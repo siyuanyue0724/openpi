@@ -125,27 +125,96 @@ class FakeDataset(Dataset):
     def __len__(self) -> int:
         return self._num_samples
 
+class DummyPointDataset:
+    """
+    A dummy dataset that generates synthetic observations with dummy point cloud data 
+    and random actions for debugging the Pi0FASTSonata model.
+    """
+    def __init__(self, model_config: _model.BaseModelConfig, length: int = 2):
+        self.model_config = model_config
+        self.length = length  # number of batches/frames to produce
+
+    def __len__(self) -> int:
+        # Finite length for controlled loop (e.g., 2 steps)
+        return self.length
+
+    def __getitem__(self, idx: int) -> dict:
+        # ① 生成 Observation / Actions
+        obs = self.model_config.fake_obs(batch_size=1)
+        act = self.model_config.fake_act(batch_size=1)
+
+        # ② 构造随机点云
+        num_points = 100
+        coords = np.random.rand(num_points, 3).astype(np.float32) * 5.0
+        colors = np.random.rand(num_points, 3).astype(np.float32)
+        feat6  = np.concatenate([coords / 5.0, colors], axis=1).astype(np.float32)
+
+        dummy_point_data = {
+            "coord": coords,                             # (N,3)
+            "feat":  feat6,                              # (N,6)
+            "batch": np.zeros(num_points, np.int32),     # (N,)
+            "grid_size": np.ones((1, 3), np.int32),      # (1,3)
+        }
+
+        # ③ 附加到 Observation（Pi0FASTSonata 在 embed_inputs() 内读取）
+        obs.pointcloud_data = dummy_point_data
+
+        # ④ 必须返回 **dict**，与 FakeDataset 格式一致！
+        return {**obs.to_dict(), "actions": act}
+
+
 
 def create_torch_dataset(
-    data_config: _config.DataConfig, action_horizon: int, model_config: _model.BaseModelConfig
+    data_config: _config.DataConfig,
+    action_horizon: int,
+    model_config: _model.BaseModelConfig,
 ) -> Dataset:
-    """Create a dataset for training."""
+    """Create a dataset object (PyTorch Dataset API) according to ``data_config``.
+    
+    支持三种 repo_id：
+    1.  ``"fake"``        —— 随机张量 (历史逻辑，图像/文本/状态均随机)。
+    2.  ``"dummy_point"`` —— 含随机点云的 DummyPointDataset，用于调通 Sonata 流程。
+    3.  其他字符串        —— 视为 LeRobot 官方数据集 repo_id，走原始 `LeRobotDataset` 逻辑。
+    
+    Args:
+        data_config: 训练配置中的 DataConfig。
+        action_horizon: 模型一次预测的时间步数；用于构造 delta_timestamps。
+        model_config: 当前模型的 config；Fake / Dummy 数据集会用到其 `fake_obs/act`。
+    
+    Returns:
+        torch.utils.data.Dataset 兼容对象，或实现了同样接口的自定义 Dataset。
+    """
     repo_id = data_config.repo_id
     if repo_id is None:
-        raise ValueError("Repo ID is not set. Cannot create dataset.")
+        raise ValueError("DataConfig.repo_id 未设置，无法创建数据集。")
+
+    # ---------- 1. 纯 Fake 张量（不含点云） ----------
     if repo_id == "fake":
+        # 仍沿用 OpenPI 原有 FakeDataset；图像/文本/状态全部随机。
         return FakeDataset(model_config, num_samples=1024)
 
+    # ---------- 2. DummyPointDataset：随机点云调试 ----------
+    if repo_id == "dummy_point":
+        # 生成含随机点云、随机动作的样本；长度设为 2 方便快速 smoke‑test。
+        return DummyPointDataset(model_config, length=2)
+
+    # ---------- 3. 真实 LeRobot 数据集 ----------
+    # 其余 repo_id 视为 HuggingFace 上的 LeRobot 数据集名称
     dataset_meta = lerobot_dataset.LeRobotDatasetMetadata(repo_id)
     dataset = lerobot_dataset.LeRobotDataset(
-        data_config.repo_id,
+        repo_id,
         delta_timestamps={
-            key: [t / dataset_meta.fps for t in range(action_horizon)] for key in data_config.action_sequence_keys
+            key: [t / dataset_meta.fps for t in range(action_horizon)]
+            for key in data_config.action_sequence_keys
         },
     )
 
+    # 可选：若需要根据 task 自动生成 prompt，则在此处追加 Transform
     if data_config.prompt_from_task:
-        dataset = TransformedDataset(dataset, [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)])
+        dataset = TransformedDataset(
+            dataset,
+            [_transforms.PromptFromLeRobotTask(dataset_meta.tasks)],
+        )
 
     return dataset
 
@@ -167,10 +236,19 @@ def create_rlds_dataset(
     )
 
 
-def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip_norm_stats: bool = False) -> Dataset:
+# --------------------------------------------------------------------
+# 1. transform_dataset —— 仅修改 if 判断
+# --------------------------------------------------------------------
+def transform_dataset(
+    dataset: Dataset,
+    data_config: _config.DataConfig,
+    *,
+    skip_norm_stats: bool = False,
+) -> Dataset:
     """Transform the dataset by applying the data transforms."""
     norm_stats = {}
-    if data_config.repo_id != "fake" and not skip_norm_stats:
+    # ❶ “fake” 和 “dummy_point” 两种 repo 都跳过归一化统计
+    if data_config.repo_id not in ("fake", "dummy_point") and not skip_norm_stats:
         if data_config.norm_stats is None:
             raise ValueError(
                 "Normalization stats not found. "
@@ -188,7 +266,9 @@ def transform_dataset(dataset: Dataset, data_config: _config.DataConfig, *, skip
         ],
     )
 
-
+# --------------------------------------------------------------------
+# 2. transform_iterable_dataset —— 同理修改判断
+# --------------------------------------------------------------------
 def transform_iterable_dataset(
     dataset: IterableDataset,
     data_config: _config.DataConfig,
@@ -198,7 +278,7 @@ def transform_iterable_dataset(
 ) -> IterableDataset:
     """Transform the dataset by applying the data transforms."""
     norm_stats = {}
-    if data_config.repo_id != "fake" and not skip_norm_stats:
+    if data_config.repo_id not in ("fake", "dummy_point") and not skip_norm_stats:
         if data_config.norm_stats is None:
             raise ValueError(
                 "Normalization stats not found. "
@@ -253,6 +333,9 @@ def create_data_loader(
     )
 
 
+# --------------------------------------------------------------------
+# 3. create_torch_data_loader —— 自动跳过 norm_stats
+# --------------------------------------------------------------------
 def create_torch_data_loader(
     data_config: _config.DataConfig,
     model_config: _model.BaseModelConfig,
@@ -266,24 +349,10 @@ def create_torch_data_loader(
     num_workers: int = 0,
     seed: int = 0,
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
-    """Create a data loader for training.
-
-    Args:
-        data_config: The data configuration.
-        action_horizon: The action horizon.
-        batch_size: The batch size.
-        sharding: The sharding to use for the data loader. If None, the data loader will
-            use a single device sharding.
-        skip_norm_stats: Whether to skip data normalization.
-        shuffle: Whether to shuffle the data.
-        num_batches: Determines the number of batches to return. If the number exceeds the
-            number of batches in the dataset, the data loader will loop over the dataset.
-            If not provided, will iterate over the dataset indefinitely.
-        num_workers: The number of worker processes to use. If zero, the data loader will
-            execute in the main process.
-        seed: The seed to use for shuffling the data.
-    """
+    """Create a PyTorch-like data loader for training."""
     dataset = create_torch_dataset(data_config, action_horizon, model_config)
+    # ❷ 若 repo 是 fake / dummy_point，则强制跳过 norm_stats
+    skip_norm_stats = skip_norm_stats or data_config.repo_id in ("fake", "dummy_point")
     dataset = transform_dataset(dataset, data_config, skip_norm_stats=skip_norm_stats)
 
     data_loader = TorchDataLoader(
@@ -295,8 +364,8 @@ def create_torch_data_loader(
         num_workers=num_workers,
         seed=seed,
     )
-
     return DataLoaderImpl(data_config, data_loader)
+# --------------------------------------------------------------------
 
 
 def create_rlds_data_loader(

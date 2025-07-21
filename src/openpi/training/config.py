@@ -27,6 +27,8 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
+import openpi.models.pi0_fast_sonata as pi0_fast_sonata
+
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
@@ -513,7 +515,7 @@ _CONFIGS = [
             ),
         ),
     ),
-    TrainConfig(
+        TrainConfig(
         name="pi0_fast_droid",
         model=pi0_fast.Pi0FASTConfig(action_dim=8, action_horizon=10),
         data=SimpleDataConfig(
@@ -522,10 +524,28 @@ _CONFIGS = [
                 inputs=[droid_policy.DroidInputs(action_dim=model.action_dim, model_type=ModelType.PI0_FAST)],
                 outputs=[droid_policy.DroidOutputs()],
             ),
-            base_config=DataConfig(
-                prompt_from_task=True,
-            ),
+            base_config=DataConfig(prompt_from_task=True),
         ),
+    ),
+    # 新增: Pi0FAST 模型 + Sonata 点云编码 的推理配置
+    TrainConfig(
+        name="pi0_fast_sonata",
+        model=pi0_fast.Pi0FASTConfig(
+            action_dim=8, 
+            action_horizon=10, 
+            point_backbone_type=pi0_fast.PointBackboneType.SONATA,   # 启用Sonata点云编码
+            projector_type=pi0_fast.ProjectorType.LINEAR,           # 使用线性投影将点云特征映射到模型维度
+        ),
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="droid"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[droid_policy.DroidInputs(action_dim=model.action_dim, model_type=ModelType.PI0_FAST)],
+                outputs=[droid_policy.DroidOutputs()],
+            ),
+            base_config=DataConfig(prompt_from_task=True),
+        ),
+        # 可选: 如有预训练基模型，可在此指定权重加载路径以初始化模型参数
+        # weight_loader=weight_loaders.CheckpointWeightLoader("gs://your_base_checkpoint/params"),
     ),
     #
     # Fine-tuning Libero configs.
@@ -726,6 +746,19 @@ _CONFIGS = [
         num_train_steps=10,
         wandb_enabled=False,
     ),
+    # ------------------------------------------------------------------
+    # Debug / smoke‑test: Pi0FAST + SONATA + Dummy 点云
+    # ------------------------------------------------------------------
+    TrainConfig(
+        name="pi0_fast_sonata_dbg",                 # 唯一名称
+        exp_name="smoke_pc",                        # 默认实验子目录
+        model=pi0_fast_sonata.Pi0FASTSonataConfig(),# ← 关键：换成我们的新 Config
+        data=FakeDataConfig(repo_id="dummy_point"), # 调用 DummyPointDataset
+        batch_size=1,
+        num_train_steps=2,
+        wandb_enabled=False,                        # 关掉 wandb，减少依赖
+        overwrite=True,
+    )
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
