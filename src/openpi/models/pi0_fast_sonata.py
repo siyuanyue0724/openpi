@@ -6,8 +6,8 @@ import jax.numpy as jnp
 import torch
 from flax import nnx
 from openpi.shared import download         # 仅 download 在 shared 包
-from openpi.shared import sonata_encoder
-from openpi.shared import nnx_bridge       # 我们自建的桥接模块
+from openpi.models import sonata_encoder
+import flax.nnx.bridge as nnx_bridge       # 我们自建的桥接模块
 
 from openpi.models import gemma as _gemma
 from openpi.models import siglip as _siglip
