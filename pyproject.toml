@@ -26,6 +26,8 @@ dependencies = [
     "orbax-checkpoint==0.11.13",
     "pillow>=11.0.0",
     "sentencepiece>=0.2.0",
+    # 或许可以考虑精确锁定，与 flash‑attn wheel 标签一致，避免未来 minor 升级导致失配
+    # 即使用"torch==2.7.1+cu126",
     "torch>=2.7.0",
     "tqdm-loggable>=0.2",
     "typing-extensions>=4.12.2",
@@ -37,6 +39,20 @@ dependencies = [
     "transformers==4.48.1",
     "rich>=14.0.0",
     "polars>=1.30.0",
+    # ---- sonata 额外依赖 ----
+    # torch‑scatter：官方 wheel（PyTorch‑2.7.x + cu126 + py311）
+    "torch-scatter @ https://data.pyg.org/whl/torch-2.7.0%2Bcu126/torch_scatter-2.1.2+pt27cu126-cp311-cp311-linux_x86_64.whl",
+    # flash‑attn：官方预编译 wheel（v2.8.2，torch‑2.7 + cu12 + cxx11 ABI TRUE + py311）
+    "flash-attn @ https://github.com/Dao-AILab/flash-attention/releases/download/v2.8.2/flash_attn-2.8.2+cu12torch2.7cxx11abiTRUE-cp311-cp311-linux_x86_64.whl",
+    "scipy>=1.12",
+    "ninja>=1.11",
+    "addict>=2.4",
+    "timm>=0.9.0",
+    "psutil>=5.9",
+    "huggingface_hub>=0.33.1",
+    "open3d>=0.18.0",
+    "matplotlib>=3.5",
+    "spconv-cu120"
 ]
 
 
@@ -74,6 +90,9 @@ members = ["packages/*"]
 line-length = 120
 target-version = "py311"
 extend-exclude = ["docker", "third_party"]
+
+[tool.hatch.metadata]
+allow-direct-references = true     # 关键！允许 URL / git 直链依赖
 
 [tool.ruff.lint]
 # https://docs.astral.sh/ruff/rules/

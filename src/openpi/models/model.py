@@ -101,16 +101,79 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # --------------------------------------------------------------------
+    # Added: optional point cloud data (e.g. for Sonata encoder integration)
+    # Expected keys: 'coord', 'feat', 'batch', 'grid_size'
+    # --------------------------------------------------------------------
+    pointcloud_data: dict[str, ArrayT] | None = None
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
         """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
         # Ensure that tokenized_prompt and tokenized_prompt_mask are provided together.
         if ("tokenized_prompt" in data) != ("tokenized_prompt_mask" in data):
             raise ValueError("tokenized_prompt and tokenized_prompt_mask must be provided together.")
-        # If images are uint8, convert them to [-1, 1] float32.
+        # -----------------------------  images  -----------------------------
+        # 如果是 uint8 → 先归一化；最后统一转 jax.Array
         for key in data["image"]:
             if data["image"][key].dtype == np.uint8:
-                data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+                img = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
+            else:
+                img = data["image"][key]
+            data["image"][key] = jnp.asarray(img)
+
+        # image_mask / state / prompt 等也全部转成 jax.Array，保持 dtype 不变
+        data["image_mask"] = {
+            k: jnp.asarray(v) for k, v in data["image_mask"].items()
+        }
+        data["state"] = jnp.asarray(data["state"])
+        for fld in ("tokenized_prompt", "tokenized_prompt_mask",
+                    "token_ar_mask", "token_loss_mask"):
+            if fld in data and data[fld] is not None:
+                data[fld] = jnp.asarray(data[fld])
+
+        # --------------------------------------------------------------------
+        # point cloud sanity‑check  🚦
+        # --------------------------------------------------------------------
+        pc = None
+        if "pointcloud_data" in data and data["pointcloud_data"] is not None:
+            pc = {k: jnp.asarray(v) for k, v in data["pointcloud_data"].items()}
+
+            # 必须包含 coord(N×3) 与 batch(N)；其它键可选
+            required = {"coord", "batch"}
+            missing  = required - pc.keys()
+            if missing:
+                raise ValueError(
+                    f"pointcloud_data 缺少必须字段 {sorted(missing)}；"
+                    f"目前仅看到 {sorted(pc.keys())}"
+                )
+
+            # coord: (..., N, 3)
+            if pc["coord"].ndim < 2 or pc["coord"].shape[-1] != 3:
+                raise ValueError(
+                    f"pointcloud_data['coord'] 形状须为 (..., N, 3)，实际 {pc['coord'].shape}"
+                )
+            n_pts = pc["coord"].shape[-2]
+
+            # batch: (..., N)
+            if pc["batch"].shape[-1] != n_pts:
+                raise ValueError(
+                    f"pointcloud_data['batch'] 长度 {pc['batch'].shape[-1]} "
+                    f"与 coord 点数 {n_pts} 不一致"
+                )
+
+            # feat (可选): (..., N, F)
+            if "feat" in pc and pc["feat"].shape[-2] != n_pts:
+                raise ValueError(
+                    f"pointcloud_data['feat'] 点数 {pc['feat'].shape[-2]} "
+                    f"与 coord 点数 {n_pts} 不一致"
+                )
+            # grid_size (可选): (..., 3)
+            if "grid_size" in pc and pc["grid_size"].shape[-1] != 3:
+                raise ValueError(
+                    f"pointcloud_data['grid_size'] 最后维须为 3，实际 {pc['grid_size'].shape}"
+                )
+
         return cls(
             images=data["image"],
             image_masks=data["image_mask"],
@@ -119,6 +182,7 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            pointcloud_data=pc,  # new field
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -126,6 +190,9 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
+        # 若无点云则移除字段，避免写出 None
+        if result.get("pointcloud_data") is None:
+            result.pop("pointcloud_data", None)
         return result
 
 
@@ -159,6 +226,8 @@ def preprocess_observation(
             image = image_tools.resize_with_pad(image, *image_resolution)
 
         if train:
+            if rng is None:
+                raise ValueError("rng must be provided when `train=True` for image augmentations.")
             # Convert from [-1, 1] to [0, 1] for augmax.
             image = image / 2.0 + 0.5
 
@@ -186,7 +255,7 @@ def preprocess_observation(
     for key in out_images:
         if key not in observation.image_masks:
             # do not mask by default
-            out_masks[key] = jnp.ones(batch_shape, dtype=jnp.bool)
+            out_masks[key] = jnp.ones(batch_shape, dtype=jnp.bool_)
         else:
             out_masks[key] = jnp.asarray(observation.image_masks[key])
 
@@ -198,6 +267,7 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        pointcloud_data=observation.pointcloud_data,  # keep point cloud unchanged
     )
 
 

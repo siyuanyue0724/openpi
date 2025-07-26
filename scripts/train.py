@@ -85,18 +85,28 @@ def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shap
 def init_train_state(
     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
 ) -> tuple[training_utils.TrainState, Any]:
-    tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
+    tx = _optimizer.create_optimizer(config.optimizer,
+                                     config.lr_schedule,
+                                     weight_decay_mask=None)
 
-    def init(rng: at.KeyArrayLike, partial_params: at.Params | None = None) -> training_utils.TrainState:
-        rng, model_rng = jax.random.split(rng)
-        # initialize the model (and its parameters).
-        model = config.model.create(model_rng)
+    # ---------- ① 只创建一次模型 ----------
+    model_rng, init_rng = jax.random.split(init_rng)
+    full_model          = config.model.create(model_rng)   # ← 仅此一处
+    model_def_template  = nnx.graphdef(full_model)         # 固定好的 NodeDef
+    params_template     = nnx.state(full_model)            # 以及其参数形状/类型
 
-        # Merge the partial params into the model.
+    # ---------- ② 用闭包持有 template ----------
+    def init(rng: at.KeyArrayLike,
+             partial_params: at.Params | None = None
+             ) -> training_utils.TrainState:
+
+        # 复制一份带同样索引的模型实例
+        model = nnx.merge(model_def_template, params_template)
+
+        # 把 resume / 预训练加载的权重 patch 进去
         if partial_params is not None:
             graphdef, state = nnx.split(model)
-            # This will produce an error if the partial params are not a subset of the state.
-            state.replace_by_pure_dict(partial_params)
+            state.replace_by_pure_dict(partial_params)   # subset check
             model = nnx.merge(graphdef, state)
 
         params = nnx.state(model)
@@ -113,6 +123,7 @@ def init_train_state(
             ema_params=None if config.ema_decay is None else params,
         )
 
+    # 形状推断再也不会触发新的 model.create()
     train_state_shape = jax.eval_shape(init, init_rng)
     state_sharding = sharding.fsdp_sharding(train_state_shape, mesh, log=True)
 
@@ -122,10 +133,10 @@ def init_train_state(
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
-    # Initialize the train state and mix in the partial params.
+    # 真正初始化，同样复用 template
     train_state = jax.jit(
         init,
-        donate_argnums=(1,),  # donate the partial params buffer.
+        donate_argnums=(1,),
         in_shardings=replicated_sharding,
         out_shardings=state_sharding,
     )(init_rng, partial_params)
