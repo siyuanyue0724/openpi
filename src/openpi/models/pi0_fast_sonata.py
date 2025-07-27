@@ -8,6 +8,10 @@ import numpy as np
 import torch
 from pathlib import Path
 
+# ---- JAX <-> openpi 兼容：KeyArray 在 JAX 0.4.14+ 被移除 ----
+import jax.random as _jr
+if not hasattr(_jr, "KeyArray"): _jr.KeyArray = jax.Array  # type: ignore[attr-defined]
+
 from flax import nnx
 # nnx_bridge allows bridging PyTorch modules to NNX (Flax) modules
 import flax.nnx.bridge as nnx_bridge
