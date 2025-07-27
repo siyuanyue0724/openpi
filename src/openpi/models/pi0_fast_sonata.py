@@ -283,7 +283,12 @@ class Pi0FASTSonata(_model.BaseModel):
                     f"but offset[-1]={host_dict['offset'][-1]}"
                 )
 
-                tch_in = {k: torch.from_numpy(v).to(device) for k, v in host_dict.items()}
+                # pure_callback 把 jax.Array 直接送过来；必须先转成真正的 numpy
+                tch_in = {
+                    k: torch.from_numpy(np.asarray(v))  # ← 关键：np.asarray()
+                    .to(device)
+                    for k, v in host_dict.items()
+                }
                 # Sonata 里要做 (batch << 48)，必须是 int64
                 for key in ("batch", "offset"):
                     if key in tch_in:
