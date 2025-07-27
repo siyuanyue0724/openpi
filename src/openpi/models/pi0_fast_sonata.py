@@ -293,7 +293,8 @@ class Pi0FASTSonata(_model.BaseModel):
             # ---------- forward ----------
             def forward(self, pc_dict, *, train: bool = False):
                 host_inputs = {k: jnp.asarray(v) for k, v in pc_dict.items()}
-                flat, unravel = jax.tree_util.tree_flatten(host_inputs)
+                # tree_flatten 返回 (flat_list, treedef)；后者负责反向展开
+                flat, treedef = jax.tree_util.tree_flatten(host_inputs)
 
                 # ---------- 重新构造 dummy_np（避免 Tracer→NumPy） ----------
                 dummy_np = {}
@@ -321,7 +322,8 @@ class Pi0FASTSonata(_model.BaseModel):
                 out_struct = ShapeDtypeStruct(dummy_out.shape, jnp.float32)
 
                 def _host_call(*flat_np):
-                    np_dict = unravel(flat_np)
+                    # flat_np 是回传的扁平列表/元组，需用 treedef.unflatten 还原
+                    np_dict = treedef.unflatten(list(flat_np))
                     return self._torch_forward(self.inner, np_dict, self.device)
 
                 return pure_callback(_host_call, out_struct, *flat, vectorized=False)
