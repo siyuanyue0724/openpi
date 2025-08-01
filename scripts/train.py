@@ -28,8 +28,58 @@ import openpi.training.utils as training_utils
 import openpi.training.weight_loaders as _weight_loaders
 
 
-def init_logging():
-    """Custom logging format for better readability."""
+# === FULL LOG PATCH ==========================================================
+import logging, sys
+from pathlib import Path
+
+# 日志文件位置；按需修改
+LOG_PATH = Path("train_full.log")      # 或 Path("/abs/path/to/train.log")
+
+# ----------------------------------------------------------------------------- 
+# 1) 先把 stdout/stderr 都“tee”到文件
+def _setup_stdout_stderr_tee(log_path: Path):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    log_file = open(log_path, "a", buffering=1)       # 行缓冲，实时写盘
+
+    class Tee:
+        """Write to several streams at once (保持 tqdm 检测 isatty 正常)."""
+        def __init__(self, *streams): self._streams = streams
+        def write(self, data):
+            for s in self._streams:
+                try:
+                    s.write(data)
+                except Exception:
+                    pass
+            for s in self._streams:
+                try:
+                    s.flush()
+                except Exception:
+                    pass
+        def flush(self):
+            for s in self._streams:
+                try:
+                    s.flush()
+                except Exception:
+                    pass
+        def isatty(self):                 # 让 tqdm 仍能刷新进度条
+            return any(getattr(s, "isatty", lambda: False)() for s in self._streams if s is not log_file)
+
+    sys.stdout = Tee(sys.__stdout__, log_file)
+    sys.stderr = Tee(sys.__stderr__, log_file)
+
+# ----------------------------------------------------------------------------- 
+# 2) 再配置 logging：终端 + 文件双写
+#    若根 logger 还没有 handler，需要先 basicConfig 保证 handlers[0] 存在，
+#    避免某些环境下 logger.handlers[0] 触发 IndexError。
+def init_logging(log_file: str | Path | None = None, level: int = logging.INFO):
+    """
+    初始化 logging，且确保 *所有* 终端输出同步写入同一日志文件。
+    - log_file: 自定义路径；默认使用 LOG_PATH。
+    - level: 根 logger 等级；默认 INFO。
+    """
+    log_path = Path(log_file) if log_file is not None else LOG_PATH
+    _setup_stdout_stderr_tee(log_path)        # 先完成 tee
+
     level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
 
     class CustomFormatter(logging.Formatter):
@@ -42,9 +92,25 @@ def init_logging():
         datefmt="%H:%M:%S",
     )
 
+# 防止重复添加 handler，注意，如果第三方库等添加handler，这个可能带来问题
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    logger.handlers[0].setFormatter(formatter)
+    logger.setLevel(level)
+    if not logger.handlers:                   # 关键：保证至少有一个 handler
+        logging.basicConfig(level=level)
+    logger.handlers.clear()                   # 清空后再加我们自己的
+
+
+    # ① 终端 handler
+    console_handler = logging.StreamHandler(sys.__stdout__)
+    console_handler.setFormatter(formatter)
+    logger.addHandler(console_handler)
+
+    # ② 文件 handler（追加写入）
+    file_handler = logging.FileHandler(log_path, mode="a", encoding="utf-8")
+    file_handler.setFormatter(formatter)
+    logger.addHandler(file_handler)
+
+# === END PATCH ===============================================================
 
 
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
@@ -85,28 +151,27 @@ def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shap
 def init_train_state(
     config: _config.TrainConfig, init_rng: at.KeyArrayLike, mesh: jax.sharding.Mesh, *, resume: bool
 ) -> tuple[training_utils.TrainState, Any]:
-    tx = _optimizer.create_optimizer(config.optimizer,
-                                     config.lr_schedule,
-                                     weight_decay_mask=None)
+    tx = _optimizer.create_optimizer(config.optimizer, config.lr_schedule, weight_decay_mask=None)
 
-    # ---------- ① 只创建一次模型 ----------
+    # ------------------------------------------------------------------ #
+    # ① 仅创建一次 full model → 抽出模板，后续 init() 全复用它           #
+    # ------------------------------------------------------------------ #
     model_rng, init_rng = jax.random.split(init_rng)
-    full_model          = config.model.create(model_rng)   # ← 仅此一处
-    model_def_template  = nnx.graphdef(full_model)         # 固定好的 NodeDef
-    params_template     = nnx.state(full_model)            # 以及其参数形状/类型
+    _full_model        = config.model.create(model_rng)
+    _model_def_tmpl    = nnx.graphdef(_full_model)
+    _params_tmpl       = nnx.state(_full_model)      # 只保存 shape/dtype
 
-    # ---------- ② 用闭包持有 template ----------
     def init(rng: at.KeyArrayLike,
              partial_params: at.Params | None = None
              ) -> training_utils.TrainState:
+        # ② 复制模板，不再重新 model.create()
+        model = nnx.merge(_model_def_tmpl, _params_tmpl)
 
-        # 复制一份带同样索引的模型实例
-        model = nnx.merge(model_def_template, params_template)
-
-        # 把 resume / 预训练加载的权重 patch 进去
+        # Merge the partial params into the model.
         if partial_params is not None:
             graphdef, state = nnx.split(model)
-            state.replace_by_pure_dict(partial_params)   # subset check
+            # This will produce an error if the partial params are not a subset of the state.
+            state.replace_by_pure_dict(partial_params)
             model = nnx.merge(graphdef, state)
 
         params = nnx.state(model)
@@ -123,7 +188,7 @@ def init_train_state(
             ema_params=None if config.ema_decay is None else params,
         )
 
-    # 形状推断再也不会触发新的 model.create()
+    # 形状推断再也不会触发 model.create()，保证 NodeDef 元数据一致
     train_state_shape = jax.eval_shape(init, init_rng)
     state_sharding = sharding.fsdp_sharding(train_state_shape, mesh, log=True)
 
@@ -133,7 +198,7 @@ def init_train_state(
     partial_params = _load_weights_and_validate(config.weight_loader, train_state_shape.params.to_pure_dict())
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
 
-    # 真正初始化，同样复用 template
+    # 真正初始化，同样复用模板
     train_state = jax.jit(
         init,
         donate_argnums=(1,),

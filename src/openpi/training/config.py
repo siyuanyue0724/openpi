@@ -754,8 +754,8 @@ _CONFIGS = [
         exp_name="smoke_pc",                        # 默认实验子目录
         model=pi0_fast_sonata.Pi0FASTSonataConfig(),# ← 关键：换成我们的新 Config
         data=FakeDataConfig(repo_id="dummy_point"), # 调用 DummyPointDataset
-        batch_size=1,
-        num_train_steps=2,
+        batch_size=2,
+        num_train_steps=4,
         wandb_enabled=False,                        # 关掉 wandb，减少依赖
         overwrite=True,
     )

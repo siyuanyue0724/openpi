@@ -169,35 +169,24 @@ class Pi0FASTSonata(_model.BaseModel):
         point_model = Sonata()
 
         if config.use_pretrained_point:
-            # 先尝试用 huggingface_hub（断点续传 + etag）
-            ckpt_path: Path | None = None
-            if _HF_OK:
-                try:
-                    ckpt_path = Path(
-                        hf_hub_download(
-                            repo_id="facebook/sonata",
-                            filename="pretrain-sonata-v1m1-0-base.pth",
-                            resume_download=True,
-                            # 与 openpi 统一缓存目录
-                            cache_dir=download.get_cache_dir(),
-                        )
-                    )
-                    logger.info(
-                        "Sonata weights downloaded via huggingface_hub: %s", ckpt_path
-                    )
-                except Exception as e:  # pragma: no cover
-                    logger.warning(
-                        "huggingface_hub download failed (%s). "
-                        "Falling back to openpi.download.maybe_download()", e
-                    )
-
-            if ckpt_path is None:
-                # 回退到原 aiohttp + .partial 方案
-                url = (
-                    "https://huggingface.co/facebook/sonata/resolve/main/"
-                    "pretrain-sonata-v1m1-0-base.pth"
+            # ------------------------------------------------------------------
+            # 仅使用本地精简后的 SpatialLM1.1 Sonata 权重
+            # 文件放置: <repo_root>/openpi/pretrained/SpatialLM_Sonata_encoder.pth
+            # 如果没有模型，请使用uv run scripts/sonata_weight_gen.py来获取sonata的checkpoint
+            # ------------------------------------------------------------------
+            # 路径指向 <repo_root>/src/pretrain/
+            ckpt_path = (
+                Path(__file__).resolve().parents[2]  # -> …/openpi/src
+                / "pretrain" / "SpatialLM_Sonata_encoder.pth"
+            )
+            if not ckpt_path.is_file():
+                raise FileNotFoundError(
+                    f"Sonata 预训练权重未找到: {ckpt_path}\n"
+                    "请先运行 scripts/sonata_weight_gen.py 生成文件，"
+                    "并放置到 openpi/pretrained/ 目录。"
                 )
-                ckpt_path = download.maybe_download(url)
+            logger.info("Using local Sonata weights: %s", ckpt_path)
+
 
             # 加载权重 —— PyTorch 2.6+ 默认 weights_only=True，会拦住包含
             # numpy 标量的老式 state_dict，这里显式关掉即可。
@@ -216,7 +205,7 @@ class Pi0FASTSonata(_model.BaseModel):
             # ②去掉多余前缀（如 "module." 或 "model.")
             cleaned = {}
             for k, v in state_dict.items():
-                if k.startswith(("module.", "model.")):
+                if k.startswith(("module.", "model.", "student.backbone.", "student.")):
                     cleaned[k.split(".", 1)[1]] = v
                 else:
                     cleaned[k] = v
