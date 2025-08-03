@@ -747,17 +747,36 @@ _CONFIGS = [
         wandb_enabled=False,
     ),
     # ------------------------------------------------------------------
-    # Debug / smoke‑test: Pi0FAST + SONATA + Dummy 点云
+    # Debug / smoke‑test: Pi0FAST + SONATA + Dummy 点云（LoRA 版）
+    # 完全复用旧版 *_low_mem_finetune* 的写法
     # ------------------------------------------------------------------
     TrainConfig(
-        name="pi0_fast_sonata_dbg",                 # 唯一名称
-        exp_name="smoke_pc",                        # 默认实验子目录
-        model=pi0_fast_sonata.Pi0FASTSonataConfig(),# ← 关键：换成我们的新 Config
-        data=FakeDataConfig(repo_id="dummy_point"), # 调用 DummyPointDataset
+        name="pi0_fast_sonata_dbg",
+        exp_name="smoke_pc",
+
+        # ① LoRA‑variant 模型（行内写一次）
+        model=pi0_fast_sonata.Pi0FASTSonataConfig(
+            paligemma_variant="gemma_2b_lora",
+        ),
+
+        data=FakeDataConfig(repo_id="dummy_point"),
         batch_size=2,
         num_train_steps=4,
-        wandb_enabled=False,                        # 关掉 wandb，减少依赖
+        wandb_enabled=False,
         overwrite=True,
+
+        # ② 加载 Pi0‑FAST 基座权重（与旧例同源）
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi0_fast_base/params"
+        ),
+
+        # ③ 仅训练 LoRA + projector，其余权重冻结（行内再写一次）
+        freeze_filter=pi0_fast_sonata.Pi0FASTSonataConfig(
+            paligemma_variant="gemma_2b_lora",
+        ).get_freeze_filter(),
+
+        # ④ LoRA 训练关闭 EMA，保持一致
+        ema_decay=None,
     )
 ]
 

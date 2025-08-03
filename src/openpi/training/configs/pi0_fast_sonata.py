@@ -3,7 +3,7 @@ from openpi.models.pi0_fast import Pi0FASTConfig, PointBackboneType, ProjectorTy
 import openpi.policies.droid_policy as droid_policy
 import openpi.transforms as _transforms
 
-# 定义 Pi0FAST + Sonata 点云编码 模型的训练配置
+# 定义 Pi0FAST + Sonata 点云编码 模型的训练配置，注意，如果要改回libero，dim等超参数需要做对应修改，具体参考config.py里面的
 config = TrainConfig(
     name="pi0_fast_sonata",
     model=Pi0FASTConfig(
@@ -22,4 +22,5 @@ config = TrainConfig(
     ),
     # 如果需要初始化预训练权重，可在此指定 CheckpointWeightLoader
     # weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_base/params"),
+    # 可能需要改成lora，后面再看
 )
