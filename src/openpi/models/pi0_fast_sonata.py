@@ -156,8 +156,14 @@ class Pi0FASTSonata(_model.BaseModel):
             scan=True,
             dtype_mm=config.dtype,
         )
-        img_kwargs = _filter_kwargs_for_call(_siglip.Module, raw_img_kwargs, verbose=True)
-        img = nnx_bridge.ToNNX(_siglip.Module(**img_kwargs))
+
+        # img_kwargs在官方实现里似乎没有，因此暂时注释掉，如果后续发现没问题，可以删除-----------
+        #img_kwargs = _filter_kwargs_for_call(_siglip.Module, raw_img_kwargs, verbose=True)
+        #img = nnx_bridge.ToNNX(_siglip.Module(**img_kwargs))
+        # ---------------------------------------------------------------------------------
+
+        img = nnx_bridge.ToNNX(_siglip.Module(**raw_img_kwargs))
+
         # Initialize image encoder with a dummy image to set dimensions
         dummy_image = next(iter(config.fake_obs(batch_size=1).images.values()))
         img.lazy_init(dummy_image, train=False, rngs=rngs)
