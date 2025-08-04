@@ -276,8 +276,16 @@ class Pi0FASTSonata(_model.BaseModel):
                 # ---------- 若缺 offset，则根据 batch 生成 ----------
                 if "offset" not in host_dict:
                     if "batch" in host_dict:
-                        # 统计每个 batch 内点数，然后做前缀和
-                        counts = np.bincount(host_dict["batch"].astype(np.int64))
+                        # --------------------------------------------------
+                        # 1. 保证 batch 是 1‑D int64
+                        # --------------------------------------------------
+                        b_arr = np.asarray(host_dict["batch"]).astype(np.int64)
+                        if b_arr.ndim > 1:
+                            b_arr = b_arr.reshape(-1)
+                        host_dict["batch"] = b_arr
+
+                        # 2. 统计每个 batch 的点数 → 前缀和
+                        counts = np.bincount(b_arr)
                         host_dict["offset"] = np.cumsum(counts, dtype=np.int64)
                     else:
                         # 单 batch 情形
@@ -321,14 +329,22 @@ class Pi0FASTSonata(_model.BaseModel):
                         # 用 128 填充，dtype 必须与原始一致 (int32)
                         dummy_np[k] = np.full(shape, 128, dtype=dtype)
                     elif k == "coord":
-                        # 生成分散坐标：0..N*3‑1 reshape 为 (N,3)
-                        N = shape[0] or 1          # 静态维度；Tracer 上也可读取
-                        coords = np.arange(N * 3, dtype=dtype).reshape(N, 3)
+                        # —— 若原 coord 是 (B,N,3) → total = B*N ——
+                        if v.ndim == 3:
+                            B, N, _ = v.shape
+                            total = B * N
+                        else:
+                            total = v.shape[0]
+                        coords = np.arange(total * 3, dtype=dtype).reshape(total, 3)
                         dummy_np[k] = coords
                     elif k == "offset":
-                            # 正确的累计点数 (= coord 的行数)
-                            n_pts = host_inputs["coord"].shape[0]          # 64
-                            dummy_np[k] = np.array([n_pts], dtype=dtype)   # [64]
+                        # 根据 **展平后的点数** 生成正确 offset
+                        total = (
+                            host_inputs["coord"].reshape(-1, 3).shape[0]
+                            if host_inputs["coord"].ndim == 3
+                            else host_inputs["coord"].shape[0]
+                        )
+                        dummy_np[k] = np.array([total], dtype=dtype)
                     else:
                         # feat / batch 等 → 全 0
                         dummy_np[k] = np.zeros(shape, dtype=dtype)
