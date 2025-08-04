@@ -273,6 +273,18 @@ class Pi0FASTSonata(_model.BaseModel):
                 if "grid_size" in host_dict and host_dict["grid_size"].ndim == 3:
                     host_dict["grid_size"] = host_dict["grid_size"].reshape(-1, 3)
                 
+                # ---------- 若缺 offset，则根据 batch 生成 ----------
+                if "offset" not in host_dict:
+                    if "batch" in host_dict:
+                        # 统计每个 batch 内点数，然后做前缀和
+                        counts = np.bincount(host_dict["batch"].astype(np.int64))
+                        host_dict["offset"] = np.cumsum(counts, dtype=np.int64)
+                    else:
+                        # 单 batch 情形
+                        host_dict["offset"] = np.array(
+                            [host_dict["coord"].shape[0]], dtype=np.int64
+                        )
+
                 assert host_dict["coord"].shape[0] == host_dict["offset"][-1], (
                     f"coord N={host_dict['coord'].shape[0]}, "
                     f"but offset[-1]={host_dict['offset'][-1]}"
