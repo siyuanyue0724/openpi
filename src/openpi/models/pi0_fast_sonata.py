@@ -345,6 +345,35 @@ class Pi0FASTSonata(_model.BaseModel):
                 dummy_out = self.forward(pc_dict, train=train)
                 return dummy_out, {}  # 本 wrapper 不含可训练参数
 
+            # --------------------------------------------------------------
+            # ★ 兼容 nnx‑bridge 调用：重载 apply，忽略 `variables / rngs`. 以后需要rng需要将其传入但目前传入会造成兼容性问题
+            # --------------------------------------------------------------
+            def apply(                       # type: ignore[override]
+                self,
+                _variables,                  # nnx‑bridge 传入的占位变量包（unused）
+                *args,
+                rngs=None,
+                method: str | None = "forward",
+                **kwargs,
+            ):
+                """
+                • `method` 为 nnx‑bridge 指定的函数名，例如 "forward"、
+                  "init_with_output"；默认 = "forward"  
+                • `rngs` 仅在 lazy_init 时会传入，Sonata 不使用，直接丢弃
+                """
+                if method is None:
+                    method = "forward"
+    
+                # 选定被调函数
+                target_fn = getattr(self, method)
+    
+                # `init_with_output` 的签名为 (rngs, pc_dict, …)
+                if method == "init_with_output":
+                    return target_fn(rngs, *args, **kwargs)
+    
+                # 其余方法（forward 等）
+                return target_fn(*args, **kwargs)
+
 
         # ---------- 5) wrap 为 NNX 模块并 lazy_init ----------
         point = nnx_bridge.ToNNX(_TorchSonataWrapper(point_model, self.device))
