@@ -4,9 +4,11 @@ import logging
 import typing
 import jax
 import jax.numpy as jnp
+import einops
 import numpy as np
 import torch
 from pathlib import Path
+import math                    # 用于计算 patch_size 对齐
 
 # ---- JAX <-> openpi 兼容：KeyArray 在 JAX 0.4.14+ 被移除 ----
 import jax.random as _jr
@@ -53,6 +55,68 @@ def _canonicalize_point_dict(pd):
             pd[key] = pd[key].astype(jnp.int32, copy=False)
 
     return pd
+
+# -------- 在旧 / 新两类 Observation 之间统一抽取点云 ----------
+def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | None:
+    """
+    返回 (pc_dict, batch_mask) 或 None
+
+    支持两种来源：
+    1. 旧版 :  obs.pointcloud_data
+       - a) 已是 Sonata 兼容 dict      → 直接使用
+       - b) [B, P, 6] ndarray          → 自动展开成 dict
+    2. 新版 :  obs.point_clouds["pointcloud"]  +  obs.point_cloud_masks["pointcloud"]
+    """
+    # ---------- 💡 新接口 ----------
+    if hasattr(obs, "point_clouds") and "pointcloud" in getattr(obs, "point_clouds"):
+        pc_arr  = obs.point_clouds["pointcloud"]          # [B, M, 6]
+        pc_mask = obs.point_cloud_masks["pointcloud"]     # [B]
+
+        B, M, _ = pc_arr.shape
+        coords  = pc_arr[..., :3].astype(jnp.float32)
+        feats   = pc_arr[..., 3:].astype(jnp.float32)
+        valid   = ~jnp.isnan(coords[..., 0])
+
+        counts  = jnp.sum(valid, axis=1).astype(jnp.int32)         # [B]
+        flat_id = valid.reshape(-1)
+        flat_coord = coords.reshape(-1, 3)[flat_id]
+        flat_feat  = feats.reshape(-1, feats.shape[-1])[flat_id]
+        flat_batch = jnp.repeat(jnp.arange(B, dtype=jnp.int64), counts)
+        offset     = jnp.cumsum(counts, dtype=jnp.int32)
+
+        pc_dict = _canonicalize_point_dict(
+            dict(coord=flat_coord, feat=flat_feat, batch=flat_batch, offset=offset)
+        )
+
+        # 🚩 直接使用静态维度 M 作为 pad 长度，避免 run‑time int()
+        max_len  = pc_arr.shape[1]                                 # == M
+        mask     = einops.repeat(pc_mask, "b -> b l", l=max_len)
+        return pc_dict, mask
+
+    # ---------- 💡 旧接口 ----------
+    legacy = getattr(obs, "pointcloud_data", None)
+    if legacy is None:
+        return None
+
+    # a) 已经是 dict
+    if isinstance(legacy, dict) and "coord" in legacy:
+        pc_dict = _canonicalize_point_dict(legacy)
+    else:
+        # b) assume [B, P, 6] array
+        arr = jnp.asarray(legacy, dtype=jnp.float32)
+        B, P, C = arr.shape
+        coord = arr[..., :3].reshape(-1, 3)
+        feat  = arr[..., 3:].reshape(-1, C - 3)
+        batch = jnp.repeat(jnp.arange(B, dtype=jnp.int64), P)
+        offset = jnp.cumsum(jnp.full((B,), P, dtype=jnp.int32))
+        pc_dict = _canonicalize_point_dict(dict(coord=coord, feat=feat,
+                                                batch=batch, offset=offset))
+
+    # legacy 路径假设每帧固定 P 个点
+    B = pc_dict["offset"].shape[0]                 # 静态 batch_size
+    P = pc_dict["coord"].shape[0] // B            # 每帧点数（静态）
+    mask = jnp.ones((B, P), dtype=bool)
+    return pc_dict, mask
 
 # Alias the Sonata class from the sonata_encoder module for convenience
 Sonata = sonata_encoder.Sonata
@@ -148,9 +212,11 @@ class Pi0FASTSonata(_model.BaseModel):
         # ------------------------------------------------------------------
         # 2) 图像编码器  SigLIP  --------------------------------------------
         # ------------------------------------------------------------------
+        _model_width = getattr(pal_cfg, "width", getattr(pal_cfg, "hidden_size", 1024))
+        
         raw_img_kwargs = dict(
             # _siglip.Module 可能不需要 num_classes；如果 signature 里没有会被自动丢弃
-            num_classes=getattr(pal_cfg, "width", getattr(pal_cfg, "hidden_size", 1024)),
+            num_classes=_model_width,
             variant="So400m/14",
             pool_type="none",
             scan=True,
@@ -168,11 +234,27 @@ class Pi0FASTSonata(_model.BaseModel):
         dummy_image = next(iter(config.fake_obs(batch_size=1).images.values()))
         img.lazy_init(dummy_image, train=False, rngs=rngs)
 
-
         # ------------------------------------------------------------------
-        # 3) 创建并加载点云编码器 (Sonata) 权重
+        # 3) 创建并加载点云编码器 (Sonata) — 参数对齐 SpatialLM‑1.1, 后面可以改成config传输
         # ------------------------------------------------------------------
-        point_model = Sonata()
+        enc_depths = (2, 2, 6, 2)        # 4 个 stage，后面要多次用到
+        
+        # ---------- Sonata hyper‑params – 与 ckpt 保持 100 % 一致 ----------
+        sp_cfg = dict(
+            in_channels   = 6,
+            order         = ("z", "z-trans"),
+            stride        = (2, 2, 2, 2),         # 5‑stage ⇒ 4 次下采样
+            enc_depths    = (3, 3, 3, 12, 3),
+            enc_channels  = (48, 96, 192, 384, 512),   # ★ 末端 512
+            enc_num_head  = (3, 6, 12, 24, 32),
+            enc_patch_size= (1024,)*5,            # ckpt 默认
+            mlp_ratio     = 4.0,
+            mask_token    = True,
+            enc_mode      = "voxel",
+            enable_fourier_encode = True,         # ★ ckpt 含 fourier+input_proj
+            num_bins      = 1280,
+        )
+        point_model = Sonata(**sp_cfg)
 
         if config.use_pretrained_point:
             # ------------------------------------------------------------------
@@ -257,7 +339,8 @@ class Pi0FASTSonata(_model.BaseModel):
             @torch.no_grad()
             def _torch_forward(inner: torch.nn.Module,
                                host_dict: dict[str, np.ndarray],
-                               device: torch.device) -> np.ndarray:
+                               device: torch.device
+                               ) -> tuple[np.ndarray, np.int32]:      # ★ 返回二元组
                 """
                 接收 host 上的 numpy 输入 → torch.Tensor.cuda → 运行 → numpy 输出
                 统一返回 float32 numpy 数组
@@ -270,8 +353,16 @@ class Pi0FASTSonata(_model.BaseModel):
                     host_dict["batch"] = np.repeat(np.arange(B, dtype=np.int64), N)
                     host_dict["offset"] = np.cumsum(np.full((B,), N, dtype=np.int64))
 
-                if "grid_size" in host_dict and host_dict["grid_size"].ndim == 3:
-                    host_dict["grid_size"] = host_dict["grid_size"].reshape(-1, 3)
+                # grid_coord / grid_size 可能来自体素网格 → 保证都是 (P,3)
+                for _key in ("grid_coord", "grid_size"):
+                    if _key in host_dict and host_dict[_key].ndim == 3:
+                        host_dict[_key] = host_dict[_key].reshape(-1, 3)
+
+                # 无论上游如何，feat 必须为 2‑D；与 SpatialLM 对齐
+                if host_dict["feat"].ndim != 2:
+                    C = host_dict["feat"].shape[-1]
+                    host_dict["feat"] = host_dict["feat"].reshape(-1, C)
+
                 
                 # ---------- 若缺 offset，则根据 batch 生成 ----------
                 if "offset" not in host_dict:
@@ -298,6 +389,20 @@ class Pi0FASTSonata(_model.BaseModel):
                     f"but offset[-1]={host_dict['offset'][-1]}"
                 )
 
+                # ---------- NaN 替换 ----------
+                nan_mask = np.isnan(host_dict["coord"]).any(axis=1)
+                if nan_mask.any():
+                    # 坐标 / 特征 置 0；batch / offset 保持
+                    host_dict["coord"][nan_mask] = 0.0
+                    host_dict["feat"][nan_mask]  = 0.0
+
+                # ---------- grid_coord ----------
+                if "grid_coord" not in host_dict:
+                    # voxel 量化到整数网格
+                    host_dict["grid_coord"] = np.round(
+                        host_dict["coord"] / 0.01
+                    ).astype(np.int32)
+
                 # pure_callback 把 jax.Array 直接送过来；必须先转成真正的 numpy
                 tch_in = {
                     k: torch.from_numpy(np.asarray(v))  # ← 关键：np.asarray()
@@ -309,10 +414,19 @@ class Pi0FASTSonata(_model.BaseModel):
                     if key in tch_in:
                         tch_in[key] = tch_in[key].long()
                 out = inner(tch_in)
-                # Sonata 返回 dict 时取 "feat"，否则取首 value
-                if isinstance(out, dict):
+                if isinstance(out, dict):                # 取 "feat"
                     out = out.get("feat", list(out.values())[0])
-                return out.float().cpu().numpy()
+
+                # -------- SpatialLM 式固定长度补零 --------
+                patch_size = 1024                       # ← 与 enc_patch_size 对齐
+                real_len   = out.size(0)
+                pad_to     = math.ceil(real_len / patch_size) * patch_size
+                if real_len < pad_to:
+                    pad = out.new_zeros(pad_to - real_len, out.size(1))
+                    out = torch.cat([out, pad], dim=0)
+                # ------------------------------------------
+
+                return out.float().cpu().numpy(), np.int32(real_len)
 
             # ---------- forward ----------
             def forward(self, pc_dict, *, train: bool = False):
@@ -345,20 +459,41 @@ class Pi0FASTSonata(_model.BaseModel):
                             else host_inputs["coord"].shape[0]
                         )
                         dummy_np[k] = np.array([total], dtype=dtype)
+                    elif k == "feat":
+                        # 保证 dummy 特征也是 2‑D，与真实前向形状一致
+                        if v.ndim == 3:
+                            B, N, C = v.shape
+                            dummy_np[k] = np.zeros((B * N, C), dtype=dtype)
+                        else:
+                            dummy_np[k] = np.zeros(shape, dtype=dtype)
+                    elif k in ("grid_coord", "grid_size"):
+                        # 始终展平成 (P,3)
+                        if v.ndim == 3:
+                            dummy_np[k] = np.zeros(
+                                (v.shape[0] * v.shape[1], 3), dtype=dtype
+                            )
+                        else:
+                            dummy_np[k] = np.zeros(shape, dtype=dtype)
                     else:
-                        # feat / batch 等 → 全 0
                         dummy_np[k] = np.zeros(shape, dtype=dtype)
                 # -----------------------------------------------------------
 
-                dummy_out = self._torch_forward(self.inner, dummy_np, self.device)
-                out_struct = ShapeDtypeStruct(dummy_out.shape, jnp.float32)
+                dummy_feat, _ = self._torch_forward(self.inner, dummy_np, self.device)
+                patch_size = dummy_feat.shape[0]                       # ==1024
+                out_struct = (                                          # feat & valid_len
+                    ShapeDtypeStruct(dummy_feat.shape, jnp.float32),
+                    ShapeDtypeStruct((), jnp.int32),
+                )
 
                 def _host_call(*flat_np):
                     # flat_np 是回传的扁平列表/元组，需用 treedef.unflatten 还原
                     np_dict = treedef.unflatten(list(flat_np))
                     return self._torch_forward(self.inner, np_dict, self.device)
 
-                return pure_callback(_host_call, out_struct, *flat, vectorized=False)
+                feat, valid_len = pure_callback(_host_call, out_struct,
+                                                *flat, vectorized=False)
+                valid_mask = jnp.arange(patch_size, dtype=jnp.int32) < valid_len
+                return feat, valid_mask                                  # ★ tuple
 
             # ---------- NNX 初始化 ----------
             def init_with_output(
@@ -374,7 +509,7 @@ class Pi0FASTSonata(_model.BaseModel):
                 return dummy_out, {}  # 本 wrapper 不含可训练参数
 
             # --------------------------------------------------------------
-            # ★ 兼容 nnx‑bridge 调用：重载 apply，忽略 `variables / rngs`. 以后需要rng需要将其传入但目前传入会造成兼容性问题
+            # ★ 兼容 nnx‑bridge 调用：重载 apply，忽略 variables / rngs. 以后需要rng需要将其传入但目前传入会造成兼容性问题
             # --------------------------------------------------------------
             def apply(                       # type: ignore[override]
                 self,
@@ -385,9 +520,9 @@ class Pi0FASTSonata(_model.BaseModel):
                 **kwargs,
             ):
                 """
-                • `method` 为 nnx‑bridge 指定的函数名，例如 "forward"、
+                • method 为 nnx‑bridge 指定的函数名，例如 "forward"、
                   "init_with_output"；默认 = "forward"  
-                • `rngs` 仅在 lazy_init 时会传入，Sonata 不使用，直接丢弃
+                • rngs 仅在 lazy_init 时会传入，Sonata 不使用，直接丢弃
                 """
                 if method is None:
                     method = "forward"
@@ -395,16 +530,86 @@ class Pi0FASTSonata(_model.BaseModel):
                 # 选定被调函数
                 target_fn = getattr(self, method)
     
-                # `init_with_output` 的签名为 (rngs, pc_dict, …)
+                # init_with_output 的签名为 (rngs, pc_dict, …)
                 if method == "init_with_output":
                     return target_fn(rngs, *args, **kwargs)
     
                 # 其余方法（forward 等）
                 return target_fn(*args, **kwargs)
+                
+        # ------------------------------------------------------------------
+        # 4‑bis) 线性层包装器：让普通 Linear 支持 lazy_init
+        # ------------------------------------------------------------------
+        class _TorchLinearWrapper(torch.nn.Module):
+            def __init__(self, in_dim: int, out_dim: int, device: torch.device, *, bias: bool = True):
+                super().__init__()
+                self.inner = torch.nn.Linear(in_dim, out_dim, bias=bias).to(device)
+                self.device = device
+
+            # -------- host‑side计算 --------
+            @staticmethod
+            @torch.no_grad()
+            def _torch_forward(inner: torch.nn.Linear,
+                               mat_np: np.ndarray,
+                               device: torch.device) -> np.ndarray:
+                """
+               纯 host 调用：np -> torch(cuda) -> np
+                """
+                # 保证一定是 NumPy，再送入 PyTorch
+                if not isinstance(mat_np, np.ndarray):
+                    mat_np = np.asarray(mat_np)
+                x = torch.from_numpy(mat_np).to(inner.weight.dtype).to(device)
+                y = inner(x)
+                return y.cpu().numpy()
+
+            # -------- forward（JAX side）--------
+            def forward(self, x_jax: jax.Array, *, train: bool = False):
+                """
+                • 在 jit 图里以 pure_callback 方式调用 _torch_forward  
+                • 输出保持 float32，后续再 cast
+                """
+                # 计算输出形状（完全符号化，不触发 concrete）
+                out_shape = (*x_jax.shape[:-1], self.inner.out_features)
+                out_struct = ShapeDtypeStruct(out_shape, jnp.float32)
+
+                def _host_call(mat):
+                    # mat 是 numpy.ndarray （pure_callback 已转换）
+                    return self._torch_forward(self.inner, mat, self.device)
+
+                return pure_callback(_host_call, out_struct, x_jax, vectorized=False)
+
+            # -------- lazy_init hook --------
+            def init_with_output(self, rngs, x_np, *, method=None, **_):
+                """
+                lazy_init 阶段不会在 jit 内，
+                直接走 host‑side 计算即可，加速初始化。
+                """
+                if isinstance(x_np, jax.Array):
+                    x_np = np.asarray(jax.device_get(x_np))
+                y = self._torch_forward(self.inner, x_np, self.device)
+                return y, {}          # no trainable vars
+
+            # -------- nnx‑bridge 兼容 --------
+            def apply(self, _vars, *args, rngs=None, method: str | None = "forward", **kw):
+                if method is None:
+                    method = "forward"
+                fn = getattr(self, method)
+                if method == "init_with_output":
+                    return fn(rngs, *args, **kw)
+                return fn(*args, **kw)
 
 
         # ---------- 5) wrap 为 NNX 模块并 lazy_init ----------
-        point = nnx_bridge.ToNNX(_TorchSonataWrapper(point_model, self.device))
+        # ⑤ 线性投影：512 → PaLI‑Gemma hidden_size (2048)
+        self.PointProjector = nnx_bridge.ToNNX(
+            _TorchLinearWrapper(512, _model_width, self.device)
+        )
+        # small dummy → lazy_init
+        self.PointProjector.lazy_init(
+            jnp.zeros((1, sp_cfg["enc_channels"][-1]), jnp.float32),
+            rngs=rngs,
+        )
+        # 让投影层跟随 PyTorch 的 device，不必手动迁移除非后续继续重写到jax
 
         N, B = 64, 1          # 64 points, 1 batch
         # ────────────────────────────────────────────────────────────────
@@ -423,17 +628,20 @@ class Pi0FASTSonata(_model.BaseModel):
             "grid_size": jnp.array([[128, 128, 128]], dtype=jnp.int32),
         }
         dummy_pc = _canonicalize_point_dict(raw_dummy_pc)
+
+        point = nnx_bridge.ToNNX(_TorchSonataWrapper(point_model, self.device))
+        # 初始化 wrapper（一次性 shape 推断）
         point.lazy_init(dummy_pc, train=False, rngs=rngs)
 
         # ------------------------------------------------------------------
-        # 6) 统一挂到 self.PaliGemma
+        # 6) 打包所有子模块
         # ------------------------------------------------------------------
         self.PaliGemma = nnx.Dict(
-            llm=llm,
-            img=img,
-            point=point,
+            llm   = llm,
+            img   = img,
+            point = point,
+            point_proj = self.PointProjector,
         )
-
 
     def embed_inputs(
         self, obs: _model.Observation
@@ -459,15 +667,39 @@ class Pi0FASTSonata(_model.BaseModel):
             # Image tokens have no autoregressive dependency amongst themselves (set AR mask = 0 for these tokens)
             ar_mask.append(jnp.zeros_like(mask, dtype=jnp.int32))
 
-        # 2. Point cloud tokens (from Sonata encoder), if point cloud data is provided
-        if obs.pointcloud_data is not None:
-            # Run Sonata encoder on the point cloud data to get token embeddings for points
-            point_tokens = self.PaliGemma.point(obs.pointcloud_data, train=False)  # shape [B, n_point_tokens, emb_dim]
-            token_embeddings.append(point_tokens)
-            # All point tokens are valid (assuming pointcloud_data is not padded)
-            pt_mask = jnp.ones((point_tokens.shape[0], point_tokens.shape[1]), dtype=bool)
+        # 2. Point cloud tokens --------------------------------------------------
+        pc_pack = _extract_point_batch(obs)
+        if pc_pack is not None:
+            pc_dict, pt_mask = pc_pack            # pt_mask : [B, Lp]
+
+            # --- 调 Sonata ---
+            pt_tokens, valid_mask = self.PaliGemma.point(pc_dict, train=False)   # [P, 512]  or [B,L,C] (旧接口)
+
+            # --- 线性投影到 LLM dim ---
+            pt_tokens = self.PointProjector(pt_tokens)
+            if isinstance(pt_tokens, (tuple, list)):
+                pt_tokens = pt_tokens[0]
+            pt_tokens = pt_tokens.astype(token_embeddings[0].dtype)
+
+            # 若仍是扁平 [P,C]，根据 offset 还原 batch，并按 patch_size=1024 补齐
+            if pt_tokens.ndim == 2:
+                splits = jnp.split(pt_tokens, pc_dict["offset"][:-1])
+                patch_size = valid_mask.shape[0]              # == 1024
+                pad = lambda x: jnp.pad(x,
+                                        ((0, patch_size - x.shape[0]), (0, 0)))
+                pt_tokens = jnp.stack([pad(s) for s in splits])       # [B,1024,C]
+
+            # ------- 同步扩展 pt_mask 并与 valid_mask 结合 -------
+            pad_len = pt_tokens.shape[1] - pt_mask.shape[1]
+            if pad_len > 0:        # 原 mask 右侧补 False 直到 1024
+                pt_mask = jnp.pad(pt_mask,
+                                  ((0, 0), (0, pad_len)),
+                                  constant_values=False)
+
+            pt_mask = pt_mask & valid_mask[None, :]   # 只保留有效 token
+
+            token_embeddings.append(pt_tokens)
             input_mask.append(pt_mask)
-            # Treat point tokens similar to image tokens (no causal dependency among themselves)
             ar_mask.append(jnp.zeros_like(pt_mask, dtype=jnp.int32))
 
         # 3. Text tokens (from language model embedding)
@@ -533,7 +765,7 @@ class Pi0FASTSonata(_model.BaseModel):
         """
         Autoregressively sample a sequence of actions (or action tokens) from the model given an observation.
         This uses the model as a prefix model (prefix = images + prompt tokens + optional point tokens),
-        then generates additional tokens up to `max_decoding_steps` or until an EOS token is produced.
+        then generates additional tokens up to max_decoding_steps or until an EOS token is produced.
         """
         # Preprocess observation (no augmentation, just ensure correct shapes/masks)
         observation = _model.preprocess_observation(None, observation, train=False, image_keys=list(observation.images.keys()))
@@ -556,83 +788,49 @@ class Pi0FASTSonata(_model.BaseModel):
             decode=True
         )
         # Start from the last logit of the prefix as the beginning for new generation
-        last_logit = prefix_logits[:, -1:]  # shape [B, 1, vocab_size]
+        last_logit = prefix_logits[:, -1:]   # [B, 1, V]
         # Placeholder for generated token outputs (initialize with zeros)
         output_tokens = jnp.zeros((last_logit.shape[0], max_decoding_steps), dtype=jnp.int32)
-
-        # Define one decoding step function
-        def step_fn(carry):
-            rng_key, last_logit, cache, step = carry
-            # Sample next token from last_logit (either greedy argmax or temperature-controlled random sample)
-            rng_key, subkey = jax.random.split(rng_key)
-            next_token = jax.lax.cond(
-                temperature > 1e-6,
-                lambda key: jax.random.categorical(key, last_logit[0] / temperature, axis=-1),    # sample with temperature
-                lambda key: jnp.argmax(last_logit[0], axis=-1),                                   # greedy
-                operand=subkey
-            )
-            next_token = next_token.astype(jnp.int32)
-            # Place the sampled token into the output_tokens at current step position
-            output = _pi0_fast.put_along_last_axis(output_tokens, jnp.broadcast_to(step, (output_tokens.shape[0], 1)), next_token[None, None])
-            # Check if EOS token was generated (PALIGEMMA_EOS_TOKEN denotes EOS in Gemma vocabulary)
-            eos_token = _pi0_fast.PALIGEMMA_EOS_TOKEN
-            done = jnp.all(next_token == eos_token)
-            # If EOS for all batch elements, we can stop early
-            new_rng_key = rng_key
-            return (new_rng_key, last_logit, cache, step), output, done
 
         # Now run autoregressive decoding for at most max_decoding_steps
         tokens_to_decode = max_decoding_steps
         # Prepare attention mask for single-step decoding (prefix length + current step)
         # We will update the attention mask dynamically in the loop if needed
-        def decoding_body(carry):
-            rng_key, last_logit, cache, step, output_tokens = carry
-            # Get next token (sample or argmax)
-            rng_key, subkey = jax.random.split(rng_key)
-            if temperature > 1e-6:
-                token = jax.random.categorical(subkey, last_logit[0] / temperature, axis=-1)
-            else:
-                token = jnp.argmax(last_logit[0], axis=-1)
-            token = token.astype(jnp.int32)
-            # Insert token into output_tokens at position `step`
-            output_tokens = _pi0_fast.put_along_last_axis(output_tokens, jnp.broadcast_to(step, (output_tokens.shape[0], 1)), token[None, None])
-            # If token is EOS for all batches, we can break
-            eos_token = _pi0_fast.PALIGEMMA_EOS_TOKEN
-            # Prepare attention mask for next step (prefix + generated tokens so far)
-            attn_mask = jnp.concatenate(
-                [prefix_attn_mask[:, :, :prefill_size + step], jnp.zeros((prefix_attn_mask.shape[0], prefix_attn_mask.shape[1], 1), dtype=bool)], axis=2
-            )
-            positions = prefix_start + step  # position index for the new token in each batch
-            # Continue LLM decoding one step (with KV cache)
-            logits, cache = self.PaliGemma.llm(token=token[:, None], kv_cache=cache, positions=positions, decode=True)
-            last_logit = logits  # shape [B, 1, vocab_size]
-            return (rng_key, last_logit, cache, step + 1, output_tokens)
 
         # Use a while loop to generate tokens until done or max steps
-        rng_key = rng
-        kv_cache_state = kv_cache
-        output_seq = output_tokens
-        last_logits = last_logit
-        step = 0
-        for _ in range(max_decoding_steps):
-            # Sample or take argmax for next token
+        def cond_fn(state):
+            _rng, _last, _cache, _step, _out = state
+            has_eos = jax.lax.cond(
+                _step == 0,
+                lambda _: False,
+                lambda _: jnp.all(_out[:, _step - 1] == _pi0_fast.PALIGEMMA_EOS_TOKEN),
+                operand=None,
+            )
+            return jnp.logical_and(_step < max_decoding_steps, ~has_eos)
+
+        def body_fn(state):
+            rng_key, last_logits, cache, step, out_tokens = state
             rng_key, subkey = jax.random.split(rng_key)
-            if temperature > 1e-6:
-                token = jax.random.categorical(subkey, last_logits[0] / temperature, axis=-1)
-            else:
-                token = jnp.argmax(last_logits[0], axis=-1)
-            token = token.astype(jnp.int32)
-            output_seq = _pi0_fast.put_along_last_axis(output_seq, jnp.broadcast_to(step, (output_seq.shape[0], 1)), token[None, None])
-            # Break if EOS token produced for all batch elements
-            if jnp.all(token == _pi0_fast.PALIGEMMA_EOS_TOKEN):
-                break
-            # Compute attention mask for current prefix+output length
-            curr_attn_mask = jnp.pad(prefix_attn_mask, ((0, 0), (0, 0), (0, 1)))  # extend by 1
-            positions = prefix_start + step  # next position index relative to prefix start
-            logits, kv_cache_state = self.PaliGemma.llm(token=token[:, None], kv_cache=kv_cache_state, positions=positions, decode=True)
-            last_logits = logits
-            step += 1
+            logits_step = last_logits.squeeze(1)
+            token = jax.lax.cond(
+                temperature > 1e-6,
+                lambda key: jax.random.categorical(key, logits_step / temperature, axis=-1),
+                lambda key: jnp.argmax(logits_step, axis=-1),
+                operand=subkey,
+            ).astype(jnp.int32)
+            out_tokens = _pi0_fast.put_along_last_axis(out_tokens,
+                                                       jnp.broadcast_to(step, (token.shape[0], 1)),
+                                                       token[:, None])
+            positions = prefix_start + step
+            logits, cache = self.PaliGemma.llm(token=token[:, None],
+                                               kv_cache=cache,
+                                               positions=positions,
+                                               decode=True)
+            return rng_key, logits, cache, step+1, out_tokens
+
+        init_state = (rng, last_logit, kv_cache, jnp.array(0, jnp.int32), output_tokens)
+        _, _, _, final_step, output_seq = jax.lax.while_loop(cond_fn, body_fn, init_state)
 
         # Return the output sequence of tokens as the model's predicted "actions"
         # (In practice, these tokens might represent discretized actions or a planned sequence encoded as text tokens)
-        return output_seq[:, :step]  # shape [B, step] of generated token IDs
+        return output_seq[:, :final_step]   # [B, <=max_dec_steps]
