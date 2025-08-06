@@ -86,7 +86,7 @@ def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | No
         # NaN 过滤 —— 仅检查 float 特征部分
         valid = ~jnp.isnan(feats).any(axis=-1)
 
-        counts  = jnp.sum(valid, axis=1).astype(jnp.int64)         # [B] int64
+        counts = valid.sum(axis=1, dtype=jnp.int64)         # [B] int64
         flat_id = valid.reshape(-1)
         flat_coord  = coords.reshape(-1, 3)[flat_id]
         flat_feat   = feats.reshape(-1, feats.shape[-1])[flat_id]
@@ -463,13 +463,16 @@ class Pi0FASTSonata(_model.BaseModel):
                     out = out.get("feat", list(out.values())[0])
 
                 real_len = out.size(0)
-                if real_len < patch_size:                      # SpatialLM 从不超 patch_size
-                    pad = out.new_zeros(patch_size - real_len, out.size(1))
-                    out = torch.cat([out, pad], dim=0)
-                else:
-                    out = out[:patch_size]             # 固定 1 patch
-                    real_len = patch_size
-                valid_mask = np.arange(patch_size) < real_len
+                # SpatialLM: 不截断；右 pad 到 patch_size 的倍数
+                MAX_TOKEN = 1024                        # ← 和 forward() 里保持相同
+                if real_len > MAX_TOKEN:
+                    out = out[:MAX_TOKEN]               # safety guard
+                    real_len = MAX_TOKEN
+                pad_len = MAX_TOKEN - real_len
+                if pad_len:
+                    pad = out.new_zeros(pad_len, out.size(1))
+                    out = torch.cat([out, pad], 0)
+                valid_mask = np.arange(MAX_TOKEN) < real_len
                 return out.float().cpu().numpy(), valid_mask
 
             # ---------- forward ----------
@@ -525,10 +528,12 @@ class Pi0FASTSonata(_model.BaseModel):
                 dummy_feat, _ = self._torch_forward(
                     self.inner, dummy_np, self.device, self.patch_size
                 )
-                out_struct = (
-                    ShapeDtypeStruct(dummy_feat.shape, jnp.float32),
-                    ShapeDtypeStruct((dummy_feat.shape[0],), jnp.bool_),
-                )
+                # 例如静态上限, 这里设置1024，可以设置8192 (= 8 patch)；确保不会在真实输入中超出但是这样会炸显存,所以我们保留1024实现, 后续可以继续加
+                # SpatialLM Sonata 的默认 enc_patch_size = 1024，1 024 patch × 1 024 points/patch = ≈100 万原始点；常规 LiDAR / RGB-D 帧达不到这个量级，我们目前先保留这个，不用在意，后面再来管
+                MAX_TOKEN = 1024
+                C = dummy_feat.shape[1]
+                out_struct = (ShapeDtypeStruct((MAX_TOKEN, C), jnp.float32),
+                              ShapeDtypeStruct((MAX_TOKEN,),  jnp.bool_))
 
                 def _host_call(*flat_np):
                     # flat_np 是回传的扁平列表/元组，需用 treedef.unflatten 还原
@@ -537,10 +542,10 @@ class Pi0FASTSonata(_model.BaseModel):
                         self.inner, np_dict, self.device, self.patch_size
                     )
 
-                feat, valid_len = pure_callback(_host_call, out_struct,
+                feat, valid_mask = pure_callback(_host_call, out_struct,
                                                 *flat, vectorized=False)
-                # 直接返回 (feat, valid_len)；由调用方自行构造 mask
-                return feat, valid_len
+                # 直接返回 (feat, valid_mask)；由调用方自行构造 mask
+                return feat, valid_mask
 
             # ---------- NNX 初始化 ----------
             def init_with_output(
@@ -754,7 +759,8 @@ class Pi0FASTSonata(_model.BaseModel):
 
                 # 投影到 LLM hidden_size ，保持与图像 / 文本维度一致
                 tok = self.PointProjector(tok.astype(jnp.float32))
-                tok = tok.astype(token_embeddings[0].dtype)
+                tgt_dtype = token_embeddings[0].dtype if token_embeddings else tok.dtype
+                tok = tok.astype(tgt_dtype)
 
                 # SpatialLM 保留补零 token，靠 vmask 指示有效性
                 per_sample_tokens.append(tok)       # ← 直接整块保存
