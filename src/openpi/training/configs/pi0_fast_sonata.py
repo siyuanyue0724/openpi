@@ -11,6 +11,7 @@ config = TrainConfig(
         action_horizon=10,
         point_backbone_type=PointBackboneType.SONATA,
         projector_type=ProjectorType.LINEAR,
+        point_feat_dim=9,
     ),
     data=SimpleDataConfig(
         assets=AssetsConfig(asset_id="droid"),

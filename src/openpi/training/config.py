@@ -527,14 +527,16 @@ _CONFIGS = [
             base_config=DataConfig(prompt_from_task=True),
         ),
     ),
-    # 新增: Pi0FAST 模型 + Sonata 点云编码 的推理配置
+    # ------------------------------------------------------------------
+    # Inference: Pi0FAST-Sonata  (真实 DROID / 资产齐全版本)
+    # ------------------------------------------------------------------
     TrainConfig(
         name="pi0_fast_sonata",
-        model=pi0_fast.Pi0FASTConfig(
-            action_dim=8, 
-            action_horizon=10, 
-            point_backbone_type=pi0_fast.PointBackboneType.SONATA,   # 启用Sonata点云编码
-            projector_type=pi0_fast.ProjectorType.LINEAR,           # 使用线性投影将点云特征映射到模型维度
+        model=pi0_fast_sonata.Pi0FASTSonataConfig(   # ← 换成新 Config
+            action_dim=8,
+            action_horizon=10,
+            point_feat_dim=9,                        # 3 xyz + 6 feat
+            projector_type=pi0_fast.ProjectorType.LINEAR,
         ),
         data=SimpleDataConfig(
             assets=AssetsConfig(asset_id="droid"),
@@ -757,6 +759,7 @@ _CONFIGS = [
         # ① LoRA‑variant 模型（行内写一次）
         model=pi0_fast_sonata.Pi0FASTSonataConfig(
             paligemma_variant="gemma_2b_lora",
+            point_feat_dim=9,
         ),
 
         data=FakeDataConfig(repo_id="dummy_point"),
@@ -773,6 +776,7 @@ _CONFIGS = [
         # ③ 仅训练 LoRA + projector，其余权重冻结（行内再写一次）
         freeze_filter=pi0_fast_sonata.Pi0FASTSonataConfig(
             paligemma_variant="gemma_2b_lora",
+            point_feat_dim=9,
         ).get_freeze_filter(),
 
         # ④ LoRA 训练关闭 EMA，保持一致

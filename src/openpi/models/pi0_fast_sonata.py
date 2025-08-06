@@ -44,15 +44,17 @@ def _canonicalize_point_dict(pd):
         B, N, _ = pd["coord"].shape
         pd["coord"] = jnp.reshape(pd["coord"], (B * N, 3))
         pd["feat"]  = jnp.reshape(pd["feat"],  (B * N, -1))
-        pd["batch"] = jnp.repeat(jnp.arange(B, dtype=jnp.int32), N)
-        pd["offset"] = jnp.cumsum(jnp.full((B,), N, dtype=jnp.int32))
+        # batch / offset 必须为 int64，Sonata 内部要做 (batch << 48)
+        pd["batch"]  = jnp.repeat(jnp.arange(B, dtype=jnp.int64), N)
+        pd["offset"] = jnp.cumsum(jnp.full((B,), N, dtype=jnp.int64))
 
     if "grid_size" in pd and pd["grid_size"].ndim == 3:
         pd["grid_size"] = jnp.reshape(pd["grid_size"], (-1, 3))
 
+    # 统一强制 int64 以免后续再 cast
     for key in ("batch", "offset"):
-        if key in pd:
-            pd[key] = pd[key].astype(jnp.int32, copy=False)
+         if key in pd:
+            pd[key] = pd[key].astype(jnp.int64, copy=False)
 
     return pd
 
@@ -73,19 +75,33 @@ def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | No
         pc_mask = obs.point_cloud_masks["pointcloud"]     # [B]
 
         B, M, _ = pc_arr.shape
-        coords  = pc_arr[..., :3].astype(jnp.float32)
-        feats   = pc_arr[..., 3:].astype(jnp.float32)
-        valid   = ~jnp.isnan(coords[..., 0])
+        # SpatialLM‑Qwen 约定:
+        #   0‑2 : 体素网格坐标 (int32)
+        #   3‑5 : 连续 xyz (float32)
+        #   6+ : 其他语义特征
+        grid_int = pc_arr[..., :3].astype(jnp.int32)           # (B,M,3)
+        coords   = pc_arr[..., 3:6].astype(jnp.float32)        # 连续 xyz
+        feats    = pc_arr[..., 3:].astype(jnp.float32)         # xyz + 语义
 
-        counts  = jnp.sum(valid, axis=1).astype(jnp.int32)         # [B]
+        # NaN 过滤 —— 仅检查 float 特征部分
+        valid = ~jnp.isnan(feats).any(axis=-1)
+
+        counts  = jnp.sum(valid, axis=1).astype(jnp.int64)         # [B] int64
         flat_id = valid.reshape(-1)
-        flat_coord = coords.reshape(-1, 3)[flat_id]
-        flat_feat  = feats.reshape(-1, feats.shape[-1])[flat_id]
-        flat_batch = jnp.repeat(jnp.arange(B, dtype=jnp.int64), counts)
-        offset     = jnp.cumsum(counts, dtype=jnp.int32)
+        flat_coord  = coords.reshape(-1, 3)[flat_id]
+        flat_feat   = feats.reshape(-1, feats.shape[-1])[flat_id]
+        flat_grid   = grid_int.reshape(-1, 3)[flat_id]        # ★ 恢复缺失行
+        flat_batch  = jnp.repeat(jnp.arange(B, dtype=jnp.int64), counts)
+        offset      = jnp.cumsum(counts, dtype=jnp.int64)
 
         pc_dict = _canonicalize_point_dict(
-            dict(coord=flat_coord, feat=flat_feat, batch=flat_batch, offset=offset)
+            dict(
+                coord      = flat_coord,     # 连续 xyz
+                grid_coord = flat_grid,      # 截断后 int32
+                feat       = flat_feat,
+                batch      = flat_batch,
+                offset     = offset,
+            )
         )
 
         # 🚩 直接使用静态维度 M 作为 pad 长度，避免 run‑time int()
@@ -107,10 +123,18 @@ def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | No
         B, P, C = arr.shape
         coord = arr[..., :3].reshape(-1, 3)
         feat  = arr[..., 3:].reshape(-1, C - 3)
-        batch = jnp.repeat(jnp.arange(B, dtype=jnp.int64), P)
-        offset = jnp.cumsum(jnp.full((B,), P, dtype=jnp.int32))
-        pc_dict = _canonicalize_point_dict(dict(coord=coord, feat=feat,
-                                                batch=batch, offset=offset))
+        batch  = jnp.repeat(jnp.arange(B, dtype=jnp.int64), P)
+        offset = jnp.cumsum(jnp.full((B,), P, dtype=jnp.int64))
+        # legacy 路径同时补 grid_coord
+        pc_dict = _canonicalize_point_dict(
+            dict(
+                coord      = coord,
+                grid_coord = coord.astype(jnp.int32),  # 截断等价
+                feat       = feat,
+                batch      = batch,
+                offset     = offset,
+            )
+        )
 
     # legacy 路径假设每帧固定 P 个点
     B = pc_dict["offset"].shape[0]                 # 静态 batch_size
@@ -121,35 +145,14 @@ def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | No
 # Alias the Sonata class from the sonata_encoder module for convenience
 Sonata = sonata_encoder.Sonata
 
-# ---------------------------------------------------------------------------
-#  helper: 过滤掉目标构造函数不支持的 kwargs
-# ---------------------------------------------------------------------------
-def _filter_kwargs_for_call(target, kw_dict, *, verbose: bool = False):
-    """
-    Parameters
-    ----------
-    target : class | callable
-        要实例化 / 调用的对象（如 _gemma.Module）
-    kw_dict : Mapping[str, Any]
-        原始 kwargs
-    verbose : bool
-        是否打印被丢弃的字段
-    """
-    sig = inspect.signature(target)
-    accepted = {}
-    dropped = []
-    for k, v in kw_dict.items():
-        if k in sig.parameters:
-            accepted[k] = v
-        else:
-            dropped.append(k)
-    if verbose and dropped:
-        logger.debug("%s: dropped unused kwargs %s", target.__name__, dropped)
-    return accepted
-
 @dataclasses.dataclass(frozen=True)
 class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     """Configuration for the Pi0FASTSonata model (Pi0FAST with Sonata point cloud encoder)."""
+
+    # 关键字段：每个点的总特征维度 = 3(xyz) + N(extra feat)
+    # 对当前 DummyPointDataset：[coords/5,  rgb] ⇒ N=6 ⇒ 9
+    point_feat_dim: int = 9
+
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
     # Inherits default action_dim, action_horizon, max_token_len from Pi0FASTConfig (e.g., 32, 32, 250)
@@ -237,11 +240,24 @@ class Pi0FASTSonata(_model.BaseModel):
         # ------------------------------------------------------------------
         # 3) 创建并加载点云编码器 (Sonata) — 参数对齐 SpatialLM‑1.1, 后面可以改成config传输
         # ------------------------------------------------------------------
-        enc_depths = (2, 2, 6, 2)        # 4 个 stage，后面要多次用到
         
         # ---------- Sonata hyper‑params – 与 ckpt 保持 100 % 一致 ----------
+        # in_channels 按配置 point_feat_dim – 3 动态确定；若配置缺失立刻报错
+        if not hasattr(config, "point_feat_dim"):
+            raise ValueError(
+                "Pi0FASTSonataConfig 需显式提供 point_feat_dim，用于推导 "
+                "Sonata in_channels = point_feat_dim - 3"
+            )
+        # ---------------- 配置 → in_channels，并保留交叉校验 ---------------
+        _in_channels = int(config.point_feat_dim) - 3
+        if _in_channels <= 0:
+            raise ValueError(
+                f"配置 point_feat_dim={config.point_feat_dim} 无效，须 ≥ 4"
+            )
+        # 若后续输入点云特征维与配置不符，将在 embed_inputs 早期报错
+
         sp_cfg = dict(
-            in_channels   = 6,
+            in_channels   = _in_channels,
             order         = ("z", "z-trans"),
             stride        = (2, 2, 2, 2),         # 5‑stage ⇒ 4 次下采样
             enc_depths    = (3, 3, 3, 12, 3),
@@ -255,6 +271,9 @@ class Pi0FASTSonata(_model.BaseModel):
             num_bins      = 1280,
         )
         point_model = Sonata(**sp_cfg)
+        # 记录供后续断言／Projector 使用
+        self._point_in_channels = _in_channels
+        self._enc_out_dim       = sp_cfg["enc_channels"][-1]   # e.g. 512
 
         if config.use_pretrained_point:
             # ------------------------------------------------------------------
@@ -328,23 +347,48 @@ class Pi0FASTSonata(_model.BaseModel):
             - 追踪期（JIT / lazy_init）只返回 ShapeDtypeStruct，不跑真模型。
             - 运行期通过 pure_callback 把 numpy → torch.cuda → numpy。
             """
-            def __init__(self, pt_model: torch.nn.Module, device: torch.device):
+            def __init__(
+                self,
+                pt_model: torch.nn.Module,
+                device: torch.device,
+                patch_size: int,
+            ):
                 super().__init__()
                 # 确保 pt_model 已在目标 device
                 self.inner = pt_model.to(device).eval()
                 self.device = device
+                self.patch_size = patch_size
 
             # ---------- 内部 util ----------
             @staticmethod
             @torch.no_grad()
             def _torch_forward(inner: torch.nn.Module,
                                host_dict: dict[str, np.ndarray],
-                               device: torch.device
+                               device: torch.device,
+                               patch_size: int
                                ) -> tuple[np.ndarray, np.int32]:      # ★ 返回二元组
                 """
                 接收 host 上的 numpy 输入 → torch.Tensor.cuda → 运行 → numpy 输出
                 统一返回 float32 numpy 数组
                 """
+
+                # =========================================================
+                # ★ 新增：若上游传入 selected_batch，只保留这一帧的点
+                #   (这样 embed_inputs 里不用 v[sel]，避免 JAX 布尔切片报错)
+                # ---------------------------------------------------------
+                if "selected_batch" in host_dict:
+                    sb = int(host_dict.pop("selected_batch"))
+                    sel = host_dict["batch"] == sb
+                    for k, v in list(host_dict.items()):
+                        # 仅对第 0 维与点数对应的字段做筛选
+                        if v.ndim and v.shape[0] == sel.shape[0]:
+                            host_dict[k] = v[sel]
+                    # 单样本语义：batch 全 0，offset = [点数]
+                    n_pts = host_dict["coord"].shape[0]
+                    host_dict["batch"]  = np.zeros(n_pts, dtype=np.int64)
+                    host_dict["offset"] = np.array([n_pts], dtype=np.int64)
+                # =========================================================
+
                 # ---------- 先安全扁平化 ----------
                 if host_dict["coord"].ndim != 2:         # (B,N,3) → (B*N,3)
                     B, N, _ = host_dict["coord"].shape
@@ -390,18 +434,19 @@ class Pi0FASTSonata(_model.BaseModel):
                 )
 
                 # ---------- NaN 替换 ----------
-                nan_mask = np.isnan(host_dict["coord"]).any(axis=1)
+                # ---------- NaN 替换（坐标或特征任一维出现 NaN 均视为无效） ----------
+                nan_mask = (
+                    np.isnan(host_dict["coord"]).any(axis=1)
+                    | np.isnan(host_dict["feat"]).any(axis=1)
+                )
                 if nan_mask.any():
                     # 坐标 / 特征 置 0；batch / offset 保持
                     host_dict["coord"][nan_mask] = 0.0
                     host_dict["feat"][nan_mask]  = 0.0
 
-                # ---------- grid_coord ----------
+                # ---------- grid_coord（缺省时直接截断） ----------
                 if "grid_coord" not in host_dict:
-                    # voxel 量化到整数网格
-                    host_dict["grid_coord"] = np.round(
-                        host_dict["coord"] / 0.01
-                    ).astype(np.int32)
+                    host_dict["grid_coord"] = host_dict["coord"].astype(np.int32)
 
                 # pure_callback 把 jax.Array 直接送过来；必须先转成真正的 numpy
                 tch_in = {
@@ -417,16 +462,15 @@ class Pi0FASTSonata(_model.BaseModel):
                 if isinstance(out, dict):                # 取 "feat"
                     out = out.get("feat", list(out.values())[0])
 
-                # -------- SpatialLM 式固定长度补零 --------
-                patch_size = 1024                       # ← 与 enc_patch_size 对齐
-                real_len   = out.size(0)
-                pad_to     = math.ceil(real_len / patch_size) * patch_size
-                if real_len < pad_to:
-                    pad = out.new_zeros(pad_to - real_len, out.size(1))
+                real_len = out.size(0)
+                if real_len < patch_size:                      # SpatialLM 从不超 patch_size
+                    pad = out.new_zeros(patch_size - real_len, out.size(1))
                     out = torch.cat([out, pad], dim=0)
-                # ------------------------------------------
-
-                return out.float().cpu().numpy(), np.int32(real_len)
+                else:
+                    out = out[:patch_size]             # 固定 1 patch
+                    real_len = patch_size
+                valid_mask = np.arange(patch_size) < real_len
+                return out.float().cpu().numpy(), valid_mask
 
             # ---------- forward ----------
             def forward(self, pc_dict, *, train: bool = False):
@@ -478,22 +522,25 @@ class Pi0FASTSonata(_model.BaseModel):
                         dummy_np[k] = np.zeros(shape, dtype=dtype)
                 # -----------------------------------------------------------
 
-                dummy_feat, _ = self._torch_forward(self.inner, dummy_np, self.device)
-                patch_size = dummy_feat.shape[0]                       # ==1024
-                out_struct = (                                          # feat & valid_len
+                dummy_feat, _ = self._torch_forward(
+                    self.inner, dummy_np, self.device, self.patch_size
+                )
+                out_struct = (
                     ShapeDtypeStruct(dummy_feat.shape, jnp.float32),
-                    ShapeDtypeStruct((), jnp.int32),
+                    ShapeDtypeStruct((dummy_feat.shape[0],), jnp.bool_),
                 )
 
                 def _host_call(*flat_np):
                     # flat_np 是回传的扁平列表/元组，需用 treedef.unflatten 还原
                     np_dict = treedef.unflatten(list(flat_np))
-                    return self._torch_forward(self.inner, np_dict, self.device)
+                    return self._torch_forward(
+                        self.inner, np_dict, self.device, self.patch_size
+                    )
 
                 feat, valid_len = pure_callback(_host_call, out_struct,
                                                 *flat, vectorized=False)
-                valid_mask = jnp.arange(patch_size, dtype=jnp.int32) < valid_len
-                return feat, valid_mask                                  # ★ tuple
+                # 直接返回 (feat, valid_len)；由调用方自行构造 mask
+                return feat, valid_len
 
             # ---------- NNX 初始化 ----------
             def init_with_output(
@@ -600,13 +647,13 @@ class Pi0FASTSonata(_model.BaseModel):
 
 
         # ---------- 5) wrap 为 NNX 模块并 lazy_init ----------
-        # ⑤ 线性投影：512 → PaLI‑Gemma hidden_size (2048)
+        # ⑤ 线性投影：enc_out_dim → PaLI‑Gemma hidden_size
         self.PointProjector = nnx_bridge.ToNNX(
-            _TorchLinearWrapper(512, _model_width, self.device)
+            _TorchLinearWrapper(self._enc_out_dim, _model_width, self.device)
         )
         # small dummy → lazy_init
         self.PointProjector.lazy_init(
-            jnp.zeros((1, sp_cfg["enc_channels"][-1]), jnp.float32),
+            jnp.zeros((1, self._enc_out_dim), jnp.float32),
             rngs=rngs,
         )
         # 让投影层跟随 PyTorch 的 device，不必手动迁移除非后续继续重写到jax
@@ -622,14 +669,17 @@ class Pi0FASTSonata(_model.BaseModel):
         # ────────────────────────────────────────────────────────────────
         raw_dummy_pc = {
             "coord": jnp.arange(N * 3, dtype=jnp.float32).reshape(N, 3),
-            "feat":  jnp.zeros((N, 6), dtype=jnp.float32),
-            "batch": jnp.zeros((N,),  dtype=jnp.int32),      # 1‑D
-            "offset": jnp.array([N], dtype=jnp.int32),
-            "grid_size": jnp.array([[128, 128, 128]], dtype=jnp.int32),
+            "feat":  jnp.zeros((N, self._point_in_channels), dtype=jnp.float32),
+            "batch": jnp.zeros((N,),  dtype=jnp.int64),      # 1‑D  (Sonata 需 int64)
+            "offset": jnp.array([N], dtype=jnp.int64),
+            "grid_size": jnp.array([[32, 32, 32]], dtype=jnp.int32),   # <= num_bins / 2**4
         }
         dummy_pc = _canonicalize_point_dict(raw_dummy_pc)
 
-        point = nnx_bridge.ToNNX(_TorchSonataWrapper(point_model, self.device))
+        _patch_sz = sp_cfg["enc_patch_size"][-1]   # 1024 (保持与 ckpt 一致)
+        point = nnx_bridge.ToNNX(
+            _TorchSonataWrapper(point_model, self.device, _patch_sz)
+        )
         # 初始化 wrapper（一次性 shape 推断）
         point.lazy_init(dummy_pc, train=False, rngs=rngs)
 
@@ -670,37 +720,68 @@ class Pi0FASTSonata(_model.BaseModel):
         # 2. Point cloud tokens --------------------------------------------------
         pc_pack = _extract_point_batch(obs)
         if pc_pack is not None:
-            pc_dict, pt_mask = pc_pack            # pt_mask : [B, Lp]
+            # --------------------------------------------------------
+            # 与 SpatialLM‑Qwen forward_point_cloud 完全一致的策略：
+            # for‑loop 逐样本调用 Sonata → 每次得到 (K*1024, C)，
+            # 再统一 pad 到同一长度。
+            # --------------------------------------------------------
+            pc_dict_all, pc_frame_mask = pc_pack        # pc_frame_mask : [B, M]
+            B = pc_dict_all["offset"].shape[0]
 
-            # --- 调 Sonata ---
-            pt_tokens, valid_mask = self.PaliGemma.point(pc_dict, train=False)   # [P, 512]  or [B,L,C] (旧接口)
+            # 运行时维度检查
+            if pc_dict_all["feat"].shape[-1] != self._point_in_channels:
+                raise ValueError(
+                    f"Sonata in_channels={self._point_in_channels}, "
+                    f"但输入特征维度={pc_dict_all['feat'].shape[-1]}"
+                )
 
-            # --- 线性投影到 LLM dim ---
-            pt_tokens = self.PointProjector(pt_tokens)
-            if isinstance(pt_tokens, (tuple, list)):
-                pt_tokens = pt_tokens[0]
-            pt_tokens = pt_tokens.astype(token_embeddings[0].dtype)
+            per_sample_tokens  = []
+            per_sample_masks   = []
+            max_len            = 0
 
-            # 若仍是扁平 [P,C]，根据 offset 还原 batch，并按 patch_size=1024 补齐
-            if pt_tokens.ndim == 2:
-                splits = jnp.split(pt_tokens, pc_dict["offset"][:-1])
-                patch_size = valid_mask.shape[0]              # == 1024
-                pad = lambda x: jnp.pad(x,
-                                        ((0, patch_size - x.shape[0]), (0, 0)))
-                pt_tokens = jnp.stack([pad(s) for s in splits])       # [B,1024,C]
+            for b in range(B):                                    # **逐 batch**
+                # 仅把 sample id 传给 wrapper；真正的切片在 PyTorch 侧完成，
+                # 因此这里不再产生动态形状。
+                single_dict = {
+                    **pc_dict_all,          # 全量点云
+                    "selected_batch": jnp.array(b, jnp.int32),  # 新增键
+                }
+                # grid_coord 缺失则直接截断取 int —— 与 SpatialLM 相同
+                if "grid_coord" not in single_dict:
+                    single_dict["grid_coord"] = single_dict["coord"].astype(jnp.int32)
 
-            # ------- 同步扩展 pt_mask 并与 valid_mask 结合 -------
-            pad_len = pt_tokens.shape[1] - pt_mask.shape[1]
-            if pad_len > 0:        # 原 mask 右侧补 False 直到 1024
-                pt_mask = jnp.pad(pt_mask,
-                                  ((0, 0), (0, pad_len)),
-                                  constant_values=False)
+                tok, vmask = self.PaliGemma.point(single_dict, train=False)
 
-            pt_mask = pt_mask & valid_mask[None, :]   # 只保留有效 token
+                # 投影到 LLM hidden_size ，保持与图像 / 文本维度一致
+                tok = self.PointProjector(tok.astype(jnp.float32))
+                tok = tok.astype(token_embeddings[0].dtype)
+
+                # SpatialLM 保留补零 token，靠 vmask 指示有效性
+                per_sample_tokens.append(tok)       # ← 直接整块保存
+                per_sample_masks.append(vmask)
+                max_len = max(max_len, tok.shape[0])   # 一般就是 1024
+
+            # ----- pad 到 batch 内最大长度 -----------
+            def _pad_to(x, tgt):
+                pad = [(0, tgt - x.shape[0])] + [(0, 0)]*(x.ndim-1)
+                return jnp.pad(x, pad)
+
+            pt_tokens = jnp.stack([_pad_to(t, max_len) for t in per_sample_tokens])  # (B,max_len,C)
+            valid_m   = jnp.stack([_pad_to(m, max_len) for m in per_sample_masks])
+
+            # --- mask 对齐到外层 pc_frame_mask ---  (与 SpatialLM 思路相同)
+            if max_len > pc_frame_mask.shape[1]:
+                pad_len = max_len - pc_frame_mask.shape[1]
+                pc_frame_mask = jnp.pad(pc_frame_mask,
+                                         ((0,0),(0,pad_len)),
+                                         constant_values=False)
+            else:                       # 罕见：1024 < M，裁剪外层掩码
+                pc_frame_mask = pc_frame_mask[:, :max_len]
+            pt_final_mask = pc_frame_mask & valid_m
 
             token_embeddings.append(pt_tokens)
-            input_mask.append(pt_mask)
-            ar_mask.append(jnp.zeros_like(pt_mask, dtype=jnp.int32))
+            input_mask.append(pt_final_mask)
+            ar_mask.append(jnp.zeros_like(pt_final_mask, dtype=jnp.int32))
 
         # 3. Text tokens (from language model embedding)
         # Ensure textual inputs are present
@@ -818,14 +899,19 @@ class Pi0FASTSonata(_model.BaseModel):
                 lambda key: jnp.argmax(logits_step, axis=-1),
                 operand=subkey,
             ).astype(jnp.int32)
-            out_tokens = _pi0_fast.put_along_last_axis(out_tokens,
-                                                       jnp.broadcast_to(step, (token.shape[0], 1)),
-                                                       token[:, None])
-            positions = prefix_start + step
-            logits, cache = self.PaliGemma.llm(token=token[:, None],
-                                               kv_cache=cache,
-                                               positions=positions,
-                                               decode=True)
+            # 原 put_along_last_axis 构造 O(N²) one‑hot；改用 scatter 更新
+            out_tokens = out_tokens.at[:, step].set(token)
+
+            # Gemma‑fast & SpatialLM：位置 = 已填 prefix token 数 + 当前 step
+            positions = prefill_len[:, None] + step           # (B,1)
+            # Gemma‑fast 无 token=kwarg：先嵌入，再 decode 一步
+            token_emb = self.PaliGemma.llm(token[:, None], embed_only=True)
+            logits, cache = self.PaliGemma.llm(
+                embedded_prefix=token_emb,
+                kv_cache=cache,
+                positions=positions,
+                decode=True,
+            )
             return rng_key, logits, cache, step+1, out_tokens
 
         init_state = (rng, last_logit, kv_cache, jnp.array(0, jnp.int32), output_tokens)

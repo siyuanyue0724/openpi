@@ -130,13 +130,15 @@ class DummyPointDataset(Dataset):
         coords = np.random.rand(num_points, 3).astype(np.float32) * 5.0  # random XYZ in [0, 5)
         colors = np.random.rand(num_points, 3).astype(np.float32)        # random RGB in [0, 1)
         # Combine normalized coords and colors to 6-D features per point
+        # 3 维归一化坐标 + 3 维 RGB  ⇒ 6 维
         feat6 = np.concatenate([coords / 5.0, colors], axis=1).astype(np.float32)
         # Create the point cloud data dictionary expected by Sonata encoder
         dummy_point_data = {
-            "coord": jnp.asarray(coords),
-            "feat":  jnp.asarray(feat6),
-            "batch": jnp.zeros((num_points,), dtype=jnp.int32),   # all points belong to batch 0
-            "grid_size": jnp.ones((1, 3), dtype=jnp.int32),       # dummy grid size (not used in inference)
+            "coord":  jnp.asarray(coords),          # (P,3) float32
+            "feat":   jnp.asarray(feat6),           # (P,6) float32
+            "batch":  jnp.zeros((num_points,), dtype=jnp.int64),
+            "offset": jnp.array([num_points], dtype=jnp.int64),
+            "grid_size": jnp.ones((1, 3), dtype=jnp.int32),
         }
         # Observation 是 frozen dataclass，需重新构造
         obs_with_pc = dataclasses.replace(obs, pointcloud_data=dummy_point_data)
