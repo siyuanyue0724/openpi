@@ -1,3 +1,8 @@
+# 该版本已知问题（这些问题目前暂时不用立刻解决）：
+# 训练时梯度	不会尝试回传到 Sonata/Projector	freeze‑filter 非刚需, 这个我们后续再解决
+# 性能潜在瓶颈	CPU ↔ GPU copy / 多编译	后续迭代可能会影响这个，所以首先解决问题1
+# 1024 token size，这个暂时不能设置太大因为会炸显存，首先使用提示方式来确定是否会有过多的情况，没有就继续训练，有的话后续再继续处理
+
 import dataclasses
 import inspect
 import logging
@@ -885,8 +890,9 @@ class Pi0FASTSonata(_model.BaseModel):
         prefix_attn_mask = _pi0_fast.make_attn_mask(prefix_mask, prefix_ar_mask)
         # Align all prefix sequences to the right (required for caching in prefix)
         prefix_tokens, prefix_mask, prefix_attn_mask = _pi0_fast.left_to_right_align(prefix_tokens, prefix_mask, prefix_attn_mask)
-        prefill_size = prefix_tokens.shape[1]  # total sequence length after alignment (prefix padded to some length)
-        prefill_len = jnp.sum(prefix_mask, axis=-1)  # actual prefix length per batch (number of valid tokens)
+        # ①  ——  与 SpatialLM 一致：prefill_len 明确 cast 为 int32（后续与 lax.iota 等保持类型匹配）
+        prefill_size = prefix_tokens.shape[1]   # total sequence length after alignment (prefix padded to some length)
+        prefill_len = jnp.sum(prefix_mask, axis=-1).astype(jnp.int32)   # actual prefix length per batch (number of valid tokens)
         prefix_start = prefill_size - prefill_len   # start index of actual prefix tokens after right-align (for each batch)
         # Prepare attention mask for prefix + decoding steps
         prefix_attn_mask = jnp.pad(prefix_attn_mask, ((0, 0), (0, 0), (0, max_decoding_steps)))
@@ -933,7 +939,8 @@ class Pi0FASTSonata(_model.BaseModel):
             out_tokens = out_tokens.at[:, step].set(token)
 
             # Gemma‑fast & SpatialLM：位置 = 已填 prefix token 数 + 当前 step
-            positions = prefill_len[:, None] + step           # (B,1)
+            # ②  ——  positions 统一 int32，可避免 multi‑host sharding “mixed signedness” 报警
+            positions = (prefill_len[:, None] + step).astype(jnp.int32)
             # Gemma‑fast 无 token=kwarg：先嵌入，再 decode 一步
             token_emb = self.PaliGemma.llm(token[:, None], embed_only=True)
             logits, cache = self.PaliGemma.llm(
