@@ -3,6 +3,7 @@
 # 性能潜在瓶颈	CPU ↔ GPU copy / 多编译	后续迭代可能会影响这个，所以首先解决问题1
 # 1024 token size，这个暂时不能设置太大因为会炸显存，首先使用提示方式来确定是否会有过多的情况，没有就继续训练，有的话后续再继续处理
 # 注意，grid似乎不能是负数！
+# per-sample pure_callback batch>1 时 CPU↔GPU 来回和 XLA → host 交互会拖慢，梯度积累场景尤甚
 
 import dataclasses
 import inspect
@@ -811,7 +812,10 @@ class Pi0FASTSonata(_model.BaseModel):
                 )
 
                 # 投影到 LLM hidden_size ，保持与图像 / 文本维度一致
+                # ① 投影到 LLM hidden_size
                 tok = self.PointProjector(tok.astype(jnp.float32))
+                # ② 把 padding / 无效 token 特征强制归零，防止 Linear 偏置泄漏
+                tok = tok * vmask[:, None]
                 tgt_dtype = token_embeddings[0].dtype if token_embeddings else tok.dtype
                 tok = tok.astype(tgt_dtype)
 
@@ -971,11 +975,25 @@ class Pi0FASTSonata(_model.BaseModel):
             positions = (prefill_len[:, None] + step).astype(jnp.int32)
             # Gemma‑fast 无 token=kwarg：先嵌入，再 decode 一步
             token_emb = self.PaliGemma.llm(token[:, None], embed_only=True)
+            # 与原 Pi0‑FAST 保持一致：显式传入 causal mask，
+            # 屏蔽右对齐前缀左侧 padding 的 KV。
+            mask = jnp.logical_and(
+                jnp.arange(prefill_size + max_decoding_steps)[None, None, :]
+                >= prefix_start[:, None, None],
+                jnp.arange(prefill_size + max_decoding_steps)[None, None, :]
+                < (
+                    jnp.broadcast_to(
+                        prefill_size + step + 1,
+                        (prefix_start.shape[0], 1, 1),
+                    )
+                ),
+            )
             logits, cache = self.PaliGemma.llm(
                 embedded_prefix=token_emb,
                 kv_cache=cache,
                 positions=positions,
                 decode=True,
+                mask=mask,  # ★ 新增
             )
             return rng_key, logits, cache, step+1, out_tokens
 
