@@ -58,6 +58,7 @@ def _canonicalize_point_dict(pd):
 
     # SpatialLM 全程使用 int32 体素坐标；强制转换可消除潜在溢出
     if "grid_coord" in pd:
+        # 这里有个潜在的问题，若用户自己组装的grid_coord已经超过65535，则可能再次溢出，但这个实际上不太可能，因此只写注释，等以后如果训练有问题再回来看。
         pd["grid_coord"] = pd["grid_coord"].astype(jnp.int32, copy=False)
 
     return pd
@@ -83,37 +84,27 @@ def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | No
         #   0‑2 : 体素网格坐标 (int32)
         #   3‑5 : 连续 xyz (float32)
         #   6+ : 其他语义特征
-        grid_int = pc_arr[..., :3].astype(jnp.int32)           # (B,M,3)
+        grid_int_raw = pc_arr[..., :3].astype(jnp.int32)       # (B,M,3)
+        # --- 关键修复：逐 batch 归零，防 Morton 位宽溢出 -----------------
+        grid_base   = grid_int_raw.min(axis=1, keepdims=True)  # (B,1,3)
+        grid_int    = grid_int_raw - grid_base                 # 保证每维 ≥0
         coords   = pc_arr[..., 3:6].astype(jnp.float32)        # 连续 xyz
         feats    = pc_arr[..., 3:].astype(jnp.float32)         # xyz + 语义
 
-        # NaN 过滤 —— 仅检查 float 特征部分
-        valid = ~jnp.isnan(feats).any(axis=-1)
-
-        counts = valid.sum(axis=1, dtype=jnp.int64)         # [B] int64
-        flat_id = valid.reshape(-1)
-        flat_coord  = coords.reshape(-1, 3)[flat_id]
-        flat_feat   = feats.reshape(-1, feats.shape[-1])[flat_id]
-        flat_grid   = grid_int.reshape(-1, 3)[flat_id]        # ★ 恢复缺失行
-        flat_batch  = jnp.repeat(jnp.arange(B, dtype=jnp.int64), counts)
-        offset      = jnp.cumsum(counts, dtype=jnp.int64)
-
+        # 不在 JAX 侧做可变长展平 / NaN 过滤；保持 (B,M,*) 静态形状，
+        # 把展平、去 NaN、重新计算 offset 完全交由
+        # _TorchSonataWrapper (host‑side) 处理，
+        # 以避免 jnp.repeat(counts) 的编译期动态大小。
         pc_dict = _canonicalize_point_dict(
-            dict(
-                coord      = flat_coord,     # 连续 xyz
-                grid_coord = flat_grid,      # 截断后 int32
-                feat       = flat_feat,
-                batch      = flat_batch,
-                offset     = offset,
-            )
+            dict(coord=coords, grid_coord=grid_int, feat=feats)
         )
 
-        # 🚩 直接使用静态维度 M 作为 pad 长度，避免 run‑time int()
+        # 直接使用静态维度 M 作为 pad 长度，避免 run‑time int()
         max_len  = pc_arr.shape[1]                                 # == M
         mask     = einops.repeat(pc_mask, "b -> b l", l=max_len)
         return pc_dict, mask
 
-    # ---------- 💡 旧接口 ----------
+    # ---------- 旧接口 ----------
     legacy = getattr(obs, "pointcloud_data", None)
     if legacy is None:
         return None
@@ -122,18 +113,24 @@ def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | No
     if isinstance(legacy, dict) and "coord" in legacy:
         pc_dict = _canonicalize_point_dict(legacy)
     else:
-        # b) assume [B, P, 6] array
-        arr = jnp.asarray(legacy, dtype=jnp.float32)
+        # b) assume legacy is a [B, P, 6] array  (xyz + feat)
+        arr = jnp.asarray(legacy, dtype=jnp.float32)   # (B,P,6)
         B, P, C = arr.shape
-        coord = arr[..., :3].reshape(-1, 3)
-        feat  = arr[..., 3:].reshape(-1, C - 3)
+
+        coord = arr[..., :3].reshape(-1, 3)            # (B*P,3)
+        feat  = arr[..., 3:].reshape(-1, C - 3)        # (B*P,3)
         batch  = jnp.repeat(jnp.arange(B, dtype=jnp.int64), P)
         offset = jnp.cumsum(jnp.full((B,), P, dtype=jnp.int64))
-        # legacy 路径同时补 grid_coord
+
+        # ---------- grid_coord: 先转 int32，再逐维减最小值 ----------
+        grid_raw   = coord.astype(jnp.int32)
+        grid_coord = grid_raw - grid_raw.min(axis=0, keepdims=True)
+
+        # 打包到 dict → canonicalize
         pc_dict = _canonicalize_point_dict(
             dict(
-                coord      = coord,
-                grid_coord = coord.astype(jnp.int32),  # 截断等价
+                coord      = coord,        # 连续 xyz
+                grid_coord = grid_coord,   # 归零后的 int32
                 feat       = feat,
                 batch      = batch,
                 offset     = offset,
@@ -230,9 +227,6 @@ class Pi0FASTSonata(_model.BaseModel):
             dtype_mm=config.dtype,
         )
 
-        # img_kwargs在官方实现里似乎没有，因此暂时注释掉，如果后续发现没问题，可以删除-----------
-        #img_kwargs = _filter_kwargs_for_call(_siglip.Module, raw_img_kwargs, verbose=True)
-        #img = nnx_bridge.ToNNX(_siglip.Module(**img_kwargs))
         # ---------------------------------------------------------------------------------
 
         img = nnx_bridge.ToNNX(_siglip.Module(**raw_img_kwargs))
@@ -452,6 +446,12 @@ class Pi0FASTSonata(_model.BaseModel):
                     counts = np.bincount(host_dict["batch"])
                     host_dict["offset"] = np.cumsum(counts, dtype=np.int64)
 
+                # ---------- 若缺 grid_coord，则用 floor(coord) 并归零 ----------
+                if "grid_coord" not in host_dict:
+                    gc = np.floor(host_dict["coord"]).astype(np.int32, copy=False)
+                    gc -= gc.min(axis=0, keepdims=True)        # 保证每维从 0 开始
+                    host_dict["grid_coord"] = gc
+
                 # pure_callback 把 jax.Array 直接送过来；必须先转成真正的 numpy
                 tch_in = {
                     k: torch.from_numpy(np.asarray(v))  # ← 关键：np.asarray()
@@ -469,9 +469,18 @@ class Pi0FASTSonata(_model.BaseModel):
                 real_len = out.size(0)
                 # SpatialLM: 不截断；右 pad 到 patch_size 的倍数
                 # --- 保留固定 1024‑padding 以维持静态 shape (JAX 需求，改成不固定的代价很大，如果单纯加大则容易炸显存) ---
-                MAX_TOKEN = patch_size                  # 与 enc_patch_size 对齐
+                # ------------------------------------------------------------------
+                # 截断前做显式报警：这个是因为如果我们要改成非固定，会导致无法jax化，计算代价很大，所以我们用这种方式进行测试，来看看数据集能不能提供合理数据
+                # ------------------------------------------------------------------
+                MAX_TOKEN = patch_size                  # =1024 (enc_patch_size[-1])
                 if real_len > MAX_TOKEN:
-                    out = out[:MAX_TOKEN]               # safety guard
+                    logging.warning(
+                        "[Sonata] token_len=%d > %d — will be truncated (batch may need "
+                        "larger enc_patch_size).", real_len, MAX_TOKEN
+                    )
+                    # 若想直接中断训练，改成:
+                    #   raise RuntimeError(f"Sonata token_len {real_len} exceeds {MAX_TOKEN}")
+                    out = out[:MAX_TOKEN]
                     real_len = MAX_TOKEN
                 pad_len = MAX_TOKEN - real_len
                 if pad_len:
