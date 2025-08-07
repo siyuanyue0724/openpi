@@ -4,6 +4,7 @@
 # 1024 token size，这个暂时不能设置太大因为会炸显存，首先使用提示方式来确定是否会有过多的情况，没有就继续训练，有的话后续再继续处理
 # 注意，grid似乎不能是负数！
 # per-sample pure_callback batch>1 时 CPU↔GPU 来回和 XLA → host 交互会拖慢，梯度积累场景尤甚
+# grid → coord 偏移：当前在 _canonicalize_point_dict 里把 grid_coord 归零，但 连续 xyz (coord) 并没有同步偏移；如果你后面用到绝对坐标，需要确保一致性。
 
 import dataclasses
 import inspect
