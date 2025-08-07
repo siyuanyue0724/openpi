@@ -56,6 +56,10 @@ def _canonicalize_point_dict(pd):
          if key in pd:
             pd[key] = pd[key].astype(jnp.int64, copy=False)
 
+    # SpatialLM 全程使用 int32 体素坐标；强制转换可消除潜在溢出
+    if "grid_coord" in pd:
+        pd["grid_coord"] = pd["grid_coord"].astype(jnp.int32, copy=False)
+
     return pd
 
 # -------- 在旧 / 新两类 Observation 之间统一抽取点云 ----------
@@ -433,20 +437,20 @@ class Pi0FASTSonata(_model.BaseModel):
                     f"but offset[-1]={host_dict['offset'][-1]}"
                 )
 
-                # ---------- NaN 替换 ----------
-                # ---------- NaN 替换（坐标或特征任一维出现 NaN 均视为无效） ----------
+                # ---------- NaN 过滤：与 SpatialLM‑Qwen 完全一致 ----------
                 nan_mask = (
                     np.isnan(host_dict["coord"]).any(axis=1)
                     | np.isnan(host_dict["feat"]).any(axis=1)
                 )
                 if nan_mask.any():
-                    # 坐标 / 特征 置 0；batch / offset 保持
-                    host_dict["coord"][nan_mask] = 0.0
-                    host_dict["feat"][nan_mask]  = 0.0
-
-                # ---------- grid_coord（缺省时直接截断） ----------
-                if "grid_coord" not in host_dict:
-                    host_dict["grid_coord"] = host_dict["coord"].astype(np.int32)
+                    keep = ~nan_mask
+                    for k in ("coord", "feat", "grid_coord"):
+                        if k in host_dict:
+                            host_dict[k] = host_dict[k][keep]
+                    host_dict["batch"] = host_dict["batch"][keep]
+                    # 重新计算 offset  (prefix‐sum of per‑batch counts)
+                    counts = np.bincount(host_dict["batch"])
+                    host_dict["offset"] = np.cumsum(counts, dtype=np.int64)
 
                 # pure_callback 把 jax.Array 直接送过来；必须先转成真正的 numpy
                 tch_in = {
@@ -464,7 +468,8 @@ class Pi0FASTSonata(_model.BaseModel):
 
                 real_len = out.size(0)
                 # SpatialLM: 不截断；右 pad 到 patch_size 的倍数
-                MAX_TOKEN = 1024                        # ← 和 forward() 里保持相同
+                # --- 保留固定 1024‑padding 以维持静态 shape (JAX 需求，改成不固定的代价很大，如果单纯加大则容易炸显存) ---
+                MAX_TOKEN = patch_size                  # 与 enc_patch_size 对齐
                 if real_len > MAX_TOKEN:
                     out = out[:MAX_TOKEN]               # safety guard
                     real_len = MAX_TOKEN
@@ -529,8 +534,8 @@ class Pi0FASTSonata(_model.BaseModel):
                     self.inner, dummy_np, self.device, self.patch_size
                 )
                 # 例如静态上限, 这里设置1024，可以设置8192 (= 8 patch)；确保不会在真实输入中超出但是这样会炸显存,所以我们保留1024实现, 后续可以继续加
-                # SpatialLM Sonata 的默认 enc_patch_size = 1024，1 024 patch × 1 024 points/patch = ≈100 万原始点；常规 LiDAR / RGB-D 帧达不到这个量级，我们目前先保留这个，不用在意，后面再来管
-                MAX_TOKEN = 1024
+                # patch_size 由 Wrapper 构造函数传入；保持与 Sonata enc_patch_size 一致
+                MAX_TOKEN = self.patch_size
                 C = dummy_feat.shape[1]
                 out_struct = (ShapeDtypeStruct((MAX_TOKEN, C), jnp.float32),
                               ShapeDtypeStruct((MAX_TOKEN,),  jnp.bool_))
@@ -757,6 +762,12 @@ class Pi0FASTSonata(_model.BaseModel):
 
                 tok, vmask = self.PaliGemma.point(single_dict, train=False)
 
+                # -------- 长度一致性断言（问题 4）--------
+                assert tok.shape[0] == vmask.shape[0], (
+                    f"Sonata 返回 token 长度 {tok.shape[0]} "
+                    f"≠ valid_mask 长度 {vmask.shape[0]}"
+                )
+
                 # 投影到 LLM hidden_size ，保持与图像 / 文本维度一致
                 tok = self.PointProjector(tok.astype(jnp.float32))
                 tgt_dtype = token_embeddings[0].dtype if token_embeddings else tok.dtype
@@ -774,6 +785,10 @@ class Pi0FASTSonata(_model.BaseModel):
 
             pt_tokens = jnp.stack([_pad_to(t, max_len) for t in per_sample_tokens])  # (B,max_len,C)
             valid_m   = jnp.stack([_pad_to(m, max_len) for m in per_sample_masks])
+
+            # 二次验证：所有 batch 长度已经对齐
+            assert (pt_tokens.shape[1] == valid_m.shape[1] == max_len), \
+                "pad 后 token / mask 长度不一致"
 
             # --- mask 对齐到外层 pc_frame_mask ---  (与 SpatialLM 思路相同)
             if max_len > pc_frame_mask.shape[1]:
