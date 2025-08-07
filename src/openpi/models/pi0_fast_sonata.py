@@ -1,7 +1,8 @@
 # 该版本已知问题（这些问题目前暂时不用立刻解决）：
-# 训练时梯度	不会尝试回传到 Sonata/Projector	freeze‑filter 非刚需, 这个我们后续再解决
+# 训练时梯度	不会尝试回传到 Sonata/Projector	freeze‑filter 非刚需, 这个我们后续再解决，因为我们实际上要允许训练，所以反而不能冻结，这个后面再说
 # 性能潜在瓶颈	CPU ↔ GPU copy / 多编译	后续迭代可能会影响这个，所以首先解决问题1
 # 1024 token size，这个暂时不能设置太大因为会炸显存，首先使用提示方式来确定是否会有过多的情况，没有就继续训练，有的话后续再继续处理
+# 注意，grid似乎不能是负数！
 
 import dataclasses
 import inspect
@@ -13,7 +14,6 @@ import einops
 import numpy as np
 import torch
 from pathlib import Path
-import math                    # 用于计算 patch_size 对齐
 
 # ---- JAX <-> openpi 兼容：KeyArray 在 JAX 0.4.14+ 被移除 ----
 import jax.random as _jr
@@ -31,7 +31,7 @@ import openpi.models.gemma_fast as _gemma
 from openpi.models import pi0_fast as _pi0_fast
 from openpi.models import siglip as _siglip
 import openpi.models.model as _model  # for BaseModel and Observation
-from openpi.shared import download     # utility for downloading resources like weights
+# from openpi.shared import download     # utility for downloading resources like weights, not used for now
 
 # optional – hug‑hub 优先
 try:
@@ -355,21 +355,24 @@ class Pi0FASTSonata(_model.BaseModel):
                 pt_model: torch.nn.Module,
                 device: torch.device,
                 patch_size: int,
+                enc_out_dim: int,
             ):
                 super().__init__()
                 # 确保 pt_model 已在目标 device
                 self.inner = pt_model.to(device).eval()
                 self.device = device
                 self.patch_size = patch_size
+                self.enc_out_dim = enc_out_dim
 
             # ---------- 内部 util ----------
             @staticmethod
             @torch.no_grad()
-            def _torch_forward(inner: torch.nn.Module,
-                               host_dict: dict[str, np.ndarray],
-                               device: torch.device,
-                               patch_size: int
-                               ) -> tuple[np.ndarray, np.int32]:      # ★ 返回二元组
+            def _torch_forward(
+                inner: torch.nn.Module,
+                host_dict: dict[str, np.ndarray],
+                device: torch.device,
+                patch_size: int,
+            ) -> tuple[np.ndarray, np.ndarray]:  # 第 2 个 ndarray 是 bool 掩码
                 """
                 接收 host 上的 numpy 输入 → torch.Tensor.cuda → 运行 → numpy 输出
                 统一返回 float32 numpy 数组
@@ -450,6 +453,19 @@ class Pi0FASTSonata(_model.BaseModel):
                     # 重新计算 offset  (prefix‐sum of per‑batch counts)
                     counts = np.bincount(host_dict["batch"])
                     host_dict["offset"] = np.cumsum(counts, dtype=np.int64)
+                
+                # ===== SpatialLM‑style 空点云保护 =====
+                if host_dict["coord"].shape[0] == 0:
+                    # ① 计算输出维度 C_out（与 Sonata encoder 末层一致）
+                    C_out = (
+                        inner.input_proj.out_features
+                        if getattr(inner, "enable_fourier_encode", False)
+                        else inner.enc_channels[-1]
+                    )
+                    # ② 返回全零特征 + 全 False 有效标记
+                    pad_feat   = np.zeros((patch_size, C_out), dtype=np.float32)
+                    valid_mask = np.zeros((patch_size,),       dtype=bool)
+                    return pad_feat, valid_mask
 
                 # ---------- 若缺 grid_coord，则用 floor(coord) 并归零 ----------
                 if "grid_coord" not in host_dict:
@@ -479,14 +495,12 @@ class Pi0FASTSonata(_model.BaseModel):
                 # ------------------------------------------------------------------
                 MAX_TOKEN = patch_size                  # =1024 (enc_patch_size[-1])
                 if real_len > MAX_TOKEN:
-                    logging.warning(
-                        "[Sonata] token_len=%d > %d — will be truncated (batch may need "
-                        "larger enc_patch_size).", real_len, MAX_TOKEN
+                    # 直接阻断：用户必须显式提高 enc_patch_size[-1] 或减少点数
+                    raise RuntimeError(
+                        f"[Sonata] token_len={real_len} exceeds configured MAX_TOKEN "
+                        f"({MAX_TOKEN}). Increase `enc_patch_size[-1]` or reduce the "
+                        "number of points per sample."
                     )
-                    # 若想直接中断训练，改成:
-                    #   raise RuntimeError(f"Sonata token_len {real_len} exceeds {MAX_TOKEN}")
-                    out = out[:MAX_TOKEN]
-                    real_len = MAX_TOKEN
                 pad_len = MAX_TOKEN - real_len
                 if pad_len:
                     pad = out.new_zeros(pad_len, out.size(1))
@@ -561,8 +575,16 @@ class Pi0FASTSonata(_model.BaseModel):
                         self.inner, np_dict, self.device, self.patch_size
                     )
 
-                feat, valid_mask = pure_callback(_host_call, out_struct,
-                                                *flat, vectorized=False)
+                feat, valid_mask = pure_callback(
+                    _host_call, out_struct, *flat, vectorized=False
+                )
+
+                # ---- Runtime contract check: channel dim must match projector ----
+                assert feat.shape[-1] == self.enc_out_dim, (
+                    f"[SonataWrapper] Output dim {feat.shape[-1]} "
+                    f"!= expected {self.enc_out_dim}. "
+                    "Check Sonata ckpt / config."
+                )
                 # 直接返回 (feat, valid_mask)；由调用方自行构造 mask
                 return feat, valid_mask
 
@@ -702,8 +724,14 @@ class Pi0FASTSonata(_model.BaseModel):
 
         _patch_sz = sp_cfg["enc_patch_size"][-1]   # 1024 (保持与 ckpt 一致)
         point = nnx_bridge.ToNNX(
-            _TorchSonataWrapper(point_model, self.device, _patch_sz)
+            _TorchSonataWrapper(
+                point_model,
+                self.device,
+                _patch_sz,
+                self._enc_out_dim,   # ← 与 __init__ 对齐
+            )
         )
+        
         # 初始化 wrapper（一次性 shape 推断）
         point.lazy_init(dummy_pc, train=False, rngs=rngs)
 
