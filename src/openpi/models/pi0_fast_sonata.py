@@ -5,6 +5,9 @@
 # 注意，grid似乎不能是负数！
 # per-sample pure_callback batch>1 时 CPU↔GPU 来回和 XLA → host 交互会拖慢，梯度积累场景尤甚
 # grid → coord 偏移：当前在 _canonicalize_point_dict 里把 grid_coord 归零，但 连续 xyz (coord) 并没有同步偏移；如果你后面用到绝对坐标，需要确保一致性。
+# 64 和 32的warning修复，这个需要跑一次才能看到，详细对比原本实现看看怎么做
+# 我们假设环境存在flash attn
+
 
 import dataclasses
 import inspect
@@ -165,6 +168,9 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     paligemma_variant: _gemma.Variant = "gemma_2b"
     # Inherits default action_dim, action_horizon, max_token_len from Pi0FASTConfig (e.g., 32, 32, 250)
     use_pretrained_point: bool = True      # 调试阶段可设 False 跳过下载
+    # 若使用 Sonata，则默认**必须**提供点云；缺失时直接报错而不是静默降级
+    # 若需要只用图像+文本做消融，可把该开关设为 False
+    require_pointcloud: bool = True
 
     @property
     def model_type(self) -> _model.ModelType:
@@ -185,6 +191,8 @@ class Pi0FASTSonata(_model.BaseModel):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
 
         # --------------------------------------------------------------
+        # 记录是否强制要求点云
+        self._require_pointcloud = bool(getattr(config, "require_pointcloud", True))
         # 设定统一 device（GPU 如果可用，否则 CPU）
         # --------------------------------------------------------------
         self.device: torch.device = torch.device(
@@ -271,7 +279,7 @@ class Pi0FASTSonata(_model.BaseModel):
             enc_patch_size= (1024,)*5,            # ckpt 默认
             mlp_ratio     = 4.0,
             mask_token    = True,
-            enc_mode      = "voxel",
+            enc_mode=True,  # 即voxel
             enable_fourier_encode = True,         # ★ ckpt 含 fourier+input_proj
             num_bins      = 1280,
         )
@@ -486,8 +494,13 @@ class Pi0FASTSonata(_model.BaseModel):
                     if key in tch_in:
                         tch_in[key] = tch_in[key].long()
                 out = inner(tch_in)
-                if isinstance(out, dict):                # 取 "feat"
-                    out = out.get("feat", list(out.values())[0])
+                # SpatialLM 约定：Sonata.forward() 返回 torch.Tensor（最终特征）
+                if not isinstance(out, torch.Tensor):
+                    raise TypeError(
+                        f"Sonata.forward is expected to return a torch.Tensor "
+                        f"(as in SpatialLM), but got: {type(out)}. "
+                        f"Please ensure Sonata.forward returns the feature tensor."
+                    )
 
                 real_len = out.size(0)
                 # SpatialLM: 不截断；右 pad 到 patch_size 的倍数
@@ -773,6 +786,13 @@ class Pi0FASTSonata(_model.BaseModel):
 
         # 2. Point cloud tokens --------------------------------------------------
         pc_pack = _extract_point_batch(obs)
+        # 若本模型启用了 Sonata（即本类本身）且配置要求点云，则缺失时直接报错
+        if pc_pack is None and self._require_pointcloud:
+            raise ValueError(
+                "Pi0FAST‑Sonata: 未提供点云，但配置 require_pointcloud=True。"
+                "请提供 Observation.point_clouds['pointcloud']（及 mask）或 Observation.pointcloud_data；"
+                "若确需只用图像+文本，请将 Pi0FASTSonataConfig.require_pointcloud=False。"
+            )
         if pc_pack is not None:
             # --------------------------------------------------------
             # 与 SpatialLM‑Qwen forward_point_cloud 完全一致的策略：
