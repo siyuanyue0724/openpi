@@ -1,10 +1,33 @@
+"""
++Pi0FAST-Sonata
++--------------
++本文件将 SpatialLM 的 Sonata 点云编码器原样融合到 Pi0-FAST backbone 中。
++
++本补丁切换到“新接口”以对齐 SpatialLM 的实际数据形态：
++  • Observation.point_clouds["pointcloud"] : [B, M, 3 + C] (float32)
++      - [:, :, 0:3]     = grid_coord 体素网格（源数据中可以是 float，但会在模型侧强制 cast->int32；强烈建议上游直接 int32）
++      - [:, :, 3:6]     = coord 连续 xyz (float32)
++      - [:, :, 6:]      = 其它特征 (float32)
++      - 严格契约：feat = [xyz, extras...]，且 feat[:,:3] 必须与 coord 一致（wrapper 严格校验）。
++  • Observation.point_cloud_masks["pointcloud"] : [B] bool
++      - 指示该样本是否提供点云；空帧将跳过 Sonata 前向（直接返回零向量和全 False 掩码）。
++
++与 SpatialLM 的差异：
++  - 核心功能完全等价（同一份 Point dict 喂 Sonata，Fourier + input_proj 一致）。
++  - 我们显式化了“是否存在点云”的帧级掩码；SpatialLM 在数据侧等价处理，这里做成显式契约。
++  - 我们更严格：若 grid/xyz 不满足契约，直接抛错，不做任何“自动修复”或体素化，以避免把错误数据“悄悄修正”。
++数据要求与建议：
++  - grid_coord 必须是非负整数索引；推荐与 num_bins=1280、4 次 stride=2 对应的最末级范围 [0, 80)（内部有 warn），以利 Fourier 归一化。
++"""
+
 # 该版本已知问题（这些问题目前暂时不用立刻解决）：
-# 训练时梯度	不会尝试回传到 Sonata/Projector	freeze‑filter 非刚需, 这个我们后续再解决，因为我们实际上要允许训练，所以反而不能冻结，这个后面再说
+# 训练时梯度：不会回传到 **Sonata**（pure_callback 非可微）；**Projector 可训练**。
+# 若后续需要端到端训练 Sonata，需要把点云分支迁到 JAX（或自定义可微 callback），再讨论 flash‑attn / spconv 的可微替代。
 # 性能潜在瓶颈	CPU ↔ GPU copy / 多编译	后续迭代可能会影响这个，所以首先解决问题1
 # 1024 token size，这个暂时不能设置太大因为会炸显存，首先使用提示方式来确定是否会有过多的情况，没有就继续训练，有的话后续再继续处理
 # 注意，grid似乎不能是负数！
 # per-sample pure_callback batch>1 时 CPU↔GPU 来回和 XLA → host 交互会拖慢，梯度积累场景尤甚
-# grid → coord 偏移：当前在 _canonicalize_point_dict 里把 grid_coord 归零，但 连续 xyz (coord) 并没有同步偏移；如果你后面用到绝对坐标，需要确保一致性。
+# grid → coord 偏移：当前不会在模型内改动 grid_coord（只做“非负 + 形状 + dtype”校验）；是否归零或对齐，请在数据侧统一处理。
 # 为了避免警告，实施了JAX 端 batch/offset 用 int32，host(PyTorch) 端统一 .long()；避免 JAX_ENABLE_X64 相关警告。
 # 【这个似乎修复了？】“插入位置”严格一致性问题存在：我们是前缀拼接；SpatialLM 是 <point_start>..点token.. <point_end> 插回到文本序列。语义等价（文本依旧能看到点 token），但不是完全同一位置。如果你要逐字节一致，需要让 tokenizer/prompt 中真的包含 <point_start>/<point_end>，并在拼接时找到这两个位置再做插入（成本较高，且对你当前 Pi0‑FAST 的多模态拼接接口不自然）。
 
@@ -18,6 +41,7 @@ import jax.numpy as jnp
 import jax.nn as jnn
 import numpy as np
 import torch
+import warnings
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
 
@@ -113,20 +137,50 @@ def _host_find_window_and_keep_idx(
     win = np.array([s, e], dtype=np.int32)
     return win, keep
 
-# -------- 在旧 / 新两类 Observation 之间统一抽取点云 ----------
+# ---------- host-side helper: find <point_start>/<point_end> (no adjacency check) ----------
+def _host_find_window_only(
+    prompt_np: np.ndarray,
+    start_id: int,
+    end_id: int,
+) -> np.ndarray:
+    """
+    返回 np.int32[2] = [s_idx, e_idx]，只定位起止位置，
+    不对二者间是否有文本做任何约束（对齐 SpatialLM 的宽松假设）。
+    """
+    arr = np.asarray(prompt_np).tolist()
+    L = len(arr)
+    s_pos = [i for i, t in enumerate(arr) if t == start_id]
+    e_pos = [i for i, t in enumerate(arr) if t == end_id]
+    if len(s_pos) != 1 or len(e_pos) != 1:
+        raise ValueError(f"[point-window] expect exactly one <start>/<end>, got start={s_pos}, end={e_pos}")
+    s, e = s_pos[0], e_pos[0]
+    if not (0 <= s < e < L): raise ValueError(f"[point-window] invalid order: start={s}, end={e}, L={L}")
+    return np.array([s, e], dtype=np.int32)
+
+# -------- 在“新接口 / 旧接口(legacy)”两类 Observation 之间统一抽取点云 ----------
 def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | None:
     """
-    返回 (pc_dict, batch_mask) 或 None
+    返回 (pc_dict, frame_mask) 或 None
+    优先走“新接口”，与 SpatialLM 的 Sonata 调用语义等价：
+      • obs.point_clouds["pointcloud"] : [B, M, 3 + C]
+          - [:, :, :3]  = grid_coord (期望 int32，非负；这里会 cast)
+          - [:, :, 3:6] = coord xyz   (float32)
+          - [:, :, 6:]  = extras      (float32)
+      • obs.point_cloud_masks["pointcloud"] : [B]  指示该样本是否有点云
+
+    仍兼容 legacy（obs.pointcloud_data 字典），但不再在模型内“体素化/修复”，
+    且会从 offset/batch 推导帧级掩码以与新接口保持一致语义。
 
     支持两种来源：
-    1. 旧版 :  obs.pointcloud_data
-       - a) 已是 Sonata 兼容 dict      → 直接使用
-       - b) [B, P, C] ndarray（C≥3，按 [xyz + extras]）→ 自动展开成 dict，并需提供 voxel_size 或显式 grid
-    2. 新版 :  obs.point_clouds["pointcloud"]  +  obs.point_cloud_masks["pointcloud"]
+    1) 新接口 :  obs.point_clouds["pointcloud"]  +  obs.point_cloud_masks["pointcloud"]
+    2) 旧接口 :  obs.pointcloud_data
+       - a) 已是 Sonata 兼容 dict（必须含 grid_coord）→ 直接使用
+       - b) 不再支持仅 [B,P,C] 原始数组（避免“越权修复”）
     """
     # ---------- 💡 新接口 ----------
     if hasattr(obs, "point_clouds") and "pointcloud" in getattr(obs, "point_clouds"):
         # 形状: [B, M, 3(grid) + point_feat_dim(feats)]
+        # [:,:,0:3] grid (cast→int32), [:,:,3:6] 连续 xyz, [:,:,6:] 其它特征
         pc_arr  = obs.point_clouds["pointcloud"]
         pc_mask = obs.point_cloud_masks["pointcloud"]     # [B]
 
@@ -170,16 +224,20 @@ def _extract_point_batch(obs) -> tuple[dict[str, jnp.ndarray], jnp.ndarray] | No
             "请在上游把点云转换为 Sonata 兼容 dict，显式提供 grid_coord(int32,非负)、coord(float32,xyz)、feat([xyz,...])。"
         )
 
-    # legacy 路径假设每帧固定 P 个点
-    # 旧路径在严格模式下仅做最小假设：返回帧级 True 掩码，用 wrapper 再做更强校验
+    # 旧接口：从 offset 或 batch 推导每帧是否存在点云（与新接口的帧级语义一致）
     if "offset" in pc_dict:
-        B = pc_dict["offset"].shape[0]
-    elif "batch" in pc_dict:
-        B = int(jnp.max(pc_dict["batch"])) + 1 if pc_dict["batch"].size else 0
-    else:
-        raise ValueError("Legacy dict 需包含 'offset' 或 'batch' 以推断 batch 尺寸。")
-    mask = jnp.ones((B,), dtype=bool)
-    return pc_dict, mask
+        off = pc_dict["offset"].astype(jnp.int32)
+        B = off.shape[0]
+        counts = jnp.diff(jnp.pad(off, (1, 0)))
+        mask = counts > 0
+        return pc_dict, mask
+    if "batch" in pc_dict:
+        b = pc_dict["batch"].astype(jnp.int32)
+        B = int(jnp.max(b)) + 1 if b.size else 0
+        counts = jnp.bincount(b, length=B)
+        mask = counts > 0
+        return pc_dict, mask
+    raise ValueError("Legacy dict 需包含 'offset' 或 'batch' 以推断 batch 尺寸。")
 
 # Alias the Sonata class from the sonata_encoder module for convenience
 Sonata = sonata_encoder.Sonata
@@ -193,6 +251,8 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     # feats = [xyz(3), extra...]，例如 xyzrgb ⇒ point_feat_dim = 6
     # Observation.pointcloud 的最后一维 = 3(grid) + point_feat_dim
     point_feat_dim: int = 6
+    # 每帧点数的静态上界（仅用于 inputs_spec 的形状声明；不会截断实际输入）
+    max_points: int = 32768
     # 让父类 Pi0FASTConfig.inputs_spec() 按原逻辑自动注入点云字段
     # （Pi0FASTSonata 本身不会用这个枚举去构建模块，只用于 spec）
     point_backbone_type: PointBackboneType = PointBackboneType.SONATA
@@ -215,6 +275,9 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     point_end_id:   Optional[int] = None   # 例如 tokenizer("<|point_end|>")   的 id
     # 默认不允许 start/end 之间仍有人类文本；若你的数据中确实存在，可设 True
     allow_text_between_markers: bool = False
+    # 若为 True，则在原位插入路径严格复刻 SpatialLM：
+    #   • 保留 <start>/<end>；• 删除中间文本；• 在 <start> 后插入 K 个点 token；
+    spatiallm_exact: bool = True
 
     @property
     def model_type(self) -> _model.ModelType:
@@ -225,7 +288,7 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
         """Instantiate a Pi0FASTSonata model with random initialization."""
         return Pi0FASTSonata(self, rngs=nnx.Rngs(rng))
 
-    # ---- 覆写 inputs_spec：严格对齐 SpatialLM 的点云布局 ----
+# ---- 覆写 inputs_spec：切换到“新接口”，与 SpatialLM 的 Sonata 输入契约等价 ----
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
@@ -243,21 +306,17 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
                 },
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
-                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
                 token_ar_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 token_loss_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
-                # 点云（与 SpatialLM 的 Sonata 输入契约对齐）：
-                #  - coord: 连续 xyz（float32）
-                #  - feat : [xyz, extras...]（float32，且 feat[:,:3] 必须与 coord 一致）
-                #  - batch: 每个点属于哪个样本（int64）
-                #  - grid_coord: 非负体素坐标（int32，可选；若缺省将由 wrapper 用 floor(coord) + 零点平移重建）
-                pointcloud_data={
-                    "coord": jax.ShapeDtypeStruct([batch_size, self.max_points, 3], jnp.float32),
-                    "feat":  jax.ShapeDtypeStruct([batch_size, self.max_points, self.point_feat_dim], jnp.float32),
-                    # JAX 端 int32；host 端升至 int64
-                    "batch": jax.ShapeDtypeStruct([batch_size, self.max_points], jnp.int32),
-                    "grid_coord": jax.ShapeDtypeStruct([batch_size, self.max_points, 3], jnp.int32),
-                },
+                # 点云（新接口）：与 SpatialLM 的 Sonata 调用保持等价语义
+                #  - point_clouds["pointcloud"]: [B, M, 3 + C] (float32)
+                #      [:,:,0:3] = grid_coord（期望 int32，非负；此处按 float32 规格声明，运行时会 cast）
+                #      [:,:,3:6] = coord xyz（float32）
+                #      [:,:,6:]  = 其它特征（float32）
+                #  - point_cloud_masks["pointcloud"]: [B] bool  —— 指示该样本是否存在点云
+                point_clouds={"pointcloud": jax.ShapeDtypeStruct([batch_size, self.max_points, 3 + self.point_feat_dim], jnp.float32)},
+                point_cloud_masks={"pointcloud": jax.ShapeDtypeStruct([batch_size], jnp.bool_)},
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
         return observation_spec, action_spec
@@ -611,12 +670,6 @@ class Pi0FASTSonata(_model.BaseModel):
                         f"[SpatialLM‑Sonata] 点数不一致：grid_coord N={host_dict['grid_coord'].shape[0]} "
                         f"≠ coord N={host_dict['coord'].shape[0]}。"
                     )
-
-                # 无论上游如何，feat 必须为 2‑D；与 SpatialLM 对齐
-                if host_dict["feat"].ndim != 2:
-                    C = host_dict["feat"].shape[-1]
-                    host_dict["feat"] = host_dict["feat"].reshape(-1, C)
-
                 
                 # ---------- 若缺 offset，则根据 batch 生成 ----------
                 if "offset" not in host_dict:
@@ -882,12 +935,14 @@ class Pi0FASTSonata(_model.BaseModel):
             )
             if extra_dims > 0 else coord_dummy
         )
+        grid_dummy = jnp.zeros((N, 3), dtype=jnp.int32)   # 严格模式：dummy 也提供非负 int32 grid
         raw_dummy_pc = {
             "coord":  coord_dummy,
             "feat":   feat_dummy,                         # ← 前 3 列 = coord
             # JAX 端 int32；host 端再升到 int64
             "batch":  jnp.zeros((N,),  dtype=jnp.int32),
-            "offset": jnp.array([N],   dtype=jnp.int32)
+            "offset": jnp.array([N],   dtype=jnp.int32),
+            "grid_coord": grid_dummy,
         }
         dummy_pc = _canonicalize_point_dict(raw_dummy_pc)
 
@@ -900,11 +955,12 @@ class Pi0FASTSonata(_model.BaseModel):
                 self._enc_out_dim,   # ← 与 __init__ 对齐
             )
         )
-        # 记录 point block 的固定长度（= Sonata enc_patch_size[-1]）
+        # 记录 point block 的固定长度（= Sonata enc_patch_size[-1]，默认 1024）
         self._pt_block_len = int(_patch_sz)
         
-        # 初始化 wrapper（一次性 shape 推断）
-        point.lazy_init(dummy_pc, train=False, rngs=rngs)
+        # 明确使用 wrapper 的 init_with_output 以避免在不同 nnx-bridge 版本下的歧义
+        point.lazy_init(dummy_pc, train=False, rngs=rngs, method="init_with_output")
+        # ↑ 若你的 nnx 版本会自动识别，则这行与上一行等价；显式化更稳
 
         # ------------------------------------------------------------------
         # 6) 打包所有子模块
@@ -921,6 +977,7 @@ class Pi0FASTSonata(_model.BaseModel):
         self._point_end_id   = getattr(config, "point_end_id", None)
         self._warned_no_point_ids = False
         self._allow_text_between = bool(getattr(config, "allow_text_between_markers", False))
+        self._spatiallm_exact = bool(getattr(config, "spatiallm_exact", True))
 
     def embed_inputs(
         self, obs: _model.Observation
@@ -1038,17 +1095,11 @@ class Pi0FASTSonata(_model.BaseModel):
                             f"pointcloud grid_coord 的最后一维必须为 3，"
                             f"实际 shape={single_dict['grid_coord'].shape}"
                         )
-                # grid_coord 缺失兜底：floor + 逐维归零（确保非负）
+                # 严格模式：不再在模型内重建 grid；缺失立刻报错（保持与 SpatialLM 契约一致）
                 if "grid_coord" not in single_dict:
-                    if not getattr(self, "_warned_missing_grid", False):
-                        logger.warning(
-                            "[Sonata] missing grid_coord; reconstructing from coord via floor() + per-dim min-shift. "
-                            "For strict SpatialLM parity, pass explicit voxelized non-negative int32 grid."
-                        )
-                        self._warned_missing_grid = True
-                    gc = jnp.floor(single_dict["coord"]).astype(jnp.int32)
-                    gc = gc - gc.min(axis=0, keepdims=True)
-                    single_dict["grid_coord"] = gc
+                    raise ValueError(
+                        "[SpatialLM‑Sonata] 当前样本缺少 grid_coord；请在数据管线中显式提供体素索引 (N,3,int32,非负)。"
+                    )
 
                 tok, vmask = self.PaliGemma.point(single_dict, train=False)
 
@@ -1111,7 +1162,8 @@ class Pi0FASTSonata(_model.BaseModel):
         pt_tokens = pt_tokens.astype(target_dtype)
         # ---- A) 原位插入（SpatialLM 一致）或安全回退 ----
         use_inplace = (
-            self._insert_points_in_place
+            self._spatiallm_exact
+            and self._insert_points_in_place
             and (self._point_start_id is not None)
             and (self._point_end_id   is not None)
         )
@@ -1122,88 +1174,90 @@ class Pi0FASTSonata(_model.BaseModel):
             )
             self._warned_no_point_ids = True
         if use_inplace:
+            # ===== SpatialLM-exact 插入：保留 <start>/<end>，删除中间文本，<start> 后插入 K 个点 =====
+            # 说明：
+            #   • 为了避免 JAX 形状多态，本实现将“文本+点段”的 buffer 固定为 L + P（P=固定点块上限），
+            #     然而右侧文本的“有效起点”基于真实 K（= sum(valid_mask)），并且 mask/labels 只覆盖有效范围。
+            #   • 这样在语义与监督上完全等价于 SpatialLM 的“pad 到本 batch 的 max_num_tokens”，只是我们固定到 L+P。
             B, L, D = txt_tokens.shape
-            P = pt_tokens.shape[1]  # 固定块长度（通常=1024）
-            # 图像部分先准备好
+            P = pt_tokens.shape[1]                  # 固定块上限（通常=1024）
+            LM = L + P                              # 固定的“文本+点”段 buffer 长度
             img_tokens = img_tokens.astype(target_dtype)
-            # 为每个样本计算窗口与 keep 索引（host 侧）
-            out_struct = (
-                ShapeDtypeStruct((2,),   jnp.int32),   # window [s,e]
-                ShapeDtypeStruct((L-2,), jnp.int32),   # keep_idx
-            )
+            pt_tokens  = pt_tokens.astype(target_dtype)
+
+            # --- 定位每个样本的 <start>/<end>（不限制二者之间是否有文本；与 SpatialLM 一致） ---
+            out_struct = (ShapeDtypeStruct((2,), jnp.int32),)
             win_list = []
-            keep_list = []
             for b in range(B):
                 def _host_call(arr):
-                    return _host_find_window_and_keep_idx(
+                    return _host_find_window_only(
                         np.asarray(arr),
                         int(self._point_start_id),
                         int(self._point_end_id),
-                        allow_text_between=self._allow_text_between,
                     )
-                w_b, k_b = pure_callback(_host_call, out_struct, obs.tokenized_prompt[b], vectorized=False)
+                (w_b,) = pure_callback(_host_call, out_struct, obs.tokenized_prompt[b], vectorized=False)
                 win_list.append(w_b)
-                keep_list.append(k_b)
-            win_all  = jnp.stack(win_list,  axis=0)    # [B,2]
-            keep_all = jnp.stack(keep_list, axis=0)    # [B,L-2]
+            win_all = jnp.stack(win_list, axis=0)         # [B,2]  -> (s,e)
 
-            # 目标“文本+点”段的长度： (L-2)+P
-            LM = (L - 2) + P
-            # 逐样本组装 —— 改为两段式 slice 写入，避免 one-hot×matmul 的巨大中间张量
+            # --- 逐样本装配：通过“条件索引 + take”避免动态形状更新 ---
             seq_list, msk_list, ar_list = [], [], []
             for b in range(B):
-                s_idx = win_all[b, 0]
-                # 去掉 start/end 的文本（保持次序）
-                txt_all = jnp.take(txt_tokens[b], keep_all[b], axis=0)                # [L-2, D]
-                m_all   = jnp.take(obs.tokenized_prompt_mask[b], keep_all[b], axis=0) # [L-2]
-                ar_all  = jnp.take(obs.token_ar_mask[b],        keep_all[b], axis=0) # [L-2]
-                # 拆成两段： s 左（保持位置不变）与 s 右（整体右移 P 位）
-                left_sel  = keep_all[b] < s_idx
-                right_sel = jnp.logical_not(left_sel)
-                txt_left  = txt_all[left_sel]     # [L_left, D]
-                txt_right = txt_all[right_sel]    # [L_right, D]
-                m_left    = m_all[left_sel]       # [L_left]
-                m_right   = m_all[right_sel]      # [L_right]
-                ar_left   = ar_all[left_sel]      # [L_left]
-                ar_right  = ar_all[right_sel]     # [L_right]
+                s_idx = win_all[b, 0]                     # <start> 位置
+                e_idx = win_all[b, 1]                     # <end>   位置
+                # 有效点数 K：只统计有效 mask（frame 存在 + Sonata 输出 valid）
+                K_b = jnp.sum(pt_final_mask[b].astype(jnp.int32))     # scalar int32
+                L_right = L - e_idx                                     # 右段文本长度（含 <end> 及其后的文本）
 
-                # 目标缓冲区
-                txt_scatter = jnp.zeros((LM, D), dtype=target_dtype)
-                m_scatter_i = jnp.zeros((LM,),   dtype=jnp.int32)
-                ar_scatter  = jnp.zeros((LM,),   dtype=jnp.int32)
+                # 目标序列（仅文本+点段）的全长索引：0..LM-1，其中：
+                #   [0 .. s]         ← 文本左段（含 <start>）
+                #   [s+1 .. s+K_b]   ← 点 token（真实 K_b 个）
+                #   [s+K_b+1 .. ...] ← 文本右段（从 <end> 开始）
+                t = jnp.arange(LM, dtype=jnp.int32)
+                pt_start = s_idx + 1
+                pt_end   = pt_start + K_b
 
-                # 写入左段： [0 : L_left)
-                L_left  = txt_left.shape[0]
-                txt_scatter = jax.lax.dynamic_update_slice(txt_scatter, txt_left.astype(target_dtype), (0, 0))
-                m_scatter_i = jax.lax.dynamic_update_slice(m_scatter_i, m_left.astype(jnp.int32), (0,))
-                ar_scatter  = jax.lax.dynamic_update_slice(ar_scatter, ar_left.astype(jnp.int32), (0,))
+                left_cond   = (t <  pt_start)
+                points_cond = (t >= pt_start) & (t < pt_end)
+                right_cond  = (t >= pt_end)   & (t < pt_end + L_right)
 
-                # 写入右段： [s_idx + P : s_idx + P + L_right)
-                L_right = txt_right.shape[0]
-                if L_right > 0:
-                    txt_scatter = jax.lax.dynamic_update_slice(
-                        txt_scatter, txt_right.astype(target_dtype), (s_idx + P, 0)
-                    )
-                    m_scatter_i = jax.lax.dynamic_update_slice(
-                        m_scatter_i, m_right.astype(jnp.int32), (s_idx + P,)
-                    )
-                    ar_scatter  = jax.lax.dynamic_update_slice(
-                        ar_scatter, ar_right.astype(jnp.int32), (s_idx + P,)
-                    )
-                # 在 [s_idx : s_idx+P) 写入点 token 块（mask/ar=0, loss=0）
-                mod_emb = jax.lax.dynamic_update_slice(txt_scatter, pt_tokens[b], (s_idx, 0))
-                mod_msk_i = jax.lax.dynamic_update_slice(m_scatter_i, pt_final_mask[b].astype(jnp.int32), (s_idx,))
-                mod_ar_i  = jax.lax.dynamic_update_slice(ar_scatter, jnp.zeros((P,), jnp.int32), (s_idx,))
+                # 文本（左+右）源位置：
+                #   左：   idx = t
+                #   右：   idx = e_idx + (t - pt_end)
+                txt_idx = jnp.where(left_cond, t, e_idx + (t - pt_end))
+                txt_idx = jnp.clip(txt_idx, 0, L - 1)
+                # 点 源位置：
+                pt_idx = jnp.clip(t - pt_start, 0, P - 1)
+
+                # 取出并按条件拼装 embedding
+                txt_part = jnp.take(txt_tokens[b], txt_idx, axis=0)
+                txt_part = txt_part * (left_cond | right_cond)[:, None].astype(txt_part.dtype)
+                pt_part  = jnp.take(pt_tokens[b],  pt_idx,  axis=0)
+                pt_part  = pt_part * points_cond[:, None].astype(pt_part.dtype)
+                txtpts_scatter = txt_part + pt_part                      # [LM, D]
+
+                # mask / ar：文本沿用源，点一律 ar=0；padding 位置全 False
+                txt_mask_src = jnp.take(obs.tokenized_prompt_mask[b].astype(bool), txt_idx, axis=0)
+                m_txt = txt_mask_src & (left_cond | right_cond)
+                m_pt  = points_cond
+                m_txtpt = m_txt | m_pt                                    # [LM]
+
+                txt_ar_src = jnp.take(obs.token_ar_mask[b].astype(jnp.int32), txt_idx, axis=0)
+                ar_txt = txt_ar_src * (left_cond | right_cond).astype(jnp.int32)
+                ar_pt  = jnp.zeros_like(t, dtype=jnp.int32)
+                ar_txtpt = jnp.where(points_cond, ar_pt, ar_txt)          # 点 token ar=0
+
                 # 与图像拼接： [img | (text+points)]
-                seq_b = jnp.concatenate([img_tokens[b], mod_emb], axis=0)                # [Nimg+LM, D]
-                m_bf  = jnp.concatenate([img_mask[b].astype(jnp.int32), mod_msk_i], 0).astype(bool)
-                ar_bf = jnp.concatenate([img_ar[b],                    mod_ar_i], 0).astype(jnp.int32)
+                seq_b = jnp.concatenate([img_tokens[b], txtpts_scatter], axis=0)
+                m_b   = jnp.concatenate([img_mask[b],   m_txtpt], axis=0)
+                ar_b  = jnp.concatenate([img_ar[b],     ar_txtpt], axis=0).astype(jnp.int32)
+
                 seq_list.append(seq_b)
-                msk_list.append(m_bf)
-                ar_list.append(ar_bf)
-            tokens = jnp.stack(seq_list, 0)
-            mask   = jnp.stack(msk_list,  0)
-            ar     = jnp.stack(ar_list,   0)
+                msk_list.append(m_b)
+                ar_list.append(ar_b)
+
+            tokens = jnp.stack(seq_list, axis=0)   # [B, Nimg+LM, D]  (LM = L + P)
+            mask   = jnp.stack(msk_list,  axis=0)  # [B, Nimg+LM]
+            ar     = jnp.stack(ar_list,   axis=0)  # [B, Nimg+LM]
             return tokens, mask, ar
 
         # ---- B) 前缀拼接（默认回退路径） ----
@@ -1261,7 +1315,8 @@ class Pi0FASTSonata(_model.BaseModel):
 
         # 静态 gating：原位插入需配置好两个特殊 token 的 id，否则回退尾部对齐损失
         use_inplace = (
-            self._insert_points_in_place
+            self._spatiallm_exact
+            and self._insert_points_in_place
             and (self._point_start_id is not None)
             and (self._point_end_id   is not None)
         )
@@ -1276,54 +1331,92 @@ class Pi0FASTSonata(_model.BaseModel):
             seq_loss = jnp.sum(token_nll * loss_mask, axis=-1) / denom
             return seq_loss
 
-        # 2) 原位插入：根据 start/end 和 keep_idx 计算“文本 token 的新位置”
-        # （此处无需再次判断 ids 是否存在；use_inplace=True 已保证）
-        # 推导：Nimg = 总长度 - ((L-2) + P)
+        # 2) SpatialLM-exact：直接重建“插入后”的 labels（包含 <start>/<end>），点位置 IGNORE
+        #    我们的 tokens 序列是 [img | text+points]，其中 text+points 固定为 L+P，真实有效长度依 K 决定。
         T_total = tokens.shape[1]
         P = int(getattr(self, "_pt_block_len", 1024))
-        Nimg = T_total - ((L - 2) + P)
-        out_struct = (
-            ShapeDtypeStruct((2,),   jnp.int32),
-            ShapeDtypeStruct((L-2,), jnp.int32),
-        )
-        win_list, keep_list = [], []
+        LM = observation.tokenized_prompt.shape[1] + P           # = L + P
+        Nimg = T_total - LM
+        IGNORE = jnp.int32(-100)
+
+        # --- (a) <start>/<end> 位置 ---
+        out_struct = (ShapeDtypeStruct((2,), jnp.int32),)
+        wins = []
         for b in range(B):
             def _host_call(arr):
-                return _host_find_window_and_keep_idx(
+                return _host_find_window_only(
                     np.asarray(arr),
                     int(self._point_start_id),
                     int(self._point_end_id),
-                    allow_text_between=self._allow_text_between,
                 )
-            w_b, k_b = pure_callback(_host_call, out_struct, observation.tokenized_prompt[b], vectorized=False)
-            win_list.append(w_b)
-            keep_list.append(k_b)
-        win_all  = jnp.stack(win_list,  axis=0)    # [B,2]
-        keep_all = jnp.stack(keep_list, axis=0)    # [B,L-2]
-        s_all = win_all[:, 0]                      # [B]
+            (w_b,) = pure_callback(_host_call, out_struct, observation.tokenized_prompt[b], vectorized=False)
+            wins.append(w_b)
+        win_all = jnp.stack(wins, axis=0)     # [B,2] -> (s,e)
+        s_all = win_all[:, 0]
+        e_all = win_all[:, 1]
 
-        # 文本 ids / loss mask 去掉 start/end
-        text_ids   = jnp.take_along_axis(observation.tokenized_prompt,   keep_all, axis=1)  # [B,L-2]
-        text_lossm = jnp.take_along_axis(observation.token_loss_mask,    keep_all, axis=1)  # [B,L-2]
-        # 预测目标：文本自身右移一位（首个文本 token 无“前一位置”，不计 loss）
-        text_targets = jax.nn.one_hot(text_ids[:, 1:], vocab_size)       # [B,L-3?,V]
-        loss_mask_t  = text_lossm[:, 1:]                                  # [B,L-3?]
+        # --- (b) 逐样本求有效点数 K —— 与 embed_inputs 完全一致：再次调用 Sonata wrapper 只取 valid_mask
+        #     注意：不能用 mask 在 [s+1 : s+1+P) 的和来近似 K，因为该窗口会包含从 <end> 起的右侧文本；
+        #     这会把 K 算大，导致 label 错位。必须以 Sonata 的 valid_mask 为准。
+        k_list = []
+        pc_pack = _extract_point_batch(observation)
+        if pc_pack is None:
+            k_list = [jnp.array(0, jnp.int32) for _ in range(B)]
+        else:
+            pc_dict_all, pc_frame_mask = pc_pack
+            for b in range(B):
+                present_b = pc_frame_mask[b].any() if pc_frame_mask.ndim == 2 else pc_frame_mask[b]
+                single_dict = {
+                    **pc_dict_all,
+                    "selected_batch": jnp.array(b, jnp.int32),
+                    "present": present_b.astype(jnp.int32),
+                }
+                _, vmask = self.PaliGemma.point(single_dict, train=False)  # [P]
+                K_b = jnp.sum(vmask.astype(jnp.int32))
+                k_list.append(K_b)
+        K_all = jnp.stack(k_list, axis=0)  # [B]
 
-        # 计算每个文本 token 的“插入后位置”（相对文本+点段），再 +Nimg 变成全局位置
-        # keep_all 不含 s/e，因此“> s”等价“> e”，右移 P 位
-        dst_mod = jnp.where(keep_all < s_all[:, None], keep_all, keep_all - 2 + P)  # [B,L-2]
-        # 对于 text_ids[:,1:]，其 logits 来源是“该 token 在序列中的位置 − 1”
-        pos_before = Nimg + dst_mod[:, 1:] - 1                                        # [B,L-3?]
-        # 按批在时间轴上 gather 对应位置的 logits：
-        # logits_all[b].shape == [T_total-1, V] ，pos_before[b].shape == [K] → 选出 [K, V]
-        def _gather_rows(a_b, idx_b):
-            return a_b[idx_b.astype(jnp.int32), :]    # [K, V]
-        logits_sel = jax.vmap(_gather_rows, in_axes=(0, 0), out_axes=0)(logits_all, pos_before)  # [B, K, V]
-        log_probs  = jax.nn.log_softmax(logits_sel, axis=-1)
+        # --- (c) 构造“插入后”的 labels_text（长度 LM=L+P），再与图像前缀拼接 ---
+        labels_full_list = []
+        L = observation.tokenized_prompt.shape[1]
+        for b in range(B):
+            s_idx = s_all[b]; e_idx = e_all[b]; K_b = K_all[b]
+            right_len = L - e_idx
+            t = jnp.arange(LM, dtype=jnp.int32)
+            pt_start = s_idx + 1
+            pt_end   = pt_start + K_b
+            left_cond   = (t <  pt_start)
+            points_cond = (t >= pt_start) & (t < pt_end)
+            right_cond  = (t >= pt_end)   & (t < pt_end + right_len)
 
-        token_nll = -jnp.sum(text_targets * log_probs, axis=-1)                      # [B, L-3?]
-        denom_t = jnp.maximum(jnp.sum(loss_mask_t, axis=-1), 1)
-        seq_loss  = jnp.sum(token_nll * loss_mask_t, axis=-1) / denom_t
+            txt_idx = jnp.where(left_cond, t, e_idx + (t - pt_end))
+            txt_idx = jnp.clip(txt_idx, 0, L - 1)
+
+            # 源 labels：依据 token_loss_mask 过滤；忽略位 = -100，与 HF 一致
+            lbl_src = jnp.where(
+                observation.token_loss_mask[b].astype(bool),
+                observation.tokenized_prompt[b],
+                IGNORE,
+            )
+            lbl_txt = jnp.take(lbl_src, txt_idx, axis=0)
+            lbl_txt = jnp.where((left_cond | right_cond), lbl_txt, IGNORE)
+            lbl_txt = jnp.where(points_cond, IGNORE, lbl_txt)     # 点位忽略
+
+            lbl_img = jnp.full((Nimg,), IGNORE, dtype=jnp.int32)
+            lbl_all = jnp.concatenate([lbl_img, lbl_txt], axis=0)  # [T_total]
+            labels_full_list.append(lbl_all)
+
+        labels_full = jnp.stack(labels_full_list, axis=0)  # [B, T_total]
+
+        # --- (d) 计算 NLL：index 方式（避免大 one-hot） ---
+        log_probs = jax.nn.log_softmax(logits_all, axis=-1)         # [B, T_total-1, V]
+        tgt = labels_full[:, 1:]                                    # 预测的是下一个 token
+        valid = (tgt != IGNORE)
+        tgt_safe = jnp.clip(tgt, 0, vocab_size - 1)
+        picked = jnp.take_along_axis(log_probs, tgt_safe[..., None], axis=-1).squeeze(-1)  # [B, T_total-1]
+        nll = -jnp.where(valid, picked, 0.0)
+        denom = jnp.maximum(jnp.sum(valid, axis=-1), 1)
+        seq_loss = jnp.sum(nll, axis=-1) / denom
         return seq_loss
 
     def sample_actions(

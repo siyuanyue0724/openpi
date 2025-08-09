@@ -1,6 +1,7 @@
 import abc
 from collections.abc import Sequence
 import dataclasses
+from dataclasses import field
 import enum
 import logging
 import pathlib
@@ -64,6 +65,16 @@ IMAGE_RESOLUTION = (224, 224)
 #     "token_ar_mask": int32[*b, l],  # Optional, autoregressive mask for FAST model
 #     "token_loss_mask": bool[*b, l],  # Optional, loss mask for FAST model
 #
+#     # (New, optional) Point cloud for Sonata-style encoders:
+#     "point_clouds": {
+#         "pointcloud": float32[*b, m, 3 + c]   # [:,:,0:3]=grid_coord(int as float ok upstream); [:,:,3:6]=xyz; [:,:,6:]=extras
+#     },
+#     "point_cloud_masks": {
+#         "pointcloud": bool[*b]                # True if this sample provides a point cloud
+#     },
+#     # (Legacy, optional) Point cloud dict kept for backward compat:
+#     "pointcloud_data": {coord(N,3), feat(N,F), batch(N), offset(B), grid_coord(N,3), ...}
+#
 #      # Actions data.
 #      "actions": float32[*b ah ad]
 # }
@@ -101,11 +112,21 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
-    # --------------------------------------------------------------------
-    # Added: optional point cloud data (e.g. for Sonata encoder integration)
-    # Expected keys: 'coord', 'feat', 'batch', 'grid_size'
-    # --------------------------------------------------------------------
+    # ----------------------------------------------------------------------
+    # Legacy point cloud field (kept for backward-compatibility with older
+    # pipelines that already build Sonata-compatible dicts).
+    # Expected keys typically: 'coord','feat','batch','offset','grid_coord',...
+    # ----------------------------------------------------------------------
     pointcloud_data: dict[str, ArrayT] | None = None
+
+    # ----------------------------------------------------------------------
+    # New point cloud interface (SpatialLM-aligned, frame-level masking).
+    # point_clouds["pointcloud"]: [B, M, 3 + C] float32
+    # point_cloud_masks["pointcloud"]: [B] bool
+    # ----------------------------------------------------------------------
+    point_clouds: dict[str, ArrayT] = field(default_factory=dict)
+    point_cloud_masks: dict[str, ArrayT] = field(default_factory=dict)
+
 
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
@@ -131,12 +152,52 @@ class Observation(Generic[ArrayT]):
                     "token_ar_mask", "token_loss_mask"):
             if fld in data and data[fld] is not None:
                 data[fld] = jnp.asarray(data[fld])
+    
+        # --------------------------------------------------------------------
+        # New point cloud API (SpatialLM-aligned): point_clouds + masks
+        # --------------------------------------------------------------------
+        new_pc: dict[str, ArrayT] = {}
+        new_pm: dict[str, ArrayT] = {}
+        use_new_api = ("point_clouds" in data) and (data["point_clouds"] is not None)
+        if "point_clouds" in data and data["point_clouds"] is not None:
+            if not isinstance(data["point_clouds"], dict):
+                raise TypeError("point_clouds must be a dict[str, array].")
+            # to jax.Array
+            new_pc = {k: jnp.asarray(v) for k, v in data["point_clouds"].items()}
+            # lightweight sanity checks for the common key "pointcloud"
+            if "pointcloud" in new_pc:
+                arr = new_pc["pointcloud"]
+                if arr.ndim != 3:
+                    raise ValueError(f"point_clouds['pointcloud'] must be 3D [B,M,3+C], got shape {arr.shape}.")
+                if arr.shape[-1] < 6:
+                    logger.warning(
+                        "point_clouds['pointcloud'] last dim is %d (<6). Expected [3 grid | 3 xyz | extras].",
+                        arr.shape[-1],
+                    )
+        if "point_cloud_masks" in data and data["point_cloud_masks"] is not None:
+            if not isinstance(data["point_cloud_masks"], dict):
+                raise TypeError("point_cloud_masks must be a dict[str, array].")
+            new_pm = {k: jnp.asarray(v) for k, v in data["point_cloud_masks"].items()}
+        # If both dicts exist, ensure key sets match (soft check)
+        if new_pc and new_pm:
+            if set(new_pc.keys()) != set(new_pm.keys()):
+                logger.warning(
+                    "point_clouds keys %s != point_cloud_masks keys %s; proceeding but this is likely a bug.",
+                    sorted(new_pc.keys()), sorted(new_pm.keys()),
+                )
 
         # --------------------------------------------------------------------
         # point cloud sanity‑check  🚦
         # --------------------------------------------------------------------
         pc = None
-        if "pointcloud_data" in data and data["pointcloud_data"] is not None:
+        # If both new API and legacy are present, prefer the NEW API, warn once.
+        if use_new_api and "pointcloud_data" in data and data["pointcloud_data"] is not None:
+            logger.warning(
+                "Both 'point_clouds' (new API) and 'pointcloud_data' (legacy) provided; "
+                "using NEW API and ignoring legacy pointcloud_data."
+            )
+        # Legacy path only if new API not present.
+        if not use_new_api and "pointcloud_data" in data and data["pointcloud_data"] is not None:
             pc = {k: jnp.asarray(v) for k, v in data["pointcloud_data"].items()}
 
             # 必须包含 coord(N×3) 与 batch(N)；其它键可选
@@ -182,7 +243,10 @@ class Observation(Generic[ArrayT]):
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
-            pointcloud_data=pc,  # new field
+            pointcloud_data=pc,  # legacy field (may be None)
+            # new API (default to empty dicts if not present)
+            point_clouds=new_pc if use_new_api else {},
+            point_cloud_masks=new_pm if use_new_api else {},
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -190,9 +254,14 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
-        # 若无点云则移除字段，避免写出 None
+        # 若无 legacy 点云则移除字段，避免写出 None
         if result.get("pointcloud_data") is None:
             result.pop("pointcloud_data", None)
+        # 若新接口为空 dict，也移除，避免产生空对象
+        if not result.get("point_clouds"):
+            result.pop("point_clouds", None)
+        if not result.get("point_cloud_masks"):
+            result.pop("point_cloud_masks", None)
         return result
 
 
@@ -259,6 +328,10 @@ def preprocess_observation(
         else:
             out_masks[key] = jnp.asarray(observation.image_masks[key])
 
+    # 透传新接口点云（原样，不做任何修复/体素化/偏移）
+    out_point_clouds = getattr(observation, "point_clouds", {})
+    out_point_cloud_masks = getattr(observation, "point_cloud_masks", {})
+
     return Observation(
         images=out_images,
         image_masks=out_masks,
@@ -267,7 +340,9 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
-        pointcloud_data=observation.pointcloud_data,  # keep point cloud unchanged
+        pointcloud_data=observation.pointcloud_data,  # legacy unchanged
+        point_clouds=out_point_clouds,               # new API透传
+        point_cloud_masks=out_point_cloud_masks,     # new API透传
     )
 
 
