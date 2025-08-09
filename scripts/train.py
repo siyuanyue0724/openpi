@@ -137,14 +137,63 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = 
 
 
 def _load_weights_and_validate(loader: _weight_loaders.WeightLoader, params_shape: at.Params) -> at.Params:
-    """Loads and validates the weights. Returns a loaded subset of the weights."""
+    """
+    允许“子集加载”：只要已加载的叶子是 expected 的子树，且每个叶子的 shape/dtype 一致即可；
+    缺失的子树（例如 PaliGemma/point_proj）保留模型初始化值。
+    同时丢弃任何 unexpected key。
+    """
     loaded_params = loader.load(params_shape)
-    at.check_pytree_equality(expected=params_shape, got=loaded_params, check_shapes=True, check_dtypes=True)
+    if loaded_params is None:
+        logging.warning("[weights] Loader returned None; proceeding with randomly initialized params.")
+        return {}  # 空子集
 
-    # Remove jax.ShapeDtypeStruct from the loaded params. This makes sure that only the loaded params are returned.
-    return traverse_util.unflatten_dict(
-        {k: v for k, v in traverse_util.flatten_dict(loaded_params).items() if not isinstance(v, jax.ShapeDtypeStruct)}
+    # 展平 expected / loaded，便于对齐比对
+    exp_flat = traverse_util.flatten_dict(params_shape, keep_empty_nodes=True)
+    got_flat = traverse_util.flatten_dict(loaded_params, keep_empty_nodes=True)
+
+    # 1) 先丢弃 loaded 里是 ShapeDtypeStruct 的占位，以及 exp 中不存在的“意外键”
+    pruned_got = {}
+    dropped_unexpected = []
+    dropped_shape_stub = 0
+    for k, v in got_flat.items():
+        if isinstance(v, jax.ShapeDtypeStruct):
+            dropped_shape_stub += 1
+            continue
+        if k not in exp_flat:
+            dropped_unexpected.append("/".join(k))
+            continue
+        pruned_got[k] = v
+
+    if dropped_unexpected:
+        logging.warning("[weights] Dropping %d unexpected keys from checkpoint (e.g. %s)",
+                        len(dropped_unexpected), dropped_unexpected[:3])
+    if dropped_shape_stub:
+        logging.debug("[weights] Dropped %d ShapeDtypeStruct placeholders from loaded params.", dropped_shape_stub)
+
+    # 2) 构造 expected 的“子集”用于严格校验 shape/dtype
+    exp_subset = {k: exp_flat[k] for k in pruned_got.keys()}
+    exp_subset_tree = traverse_util.unflatten_dict(exp_subset)
+    got_subset_tree = traverse_util.unflatten_dict(pruned_got)
+
+    # 3) 对子集进行严格 shape/dtype 校验
+    at.check_pytree_equality(
+        expected=exp_subset_tree,
+        got=got_subset_tree,
+        check_shapes=True,
+        check_dtypes=True,
     )
+
+    # 4) 统计缺失键（信息提示，不是错误）：这些会用模型初始化权重
+    missing = sorted(set(exp_flat.keys()) - set(pruned_got.keys()))
+    if missing:
+        # 汇总到顶层模块名/一级路径，避免日志过长
+        top_levels = sorted({m[0] for m in missing if len(m) > 0})
+        logging.info("[weights] Loaded subset of params: %d/%d leaves. "
+                     "Missing subtrees will keep model init values. Top-level missing: %s",
+                     len(pruned_got), len(exp_flat), top_levels[:5])
+
+    # 5) 返回“已加载子集”，由上层通过 state.replace_by_pure_dict 合并
+    return got_subset_tree
 
 
 @at.typecheck
