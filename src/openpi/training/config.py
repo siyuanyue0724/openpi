@@ -10,6 +10,7 @@ from typing import Any, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
+import typing as _typing
 from typing_extensions import override
 import tyro
 
@@ -33,6 +34,50 @@ ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
 
+# ============================================================================
+# FAST special tokens for point window (用于 SpatialLM‑exact 原位插入)
+#  - 这两个 ID 会在 Pi0FAST‑SonataConfig 里使用
+#  - 并且我们会在 tokenization 之前确保 prompt 内必然出现它们各 1 次
+# ============================================================================
+_FAST_TOK = _tokenizer.FASTTokenizer(250)
+POINT_START_ID = _FAST_TOK.encode("<|point_start|>")[0]
+POINT_END_ID   = _FAST_TOK.encode("<|point_end|>")[0]
+
+# 将 prompt 规整为“必含 <|point_start|><|point_end|>”
+def _ensure_point_window(p: str | None) -> str:
+    s = (p or "").strip()
+    if "<|point_start|>" not in s or "<|point_end|>" not in s:
+        s = (s + " <|point_start|><|point_end|>").strip()
+    return s
+
+# 若 transforms 中已有 MapPrompt，优先使用；否则提供一个极简 fallback。
+try:
+    MapPrompt = _transforms.MapPrompt  # type: ignore[attr-defined]
+except AttributeError:
+    @dataclasses.dataclass(frozen=True)
+    class MapPrompt:  # fallback：尽量与 Group 调用方式兼容（就地改 prompt）
+        fn: Any
+        def __call__(self, batch: dict) -> dict:
+            # 适配标量字符串或 list[str]
+            prompt = batch.get("prompt", None)
+            if isinstance(prompt, (list, tuple)):
+                batch["prompt"] = [self.fn(p) for p in prompt]
+            else:
+                batch["prompt"] = self.fn(prompt)
+            return batch
+
+# dbg 专用：若样本里没点云字段，则注入空点云（匹配 Pi0FAST‑Sonata 的“新接口”键名）
+@dataclasses.dataclass(frozen=True)
+class EnsureEmptyPointCloud:
+    max_points: int = 1  # 最小占位即可；DataLoader 会做 batch 对齐
+    def __call__(self, batch: dict) -> dict:
+        obs = batch.setdefault("observation", {})
+        pcs = obs.setdefault("point_clouds", {})
+        pcm = obs.setdefault("point_cloud_masks", {})
+        if "pointcloud" not in pcs:
+            pcs["pointcloud"] = np.zeros((self.max_points, 3 + 6), np.float32)  # [M, 3+6]
+            pcm["pointcloud"] = False  # 该样本无点云
+        return batch
 
 @dataclasses.dataclass(frozen=True)
 class AssetsConfig:
@@ -535,14 +580,36 @@ _CONFIGS = [
         model=pi0_fast_sonata.Pi0FASTSonataConfig(   # ← 换成新 Config
             action_dim=8,
             action_horizon=10,
-            point_feat_dim=9,                        # 3 xyz + 6 feat
+            point_feat_dim=6,
             projector_type=pi0_fast.ProjectorType.LINEAR,
+            # 必填：用于原位插入点 token 的 special ids
+            point_start_id=POINT_START_ID,
+            point_end_id=POINT_END_ID,
         ),
         data=SimpleDataConfig(
             assets=AssetsConfig(asset_id="droid"),
             data_transforms=lambda model: _transforms.Group(
                 inputs=[droid_policy.DroidInputs(action_dim=model.action_dim, model_type=ModelType.PI0_FAST)],
                 outputs=[droid_policy.DroidOutputs()],
+            ),
+            # 关键：在 TokenizeFASTInputs 之前，保证 prompt 含有 <|point_start|><|point_end|>
+            # 这样 Pi0FAST‑Sonata 才能在 embed_inputs 中找到插入窗口（与 SpatialLM 保持一致）
+            model_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    _transforms.InjectDefaultPrompt(None),  # 若数据集无 prompt，不覆盖已有的
+                    MapPrompt(_ensure_point_window),        # 若缺少窗口标记，则自动补上
+                    _transforms.ResizeImages(224, 224),
+                    _transforms.TokenizeFASTInputs(
+                        _tokenizer.FASTTokenizer(model.max_token_len),
+                    ),
+                ],
+                outputs=[
+                    _transforms.ExtractFASTActions(
+                        _tokenizer.FASTTokenizer(model.max_token_len),
+                        action_horizon=model.action_horizon,
+                        action_dim=model.action_dim,
+                    )
+                ],
             ),
             base_config=DataConfig(prompt_from_task=True),
         ),
@@ -759,10 +826,40 @@ _CONFIGS = [
         # ① LoRA‑variant 模型（行内写一次）
         model=pi0_fast_sonata.Pi0FASTSonataConfig(
             paligemma_variant="gemma_2b_lora",
-            point_feat_dim=9,
+            point_feat_dim=6,
+            point_start_id=POINT_START_ID,
+            point_end_id=POINT_END_ID,
+            # dbg：允许无点云样本（FakeData 场景），仅用于烟雾测试
+            require_pointcloud=False,
         ),
 
-        data=FakeDataConfig(repo_id="dummy_point"),
+        # dbg 路线建议：用 SimpleDataConfig 显式加两个变换：
+        #   (a) EnsureEmptyPointCloud：没有点云时注入空键，避免 Missing-Key 报错
+        #   (b) MapPrompt + TokenizeFASTInputs：保证 prompt 含 <|point_start|><|point_end|> 并完成 FAST tokenization
+        data=SimpleDataConfig(
+            assets=AssetsConfig(asset_id="dummy_point"),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[EnsureEmptyPointCloud(max_points=1)],
+                outputs=[],
+            ),
+            model_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    MapPrompt(_ensure_point_window),
+                    _transforms.ResizeImages(224, 224),
+                    _transforms.TokenizeFASTInputs(
+                        _tokenizer.FASTTokenizer(model.max_token_len),
+                    ),
+                ],
+                outputs=[
+                    _transforms.ExtractFASTActions(
+                        _tokenizer.FASTTokenizer(model.max_token_len),
+                        action_horizon=model.action_horizon,
+                        action_dim=model.action_dim,
+                    )
+                ],
+            ),
+            base_config=DataConfig(prompt_from_task=False),
+        ),
         batch_size=2,
         num_train_steps=4,
         wandb_enabled=False,
@@ -776,7 +873,7 @@ _CONFIGS = [
         # ③ 仅训练 LoRA + projector，其余权重冻结（行内再写一次）
         freeze_filter=pi0_fast_sonata.Pi0FASTSonataConfig(
             paligemma_variant="gemma_2b_lora",
-            point_feat_dim=9,
+            point_feat_dim=6,
         ).get_freeze_filter(),
 
         # ④ LoRA 训练关闭 EMA，保持一致
