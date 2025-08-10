@@ -1,4 +1,5 @@
 import logging
+import re
 
 import numpy as np
 import sentencepiece
@@ -6,6 +7,8 @@ from transformers import AutoProcessor
 
 import openpi.shared.download as download
 
+POINT_START = "<|point_start|>"
+POINT_END   = "<|point_end|>"
 
 class PaligemmaTokenizer:
     def __init__(self, max_len: int = 48):
@@ -48,6 +51,63 @@ class FASTTokenizer:
         # Instantiate FAST tokenizer
         self._fast_tokenizer = AutoProcessor.from_pretrained(fast_tokenizer_path, trust_remote_code=True)
         self._fast_skip_tokens = 128  # Skip last 128 tokens in PaliGemma vocab since they are special tokens
+        # Skip last 128 tokens in PaliGemma vocab for FAST/special controls
+        self._fast_skip_tokens = 128
+
+        # ------------------------------ special ids for SpatialLM window ------------------------------
+        # We allocate two ids from the reserved tail of the Paligemma vocab.  Action tokens are mapped into
+        # [0, vocab_size - 1 - _fast_skip_tokens] via _act_tokens_to_paligemma_tokens, so these last two are free.
+        self._pg_vocab_size = int(self._paligemma_tokenizer.vocab_size())
+        # keep order stable: start < end
+        self._point_start_id = self._pg_vocab_size - 2
+        self._point_end_id   = self._pg_vocab_size - 1
+        self._special_token_to_id = {
+            POINT_START: self._point_start_id,
+            POINT_END:   self._point_end_id,
+        }
+        logging.info(
+            "[FASTTokenizer] spatial window token ids: %s=%d, %s=%d",
+            POINT_START, self._point_start_id, POINT_END, self._point_end_id
+        )
+
+    # ---- tiny public helpers so training/config.py can fetch ids without .encode() ----
+    def token_to_id(self, tok: str) -> int | None:
+        """Return id only for known special tokens; otherwise None."""
+        return self._special_token_to_id.get(tok, None)
+
+    def convert_tokens_to_ids(self, toks: list[str]) -> list[int | None]:
+        """Batch version used by some callers; only handles our two specials."""
+        return [self.token_to_id(t) for t in toks]
+
+    # --------------------------------- internal utils ---------------------------------
+    def _encode_text_with_specials(self, text: str, *, add_bos_first_segment: bool) -> list[int]:
+        """
+        Encode plain text, but inject POINT_START / POINT_END as dedicated single ids.
+        SentencePiece handles normal segments; markers are inserted verbatim as our special ids.
+        """
+        if not isinstance(text, str):
+            text = str(text)
+        # split and keep delimiters
+        parts = re.split(rf'({re.escape(POINT_START)}|{re.escape(POINT_END)})', text)
+        out: list[int] = []
+        first_plain_done = False
+        for part in parts:
+            if part == "" or part is None:
+                continue
+            if part == POINT_START:
+                out.append(self._point_start_id)
+            elif part == POINT_END:
+                out.append(self._point_end_id)
+            else:
+                # normal text → sentencepiece; BOS only once if requested
+                enc = self._paligemma_tokenizer.encode(
+                    part,
+                    add_bos=add_bos_first_segment and not first_plain_done
+                )
+                if add_bos_first_segment and not first_plain_done and len(enc) > 0:
+                    first_plain_done = True
+                out.extend(enc)
+        return out
 
     def tokenize(
         self, prompt: str, state: np.ndarray, actions: np.ndarray | None
@@ -59,8 +119,11 @@ class FASTTokenizer:
 
         # Convention: prefix includes prompt and string-representation of state, followed by ';'
         state_str = " ".join(map(str, discretized_state))
-        prefix = f"Task: {cleaned_text}, State: {state_str};\n"
-        prefix_tokens = self._paligemma_tokenizer.encode(prefix, add_bos=True)
+        # Build prefix tokens with in-place special markers:
+        #   [BOS] + "Task: " + cleaned_text(with specials) + ", State: {state_str};\n"
+        prefix_tokens  = self._paligemma_tokenizer.encode("Task: ", add_bos=True)
+        prefix_tokens += self._encode_text_with_specials(cleaned_text, add_bos_first_segment=False)
+        prefix_tokens += self._paligemma_tokenizer.encode(f", State: {state_str};\n", add_bos=False)
 
         if actions is not None:
             # Tokenize actions with FAST tokenizer --> map to last tokens in PaliGemma vocab

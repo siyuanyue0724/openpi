@@ -10,9 +10,9 @@ from typing import Any, Protocol, TypeAlias
 
 import etils.epath as epath
 import flax.nnx as nnx
-import typing as _typing
 from typing_extensions import override
 import tyro
+import numpy as np
 
 import openpi.models.model as _model
 import openpi.models.pi0 as pi0
@@ -40,8 +40,52 @@ Filter: TypeAlias = nnx.filterlib.Filter
 #  - 并且我们会在 tokenization 之前确保 prompt 内必然出现它们各 1 次
 # ============================================================================
 _FAST_TOK = _tokenizer.FASTTokenizer(250)
-POINT_START_ID = _FAST_TOK.encode("<|point_start|>")[0]
-POINT_END_ID   = _FAST_TOK.encode("<|point_end|>")[0]
+
+def _fast_token_id(tok: str) -> int:
+    """
+    从 FAST tokenizer 里获取某个 token 的 id。
+    兼容多种常见接口；全部失败则显式报错（不做任何退化）。
+    """
+    t = _FAST_TOK
+    # 1) 常见直连方法
+    if hasattr(t, "token_to_id"):
+        v = t.token_to_id(tok)
+        if v is not None and int(v) >= 0:
+            return int(v)
+    if hasattr(t, "convert_tokens_to_ids"):
+        v = t.convert_tokens_to_ids([tok])
+        if isinstance(v, (list, tuple)) and v and v[0] is not None and int(v[0]) >= 0:
+            return int(v[0])
+    if hasattr(t, "id_of"):
+        v = t.id_of(tok)  # some libs use id_of
+        if v is not None and int(v) >= 0:
+            return int(v)
+    if hasattr(t, "to_id"):
+        v = t.to_id(tok)
+        if v is not None and int(v) >= 0:
+            return int(v)
+    # 2) 透传到内部 tokenizer（如 HF/SentencePiece）
+    if hasattr(t, "tokenizer"):
+        inner = getattr(t, "tokenizer")
+        if hasattr(inner, "convert_tokens_to_ids"):
+            v = inner.convert_tokens_to_ids(tok)
+            if v is not None and int(v) >= 0:
+                return int(v)
+        if hasattr(inner, "encode"):
+            enc = inner.encode(tok, add_special_tokens=False)
+            if isinstance(enc, (list, tuple)) and enc and int(enc[0]) >= 0:
+                return int(enc[0])
+    # 3) 全部失败：立刻报错，要求显式暴露映射
+    raise AttributeError(
+        "FASTTokenizer 未暴露字符串→ID 的接口，无法解析 "
+        f"{tok!r}。请在 openpi.models.tokenizer 中为 FASTTokenizer "
+        "提供 token_to_id / convert_tokens_to_ids / tokenizer.convert_tokens_to_ids 之一，"
+        "或直接暴露 <|point_start|>/<|point_end|> 的常量 ID。"
+    )
+
+POINT_START_ID = _fast_token_id("<|point_start|>")
+POINT_END_ID   = _fast_token_id("<|point_end|>")
+logging.info(f"[config] FAST special ids: <|point_start|>={POINT_START_ID}, <|point_end|>={POINT_END_ID}")
 
 # 将 prompt 规整为“必含 <|point_start|><|point_end|>”
 def _ensure_point_window(p: str | None) -> str:
@@ -66,17 +110,68 @@ except AttributeError:
                 batch["prompt"] = self.fn(prompt)
             return batch
 
-# dbg 专用：若样本里没点云字段，则注入空点云（匹配 Pi0FAST‑Sonata 的“新接口”键名）
+# 仅生产用：必须已经包含窗口标记；否则抛错（不做自动补齐/退化）
 @dataclasses.dataclass(frozen=True)
-class EnsureEmptyPointCloud:
-    max_points: int = 1  # 最小占位即可；DataLoader 会做 batch 对齐
+class RequirePointWindow:
     def __call__(self, batch: dict) -> dict:
-        obs = batch.setdefault("observation", {})
-        pcs = obs.setdefault("point_clouds", {})
-        pcm = obs.setdefault("point_cloud_masks", {})
-        if "pointcloud" not in pcs:
-            pcs["pointcloud"] = np.zeros((self.max_points, 3 + 6), np.float32)  # [M, 3+6]
-            pcm["pointcloud"] = False  # 该样本无点云
+        prompt = batch.get("prompt", "")
+        def _ok(s: str | None) -> bool:
+            s = (s or "")
+            return ("<|point_start|>" in s) and ("<|point_end|>" in s)
+        if isinstance(prompt, (list, tuple)):
+            if not all(_ok(p) for p in prompt):
+                raise ValueError(
+                    "Prompt 缺少 <|point_start|>/<|point_end|> 窗口标记（生产配置禁止自动补齐）。"
+                )
+        else:
+            if not _ok(prompt):
+                raise ValueError(
+                    "Prompt 缺少 <|point_start|>/<|point_end|> 窗口标记（生产配置禁止自动补齐）。"
+                )
+        return batch
+
+
+# 严格校验：点云必须存在且满足形状/类型/数值约束（dbg 也走真严模式）
+@dataclasses.dataclass(frozen=True)
+class ValidatePointCloud:
+    """
+    校验单路点云：
+      observation.point_clouds[key]        : [N, 3 + feat_dim] float32
+      observation.point_cloud_masks[key]   : [N] bool
+    校验不过直接抛错（不做任何自动修复/退化）。
+    """
+    key: str = "pointcloud"
+    feat_dim: int = 6
+    min_points: int = 1
+    allow_mask_all_false: bool = False
+    def __call__(self, batch: dict) -> dict:
+        obs = batch.get("observation")
+        if obs is None:
+            raise KeyError("missing 'observation'")
+        pcs = obs.get("point_clouds")
+        if pcs is None or self.key not in pcs:
+            raise KeyError(f"missing observation.point_clouds['{self.key}']")
+        x = np.asarray(pcs[self.key])
+        if x.ndim != 2 or x.shape[1] != 3 + self.feat_dim:
+            raise ValueError(
+                f"pointcloud shape must be [N, {3 + self.feat_dim}], got {tuple(x.shape)}"
+            )
+        if x.dtype != np.float32:
+            raise TypeError(f"pointcloud dtype must be float32, got {x.dtype}")
+        if not np.isfinite(x).all():
+            raise ValueError("pointcloud contains NaN/Inf")
+        if x.shape[0] < self.min_points:
+            raise ValueError(f"pointcloud must have at least {self.min_points} points, got {x.shape[0]}")
+        mset = obs.get("point_cloud_masks")
+        if mset is None or self.key not in mset:
+            raise KeyError(f"missing observation.point_cloud_masks['{self.key}']")
+        m = np.asarray(mset[self.key])
+        if m.ndim != 1 or m.shape[0] != x.shape[0]:
+            raise ValueError(f"mask shape must be [N] matching points, got {tuple(m.shape)} vs {tuple(x.shape)}")
+        if m.dtype != np.bool_:
+            raise TypeError(f"mask dtype must be bool, got {m.dtype}")
+        if not self.allow_mask_all_false and not m.any():
+            raise ValueError("mask has no valid points (all False)")
         return batch
 
 @dataclasses.dataclass(frozen=True)
@@ -589,15 +684,23 @@ _CONFIGS = [
         data=SimpleDataConfig(
             assets=AssetsConfig(asset_id="droid"),
             data_transforms=lambda model: _transforms.Group(
-                inputs=[droid_policy.DroidInputs(action_dim=model.action_dim, model_type=ModelType.PI0_FAST)],
+                inputs=[
+                    # 在生产配置里也做严格点云校验（早失败）
+                    ValidatePointCloud(
+                        key="pointcloud",
+                        feat_dim=getattr(model, "point_feat_dim", 6),
+                        min_points=1,
+                        allow_mask_all_false=False,
+                    ),
+                    droid_policy.DroidInputs(action_dim=model.action_dim, model_type=ModelType.PI0_FAST),
+                ],
                 outputs=[droid_policy.DroidOutputs()],
             ),
-            # 关键：在 TokenizeFASTInputs 之前，保证 prompt 含有 <|point_start|><|point_end|>
-            # 这样 Pi0FAST‑Sonata 才能在 embed_inputs 中找到插入窗口（与 SpatialLM 保持一致）
+            # 生产配置：严格要求已有窗口标记（缺则报错，不自动补齐）
             model_transforms=lambda model: _transforms.Group(
                 inputs=[
-                    _transforms.InjectDefaultPrompt(None),  # 若数据集无 prompt，不覆盖已有的
-                    MapPrompt(_ensure_point_window),        # 若缺少窗口标记，则自动补上
+                    _transforms.InjectDefaultPrompt(None),
+                    RequirePointWindow(),
                     _transforms.ResizeImages(224, 224),
                     _transforms.TokenizeFASTInputs(
                         _tokenizer.FASTTokenizer(model.max_token_len),
@@ -829,22 +932,29 @@ _CONFIGS = [
             point_feat_dim=6,
             point_start_id=POINT_START_ID,
             point_end_id=POINT_END_ID,
-            # dbg：允许无点云样本（FakeData 场景），仅用于烟雾测试
-            require_pointcloud=False,
+            # dbg 也走严格模式：要求必须提供点云
+            require_pointcloud=True,
         ),
 
-        # dbg 路线建议：用 SimpleDataConfig 显式加两个变换：
-        #   (a) EnsureEmptyPointCloud：没有点云时注入空键，避免 Missing-Key 报错
-        #   (b) MapPrompt + TokenizeFASTInputs：保证 prompt 含 <|point_start|><|point_end|> 并完成 FAST tokenization
+        # dbg：严格校验点云，不再注入空点云
         data=SimpleDataConfig(
             assets=AssetsConfig(asset_id="dummy_point"),
             data_transforms=lambda model: _transforms.Group(
-                inputs=[EnsureEmptyPointCloud(max_points=1)],
+                inputs=[
+                    ValidatePointCloud(
+                        key="pointcloud",
+                        feat_dim=getattr(model, "point_feat_dim", 6),
+                        min_points=1,
+                        allow_mask_all_false=False,  # 必须至少有一个有效点
+                    ),
+                ],
                 outputs=[],
             ),
             model_transforms=lambda model: _transforms.Group(
                 inputs=[
-                    MapPrompt(_ensure_point_window),
+                    # dbg 也与生产保持一致：必须已有窗口标记（不自动补齐）
+                    _transforms.InjectDefaultPrompt(None),
+                    RequirePointWindow(),
                     _transforms.ResizeImages(224, 224),
                     _transforms.TokenizeFASTInputs(
                         _tokenizer.FASTTokenizer(model.max_token_len),
