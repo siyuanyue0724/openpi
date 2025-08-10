@@ -30,7 +30,6 @@ Pi0FAST-Sonata
 # per-sample pure_callback batch>1 时 CPU↔GPU 来回和 XLA → host 交互会拖慢，梯度积累场景尤甚
 # grid → coord 偏移：当前不会在模型内改动 grid_coord（只做“非负 + 形状 + dtype”校验）；是否归零或对齐，请在数据侧统一处理。
 # 为了避免警告，实施了JAX 端 batch/offset 用 int32，host(PyTorch) 端统一 .long()；避免 JAX_ENABLE_X64 相关警告。
-# 【这个似乎修复了？】“插入位置”严格一致性问题存在：我们是前缀拼接；SpatialLM 是 <point_start>..点token.. <point_end> 插回到文本序列。语义等价（文本依旧能看到点 token），但不是完全同一位置。如果你要逐字节一致，需要让 tokenizer/prompt 中真的包含 <point_start>/<point_end>，并在拼接时找到这两个位置再做插入（成本较高，且对你当前 Pi0‑FAST 的多模态拼接接口不自然）。
 # 1024 token 块上限先与 ckpt 保持一致；显存允许时再调大 enc_patch_size[-1]。
 # JAX 端 batch/offset 用 int32，host (PyTorch) 端统一 .long()，避免 X64 警告。
 
@@ -40,7 +39,6 @@ import logging
 import typing
 import jax
 import jax.numpy as jnp
-import jax.nn as jnn
 import numpy as np
 import torch
 import warnings
@@ -67,6 +65,27 @@ import openpi.models.model as _model  # for BaseModel and Observation
 from openpi.shared import array_typing as at  # for inputs_spec override
 
 logger = logging.getLogger("openpi")
+
+# ───────────────────────────────────────────────────────────────────────────────
+# 与 SpatialLM 严格一致的 Sonata 超参（单一真源，避免循环导入）
+# 如果需要切换权重族，只需在实例化 config 时覆盖 point_config 即可。
+# enc_mode 保持 True（你们实现中 True==voxel），如需字符串枚举可在外部覆盖为 "voxel"。
+POINT_CONFIG_SPATIALLM: dict[str, typing.Any] = {
+    "in_channels": 6,
+    "order": ("z", "z-trans"),
+    "stride": (2, 2, 2, 2),
+    "enc_depths": (3, 3, 3, 12, 3),
+    "enc_channels": (48, 96, 192, 384, 512),
+    "enc_num_head": (3, 6, 12, 24, 32),
+    "enc_patch_size": (1024, 1024, 1024, 1024, 1024),
+    "mlp_ratio": 4.0,
+    "mask_token": True,
+    "enc_mode": True,               # 若你们 Sonata 用字符串枚举，可改为 "voxel"
+    "enable_fourier_encode": True,
+    "num_bins": 1280,
+    # "enable_flash" 由运行期覆盖（跟随环境与驱动）
+}
+# ───────────────────────────────────────────────────────────────────────────────
 
 # 用于生成测试用数据的工具函数
 def _canonicalize_point_dict(pd):
@@ -139,9 +158,13 @@ def _extract_point_batch(obs, *, expected_feat_dim: int) -> tuple[dict[str, jnp.
     B, M, Ctot = pc_arr.shape
     if pc_mask.shape != (B,):
         raise ValueError(f"point_cloud_masks['pointcloud'] 应为 [B]，实际 shape={pc_mask.shape}.")
-    # 严格 dtype：必须是 bool
-    if pc_mask.dtype != jnp.bool_:
-        raise ValueError(f"point_cloud_masks['pointcloud'] 必须是 bool dtype，实际为 {pc_mask.dtype}.")
+    # 布尔 dtype：允许 jnp.bool_ / np.bool_ / 内建 bool，统一为 jnp.bool_，避免不同管线名字差异导致的假阳性
+    if not (jnp.issubdtype(pc_mask.dtype, jnp.bool_) or np.issubdtype(pc_mask.dtype, np.bool_)):
+        raise ValueError(
+            f"point_cloud_masks['pointcloud'] 必须是布尔类型，实际为 {pc_mask.dtype}."
+        )
+    # 归一到 JAX 布尔，后续广播/逻辑运算更稳
+    pc_mask = pc_mask.astype(jnp.bool_, copy=False)
     if Ctot != 3 + expected_feat_dim:
         raise ValueError(f"最后一维应为 3 + C（C={expected_feat_dim}），实际 {Ctot}。请裁剪/重排到 feats=[xyz, rgb] 共 6 维。")
     grid_int = pc_arr[..., :3].astype(jnp.int32)      # (B,M,3)
@@ -169,6 +192,8 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     point_backbone_type: PointBackboneType = PointBackboneType.SONATA
     # projector_type 对 spec 无影响，这里保持 None 或 LINEAR 均可
     projector_type: ProjectorType | None = None
+    # 与 SpatialLM 严格一致的点云编码器超参；默认使用本文件中的“单一真源”
+    point_config: dict = dataclasses.field(default_factory=lambda: dict(POINT_CONFIG_SPATIALLM))
 
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
@@ -294,32 +319,26 @@ class Pi0FASTSonata(_model.BaseModel):
         # 3) 创建并加载点云编码器 (Sonata) — 参数对齐 SpatialLM‑1.1, 后面可以改成config传输
         # ------------------------------------------------------------------
         
-        # ---------- Sonata hyper‑params – 与 ckpt 完全一致 ----------
-        # 强制 6 通道（xyz + rgb）
+        # ---------- Sonata hyper‑params：单一真源，严格对齐 ckpt ----------
         if int(config.point_feat_dim) != 6:
             raise ValueError("本实现严格复刻 SpatialLM：point_feat_dim 必须为 6（xyz+rgb）。")
         _in_channels = 6
-
         # 若未安装 flash_attn，自动禁用以避免断言失败
         _enable_flash = (getattr(sonata_encoder, "flash_attn", None) is not None)
         if not _enable_flash and not getattr(Pi0FASTSonata, "_warned_no_flash", False):
             logger.warning("[Sonata] flash-attn not found; falling back to non-flash path (slower, it is highly recommended to use flash-attn).")
             Pi0FASTSonata._warned_no_flash = True
-        sp_cfg = dict(
-            in_channels   = _in_channels,
-            order         = ("z", "z-trans"),
-            stride        = (2, 2, 2, 2),         # 5‑stage ⇒ 4 次下采样
-            enc_depths    = (3, 3, 3, 12, 3),
-            enc_channels  = (48, 96, 192, 384, 512),   # ★ 末端 512
-            enc_num_head  = (3, 6, 12, 24, 32),
-            enc_patch_size= (1024,)*5,            # ckpt 默认
-            mlp_ratio     = 4.0,
-            mask_token    = True,                   # Sonata.Embedding 中 mask_token 功能被禁用，此参数无效
-            enc_mode=True,  # 即voxel
-            enable_fourier_encode = True,         # ★ ckpt 含 fourier+input_proj
-            num_bins      = 1280,
-            enable_flash  = _enable_flash,
-        )
+        # 以 config.point_config 为单一真源；仅覆盖运行期相关开关
+        sp_cfg = dict(config.point_config)
+        # 必要字段齐备性（fail‑fast）
+        for k in ("in_channels","order","stride","enc_depths","enc_channels","enc_num_head",
+                  "enc_patch_size","mlp_ratio","mask_token","enc_mode","enable_fourier_encode","num_bins"):
+            if k not in sp_cfg:
+                raise KeyError(f"[Pi0FASTSonata] point_config 缺少字段：{k}")
+        # in_channels 必须与实现保持 6（xyz+rgb）
+        if int(sp_cfg["in_channels"]) != _in_channels:
+            raise ValueError(f"[Pi0FASTSonata] point_config.in_channels={sp_cfg['in_channels']} != 6")
+        sp_cfg["enable_flash"] = _enable_flash
         point_model = Sonata(**sp_cfg)
         # 记录供后续断言／Projector 使用
         self._point_in_channels = _in_channels
@@ -377,14 +396,17 @@ class Pi0FASTSonata(_model.BaseModel):
                 raise ValueError(f"Sonata ckpt in_channels={in_from_ckpt} 与期望 {self._point_in_channels} 不一致；"
                                  "请使用与 SpatialLM 完全一致的 6 通道权重。")
 
-            # ③部分匹配即可；strict=False 会跳过多余键，也会提示哪些没加载
+            # ③严格一致性加载：shape 不匹配会直接抛错；并且 missing/unexpected 立刻 fail‑fast
             ik = point_model.load_state_dict(cleaned, strict=False)
-            if getattr(ik, "missing_keys", None):
-                mk = ik.missing_keys
-                logger.warning("Sonata weights: %d missing params, e.g. %s", len(mk), mk[:5])
-            if getattr(ik, "unexpected_keys", None):
-                uk = ik.unexpected_keys
-                logger.warning("Sonata weights: %d unexpected params, e.g. %s", len(uk), uk[:5])
+            missing = list(getattr(ik, "missing_keys", []))
+            unexpected = list(getattr(ik, "unexpected_keys", []))
+            if missing or unexpected:
+                raise RuntimeError(
+                    "[Sonata] Weight/state mismatch.\n"
+                    f"  missing={missing[:10]}\n"
+                    f"  unexpected={unexpected[:10]}\n"
+                    "请确认 point_config 与权重版本严格一致（不要依赖 strict=False 静默跳过）。"
+                )
 
             logger.info("Loaded pretrained Sonata weights from %s", ckpt_path)
 
@@ -441,32 +463,18 @@ class Pi0FASTSonata(_model.BaseModel):
                     return pad_feat, valid_mask
                 
                 # =========================================================
-                # ★ 新增：若上游传入 selected_batch，只保留这一帧的点
-                #   (这样 embed_inputs 里不用 v[sel]，避免 JAX 布尔切片报错)
+                # 若上游传入 selected_batch，只保留这一帧（按 batch 等于 sb 过滤）
+                # 简化为唯一稳定路径：要求 host_dict 含 batch；去掉收益极小的兜底分支。
                 # ---------------------------------------------------------
                 if "selected_batch" in host_dict:  # 按样本切片
                     sb = int(host_dict.pop("selected_batch"))
-                    if "batch" in host_dict:
-                        b_arr = np.asarray(host_dict["batch"]).reshape(-1)
-                        sel = (b_arr == sb)                     # sel.shape == (B*M,)
-                        for k, v in list(host_dict.items()):
-                            if hasattr(v, "shape") and v.ndim and v.shape[0] == sel.shape[0]:
-                                host_dict[k] = v[sel]
-                        # 还需要对“按帧打包”的张量做第 0 维切片（例如 grid_coord[B,M,3]、grid_size[B,3]）
-                        # 这里的 B 优先用 offset 推断；否则用 batch 的最大值+1
-                        if "offset" in host_dict:
-                            B_est = int(np.asarray(host_dict["offset"]).reshape(-1).shape[0])
-                        else:
-                            B_est = int(b_arr.max()) + 1 if b_arr.size else 0
-                        if B_est:
-                            for k, v in list(host_dict.items()):
-                                if hasattr(v, "shape") and v.ndim >= 2 and v.shape[0] == B_est:
-                                    host_dict[k] = v[sb]
-                    else:
-                        # 无 batch 键：按第 0 维是 batch 轴处理（v 的形状形如 (B, M, ...) 或 (B, 3)）
-                        for k, v in list(host_dict.items()):
-                            if hasattr(v, "shape") and v.ndim >= 2 and v.shape[0] > sb:
-                                host_dict[k] = v[sb]
+                    if "batch" not in host_dict:
+                        raise ValueError("[SpatialLM‑Sonata] selected_batch 需要提供 'batch' 字段。")
+                    b_arr = np.asarray(host_dict["batch"]).reshape(-1)
+                    sel = (b_arr == sb)                     # sel.shape == (B*M,)
+                    for k, v in list(host_dict.items()):
+                        if hasattr(v, "shape") and v.ndim and v.shape[0] == sel.shape[0]:
+                            host_dict[k] = v[sel]
                     # 单样本语义：batch 全 0，offset = [点数]
                     n_pts = int(host_dict["coord"].shape[0])
                     host_dict["batch"]  = np.zeros(n_pts, dtype=np.int64)
@@ -635,19 +643,14 @@ class Pi0FASTSonata(_model.BaseModel):
                         f"[SpatialLM‑Sonata] token_len={real_len} 超过上限 patch_size={patch_size}。"
                         "请增大 enc_patch_size[-1] 或在上游减少每样本点数。"
                     )
-                # SpatialLM: 不截断；右 pad 到 patch_size 的倍数
-                # --- 保留固定 1024‑padding 以维持静态 shape (JAX 需求，如果超过1024则容易炸显存) ---
-                # ------------------------------------------------------------------
-                # 截断前做显式报警：这个是因为如果我们要改成非固定，会导致无法jax化，计算代价很大，所以我们用这种方式进行测试，来看看数据集能不能提供合理数据
-                # ------------------------------------------------------------------
-                MAX_TOKEN = patch_size                  # =1024 (enc_patch_size[-1])
-                if real_len > MAX_TOKEN:
-                    # 直接阻断：用户必须显式提高 enc_patch_size[-1] 或减少点数
-                    raise RuntimeError(
-                        f"[Sonata] token_len={real_len} exceeds configured MAX_TOKEN "
-                        f"({MAX_TOKEN}). Increase `enc_patch_size[-1]` or reduce the "
-                        "number of points per sample."
+                elif real_len >= int(0.95 * patch_size):
+                    warnings.warn(
+                        f"[Sonata] token_len={real_len} 接近上限 ({patch_size})；"
+                        "建议增大 enc_patch_size[-1] 或降低点密度，避免隐性截断风险。",
+                        RuntimeWarning,
                     )
+                # SpatialLM: 不截断；右 pad 到 patch_size 的定长（JAX 需要静态形状）
+                MAX_TOKEN = patch_size                  # =1024 (enc_patch_size[-1])
                 pad_len = MAX_TOKEN - real_len
                 if pad_len:
                     pad = out.new_zeros(pad_len, out.size(1))
@@ -731,9 +734,9 @@ class Pi0FASTSonata(_model.BaseModel):
                 # 其余方法（forward 等）
                 return target_fn(*args, **kwargs)
 
-        # ---------- 4) 原生 NNX 线性投影：支持端到端反向传播、避免 host 往返 ----------
-        # enc_out_dim → PaLI‑Gemma hidden_size
-        self.PointProjector = nnx.Linear(self._enc_out_dim, _model_width, rngs=rngs)
+        # ---------- 4) 原生 NNX 线性投影：enc_out_dim → PaLI‑Gemma hidden_size ----------
+        # 仅在 PaliGemma 字典中注册为 point_proj，避免与顶层重复挂载造成命名歧义
+        point_proj = nnx.Linear(self._enc_out_dim, _model_width, rngs=rngs)
 
         # 让投影层跟随 PyTorch 的 device，不必手动迁移除非后续继续重写到jax
 
@@ -789,7 +792,7 @@ class Pi0FASTSonata(_model.BaseModel):
             llm   = llm,
             img   = img,
             point = point,
-            point_proj = self.PointProjector,
+            point_proj = point_proj,
         )
         # special ids（原位插入必需）
         self._point_start_id = getattr(config, "point_start_id", None)
@@ -882,7 +885,7 @@ class Pi0FASTSonata(_model.BaseModel):
             )
 
             # 投影到 LLM hidden_size ，保持与图像 / 文本维度一致
-            tok = self.PointProjector(tok.astype(jnp.float32))
+            tok = self.PaliGemma.point_proj(tok.astype(jnp.float32))
             # 把 padding / 无效 token 特征强制归零，防止 Linear 偏置泄漏
             tok = tok * vmask[:, None]
             per_sample_tokens.append(tok)
@@ -1164,7 +1167,7 @@ class Pi0FASTSonata(_model.BaseModel):
 
             # Gemma‑fast & SpatialLM：位置 = 已填 prefix token 数 + 当前 step
             # ②  ——  positions 统一 int32，可避免 multi‑host sharding “mixed signedness” 报警
-            # 与 SpatialLM/pi0_fast 对齐（0‑based）：首个新 token 位置 = prefill_len + 0
+            # 与 SpatialLM 完全一致：首个新 token 位置 = prefill_len（下一步依次 +1）
             positions = (prefill_len[:, None] + step).astype(jnp.int32)
             # Gemma‑fast 无 token=kwarg：先嵌入，再 decode 一步
             token_emb = self.PaliGemma.llm(token[:, None], embed_only=True)
