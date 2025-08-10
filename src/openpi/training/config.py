@@ -15,6 +15,7 @@ import tyro
 import numpy as np
 
 import openpi.models.model as _model
+from openpi.models.tokenizer import (FAST_POINT_START_ID as POINT_START_ID, FAST_POINT_END_ID as POINT_END_ID, POINT_START as POINT_START_TOKEN, POINT_END as POINT_END_TOKEN)
 import openpi.models.pi0 as pi0
 import openpi.models.pi0_fast as pi0_fast
 import openpi.models.tokenizer as _tokenizer
@@ -29,12 +30,6 @@ import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
 import openpi.models.pi0_fast_sonata as pi0_fast_sonata
-from openpi.models.tokenizer import (
-    FAST_POINT_START_ID as POINT_START_ID,
-    FAST_POINT_END_ID   as POINT_END_ID,
-    POINT_START as POINT_START_TOKEN,
-    POINT_END   as POINT_END_TOKEN,
-)
 
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
@@ -42,20 +37,9 @@ Filter: TypeAlias = nnx.filterlib.Filter
 
 # 记录一下映射（此处仅日志，不做任何自动推断/退化）
 logging.info(
-    "[config] FAST fence ids: %s=%d, %s=%d",
+    "[config] SpatialLM fence ids (PaliGemma vocab tail): %s=%d, %s=%d",
     POINT_START_TOKEN, POINT_START_ID, POINT_END_TOKEN, POINT_END_ID
 )
-
-POINT_START_ID = _fast_token_id("<|point_start|>")
-POINT_END_ID   = _fast_token_id("<|point_end|>")
-logging.info(f"[config] FAST special ids: <|point_start|>={POINT_START_ID}, <|point_end|>={POINT_END_ID}")
-
-# 将 prompt 规整为“必含 <|point_start|><|point_end|>”
-def _ensure_point_window(p: str | None) -> str:
-    s = (p or "").strip()
-    if "<|point_start|>" not in s or "<|point_end|>" not in s:
-        s = (s + " <|point_start|><|point_end|>").strip()
-    return s
 
 # 若 transforms 中已有 MapPrompt，优先使用；否则提供一个极简 fallback。
 try:
@@ -68,28 +52,34 @@ except AttributeError:
             # 适配标量字符串或 list[str]
             prompt = batch.get("prompt", None)
             if isinstance(prompt, (list, tuple)):
-                batch["prompt"] = [self.fn(p) for p in prompt]
+                batch["prompt"] = [self.fn(p) for p in prompt]  # type: ignore[call-arg]
             else:
-                batch["prompt"] = self.fn(prompt)
+                batch["prompt"] = self.fn(prompt)               # type: ignore[call-arg]
             return batch
 
-# 仅生产用：必须已经包含窗口标记；否则抛错（不做自动补齐/退化）
+# 仅生产用：必须“恰好一对”窗口标记，且顺序正确；否则抛错（不做自动补齐/退化）
 @dataclasses.dataclass(frozen=True)
 class RequirePointWindow:
     def __call__(self, batch: dict) -> dict:
         prompt = batch.get("prompt", "")
         def _ok(s: str | None) -> bool:
             s = (s or "")
-            return ("<|point_start|>" in s) and ("<|point_end|>" in s)
+            c_start = s.count(POINT_START_TOKEN)
+            c_end   = s.count(POINT_END_TOKEN)
+            if c_start != 1 or c_end != 1:
+                return False
+            i_start = s.find(POINT_START_TOKEN)
+            i_end   = s.find(POINT_END_TOKEN)
+            return i_start != -1 and i_end != -1 and i_start < i_end
         if isinstance(prompt, (list, tuple)):
             if not all(_ok(p) for p in prompt):
                 raise ValueError(
-                    "Prompt 缺少 <|point_start|>/<|point_end|> 窗口标记（生产配置禁止自动补齐）。"
+                    "Prompt 必须恰好包含一次且顺序正确的 <|point_start|><|point_end|> 窗口标记。"
                 )
         else:
             if not _ok(prompt):
                 raise ValueError(
-                    "Prompt 缺少 <|point_start|>/<|point_end|> 窗口标记（生产配置禁止自动补齐）。"
+                    "Prompt 必须恰好包含一次且顺序正确的 <|point_start|><|point_end|> 窗口标记。"
                 )
         return batch
 
@@ -99,8 +89,8 @@ class RequirePointWindow:
 class ValidatePointCloud:
     """
     校验单路点云：
-      observation.point_clouds[key]        : [N, 3 + feat_dim] float32
-      observation.point_cloud_masks[key]   : [N] bool
+      observation.point_clouds[key]        : [N, 3 + feat_dim] float32   （样本内点数 N）
+      observation.point_cloud_masks[key]   : bool 或 [1]                 （帧级掩码，每样本一个）
     校验不过直接抛错（不做任何自动修复/退化）。
     """
     key: str = "pointcloud"
@@ -108,33 +98,51 @@ class ValidatePointCloud:
     min_points: int = 1
     allow_mask_all_false: bool = False
     def __call__(self, batch: dict) -> dict:
-        obs = batch.get("observation")
-        if obs is None:
-            raise KeyError("missing 'observation'")
-        pcs = obs.get("point_clouds")
+        # 兼容两种放置位置：顶层（规范）或 legacy 的 observation 下
+        pcs = None
+        pms = None
+        if "point_clouds" in batch:
+            pcs = batch["point_clouds"]
+            pms = batch.get("point_cloud_masks", None)
+        elif "observation" in batch and isinstance(batch["observation"], dict):
+            pcs = batch["observation"].get("point_clouds", None)
+            pms = batch["observation"].get("point_cloud_masks", None)
         if pcs is None or self.key not in pcs:
-            raise KeyError(f"missing observation.point_clouds['{self.key}']")
+            raise KeyError(f"missing point_clouds['{self.key}']")
+
         x = np.asarray(pcs[self.key])
+        # 允许单样本 2D [N, F]，或已带 batch 维度的 3D [B, N, F]（要求 B==1）
+        if x.ndim == 3:
+            if x.shape[0] != 1:
+                raise ValueError(f"pointcloud first dim must be 1 if batched; got B={x.shape[0]}")
+            x = x[0]
         if x.ndim != 2 or x.shape[1] != 3 + self.feat_dim:
-            raise ValueError(
-                f"pointcloud shape must be [N, {3 + self.feat_dim}], got {tuple(x.shape)}"
-            )
+            raise ValueError(f"pointcloud shape must be [N, {3 + self.feat_dim}], got {tuple(x.shape)}")
         if x.dtype != np.float32:
             raise TypeError(f"pointcloud dtype must be float32, got {x.dtype}")
         if not np.isfinite(x).all():
             raise ValueError("pointcloud contains NaN/Inf")
         if x.shape[0] < self.min_points:
             raise ValueError(f"pointcloud must have at least {self.min_points} points, got {x.shape[0]}")
-        mset = obs.get("point_cloud_masks")
-        if mset is None or self.key not in mset:
-            raise KeyError(f"missing observation.point_cloud_masks['{self.key}']")
-        m = np.asarray(mset[self.key])
-        if m.ndim != 1 or m.shape[0] != x.shape[0]:
-            raise ValueError(f"mask shape must be [N] matching points, got {tuple(m.shape)} vs {tuple(x.shape)}")
+        if pms is None or self.key not in pms:
+            raise KeyError(f"missing point_cloud_masks['{self.key}']")
+        m = np.asarray(pms[self.key])
         if m.dtype != np.bool_:
             raise TypeError(f"mask dtype must be bool, got {m.dtype}")
-        if not self.allow_mask_all_false and not m.any():
-            raise ValueError("mask has no valid points (all False)")
+        # 帧级掩码：标量 bool、[1] 或 [B]（要求 B==1）
+        if m.ndim == 0:
+            valid = bool(m)
+        elif m.ndim == 1 and m.shape[0] == 1:
+            valid = bool(m[0])
+        elif m.ndim == 1 and m.shape[0] > 1:
+            # 已带 batch：要求 B==1（与上面的点云检查一致）
+            if m.shape[0] != 1:
+                raise ValueError(f"mask is batched but B={m.shape[0]} (expected 1)")
+            valid = bool(m[0])
+        else:
+            raise ValueError(f"mask must be a frame-level bool (scalar or [1]), got shape {tuple(m.shape)}")
+        if not self.allow_mask_all_false and not valid:
+            raise ValueError("frame-level mask is False")
         return batch
 
 @dataclasses.dataclass(frozen=True)
@@ -224,17 +232,17 @@ class ModelTransformFactory(GroupFactory):
                     ],
                 )
             case _model.ModelType.PI0_FAST:
+                # 复用同一个 tokenizer，避免重复加载 AutoProcessor
+                _fast_tok = _tokenizer.FASTTokenizer(model_config.max_token_len)
                 return _transforms.Group(
                     inputs=[
                         _transforms.InjectDefaultPrompt(self.default_prompt),
                         _transforms.ResizeImages(224, 224),
-                        _transforms.TokenizeFASTInputs(
-                            _tokenizer.FASTTokenizer(model_config.max_token_len),
-                        ),
+                        _transforms.TokenizeFASTInputs(_fast_tok),
                     ],
                     outputs=[
                         _transforms.ExtractFASTActions(
-                            _tokenizer.FASTTokenizer(model_config.max_token_len),
+                            _fast_tok,
                             action_horizon=model_config.action_horizon,
                             action_dim=model_config.action_dim,
                         )
@@ -660,22 +668,21 @@ _CONFIGS = [
                 outputs=[droid_policy.DroidOutputs()],
             ),
             # 生产配置：严格要求已有窗口标记（缺则报错，不自动补齐）
-            model_transforms=lambda model: _transforms.Group(
-                inputs=[
-                    _transforms.InjectDefaultPrompt(None),
-                    RequirePointWindow(),
-                    _transforms.ResizeImages(224, 224),
-                    _transforms.TokenizeFASTInputs(
-                        _tokenizer.FASTTokenizer(model.max_token_len),
-                    ),
-                ],
-                outputs=[
-                    _transforms.ExtractFASTActions(
-                        _tokenizer.FASTTokenizer(model.max_token_len),
-                        action_horizon=model.action_horizon,
-                        action_dim=model.action_dim,
-                    )
-                ],
+            model_transforms=lambda model: (  # 复用同一个 tokenizer 实例
+                (lambda _tk=_tokenizer.FASTTokenizer(model.max_token_len): _transforms.Group(
+                    inputs=[
+                        RequirePointWindow(),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.TokenizeFASTInputs(_tk),
+                    ],
+                    outputs=[
+                        _transforms.ExtractFASTActions(
+                            _tk,
+                            action_horizon=model.action_horizon,
+                            action_dim=model.action_dim,
+                        )
+                    ],
+                ))()
             ),
             base_config=DataConfig(prompt_from_task=True),
         ),
@@ -913,23 +920,21 @@ _CONFIGS = [
                 ],
                 outputs=[],
             ),
-            model_transforms=lambda model: _transforms.Group(
-                inputs=[
-                    # dbg 也与生产保持一致：必须已有窗口标记（不自动补齐）
-                    _transforms.InjectDefaultPrompt(None),
-                    RequirePointWindow(),
-                    _transforms.ResizeImages(224, 224),
-                    _transforms.TokenizeFASTInputs(
-                        _tokenizer.FASTTokenizer(model.max_token_len),
-                    ),
-                ],
-                outputs=[
-                    _transforms.ExtractFASTActions(
-                        _tokenizer.FASTTokenizer(model.max_token_len),
-                        action_horizon=model.action_horizon,
-                        action_dim=model.action_dim,
-                    )
-                ],
+            model_transforms=lambda model: (
+                (lambda _tk=_tokenizer.FASTTokenizer(model.max_token_len): _transforms.Group(
+                    inputs=[
+                        RequirePointWindow(),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.TokenizeFASTInputs(_tk),
+                    ],
+                    outputs=[
+                        _transforms.ExtractFASTActions(
+                            _tk,
+                            action_horizon=model.action_horizon,
+                            action_dim=model.action_dim,
+                        )
+                    ],
+                ))()
             ),
             base_config=DataConfig(prompt_from_task=False),
         ),

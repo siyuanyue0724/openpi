@@ -10,6 +10,8 @@ import openpi.shared.download as download
 # SpatialLM 窗口标记（作为“用户自定义 token”使用）
 POINT_START = "<|point_start|>"
 POINT_END   = "<|point_end|>"
+__all__ = ["PaligemmaTokenizer", "FASTTokenizer",
+           "POINT_START", "POINT_END", "FAST_POINT_START_ID", "FAST_POINT_END_ID"]
 
 class PaligemmaTokenizer:
     def __init__(self, max_len: int = 48):
@@ -81,7 +83,12 @@ class FASTTokenizer:
             text = str(text)
         parts = re.split(rf'({re.escape(POINT_START)}|{re.escape(POINT_END)})', text)
         out: list[int] = []
-        bos_done = False
+        # 关键修正：无条件把 BOS 放在序列首位，确保与 `add_bos=True` 的全局语义严格一致
+        if add_bos_first_segment:
+            bos_id = int(self._paligemma_tokenizer.bos_id())
+            if bos_id < 0:
+                raise RuntimeError("SentencePiece BOS id is invalid.")
+            out.append(bos_id)
         for part in parts:
             if not part:
                 continue
@@ -90,9 +97,8 @@ class FASTTokenizer:
             elif part == POINT_END:
                 out.append(self._point_end_id)
             else:
-                enc = self._paligemma_tokenizer.encode(part, add_bos=add_bos_first_segment and not bos_done)
-                if add_bos_first_segment and not bos_done and enc:
-                    bos_done = True
+                # 注意：这里固定 add_bos=False，因为我们已在序列开头手动插入 BOS
+                enc = self._paligemma_tokenizer.encode(part, add_bos=False)
                 out.extend(enc)
         return out
 
@@ -153,7 +159,13 @@ class FASTTokenizer:
 
     def extract_actions(self, tokens: np.ndarray, action_horizon: int, action_dim: int) -> np.ndarray:
         # Decode predicted output tokens
-        decoded_tokens = self._paligemma_tokenizer.decode(tokens.tolist())
+        # 为避免窗口标记 id 在 decode 阶段产生奇怪字符，先过滤之（对 "Action: ... |" 的查找无影响）
+        if isinstance(tokens, np.ndarray):
+            toks = tokens.tolist()
+        else:
+            toks = list(tokens)
+        toks = [t for t in toks if t not in (self._point_start_id, self._point_end_id)]
+        decoded_tokens = self._paligemma_tokenizer.decode(toks)
 
         # Extract actions from FAST model outputs
         if "Action: " not in decoded_tokens:
@@ -179,11 +191,23 @@ def _paligemma_vocab_size() -> int:
     with path.open("rb") as f:
         spp = sentencepiece.SentencePieceProcessor(model_proto=f.read())
     return int(spp.vocab_size())
+def _paligemma_bos_eos() -> tuple[int, int]:
+    path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+    with path.open("rb") as f:
+        spp = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+    return int(spp.bos_id()), int(spp.eos_id())
 
 _PG_VSZ = _paligemma_vocab_size()
 # 保留区末尾两个 id 作为窗口标记；与 FAST 动作 token（至多用到 vsz-129）不冲突
 FAST_POINT_START_ID: int = _PG_VSZ - 2
 FAST_POINT_END_ID  : int = _PG_VSZ - 1
+_BOS_ID, _EOS_ID = _paligemma_bos_eos()
+assert FAST_POINT_START_ID not in (_BOS_ID, _EOS_ID), "POINT_START id collides with BOS/EOS!"
+assert FAST_POINT_END_ID   not in (_BOS_ID, _EOS_ID), "POINT_END id collides with BOS/EOS!"
+assert FAST_POINT_START_ID < FAST_POINT_END_ID, "POINT ids order must be ascending."
+assert FAST_POINT_START_ID >= _PG_VSZ - 128 and FAST_POINT_END_ID >= _PG_VSZ - 128, \
+    "window token ids must stay in the top-128 reserved range to avoid collision with FAST tokens."
+
 logging.info(
     "[tokenizer] FAST_POINT_START_ID=%d, FAST_POINT_END_ID=%d (pg_vocab=%d)",
     FAST_POINT_START_ID, FAST_POINT_END_ID, _PG_VSZ
