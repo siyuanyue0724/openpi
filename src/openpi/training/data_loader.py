@@ -12,6 +12,7 @@ import torch
 
 import openpi.models.model as _model
 import openpi.training.config as _config
+from openpi.models.tokenizer import POINT_START, POINT_END
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
 import openpi.transforms as _transforms
 
@@ -121,29 +122,37 @@ class DummyPointDataset(Dataset):
         # ---------- 生成单样本，不带 batch 维 ----------
         obs_batched = self.model_config.fake_obs(batch_size=1)
         act_batched = self.model_config.fake_act(batch_size=1)
-
-        # ★ 去掉最左侧 batch 维，使其成为 “单样本”
         obs = jax.tree_map(lambda x: x[0], obs_batched)
         act = jax.tree_map(lambda x: x[0], act_batched)
-        # Construct a random dummy point cloud
-        num_points = 100
-        coords = np.random.rand(num_points, 3).astype(np.float32) * 5.0  # random XYZ in [0, 5)
-        colors = np.random.rand(num_points, 3).astype(np.float32)        # random RGB in [0, 1)
-        # Combine normalized coords and colors to 6-D features per point
-        # 3 维归一化坐标 + 3 维 RGB  ⇒ 6 维
-        feat6 = np.concatenate([coords / 5.0, colors], axis=1).astype(np.float32)
-        # Create the point cloud data dictionary expected by Sonata encoder
-        dummy_point_data = {
-            "coord":  jnp.asarray(coords),          # (P,3) float32
-            "feat":   jnp.asarray(feat6),           # (P,6) float32
-            "batch":  jnp.zeros((num_points,), dtype=jnp.int64),
-            "offset": jnp.array([num_points], dtype=jnp.int64),
-            "grid_size": jnp.ones((1, 3), dtype=jnp.int32),
-        }
-        # Observation 是 frozen dataclass，需重新构造
-        obs_with_pc = dataclasses.replace(obs, pointcloud_data=dummy_point_data)
 
-        return {**obs_with_pc.to_dict(), "actions": act}
+        # ---------- 生成符合“新接口”的点云 ----------
+        # 形状: [N, 3 + feat_dim]；惯例: [:,0:3]=grid_coord(占位可用0), [:,3:6]=xyz, [:,6:]=extras
+        num_points = 100
+        feat_dim = int(getattr(self.model_config, "point_feat_dim", 6))
+        coords_xyz = np.random.rand(num_points, 3).astype(np.float32) * 5.0  # xyz in [0,5)
+        grid_coord = np.zeros((num_points, 3), dtype=np.float32)             # 占位网格坐标
+        # extras 维度 = feat_dim - 3（因为 3 维被 xyz 占用）
+        num_extras = max(feat_dim - 3, 0)
+        extras = np.zeros((num_points, num_extras), dtype=np.float32)
+        if num_extras > 0:
+            # 用 RGB 作为 extras（如恰好 3 维时）
+            rand_rgb = np.random.rand(num_points, 3).astype(np.float32)
+            extras[:, :min(3, num_extras)] = rand_rgb[:, :min(3, num_extras)]
+        # 拼接成 [N, 3 + feat_dim]
+        pc_feat = np.concatenate([coords_xyz, extras], axis=1).astype(np.float32)  # [N, feat_dim]
+        pointcloud = np.concatenate([grid_coord, pc_feat], axis=1)                 # [N, 3 + feat_dim]
+
+        # ---------- prompt：恰好一对窗口标记 ----------
+        prompt = f"debug window {POINT_START} {POINT_END}"
+
+        # ---------- 输出 dict（顶层即新接口） ----------
+        sample = {**obs.to_dict(), "actions": act}
+        sample["prompt"] = prompt
+        sample["point_clouds"] = {"pointcloud": pointcloud}
+        sample["point_cloud_masks"] = {"pointcloud": np.bool_(True)}
+        # 不再下发 legacy 的 pointcloud_data，保持新接口单一来源
+        sample.pop("pointcloud_data", None)
+        return sample
 
 def create_torch_dataset(
     data_config: _config.DataConfig,

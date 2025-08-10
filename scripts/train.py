@@ -388,7 +388,16 @@ def main(config: _config.TrainConfig):
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
             reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
-            info_str = ", ".join(f"{k}={v:.4f}" for k, v in reduced_info.items())
+            def _fmt_metric(v):
+                # 支持 Python/NumPy 标量；非数值安全转为字符串，避免 "Unknown format code 'f'"
+                try:
+                    # bool 也可以 float()，但通常希望打印 True/False；这里把 bool 当作字符串
+                    if isinstance(v, (bool, np.bool_)):
+                        return str(v)
+                    return f"{float(v):.4f}"
+                except Exception:
+                    return str(v)
+            info_str = ", ".join(f"{k}={_fmt_metric(v)}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
             wandb.log(reduced_info, step=step)
             infos = []

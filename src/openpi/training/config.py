@@ -895,6 +895,7 @@ _CONFIGS = [
     TrainConfig(
         name="pi0_fast_sonata_dbg",
         exp_name="smoke_pc",
+        # dbg 路线：显式使用 dummy_point 以避免 CLI 要求 --data.repo-id
 
         # ① LoRA‑variant 模型（行内写一次）
         model=pi0_fast_sonata.Pi0FASTSonataConfig(
@@ -908,6 +909,8 @@ _CONFIGS = [
 
         # dbg：严格校验点云，不再注入空点云
         data=SimpleDataConfig(
+            repo_id="dummy_point",                  # ★ 关键：设定 repo_id，避免 CLI 要求 --data.repo-id
+            # assets 仍可复用 dummy_point 以屏蔽 norm_stats 需求
             assets=AssetsConfig(asset_id="dummy_point"),
             data_transforms=lambda model: _transforms.Group(
                 inputs=[
