@@ -29,59 +29,22 @@ import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
 import openpi.models.pi0_fast_sonata as pi0_fast_sonata
+from openpi.models.tokenizer import (
+    FAST_POINT_START_ID as POINT_START_ID,
+    FAST_POINT_END_ID   as POINT_END_ID,
+    POINT_START as POINT_START_TOKEN,
+    POINT_END   as POINT_END_TOKEN,
+)
 
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
 
-# ============================================================================
-# FAST special tokens for point window (用于 SpatialLM‑exact 原位插入)
-#  - 这两个 ID 会在 Pi0FAST‑SonataConfig 里使用
-#  - 并且我们会在 tokenization 之前确保 prompt 内必然出现它们各 1 次
-# ============================================================================
-_FAST_TOK = _tokenizer.FASTTokenizer(250)
-
-def _fast_token_id(tok: str) -> int:
-    """
-    从 FAST tokenizer 里获取某个 token 的 id。
-    兼容多种常见接口；全部失败则显式报错（不做任何退化）。
-    """
-    t = _FAST_TOK
-    # 1) 常见直连方法
-    if hasattr(t, "token_to_id"):
-        v = t.token_to_id(tok)
-        if v is not None and int(v) >= 0:
-            return int(v)
-    if hasattr(t, "convert_tokens_to_ids"):
-        v = t.convert_tokens_to_ids([tok])
-        if isinstance(v, (list, tuple)) and v and v[0] is not None and int(v[0]) >= 0:
-            return int(v[0])
-    if hasattr(t, "id_of"):
-        v = t.id_of(tok)  # some libs use id_of
-        if v is not None and int(v) >= 0:
-            return int(v)
-    if hasattr(t, "to_id"):
-        v = t.to_id(tok)
-        if v is not None and int(v) >= 0:
-            return int(v)
-    # 2) 透传到内部 tokenizer（如 HF/SentencePiece）
-    if hasattr(t, "tokenizer"):
-        inner = getattr(t, "tokenizer")
-        if hasattr(inner, "convert_tokens_to_ids"):
-            v = inner.convert_tokens_to_ids(tok)
-            if v is not None and int(v) >= 0:
-                return int(v)
-        if hasattr(inner, "encode"):
-            enc = inner.encode(tok, add_special_tokens=False)
-            if isinstance(enc, (list, tuple)) and enc and int(enc[0]) >= 0:
-                return int(enc[0])
-    # 3) 全部失败：立刻报错，要求显式暴露映射
-    raise AttributeError(
-        "FASTTokenizer 未暴露字符串→ID 的接口，无法解析 "
-        f"{tok!r}。请在 openpi.models.tokenizer 中为 FASTTokenizer "
-        "提供 token_to_id / convert_tokens_to_ids / tokenizer.convert_tokens_to_ids 之一，"
-        "或直接暴露 <|point_start|>/<|point_end|> 的常量 ID。"
-    )
+# 记录一下映射（此处仅日志，不做任何自动推断/退化）
+logging.info(
+    "[config] FAST fence ids: %s=%d, %s=%d",
+    POINT_START_TOKEN, POINT_START_ID, POINT_END_TOKEN, POINT_END_ID
+)
 
 POINT_START_ID = _fast_token_id("<|point_start|>")
 POINT_END_ID   = _fast_token_id("<|point_end|>")

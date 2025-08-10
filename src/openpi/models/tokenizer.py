@@ -7,6 +7,7 @@ from transformers import AutoProcessor
 
 import openpi.shared.download as download
 
+# SpatialLM 窗口标记（作为“用户自定义 token”使用）
 POINT_START = "<|point_start|>"
 POINT_END   = "<|point_end|>"
 
@@ -47,20 +48,17 @@ class FASTTokenizer:
         path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
         with path.open("rb") as f:
             self._paligemma_tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+        self._pg_vocab_size = int(self._paligemma_tokenizer.vocab_size())
 
         # Instantiate FAST tokenizer
         self._fast_tokenizer = AutoProcessor.from_pretrained(fast_tokenizer_path, trust_remote_code=True)
-        self._fast_skip_tokens = 128  # Skip last 128 tokens in PaliGemma vocab since they are special tokens
-        # Skip last 128 tokens in PaliGemma vocab for FAST/special controls
+        # Skip last 128 tokens in PaliGemma vocab since they are special / reserved
         self._fast_skip_tokens = 128
 
-        # ------------------------------ special ids for SpatialLM window ------------------------------
-        # We allocate two ids from the reserved tail of the Paligemma vocab.  Action tokens are mapped into
-        # [0, vocab_size - 1 - _fast_skip_tokens] via _act_tokens_to_paligemma_tokens, so these last two are free.
-        self._pg_vocab_size = int(self._paligemma_tokenizer.vocab_size())
-        # keep order stable: start < end
-        self._point_start_id = self._pg_vocab_size - 2
-        self._point_end_id   = self._pg_vocab_size - 1
+        # SpatialLM-style window fence: 末尾两个 id
+        # （与动作 token 映射区间严格不冲突）
+        self._point_start_id = FAST_POINT_START_ID
+        self._point_end_id   = FAST_POINT_END_ID
         self._special_token_to_id = {
             POINT_START: self._point_start_id,
             POINT_END:   self._point_end_id,
@@ -70,42 +68,31 @@ class FASTTokenizer:
             POINT_START, self._point_start_id, POINT_END, self._point_end_id
         )
 
-    # ---- tiny public helpers so training/config.py can fetch ids without .encode() ----
+    # ---- 提供最小 id 查询接口，供 config 等模块安全获取 ----
     def token_to_id(self, tok: str) -> int | None:
-        """Return id only for known special tokens; otherwise None."""
         return self._special_token_to_id.get(tok, None)
 
     def convert_tokens_to_ids(self, toks: list[str]) -> list[int | None]:
-        """Batch version used by some callers; only handles our two specials."""
         return [self.token_to_id(t) for t in toks]
 
-    # --------------------------------- internal utils ---------------------------------
+    # ---- “整串编码 + 特殊标记原位注入”，等价于 SP 的 user-defined token 语义 ----
     def _encode_text_with_specials(self, text: str, *, add_bos_first_segment: bool) -> list[int]:
-        """
-        Encode plain text, but inject POINT_START / POINT_END as dedicated single ids.
-        SentencePiece handles normal segments; markers are inserted verbatim as our special ids.
-        """
         if not isinstance(text, str):
             text = str(text)
-        # split and keep delimiters
         parts = re.split(rf'({re.escape(POINT_START)}|{re.escape(POINT_END)})', text)
         out: list[int] = []
-        first_plain_done = False
+        bos_done = False
         for part in parts:
-            if part == "" or part is None:
+            if not part:
                 continue
             if part == POINT_START:
                 out.append(self._point_start_id)
             elif part == POINT_END:
                 out.append(self._point_end_id)
             else:
-                # normal text → sentencepiece; BOS only once if requested
-                enc = self._paligemma_tokenizer.encode(
-                    part,
-                    add_bos=add_bos_first_segment and not first_plain_done
-                )
-                if add_bos_first_segment and not first_plain_done and len(enc) > 0:
-                    first_plain_done = True
+                enc = self._paligemma_tokenizer.encode(part, add_bos=add_bos_first_segment and not bos_done)
+                if add_bos_first_segment and not bos_done and enc:
+                    bos_done = True
                 out.extend(enc)
         return out
 
@@ -117,13 +104,10 @@ class FASTTokenizer:
         # Convention: state gets discretized into 256 discrete bins (assumed range after normalization: [-1, 1])
         discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
 
-        # Convention: prefix includes prompt and string-representation of state, followed by ';'
+        # 前缀整串编码（若含窗口标记，则在该位置注入单一 id；否则与旧实现完全等价）
         state_str = " ".join(map(str, discretized_state))
-        # Build prefix tokens with in-place special markers:
-        #   [BOS] + "Task: " + cleaned_text(with specials) + ", State: {state_str};\n"
-        prefix_tokens  = self._paligemma_tokenizer.encode("Task: ", add_bos=True)
-        prefix_tokens += self._encode_text_with_specials(cleaned_text, add_bos_first_segment=False)
-        prefix_tokens += self._paligemma_tokenizer.encode(f", State: {state_str};\n", add_bos=False)
+        prefix_str = f"Task: {cleaned_text}, State: {state_str};\n"
+        prefix_tokens = self._encode_text_with_specials(prefix_str, add_bos_first_segment=True)
 
         if actions is not None:
             # Tokenize actions with FAST tokenizer --> map to last tokens in PaliGemma vocab
@@ -188,3 +172,19 @@ class FASTTokenizer:
         if isinstance(tokens, list):
             tokens = np.array(tokens)
         return self._paligemma_tokenizer.vocab_size() - 1 - self._fast_skip_tokens - tokens
+
+# ---------------- 模块级：暴露固定 special id，供 config 直接 import ----------------
+def _paligemma_vocab_size() -> int:
+    path = download.maybe_download("gs://big_vision/paligemma_tokenizer.model", gs={"token": "anon"})
+    with path.open("rb") as f:
+        spp = sentencepiece.SentencePieceProcessor(model_proto=f.read())
+    return int(spp.vocab_size())
+
+_PG_VSZ = _paligemma_vocab_size()
+# 保留区末尾两个 id 作为窗口标记；与 FAST 动作 token（至多用到 vsz-129）不冲突
+FAST_POINT_START_ID: int = _PG_VSZ - 2
+FAST_POINT_END_ID  : int = _PG_VSZ - 1
+logging.info(
+    "[tokenizer] FAST_POINT_START_ID=%d, FAST_POINT_END_ID=%d (pg_vocab=%d)",
+    FAST_POINT_START_ID, FAST_POINT_END_ID, _PG_VSZ
+)
