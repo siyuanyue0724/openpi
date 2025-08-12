@@ -25,13 +25,13 @@ Pi0FAST-Sonata
 # 训练时梯度：不会回传到 **Sonata**（pure_callback 非可微）；**Projector 可训练**。
 # 若后续需要端到端训练 Sonata，需要把点云分支迁到 JAX（或自定义可微 callback），再讨论 flash‑attn / spconv 的可微替代。
 # 性能潜在瓶颈	CPU ↔ GPU copy / 多编译	后续迭代可能会影响这个，所以首先解决问题1
-# 1024 token size，这个暂时不能设置太大因为会炸显存，首先使用提示方式来确定是否会有过多的情况，没有就继续训练，有的话后续再继续处理
+# 1024 的“点 token 容量”先与现有预算保持；显存允许时再调大 point_token_cap（与 enc_patch_size[-1] 无关）
 # 注意，grid似乎不能是负数！
 # per-sample pure_callback batch>1 时 CPU↔GPU 来回和 XLA → host 交互会拖慢，梯度积累场景尤甚
 # grid → coord 偏移：当前不会在模型内改动 grid_coord（只做“非负 + 形状 + dtype”校验）；是否归零或对齐，请在数据侧统一处理。
 # 为了避免警告，实施了JAX 端 batch/offset 用 int32，host(PyTorch) 端统一 .long()；避免 JAX_ENABLE_X64 相关警告。
-# 1024 token 块上限先与 ckpt 保持一致；显存允许时再调大 enc_patch_size[-1]。
 # JAX 端 batch/offset 用 int32，host (PyTorch) 端统一 .long()，避免 X64 警告。
+# 就“首个生成 token 要不要 +1”这个核心问题（这是在增量解码时决定给 LLM 的首个新生成 token的 position 应该设为已填前缀长度 prefill_len 还是再多加一变成 prefill_len+1 的取值问题；正确应取 prefill_len，以与一次性前向（one-shot）的位置对齐。），你现在的实现已经是正确的（+0），请不要再担心
 
 import dataclasses
 import inspect
@@ -41,6 +41,7 @@ import jax
 import jax.numpy as jnp
 import numpy as np
 import torch
+import os
 import warnings
 from pathlib import Path
 from typing import Any, Dict, Tuple, Optional
@@ -194,6 +195,11 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     projector_type: ProjectorType | None = None
     # 与 SpatialLM 严格一致的点云编码器超参；默认使用本文件中的“单一真源”
     point_config: dict = dataclasses.field(default_factory=lambda: dict(POINT_CONFIG_SPATIALLM))
+
+    # —— 解耦 “点 token 总容量” 与 Sonata 的注意力 patch 大小 ——
+    # 仅用于 JAX 侧的静态形状（pure_callback 返回定长），与 enc_patch_size[-1] 无直接关系。
+    # 默认仍为 1024（与常见 ckpt/显存预算匹配）；显存允许可在外部配置为 4096/8192。
+    point_token_cap: int = 1024
 
     dtype: str = "bfloat16"
     paligemma_variant: _gemma.Variant = "gemma_2b"
@@ -430,14 +436,15 @@ class Pi0FASTSonata(_model.BaseModel):
                 self,
                 pt_model: torch.nn.Module,
                 device: torch.device,
-                patch_size: int,
+                max_tokens_cap: int,
                 enc_out_dim: int,
             ):
                 super().__init__()
                 # 确保 pt_model 已在目标 device
                 self.inner = pt_model.to(device).eval()
                 self.device = device
-                self.patch_size = patch_size
+                # 仅作“静态输出容量”（JAX 侧形状），与 enc_patch_size[-1] 无关
+                self.max_tokens_cap = max_tokens_cap
                 self.enc_out_dim = enc_out_dim
 
             # ---------- 内部 util ----------
@@ -447,7 +454,7 @@ class Pi0FASTSonata(_model.BaseModel):
                 inner: torch.nn.Module,
                 host_dict: Dict[str, np.ndarray],
                 device: torch.device,
-                patch_size: int,
+                max_tokens_cap: int,
                 enc_out_dim: int,
             ) -> Tuple[np.ndarray, np.ndarray]:  # 第 2 个 ndarray 是 bool 掩码
                 """
@@ -458,8 +465,8 @@ class Pi0FASTSonata(_model.BaseModel):
                 # ---------- fast‑path：该帧不存在，直接返回全零 ----------
                 present = int(host_dict.pop("present", 1))
                 if present == 0:
-                    pad_feat   = np.zeros((patch_size, enc_out_dim), dtype=np.float32)
-                    valid_mask = np.zeros((patch_size,),       dtype=bool)
+                    pad_feat   = np.zeros((max_tokens_cap, enc_out_dim), dtype=np.float32)
+                    valid_mask = np.zeros((max_tokens_cap,),       dtype=bool)
                     return pad_feat, valid_mask
                 
                 # =========================================================
@@ -603,8 +610,8 @@ class Pi0FASTSonata(_model.BaseModel):
                 # ===== SpatialLM‑style 空点云保护 =====
                 if host_dict["coord"].shape[0] == 0:
                     # 返回全零特征 + 全 False 有效标记（维度与正常路径一致）
-                    pad_feat   = np.zeros((patch_size, enc_out_dim), dtype=np.float32)
-                    valid_mask = np.zeros((patch_size,),       dtype=bool)
+                    pad_feat   = np.zeros((max_tokens_cap, enc_out_dim), dtype=np.float32)
+                    valid_mask = np.zeros((max_tokens_cap,),       dtype=bool)
                     return pad_feat, valid_mask
 
                 # 严格模式：不再在模型内“重建/偏移” grid。缺失已在前面报错。
@@ -638,19 +645,19 @@ class Pi0FASTSonata(_model.BaseModel):
                     )
 
                 real_len = out.size(0)
-                if real_len > patch_size:
+                if real_len > max_tokens_cap:
                     raise RuntimeError(
-                        f"[SpatialLM‑Sonata] token_len={real_len} 超过上限 patch_size={patch_size}。"
-                        "请增大 enc_patch_size[-1] 或在上游减少每样本点数。"
+                        f"[SpatialLM‑Sonata] token_len={real_len} 超过 cap={max_tokens_cap}。"
+                        "请增大 point_token_cap 或在上游减少每样本点数（cap 与 enc_patch_size 无关）。"
                     )
-                elif real_len >= int(0.95 * patch_size):
+                elif real_len >= int(0.95 * max_tokens_cap):
                     warnings.warn(
-                        f"[Sonata] token_len={real_len} 接近上限 ({patch_size})；"
-                        "建议增大 enc_patch_size[-1] 或降低点密度，避免隐性截断风险。",
+                        f"[Sonata] token_len={real_len} 接近 cap ({max_tokens_cap})；"
+                        "建议增大 point_token_cap 或降低点密度，避免隐性截断风险。",
                         RuntimeWarning,
                     )
-                # SpatialLM: 不截断；右 pad 到 patch_size 的定长（JAX 需要静态形状）
-                MAX_TOKEN = patch_size                  # =1024 (enc_patch_size[-1])
+                # SpatialLM: 不截断；右 pad 到 max_tokens_cap 的定长（JAX 需要静态形状）
+                MAX_TOKEN = max_tokens_cap
                 pad_len = MAX_TOKEN - real_len
                 if pad_len:
                     pad = out.new_zeros(pad_len, out.size(1))
@@ -665,9 +672,8 @@ class Pi0FASTSonata(_model.BaseModel):
                 flat, treedef = jax.tree_util.tree_flatten(host_inputs)
 
                 # -----------------------------------------------------------
-                # 例如静态上限, 这里设置1024，可以设置8192 (= 8 patch)；确保不会在真实输入中超出但是这样会炸显存,所以我们保留1024实现, 后续可以继续加
-                # patch_size 由 Wrapper 构造函数传入；保持与 Sonata enc_patch_size 一致
-                MAX_TOKEN = self.patch_size
+                # 静态输出上限（仅为 JAX 形状所需；与 enc_patch_size 无关）
+                MAX_TOKEN = self.max_tokens_cap
                 C = self.enc_out_dim
                 out_struct = (ShapeDtypeStruct((MAX_TOKEN, C), jnp.float32),
                               ShapeDtypeStruct((MAX_TOKEN,),  jnp.bool_))
@@ -676,7 +682,7 @@ class Pi0FASTSonata(_model.BaseModel):
                     # flat_np 是回传的扁平列表/元组，需用 treedef.unflatten 还原
                     np_dict = treedef.unflatten(list(flat_np))
                     return self._torch_forward(
-                        self.inner, np_dict, self.device, self.patch_size, self.enc_out_dim
+                        self.inner, np_dict, self.device, self.max_tokens_cap, self.enc_out_dim
                     )
 
                 feat, valid_mask = pure_callback(
@@ -769,17 +775,18 @@ class Pi0FASTSonata(_model.BaseModel):
         }
         dummy_pc = _canonicalize_point_dict(raw_dummy_pc)
 
-        _patch_sz = sp_cfg["enc_patch_size"][-1]   # 1024 (保持与 ckpt 一致)
+        # 仅将 point_token_cap 用作纯回调的静态输出容量；与 enc_patch_size 无关
+        _cap = int(getattr(config, "point_token_cap", sp_cfg["enc_patch_size"][-1]))
         point = nnx_bridge.ToNNX(
             _TorchSonataWrapper(
                 point_model,
                 self.device,
-                _patch_sz,
+                _cap,
                 self._enc_out_dim,   # ← 与 __init__ 对齐
             )
         )
-        # 记录 point block 的固定长度（= Sonata enc_patch_size[-1]，默认 1024）
-        self._pt_block_len = int(_patch_sz)
+        # 记录“点 token 容量”（仅用于 label 对齐等静态逻辑）
+        self._pt_block_len = int(_cap)
         
         # 明确使用 wrapper 的 init_with_output 以避免在不同 nnx-bridge 版本下的歧义
         point.lazy_init(dummy_pc, train=False, rngs=rngs, method="init_with_output")
@@ -909,7 +916,7 @@ class Pi0FASTSonata(_model.BaseModel):
         # Ensure textual inputs are present
         assert obs.tokenized_prompt is not None and obs.tokenized_prompt_mask is not None and obs.token_ar_mask is not None, \
             "Tokenized prompt and corresponding masks must be provided for text inputs."
-        txt_tokens = self.PaliGemma.llm(obs.tokenized_prompt, embed_only=True)  # [B, L, emb_dim]
+        txt_tokens = self.PaliGemma.llm(tokens=obs.tokenized_prompt, embed_only=True)  # [B, L, emb_dim]
         # 避免如果错误地给了空prompt或只有1个token，在后面逻辑里产生“0长度但不报错”
         if obs.tokenized_prompt.shape[1] < 2:
            raise ValueError("tokenized_prompt 长度必须 ≥ 2，用于构造 next-token 监督。")
@@ -919,7 +926,7 @@ class Pi0FASTSonata(_model.BaseModel):
 
         # ===== 4) SpatialLM‑exact 原位插入（无降级路径） =====
         B, L, D = txt_tokens.shape
-        P = pt_tokens.shape[1]               # 固定块上限（通常=1024）
+        P = pt_tokens.shape[1]               # = point_token_cap（由 wrapper 定长）
         LM = L + P                           # “文本+点”段固定 buffer 长度
         img_tokens = img_tokens.astype(target_dtype)
         pt_tokens  = pt_tokens.astype(target_dtype)
@@ -961,7 +968,7 @@ class Pi0FASTSonata(_model.BaseModel):
             pt_part  = pt_part * points_cond[:, None].astype(pt_part.dtype)
             txtpts_scatter = txt_part + pt_part                      # [LM, D]
 
-            # mask / ar：文本沿用源，点一律 ar=0；padding 位置全 False
+            # mask / ar：文本沿用源；点 token 严格因果（ar=1，label=-100）；padding 位置全 False
             txt_mask_src = jnp.take(obs.tokenized_prompt_mask[b].astype(bool), txt_idx, axis=0)
             m_txt = txt_mask_src & (left_cond | right_cond)
             m_pt  = points_cond
@@ -969,8 +976,9 @@ class Pi0FASTSonata(_model.BaseModel):
 
             txt_ar_src = jnp.take(obs.token_ar_mask[b].astype(jnp.int32), txt_idx, axis=0)
             ar_txt = txt_ar_src * (left_cond | right_cond).astype(jnp.int32)
-            ar_pt  = jnp.zeros_like(t, dtype=jnp.int32)
-            ar_txtpt = jnp.where(points_cond, ar_pt, ar_txt)          # 点 token ar=0
+            # ★ 关键修复：点 token 也参与因果（ar=1）；仅 label=-100，不预测它们
+            ar_pt  = jnp.ones_like(t, dtype=jnp.int32)
+            ar_txtpt = jnp.where(points_cond, ar_pt, ar_txt)          # 点 token ar=1
 
             # 与图像拼接： [img | (text+points)]
             seq_b = jnp.concatenate([img_tokens[b], txtpts_scatter], axis=0)
@@ -1010,12 +1018,17 @@ class Pi0FASTSonata(_model.BaseModel):
         vocab_size = self.PaliGemma.llm.module.vocab_size
         B, L = observation.tokenized_prompt.shape
         # 1) 先得到整段 pre_logits → logits_all
+        # 显式给出 positions，确保训练前向与解码路径使用完全一致的绝对位置编号
+        seq_positions = (jnp.cumsum(mask.astype(jnp.int32), axis=-1) - 1).astype(jnp.int32)
+        # 防御性夹紧：极端情况下若序列左端存在整段无效位，避免出现 -1 位置
+        tf_positions  = jnp.maximum(seq_positions[:, :-1], 0)
         pre_logits, _, _ = self.PaliGemma.llm(
             embedded_prefix=tokens[:, :-1],
+            positions=tf_positions,
             mask=attn_mask[:, :-1, :-1],
             return_prelogits=True
         )
-        logits_all, _ = self.PaliGemma.llm(pre_logits=pre_logits)   # [B, T_total-1, V]
+        logits_all, *_ = self.PaliGemma.llm(pre_logits=pre_logits)   # [B, T_total-1, V]
 
         # 2) 直接重建“插入后”的 labels（包含 <start>/<end>），点位置 IGNORE
         T_total = tokens.shape[1]
@@ -1040,12 +1053,31 @@ class Pi0FASTSonata(_model.BaseModel):
         s_all = win_all[:, 0]
         e_all = win_all[:, 1]
 
-        # --- (b) 逐样本求有效点数 K —— 直接在“点占位区”内对 mask 求和（与 embed_inputs 完全一致）
-        # 点占位区在拼接后的 text+point 段（长度 LM）的相对区间为 [s_idx+1, s_idx+1+P)
-        t_rel = jnp.arange(LM, dtype=jnp.int32)[None, :]                    # [1, LM]
-        pt_zone = (t_rel >= (s_all[:, None] + 1)) & (t_rel < (s_all[:, None] + 1 + P))  # [B, LM]
-        # mask[:, Nimg:Nimg+LM] 是拼接后 text+point 段的有效性；其与 pt_zone 的按位与即为“点 token”有效位置
-        K_all = jnp.sum(mask[:, Nimg:Nimg+LM] & pt_zone, axis=1).astype(jnp.int32)
+        # --- (b) 逐样本求有效点数 K —— “总有效数 - 左文本 - 右文本”
+        # 插点后的 text+point 段有效总数：
+        TOT_all = jnp.sum(mask[:, Nimg:Nimg+LM].astype(jnp.int32), axis=1)  # [B]
+
+        # —— 向量化口径，避免动态切片导致的 Tracer 报错（等价于上面的循环）——
+        L_prompt = observation.tokenized_prompt.shape[1]
+        idxs = jnp.arange(L_prompt, dtype=jnp.int32)[None, :]           # [1, L]
+        pm_i32 = observation.tokenized_prompt_mask.astype(jnp.int32)    # [B, L]
+        left_mask  = (idxs <= s_all[:, None]).astype(jnp.int32)         # [B, L]
+        right_mask = (idxs >= e_all[:, None]).astype(jnp.int32)         # [B, L]
+        left_valid_all  = jnp.sum(pm_i32 * left_mask,  axis=1)          # [B]
+        right_valid_all = jnp.sum(pm_i32 * right_mask, axis=1)          # [B]
+        K_all = (TOT_all - left_valid_all - right_valid_all).astype(jnp.int32)
+
+        # 可选：对原“pt_zone 计数”做一次对照（仅调试；默认不启用）
+        if int(os.environ.get("OPENPI_SONATA_DEBUG_K", "0")):
+            t_rel   = jnp.arange(LM, dtype=jnp.int32)[None, :]
+            pt_zone = (t_rel >= (s_all[:, None] + 1)) & (t_rel < (s_all[:, None] + 1 + P))
+            K_bad   = jnp.sum(mask[:, Nimg:Nimg+LM] & pt_zone, axis=1).astype(jnp.int32)
+            # 打印或报警（这里用 logger；如需强制报错可改成 assert jnp.all(K_all==K_bad)）
+            try:
+                diff = (K_bad - K_all).tolist()
+                logger.info("[SONATA-KDBG] K_good(TOT-left-right) vs K_bad(pt_zone): %s", diff)
+            except Exception:
+                pass
 
         # --- (c) 构造“插入后”的 labels_text（长度 LM=L+P），再与图像前缀拼接 ---
         labels_full_list = []
@@ -1114,11 +1146,11 @@ class Pi0FASTSonata(_model.BaseModel):
         prefill_size = prefix_tokens.shape[1]   # total sequence length after alignment (prefix padded to some length)
         prefill_len = jnp.sum(prefix_mask, axis=-1).astype(jnp.int32)   # actual prefix length per batch (number of valid tokens)
         prefix_start = prefill_size - prefill_len   # start index of actual prefix tokens after right-align (for each batch)
-        # Prepare attention mask for prefix + decoding steps
-        prefix_attn_mask = jnp.pad(prefix_attn_mask, ((0, 0), (0, 0), (0, max_decoding_steps)))
-        prefix_positions = (jnp.cumsum(prefix_mask.astype(jnp.int32), axis=-1) - 1).astype(jnp.int32)  # positions of prefix tokens (0-indexed)
+        # positions of prefix tokens (0-indexed)；与 TF 路径一致：非负夹紧
+        prefix_positions = (jnp.cumsum(prefix_mask.astype(jnp.int32), axis=-1) - 1).astype(jnp.int32)
+        prefix_positions = jnp.maximum(prefix_positions, 0)
         # Run the LLM in decoding mode to fill KV cache with prefix
-        prefix_logits, kv_cache, _ = self.PaliGemma.llm(
+        prefix_logits, kv_cache, *_ = self.PaliGemma.llm(
             embedded_prefix=prefix_tokens,
             mask=prefix_attn_mask,
             positions=prefix_positions,
@@ -1129,31 +1161,13 @@ class Pi0FASTSonata(_model.BaseModel):
         # Placeholder for generated token outputs (initialize with zeros)
         output_tokens = jnp.zeros((last_logit.shape[0], max_decoding_steps), dtype=jnp.int32)
 
-        # Now run autoregressive decoding for at most max_decoding_steps
-        # Prepare attention mask for single-step decoding (prefix length + current step)
-        # We will update the attention mask dynamically in the loop if needed
-
-        # Use a while loop to generate tokens until done or max steps
+        # 维护 per‑batch done 掩码：已结束样本后续步固定为 EOS（对齐 HF generate 语义）
         def cond_fn(state):
-            _rng, _last, _cache, _step, _out = state
-            # while_loop 的条件必须是**标量 bool**。
-            # 这里我们认为“所有样本都已生成 EOS”才提前停止，因此用 jnp.all(...) → 标量。
-            def _false_scalar(_):
-                return jnp.array(False, dtype=bool)
-            def _all_eos_scalar(_):
-                # _out[:, _step - 1] 形状为 [B]，jnp.all(...) 返回标量（所有样本均为 EOS）
-                # 注意：step==0 时还没有有效 token，因此走 _false_scalar 分支。
-                return jnp.all(_out[:, _step - 1] == _pi0_fast.PALIGEMMA_EOS_TOKEN)
-            has_eos = jax.lax.cond(
-                _step == 0,
-                _false_scalar,
-                _all_eos_scalar,
-                operand=None,
-            )
-            return jnp.logical_and(_step < max_decoding_steps, jnp.logical_not(has_eos))
+            _rng, _last, _cache, _step, _out, _done = state
+            return jnp.logical_and(_step < max_decoding_steps, jnp.any(~_done))
 
         def body_fn(state):
-            rng_key, last_logits, cache, step, out_tokens = state
+            rng_key, last_logits, cache, step, out_tokens, done = state
             rng_key, subkey = jax.random.split(rng_key)
             logits_step = last_logits.squeeze(1)
             token = jax.lax.cond(
@@ -1162,15 +1176,18 @@ class Pi0FASTSonata(_model.BaseModel):
                 lambda key: jnp.argmax(logits_step, axis=-1),
                 operand=subkey,
             ).astype(jnp.int32)
-            # 原 put_along_last_axis 构造 O(N²) one‑hot；改用 scatter 更新
+            # ★ 已结束样本固定输出 EOS，避免“从 EOS 又解回别的 token”
+            eos_id = jnp.int32(_pi0_fast.PALIGEMMA_EOS_TOKEN)
+            token = jnp.where(done, eos_id, token)
             out_tokens = out_tokens.at[:, step].set(token)
+            done = jnp.logical_or(done, token == eos_id)
 
             # Gemma‑fast & SpatialLM：位置 = 已填 prefix token 数 + 当前 step
             # ②  ——  positions 统一 int32，可避免 multi‑host sharding “mixed signedness” 报警
             # 与 SpatialLM 完全一致：首个新 token 位置 = prefill_len（下一步依次 +1）
             positions = (prefill_len[:, None] + step).astype(jnp.int32)
             # Gemma‑fast 无 token=kwarg：先嵌入，再 decode 一步
-            token_emb = self.PaliGemma.llm(token[:, None], embed_only=True)
+            token_emb = self.PaliGemma.llm(tokens=token[:, None], embed_only=True)
             # 与原 Pi0‑FAST 保持一致：显式传入 causal mask，
             # 屏蔽右对齐前缀左侧 padding 的 KV。
             mask = jnp.logical_and(
@@ -1184,18 +1201,20 @@ class Pi0FASTSonata(_model.BaseModel):
                     )
                 ),
             )
-            logits, cache = self.PaliGemma.llm(
+            logits, cache, *_ = self.PaliGemma.llm(
                 embedded_prefix=token_emb,
                 kv_cache=cache,
                 positions=positions,
                 decode=True,
                 mask=mask,  # ★ 新增
             )
-            return rng_key, logits, cache, step+1, out_tokens
+            return rng_key, logits, cache, step+1, out_tokens, done
 
-        init_state = (rng, last_logit, kv_cache, jnp.array(0, jnp.int32), output_tokens)
-        _, _, _, final_step, output_seq = jax.lax.while_loop(cond_fn, body_fn, init_state)
+        init_done = jnp.zeros((output_tokens.shape[0],), dtype=bool)
+        init_state = (rng, last_logit, kv_cache, jnp.array(0, jnp.int32), output_tokens, init_done)
+        _, _, _, final_step, output_seq, _ = jax.lax.while_loop(cond_fn, body_fn, init_state)
 
         # Return the output sequence of tokens as the model's predicted "actions"
         # (In practice, these tokens might represent discretized actions or a planned sequence encoded as text tokens)
-        return output_seq[:, :final_step]   # [B, <=max_dec_steps]
+        # 避免动态切片：返回定长序列和有效步数，调用侧按 final_step 截取/显示
+        return output_seq                   # [B, max_decoding_steps]
