@@ -741,7 +741,6 @@ class Pi0FASTSonata(_model.BaseModel):
                 return target_fn(*args, **kwargs)
 
         # ---------- 4) 原生 NNX 线性投影：enc_out_dim → PaLI‑Gemma hidden_size ----------
-        # 仅在 PaliGemma 字典中注册为 point_proj，避免与顶层重复挂载造成命名歧义
         point_proj = nnx.Linear(self._enc_out_dim, _model_width, rngs=rngs)
 
         # 让投影层跟随 PyTorch 的 device，不必手动迁移除非后续继续重写到jax
@@ -793,13 +792,17 @@ class Pi0FASTSonata(_model.BaseModel):
         # ↑ 若你的 nnx 版本会自动识别，则这行与上一行等价；显式化更稳
 
         # ------------------------------------------------------------------
-        # 6) 打包所有子模块
+        # 6) 打包所有子模块（边界归位）
+        #    - PaliGemma 只保留 llm/img
+        #    - Sonata 子树负责 encoder/projector
         # ------------------------------------------------------------------
         self.PaliGemma = nnx.Dict(
-            llm   = llm,
-            img   = img,
-            point = point,
-            point_proj = point_proj,
+            llm = llm,
+            img = img,
+        )
+        self.Sonata = nnx.Dict(
+            encoder   = point,
+            projector = point_proj,
         )
         # special ids（原位插入必需）
         self._point_start_id = getattr(config, "point_start_id", None)
@@ -883,7 +886,7 @@ class Pi0FASTSonata(_model.BaseModel):
             }
             if "grid_coord" in single_dict and single_dict["grid_coord"].shape[-1] != 3:
                 raise ValueError(f"pointcloud grid_coord 的最后一维必须为 3，实际 shape={single_dict['grid_coord'].shape}")
-            tok, vmask = self.PaliGemma.point(single_dict, train=False)
+            tok, vmask = self.Sonata.encoder(single_dict, train=False)
 
             # -------- 长度一致性断言 --------
             assert tok.shape[0] == vmask.shape[0], (
@@ -892,7 +895,7 @@ class Pi0FASTSonata(_model.BaseModel):
             )
 
             # 投影到 LLM hidden_size ，保持与图像 / 文本维度一致
-            tok = self.PaliGemma.point_proj(tok.astype(jnp.float32))
+            tok = self.Sonata.projector(tok.astype(jnp.float32))
             # 把 padding / 无效 token 特征强制归零，防止 Linear 偏置泄漏
             tok = tok * vmask[:, None]
             per_sample_tokens.append(tok)
