@@ -21,6 +21,16 @@ Pi0FAST-Sonata
   - 若可获取 reduced_grid_size，若 grid_coord 超界则 **warning**（与 SpatialLM 行为一致），建议上游修正。
 """
 
+# ========================= 可调整项（默认全量微调） =========================
+# 训练模式：
+#   "all"       : 方案A，全量微调（Sonata + projector + 其他参数）。需要训练循环传入
+#                 pt_feat_override / pt_mask_override（建议 DLPack 零拷贝）。
+#   "projector" : 冻结 Sonata，仅训练 projector（可以走 pure_callback，无需 override）。
+#   "frozen"    : Sonata + projector 均冻结（只训练 LLM/SigLIP 等）。
+# 如需外部覆盖，也可设置环境变量 OPENPI_SONATA_TRAIN_MODE；配置类字段优先。
+SONATA_TRAIN_MODE = os.environ.get("OPENPI_SONATA_TRAIN_MODE", "all").strip().lower() or "all"
+# ========================================================================
+
 # 该版本已知问题（这些问题目前暂时不用立刻解决）：
 # 训练时梯度：不会回传到 **Sonata**（pure_callback 非可微）；**Projector 可训练**。
 # 若后续需要端到端训练 Sonata，需要把点云分支迁到 JAX（或自定义可微 callback），再讨论 flash‑attn / spconv 的可微替代。
@@ -222,6 +232,8 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     point_end_id:   Optional[int] = None
     # 可选：强制要求 CUDA；默认 False 以兼容旧流程/CI
     require_cuda: bool = False
+    # 训练模式：默认 "all"（全量微调）
+    sonata_train_mode: str = "all"  # "all" | "projector" | "frozen"
 
     @property
     def model_type(self) -> _model.ModelType:
@@ -254,10 +266,21 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     # ---- LoRA 兼容：确保 Sonata.projector 在默认冻结策略下可训练 ----
     def get_freeze_filter(self) -> nnx.filterlib.Filter:
         base = super().get_freeze_filter()
+        # 依据配置/环境变量决定是否从“冻结集合”里排除 projector
+        # 这里用环境变量作兜底，避免 SONATA_TRAIN_MODE 未定义或传空造成 NameError
+        env_mode = os.environ.get("OPENPI_SONATA_TRAIN_MODE", "all")
+        mode = (getattr(self, "sonata_train_mode", None) or env_mode).strip().lower()
         try:
-            return nnx.Any(base, nnx.Name("Sonata.projector"))
+            if mode in ("all", "projector"):
+                # 冻结集合 = base ∩ 非("Sonata.projector")  ⇒ projector 放开训练
+                return nnx.All(base, nnx.Not(nnx.Name("Sonata.projector")))
+            elif mode == "frozen":
+                # 冻结集合 = base ∪ "Sonata.projector"     ⇒ projector 一并冻结
+                return nnx.Any(base, nnx.Name("Sonata.projector"))
+            else:
+                # 未知取值，回退到默认：放开 projector
+                return nnx.All(base, nnx.Not(nnx.Name("Sonata.projector")))
         except Exception:
-            # 老版 filterlib 兼容：找不到原语则回退
             return base
 class Pi0FASTSonata(_model.BaseModel):
     """
@@ -374,6 +397,8 @@ class Pi0FASTSonata(_model.BaseModel):
         self._point_in_channels = _in_channels
         # 与 SpatialLM 一致：proj 输入维 = 编码器末层通道
         self._enc_out_dim = sp_cfg["enc_channels"][-1]
+        # 暴露原生 torch Sonata 句柄，供方案A训练时使用
+        self._torch_sonata = point_model
 
         if config.use_pretrained_point:
             # ------------------------------------------------------------------
@@ -745,10 +770,12 @@ class Pi0FASTSonata(_model.BaseModel):
                 def _host_call(*flat_np):
                     # flat_np 是回传的扁平列表/元组，需用 treedef.unflatten 还原
                     np_dict = treedef.unflatten(list(flat_np))
-                    return self._torch_forward(
-                        self.inner, np_dict, self.device, self.max_tokens_cap, self.enc_out_dim
-                    )
-
+                    # 训练/评估切换（便于将来需要）
+                    self.inner.train(bool(train))
+                    with torch.inference_mode(not bool(train)):
+                        return self._torch_forward(
+                            self.inner, np_dict, self.device, self.max_tokens_cap, self.enc_out_dim
+                        )
                 feat, valid_mask = pure_callback(
                     _host_call, out_struct, *flat, vectorized=False
                 )
@@ -865,6 +892,7 @@ class Pi0FASTSonata(_model.BaseModel):
         )
         # 记录“点 token 容量”（仅用于 label 对齐等静态逻辑）
         self._pt_block_len = int(_cap)
+        self._pt_token_cap = int(_cap)  # alias，供 torch 侧 batch 编码便捷使用
         
         # 明确使用 wrapper 的 init_with_output 以避免在不同 nnx-bridge 版本下的歧义
         point.lazy_init(dummy_pc, train=False, rngs=rngs, method="init_with_output")
@@ -889,8 +917,99 @@ class Pi0FASTSonata(_model.BaseModel):
         if (self._point_start_id is None) or (self._point_end_id is None):
             raise ValueError("必须提供 point_start_id / point_end_id 才能进行 SpatialLM‑exact 原位插入。")
 
+        # 训练模式（配置优先，其次环境变量，最后默认常量）
+        cfg_mode = (getattr(config, "sonata_train_mode", "") or "").strip().lower()
+        self._sonata_train_mode = cfg_mode if cfg_mode else SONATA_TRAIN_MODE
+
+    # ----------------------- Debug: 30s 自检 projector 是否在学 -----------------------
+    def _proj_param_ref(self):
+        """返回 projector 主权重 Param（兼容 kernel/weight 命名差异）。"""
+        p = getattr(self.Sonata.projector, "kernel", None)
+        if p is None: p = getattr(self.Sonata.projector, "weight", None)
+        if p is None:
+            raise AttributeError("未找到 Sonata.projector 的权重参数（kernel/weight）。")
+        return p
+
+    def debug_snapshot_projector(self) -> float:
+        """记录 projector 权重的 L2 范数快照，并返回当前 L2 值（float）。"""
+        w = self._proj_param_ref()
+        cur = float(jnp.linalg.norm(w.astype(jnp.float32)))
+        self._dbg_proj_l2_prev = cur
+        logger.info("[SONATA/DEBUG] projector ||W||_2 snapshot = %.6e", cur)
+        return cur
+
+    def debug_log_projector_delta(self, tag: str = "") -> float:
+        """打印自上次 snapshot 起的 L2 变化；返回 delta（float）。"""
+        w = self._proj_param_ref()
+        cur = float(jnp.linalg.norm(w.astype(jnp.float32)))
+        prev = getattr(self, "_dbg_proj_l2_prev", None)
+        delta = float("nan") if prev is None else cur - prev
+        logger.info("[SONATA/DEBUG] projector Δ||W||_2 = %.6e %s", delta, tag)
+        self._dbg_proj_l2_prev = cur
+        return delta
+
+    # ----------------------- 便捷：PyTorch 侧 Sonata 编码（方案A） -----------------------
+    def torch_sonata_encode_batch(self, obs: _model.Observation, *, train: bool) -> tuple[torch.Tensor, torch.Tensor]:
+        """
+        在 PyTorch 上逐样本跑 Sonata，pad 到 point_token_cap，返回：
+          pt_feat_t: [B, P_cap, C_enc] torch.float32（是否 requires_grad 由调用侧设置）
+          pt_mask_t: [B, P_cap] torch.bool
+        说明：与 pure_callback 分支严格等价（含 NaN 过滤、cap 检查、右侧 pad）。
+        """
+        pc = obs.point_clouds["pointcloud"]                       # jax.Array [B, M, 3+C]
+        mask_frame = obs.point_cloud_masks["pointcloud"]          # [B]
+        pc_np = np.asarray(pc)
+        mask_np = np.asarray(mask_frame)
+        B, M, Ctot = pc_np.shape
+        cap = int(self._pt_token_cap)
+        Cenc = int(self._enc_out_dim)
+        device = self.device
+        self._torch_sonata.train(bool(train))
+        feat_batch, mask_batch = [], []
+        for b in range(B):
+            if not bool(mask_np[b]):
+                feat_batch.append(torch.zeros((cap, Cenc), dtype=torch.float32, device=device))
+                mask_batch.append(torch.zeros((cap,), dtype=torch.bool, device=device))
+                continue
+            arr = pc_np[b]  # [M, 3+C]
+            grid = torch.as_tensor(arr[:, :3],  dtype=torch.int32,  device=device)
+            coord= torch.as_tensor(arr[:, 3:6], dtype=torch.float32, device=device)
+            feat = torch.as_tensor(arr[:, 3:],  dtype=torch.float32, device=device)
+            good = ~(torch.isnan(coord).any(-1) | torch.isnan(feat).any(-1))
+            grid, coord, feat = grid[good], coord[good], feat[good]
+            if feat.numel() == 0:
+                feat_batch.append(torch.zeros((cap, Cenc), dtype=torch.float32, device=device))
+                mask_batch.append(torch.zeros((cap,), dtype=torch.bool, device=device))
+                continue
+            inp = {
+                "coord": coord,
+                "feat":  feat,
+                "grid_coord": grid,
+                "batch": torch.zeros(coord.shape[0], dtype=torch.long, device=device),
+                "offset": torch.as_tensor([coord.shape[0]], dtype=torch.long, device=device),
+            }
+            with torch.set_grad_enabled(train):
+                out = self._torch_sonata(inp)  # [K_b, C_enc]
+            K = int(out.shape[0])
+            if K > cap:
+                raise RuntimeError(f"[Sonata] token_len={K} > cap={cap}; 请增大 point_token_cap")
+            pad = torch.zeros((cap - K, Cenc), dtype=out.dtype, device=device)
+            feat_pad = torch.cat([out, pad], dim=0)
+            mask_pad = torch.zeros((cap,), dtype=torch.bool, device=device)
+            mask_pad[:K] = True
+            feat_batch.append(feat_pad)
+            mask_batch.append(mask_pad)
+        pt_feat_t = torch.stack(feat_batch, dim=0)
+        pt_mask_t = torch.stack(mask_batch, dim=0)
+        return pt_feat_t, pt_mask_t
+
     def embed_inputs(
-        self, obs: _model.Observation
+        self,
+        obs: _model.Observation,
+        *,
+        pt_feat_override: jax.Array | None = None,   # [B, P_cap, C_enc]（方案A）
+        pt_mask_override: jax.Array | None = None,   # [B, P_cap] bool
+        train: bool | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
         """
         Embed all input modalities (images, point cloud, text tokens) into sequences of token embeddings.
@@ -930,7 +1049,7 @@ class Pi0FASTSonata(_model.BaseModel):
             img_mask   = jnp.zeros((B, 0),   dtype=bool)
         img_ar = jnp.zeros_like(img_mask, dtype=jnp.int32)
 
-        # ---------- 2) Point cloud tokens（严格 SpatialLM 路径） ----------
+        # ---------- 2) Point cloud tokens ----------
         pc_dict_all, pc_frame_mask = _extract_point_batch(obs, expected_feat_dim=self._point_in_channels)
         # require_pointcloud：本 batch 至少有一个样本存在点云(避免数据集错误)；空帧允许（走零特征）
         if self._require_pointcloud:
@@ -961,38 +1080,52 @@ class Pi0FASTSonata(_model.BaseModel):
         per_sample_tokens  = []
         per_sample_masks   = []
         max_len            = 0
-        for b in range(B):  # 逐样本调用 Sonata
-            present_b = pc_frame_mask[b]
-            single_dict = {
-                **pc_dict_all,
-                "selected_batch": jnp.array(b, jnp.int32),
-                "present": jnp.asarray(present_b, jnp.int32),
-            }
-            if "grid_coord" in single_dict and single_dict["grid_coord"].shape[-1] != 3:
-                raise ValueError(f"pointcloud grid_coord 的最后一维必须为 3，实际 shape={single_dict['grid_coord'].shape}")
-            tok, vmask = self.Sonata.encoder(single_dict, train=False)
-
-            # -------- 长度一致性断言 --------
-            assert tok.shape[0] == vmask.shape[0], (
-                f"Sonata 返回 token 长度 {tok.shape[0]} "
-                f"≠ valid_mask 长度 {vmask.shape[0]}"
-            )
-
-            # 投影到 LLM hidden_size ，保持与图像 / 文本维度一致
-            # C) 投影输入 dtype 与投影层参数 dtype 对齐
-            tok = self.Sonata.projector(tok.astype(self._proj_dtype))
-            # 把 padding / 无效 token 特征强制归零，防止 Linear 偏置泄漏
-            tok = tok * vmask[:, None]
-            per_sample_tokens.append(tok)
-            per_sample_masks.append(vmask)
-            max_len = max(max_len, tok.shape[0])
+        use_override = (pt_feat_override is not None)
+        if use_override:
+            if pt_mask_override is None:
+                raise ValueError("pt_mask_override is required when pt_feat_override is provided.")
+            # 方案A：外部已在 PyTorch 侧计算好 Sonata 特征（enc_out_dim）
+            pt_tokens = self.Sonata.projector(pt_feat_override.astype(self._proj_dtype))   # [B, P_cap, D]
+            valid_m   = pt_mask_override.astype(bool)                                      # [B, P_cap]
+            pt_tokens = pt_tokens * valid_m[:, :, None]                                    # projector 后再次遮蔽
+            max_len   = pt_tokens.shape[1]
+        else:
+            # pure_callback（不可微）。若处于训练阶段且声明为 "all"，给出明确报错提示。
+            if (train is True) and (self._sonata_train_mode == "all"):
+                raise RuntimeError(
+                    "sonata_train_mode='all' 但未提供 pt_feat_override/pt_mask_override；"
+                    "请在训练循环中先用 PyTorch 跑 Sonata，并通过 DLPack 将特征/掩码传入 embed_inputs。"
+                )
+            for b in range(B):  # 逐样本调用 Sonata
+                present_b = pc_frame_mask[b]
+                single_dict = {
+                    **pc_dict_all,
+                    "selected_batch": jnp.array(b, jnp.int32),
+                    "present": jnp.asarray(present_b, jnp.int32),
+                }
+                if "grid_coord" in single_dict and single_dict["grid_coord"].shape[-1] != 3:
+                    raise ValueError(f"pointcloud grid_coord 的最后一维必须为 3，实际 shape={single_dict['grid_coord'].shape}")
+                tok, vmask = self.Sonata.encoder(single_dict, train=(train is True))
+                # -------- 长度一致性断言 --------
+                assert tok.shape[0] == vmask.shape[0], (
+                    f"Sonata 返回 token 长度 {tok.shape[0]} "
+                    f"≠ valid_mask 长度 {vmask.shape[0]}"
+                )
+                # projector 前后各遮蔽一次，数值更稳
+                proj_in = (tok * vmask[:, None]).astype(self._proj_dtype)
+                tok     = self.Sonata.projector(proj_in)
+                tok     = tok * vmask[:, None]
+                per_sample_tokens.append(tok)
+                per_sample_masks.append(vmask)
+                max_len = max(max_len, tok.shape[0])
 
         # ----- pad 到 batch 内最大长度（一次性做）-----------
         def _pad_to(x, tgt):
             pad = [(0, tgt - x.shape[0])] + [(0, 0)]*(x.ndim-1)
             return jnp.pad(x, pad)
-        pt_tokens = jnp.stack([_pad_to(t, max_len) for t in per_sample_tokens], axis=0)  # (B,P,C)
-        valid_m   = jnp.stack([_pad_to(m, max_len) for m in per_sample_masks], axis=0)   # (B,P)
+        if not use_override:
+            pt_tokens = jnp.stack([_pad_to(t, max_len) for t in per_sample_tokens], axis=0)  # (B,P,C)
+            valid_m   = jnp.stack([_pad_to(m, max_len) for m in per_sample_masks], axis=0)   # (B,P)
         assert (pt_tokens.shape[1] == valid_m.shape[1] == max_len), "pad 后 token / mask 长度不一致"
 
         # --- 帧级掩码广播到 token 维 ---
@@ -1085,7 +1218,10 @@ class Pi0FASTSonata(_model.BaseModel):
         observation: _model.Observation,
         actions: _model.Actions,
         *,
-        train: bool = False
+        train: bool = False,
+        # 允许全量微调模式把 Torch 侧算好的点云特征/掩码透传进来
+        pt_feat_override: jax.Array | None = None,
+        pt_mask_override: jax.Array | None = None,
     ) -> jax.Array:
         """Compute sequence loss for the model (predict next token loss for language prompt)."""
         # Preprocess observation (normalize/augment images, ensure masks)
@@ -1099,7 +1235,9 @@ class Pi0FASTSonata(_model.BaseModel):
                 "abort this training step or filter such samples upstream."
             )
         # Embed all inputs to tokens and get masks
-        tokens, mask, ar = self.embed_inputs(observation)
+        tokens, mask, ar = self.embed_inputs(
+            observation, train=train,
+            pt_feat_override=pt_feat_override, pt_mask_override=pt_mask_override)
         # Compute attention mask for the sequence (prefix + causal masking as needed)
         attn_mask = _pi0_fast.make_attn_mask(mask, ar)
         # === SpatialLM‑exact：原位插入后文本位置改变，按新位置对齐标签 ===
@@ -1227,7 +1365,7 @@ class Pi0FASTSonata(_model.BaseModel):
         # Preprocess observation (no augmentation, just ensure correct shapes/masks)
         observation = _model.preprocess_observation(None, observation, train=False, image_keys=list(observation.images.keys()))
         # Embed inputs to get prefix token embeddings and masks
-        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_inputs(observation)
+        prefix_tokens, prefix_mask, prefix_ar_mask = self.embed_inputs(observation, train=False)
         prefix_attn_mask = _pi0_fast.make_attn_mask(prefix_mask, prefix_ar_mask)
         # Align all prefix sequences to the right (required for caching in prefix)
         prefix_tokens, prefix_mask, prefix_attn_mask = _pi0_fast.left_to_right_align(prefix_tokens, prefix_mask, prefix_attn_mask)
