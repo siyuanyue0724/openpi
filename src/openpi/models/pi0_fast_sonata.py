@@ -90,13 +90,16 @@ POINT_CONFIG_SPATIALLM: dict[str, typing.Any] = {
 
 # 用于生成测试用数据的工具函数
 def _canonicalize_point_dict(pd):
-    pd = {k: jnp.asarray(v) for k, v in pd.items()}  # ← 用 jnp；不做任何“数据修复”，只做形状规范化与 dtype 约束
- 
+    # 用 jnp；不做任何“数据修复”，只做形状规范化与 dtype 约束
+    pd = {k: jnp.asarray(v) for k, v in pd.items()}
 
-    if pd["coord"].ndim == 3:      # (B,N,3) → (B*N,3)
+    if pd["coord"].ndim == 3:      # (B,N,3) → (B*N,3)；其它字段同步展平，保证 per‑sample 选择后维度一致
         B, N, _ = pd["coord"].shape
         pd["coord"] = jnp.reshape(pd["coord"], (B * N, 3))
         pd["feat"]  = jnp.reshape(pd["feat"],  (B * N, -1))
+        # ★ 关键：grid_coord 也要一起展平，否则 selected_batch 后会与 coord 不对齐
+        if "grid_coord" in pd and pd["grid_coord"].ndim == 3:
+            pd["grid_coord"] = jnp.reshape(pd["grid_coord"], (B * N, 3))
         # JAX 端统一 int32；host(PyTorch) 端再升为 int64 以支持 (batch << 48)
         pd["batch"]  = jnp.repeat(jnp.arange(B, dtype=jnp.int32), N)
         pd["offset"] = jnp.cumsum(jnp.full((B,), N, dtype=jnp.int32))
@@ -111,8 +114,8 @@ def _canonicalize_point_dict(pd):
 
     # SpatialLM 约定：显式提供 int32 体素坐标（不做零点平移/重建）
     if "grid_coord" in pd:
-        # 这里有个潜在的问题，若用户自己组装的grid_coord已经超过65535，则可能再次溢出，但这个实际上不太可能，因此只写注释，等以后如果训练有问题再回来看。
-        if pd["grid_coord"].shape[-1] != 3:
+        # 按 SpatialLM 约定仅做 dtype/形状校验，不做数值修复
+        if pd["grid_coord"].ndim != 2 or pd["grid_coord"].shape[-1] != 3:
             raise ValueError("pointcloud.grid_coord 的最后一维必须为 3（xyz）。")
         pd["grid_coord"] = pd["grid_coord"].astype(jnp.int32, copy=False)
 
@@ -136,6 +139,13 @@ def _host_find_window_only(
         raise ValueError(f"[point-window] expect exactly one <start>/<end>, got start={s_pos}, end={e_pos}")
     s, e = s_pos[0], e_pos[0]
     if not (0 <= s < e < L): raise ValueError(f"[point-window] invalid order: start={s}, end={e}, L={L}")
+    # D) 软提示：start 与 end 相邻（或几乎无夹层文本）
+    if e - s <= 1:
+        warnings.warn(
+            f"[Pi0FAST-Sonata] <point_start> and <point_end> are adjacent at positions ({s},{e}). "
+            "No textual context between them.",
+            RuntimeWarning
+        )
     return np.array([s, e], dtype=np.int32)
 
 # -------- 仅支持“新接口”抽取点云 ----------
@@ -341,7 +351,24 @@ class Pi0FASTSonata(_model.BaseModel):
         # in_channels 必须与实现保持 6（xyz+rgb）
         if int(sp_cfg["in_channels"]) != _in_channels:
             raise ValueError(f"[Pi0FASTSonata] point_config.in_channels={sp_cfg['in_channels']} != 6")
-        sp_cfg["enable_flash"] = _enable_flash
+        # —— 构造参数鲁棒化：按 Sonata 签名过滤未知参数；必要时转换 enc_mode；仅在支持时注入 enable_flash —— #
+        try:
+            _sig = inspect.signature(Sonata)
+        except Exception:
+            _sig = None
+        # enc_mode: 若实现以字符串枚举表示，且目前值是布尔，则做布尔→字符串映射
+        if isinstance(sp_cfg.get("enc_mode"), bool) and _sig is not None:
+            _p = _sig.parameters.get("enc_mode")
+            if _p is not None and (isinstance(_p.default, str) or _p.annotation is str):
+                sp_cfg["enc_mode"] = "voxel" if sp_cfg["enc_mode"] else "point"
+        # enable_flash: 仅在 Sonata.__init__ 接受该形参时注入
+        if _sig is not None and "enable_flash" in _sig.parameters:
+            sp_cfg["enable_flash"] = _enable_flash
+        else:
+            sp_cfg.pop("enable_flash", None)
+        # 过滤未知形参，避免不同分支/版本直接 TypeError
+        if _sig is not None:
+            sp_cfg = {k: v for k, v in sp_cfg.items() if k in _sig.parameters}
         point_model = Sonata(**sp_cfg)
         # 记录供后续断言／Projector 使用
         self._point_in_channels = _in_channels
@@ -407,19 +434,24 @@ class Pi0FASTSonata(_model.BaseModel):
                                  "请使用与 SpatialLM 完全一致的 6 通道权重。")
 
             # ③严格一致性加载：shape 不匹配会直接抛错；并且 missing/unexpected 立刻 fail‑fast
-            # 过滤历史分支中可能存在的 embedding.mask_token，避免误报 unexpected key
-            if "embedding.mask_token" in cleaned:
+            # 过滤历史分支中可能存在的 embedding.mask_token（仅当当前模型确实不存在该键时）
+            _model_keys = set(point_model.state_dict().keys())
+            if "embedding.mask_token" in cleaned and "embedding.mask_token" not in _model_keys:
                 cleaned.pop("embedding.mask_token")
 
-            ik = point_model.load_state_dict(cleaned, strict=False)
+            # F) 严格一致加载（更直观的严格语义）；若不一致，直接报错
+            try:
+                ik = point_model.load_state_dict(cleaned, strict=True)
+            except RuntimeError as e:
+                raise RuntimeError(f"[Sonata] strict load_state_dict failed: {e}") from e
             missing = list(getattr(ik, "missing_keys", []))
-            unexpected = [k for k in list(getattr(ik, "unexpected_keys", [])) if k != "embedding.mask_token"]
+            unexpected = list(getattr(ik, "unexpected_keys", []))
             if missing or unexpected:
                 raise RuntimeError(
                     "[Sonata] Weight/state mismatch.\n"
                     f"  missing={missing[:10]}\n"
                     f"  unexpected={unexpected[:10]}\n"
-                    "请确认 point_config 与权重版本严格一致（忽略 embedding.mask_token 以兼容历史权重）。"
+                    "请确认 point_config 与权重版本严格一致。"
                 )
 
             logger.info("Loaded pretrained Sonata weights from %s", ckpt_path)
@@ -430,8 +462,8 @@ class Pi0FASTSonata(_model.BaseModel):
                 "Sonata encoder starts with random weights."
             )
 
-        # -------- 保证 Sonata 整个网络在 GPU（含 spconv kernel） --------
-        point_model.to(self.device)
+        # -------- 保证 Sonata 整个网络在 GPU 且 dtype=fp32（对齐 SpatialLM 前向） --------
+        point_model.to(dtype=torch.float32, device=self.device)
         point_model.eval()  # inference mode
 
         # -------------------- TorchSonataWrapper（host 侧运行，JAX 侧 pure_callback） --------------------
@@ -614,6 +646,30 @@ class Pi0FASTSonata(_model.BaseModel):
                     # 重新计算 offset  (prefix‐sum of per‑batch counts)
                     counts = np.bincount(host_dict["batch"])
                     host_dict["offset"] = np.cumsum(counts, dtype=np.int64)
+
+                # —— 可选：过滤“全零 padding 行”（默认关闭；仅当数据侧确有零填充时建议开启） —— #
+                if os.environ.get("OPENPI_SONATA_FILTER_ZERO_PADDING", "0") == "1":
+                    zero_coord = (np.abs(host_dict["coord"]).max(axis=1) == 0)
+                    zero_feat  = (np.abs(host_dict["feat"]).max(axis=1)  == 0)
+                    zero_grid  = (np.abs(host_dict["grid_coord"]).max(axis=1) == 0)
+                    is_zero_row = zero_coord & zero_feat & zero_grid
+                    if np.any(is_zero_row):
+                        keep = ~is_zero_row
+                        if not np.any(keep):
+                            pad_feat   = np.zeros((max_tokens_cap, enc_out_dim), dtype=np.float32)
+                            valid_mask = np.zeros((max_tokens_cap,),       dtype=bool)
+                            return pad_feat, valid_mask
+                        for k in ("coord", "feat", "grid_coord"):
+                            if k in host_dict:
+                                host_dict[k] = host_dict[k][keep]
+                        if "batch" in host_dict:
+                            host_dict["batch"] = host_dict["batch"][keep]
+                        # 重新计算 offset
+                        if "batch" in host_dict:
+                            counts = np.bincount(host_dict["batch"])
+                            host_dict["offset"] = np.cumsum(counts, dtype=np.int64)
+                        else:
+                            host_dict["offset"] = np.array([host_dict["coord"].shape[0]], dtype=np.int64)
                 
                 # ===== SpatialLM‑style 空点云保护 =====
                 if host_dict["coord"].shape[0] == 0:
@@ -749,7 +805,22 @@ class Pi0FASTSonata(_model.BaseModel):
                 return target_fn(*args, **kwargs)
 
         # ---------- 4) 原生 NNX 线性投影：enc_out_dim → PaLI‑Gemma hidden_size ----------
-        point_proj = nnx.Linear(self._enc_out_dim, model_width, rngs=rngs)
+        # C) 投影层 dtype 与 LLM 对齐，减少不必要的 f32<->bf16 转换
+        _dtype_map = {
+            "bfloat16": jnp.bfloat16, "bf16": jnp.bfloat16,
+            "float16": jnp.float16,   "fp16": jnp.float16,
+            "float32": jnp.float32,   "fp32": jnp.float32,
+        }
+        proj_dtype = _dtype_map.get(str(getattr(config, "dtype", "bfloat16")).lower(), jnp.bfloat16)
+        _linear_params = set(inspect.signature(nnx.Linear).parameters.keys())
+        if "dtype" in _linear_params:
+            point_proj = nnx.Linear(self._enc_out_dim, model_width, dtype=proj_dtype, rngs=rngs)
+            self._proj_dtype = proj_dtype
+        else:
+            # 回退：nnx.Linear 没有 dtype 参数时，使用默认 dtype（通常是 float32）
+            point_proj = nnx.Linear(self._enc_out_dim, model_width, rngs=rngs)
+            self._proj_dtype = jnp.float32
+            logger.warning("nnx.Linear has no 'dtype' parameter; projector uses default dtype (likely float32).")
 
         # 让投影层跟随 PyTorch 的 device，不必手动迁移除非后续继续重写到jax
 
@@ -908,7 +979,8 @@ class Pi0FASTSonata(_model.BaseModel):
             )
 
             # 投影到 LLM hidden_size ，保持与图像 / 文本维度一致
-            tok = self.Sonata.projector(tok.astype(jnp.float32))
+            # C) 投影输入 dtype 与投影层参数 dtype 对齐
+            tok = self.Sonata.projector(tok.astype(self._proj_dtype))
             # 把 padding / 无效 token 特征强制归零，防止 Linear 偏置泄漏
             tok = tok * vmask[:, None]
             per_sample_tokens.append(tok)
@@ -1167,6 +1239,8 @@ class Pi0FASTSonata(_model.BaseModel):
         prefix_positions = (jnp.cumsum(prefix_mask.astype(jnp.int32), axis=-1) - 1).astype(jnp.int32)
         prefix_positions = jnp.maximum(prefix_positions, 0)
         # Run the LLM in decoding mode to fill KV cache with prefix
+        # 与原版 pi0_fast.py 一致：预填充阶段就把注意力掩码右侧 pad 到预期解码长度，避免掩码宽度不一致
+        prefix_attn_mask = jnp.pad(prefix_attn_mask, ((0, 0), (0, 0), (0, max_decoding_steps)))
         prefix_logits, kv_cache, *_ = self.PaliGemma.llm(
             embedded_prefix=prefix_tokens,
             mask=prefix_attn_mask,
