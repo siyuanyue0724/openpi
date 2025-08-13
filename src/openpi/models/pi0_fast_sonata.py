@@ -264,11 +264,14 @@ class Pi0FASTSonata(_model.BaseModel):
         # 记录是否强制要求点云
         self._require_pointcloud = bool(getattr(config, "require_pointcloud", True))
         self._require_image = bool(getattr(config, "require_image", True))
-        # 设定统一 device（GPU 如果可用，否则 CPU）
+        # 设定统一 device（GPU，为了调试方便，禁止CPU模式）
         # --------------------------------------------------------------
-        self.device: torch.device = torch.device(
-            "cuda" if torch.cuda.is_available() else "cpu"
-        )
+        if not torch.cuda.is_available():
+            raise RuntimeError(
+                "Pi0FAST‑Sonata requires CUDA for spconv/flash‑attn. "
+                "Please install CUDA builds and ensure a GPU is available."
+            )
+        self.device = torch.device("cuda")
         
         # ------------------------------------------------------------------
         # 1) 语言模型  Gemma  ------------------------------------------------
@@ -276,25 +279,15 @@ class Pi0FASTSonata(_model.BaseModel):
         # ------------------------------------------------------------------
         # Gemma‑fast LLM ----------------------------------------------------
         # ------------------------------------------------------------------
-        pal_cfg = _gemma.get_config(config.paligemma_variant)
-
-        # 按 gemma_fast.Module 的 __init__ 签名自动收集需要的参数
-        gemma_sig = inspect.signature(_gemma.Module.__init__)
-        pal_kwargs: dict[str, typing.Any] = {}
-        for name in gemma_sig.parameters:
-            if name == "self":          # 跳过 self
-                continue
-            if hasattr(pal_cfg, name):
-                pal_kwargs[name] = getattr(pal_cfg, name)
-
-        # 若 get_config 没返回 variant，则用传入的枚举字符串补齐
-        pal_kwargs.setdefault("variant", config.paligemma_variant)
-
-        # 其它 dtype 相关覆写
-        pal_kwargs["embed_dtype"] = config.dtype
-        pal_kwargs["cache_dtype"] = config.dtype
-
-        llm = nnx_bridge.ToNNX(_gemma.Module(**pal_kwargs))
+        # 与 pi0_fast.py 完全一致的用法：get_config 返回 dict
+        paligemma_config = _gemma.get_config(config.paligemma_variant)
+        llm = nnx_bridge.ToNNX(
+            _gemma.Module(
+                **paligemma_config,
+                embed_dtype=config.dtype,
+                cache_dtype=config.dtype,
+            )
+        )
 
         # 初始化
         llm.lazy_init(rngs=rngs, method="init")
@@ -302,7 +295,8 @@ class Pi0FASTSonata(_model.BaseModel):
         # ------------------------------------------------------------------
         # 2) 图像编码器  SigLIP  --------------------------------------------
         # ------------------------------------------------------------------
-        _model_width = getattr(pal_cfg, "width", getattr(pal_cfg, "hidden_size", 1024))
+        # 与 pi0_fast.py 同源：统一使用 LLM 的 width
+        _model_width = paligemma_config["width"]
         
         raw_img_kwargs = dict(
             # _siglip.Module 可能不需要 num_classes；如果 signature 里没有会被自动丢弃
@@ -330,7 +324,10 @@ class Pi0FASTSonata(_model.BaseModel):
             raise ValueError("本实现严格复刻 SpatialLM：point_feat_dim 必须为 6（xyz+rgb）。")
         _in_channels = 6
         # 若未安装 flash_attn，自动禁用以避免断言失败
-        _enable_flash = (getattr(sonata_encoder, "flash_attn", None) is not None)
+        _enable_flash = (
+            torch.cuda.is_available()
+            and (getattr(sonata_encoder, "flash_attn", None) is not None)
+        )
         if not _enable_flash and not getattr(Pi0FASTSonata, "_warned_no_flash", False):
             logger.warning("[Sonata] flash-attn not found; falling back to non-flash path (slower, it is highly recommended to use flash-attn).")
             Pi0FASTSonata._warned_no_flash = True
@@ -403,15 +400,19 @@ class Pi0FASTSonata(_model.BaseModel):
                                  "请使用与 SpatialLM 完全一致的 6 通道权重。")
 
             # ③严格一致性加载：shape 不匹配会直接抛错；并且 missing/unexpected 立刻 fail‑fast
+            # 过滤历史分支中可能存在的 embedding.mask_token，避免误报 unexpected key
+            if "embedding.mask_token" in cleaned:
+                cleaned.pop("embedding.mask_token")
+
             ik = point_model.load_state_dict(cleaned, strict=False)
             missing = list(getattr(ik, "missing_keys", []))
-            unexpected = list(getattr(ik, "unexpected_keys", []))
+            unexpected = [k for k in list(getattr(ik, "unexpected_keys", [])) if k != "embedding.mask_token"]
             if missing or unexpected:
                 raise RuntimeError(
                     "[Sonata] Weight/state mismatch.\n"
                     f"  missing={missing[:10]}\n"
                     f"  unexpected={unexpected[:10]}\n"
-                    "请确认 point_config 与权重版本严格一致（不要依赖 strict=False 静默跳过）。"
+                    "请确认 point_config 与权重版本严格一致（忽略 embedding.mask_token 以兼容历史权重）。"
                 )
 
             logger.info("Loaded pretrained Sonata weights from %s", ckpt_path)

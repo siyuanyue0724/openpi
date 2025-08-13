@@ -177,7 +177,14 @@ class Observation(Generic[ArrayT]):
         if "point_cloud_masks" in data and data["point_cloud_masks"] is not None:
             if not isinstance(data["point_cloud_masks"], dict):
                 raise TypeError("point_cloud_masks must be a dict[str, array].")
-            new_pm = {k: jnp.asarray(v) for k, v in data["point_cloud_masks"].items()}
+        # If new API is present but masks are missing, synthesize all-True masks per key.
+        if new_pc and not new_pm:
+            new_pm = {k: jnp.ones((v.shape[0],), dtype=jnp.bool_) for k, v in new_pc.items()}
+        elif new_pc and new_pm:
+            # Ensure every PC key has a mask; if missing, fill with True.
+            for k, v in new_pc.items():
+                if k not in new_pm:
+                    new_pm[k] = jnp.ones((v.shape[0],), dtype=jnp.bool_)
         # If both dicts exist, ensure key sets match (soft check)
         if new_pc and new_pm:
             if set(new_pc.keys()) != set(new_pm.keys()):
@@ -329,8 +336,12 @@ def preprocess_observation(
             out_masks[key] = jnp.asarray(observation.image_masks[key])
 
     # 透传新接口点云（原样，不做任何修复/体素化/偏移）
-    out_point_clouds = getattr(observation, "point_clouds", {})
-    out_point_cloud_masks = getattr(observation, "point_cloud_masks", {})
+    out_point_clouds = dict(getattr(observation, "point_clouds", {}) or {})
+    out_point_cloud_masks = dict(getattr(observation, "point_cloud_masks", {}) or {})
+    # If upstream provided point_clouds but forgot masks, synthesize all-True masks.
+    for k, arr in out_point_clouds.items():
+        if k not in out_point_cloud_masks:
+            out_point_cloud_masks[k] = jnp.ones((arr.shape[0],), dtype=jnp.bool_)
 
     return Observation(
         images=out_images,
@@ -384,7 +395,12 @@ class BaseModelConfig(abc.ABC):
 
     def fake_obs(self, batch_size: int = 1) -> Observation:
         observation_spec, _ = self.inputs_spec(batch_size=batch_size)
-        return jax.tree.map(lambda x: jnp.ones(x.shape, x.dtype), observation_spec)
+        def _fill(x):
+            # booleans -> True; everything else -> 0
+            if x.dtype == jnp.bool_:
+                return jnp.ones(x.shape, x.dtype)
+            return jnp.zeros(x.shape, x.dtype)
+        return jax.tree.map(_fill, observation_spec)
 
     def fake_act(self, batch_size: int = 1) -> Actions:
         _, action_spec = self.inputs_spec(batch_size=batch_size)
