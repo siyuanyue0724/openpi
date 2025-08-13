@@ -210,6 +210,8 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     require_image: bool = True
     point_start_id: Optional[int] = None
     point_end_id:   Optional[int] = None
+    # 可选：强制要求 CUDA；默认 False 以兼容旧流程/CI
+    require_cuda: bool = False
 
     @property
     def model_type(self) -> _model.ModelType:
@@ -220,37 +222,33 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
         """Instantiate a Pi0FASTSonata model with random initialization."""
         return Pi0FASTSonata(self, rngs=nnx.Rngs(rng))
 
-# ---- 覆写 inputs_spec：切换到“新接口”，与 SpatialLM 的 Sonata 输入契约等价 ----
+    # ---- 覆写 inputs_spec：复用父类规范，仅补充点云字段，避免 state 维度不一致 ----
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
-        image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
-        image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
+        parent_obs, act_spec = super().inputs_spec(batch_size=batch_size)
         with at.disable_typechecking():
             observation_spec = _model.Observation(
-                images={
-                    "base_0_rgb": image_spec,
-                    "base_1_rgb": image_spec,
-                    "wrist_0_rgb": image_spec,
-                },
-                image_masks={
-                    "base_0_rgb": image_mask_spec,
-                    "base_1_rgb": image_mask_spec,
-                    "wrist_0_rgb": image_mask_spec,
-                },
-                state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
-                tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
-                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
-                token_ar_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
-                token_loss_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.bool_),
+                images=parent_obs.images,
+                image_masks=parent_obs.image_masks,
+                state=parent_obs.state,
+                tokenized_prompt=parent_obs.tokenized_prompt,
+                tokenized_prompt_mask=parent_obs.tokenized_prompt_mask,
+                token_ar_mask=parent_obs.token_ar_mask,
+                token_loss_mask=parent_obs.token_loss_mask,
                 # 点云（新接口）：与 SpatialLM 的 Sonata 调用保持等价语义
-                #  - point_clouds["pointcloud"]: [B, M, 3 + 6] (float32)
-                #      [:,:,0:3] = grid_coord（运行时 cast→int32）
-                #      [:,:,3:6] = coord xyz（float32）；[:,:6] 后必须是 rgb 等额外 3 维
-                #  - point_cloud_masks["pointcloud"]: [B] bool  —— 指示该样本是否存在点云
-                point_clouds={"pointcloud": jax.ShapeDtypeStruct([batch_size, self.max_points, 3 + 6], jnp.float32)},
+                point_clouds={"pointcloud": jax.ShapeDtypeStruct(
+                    [batch_size, self.max_points, 3 + self.point_feat_dim], jnp.float32)},
                 point_cloud_masks={"pointcloud": jax.ShapeDtypeStruct([batch_size], jnp.bool_)},
             )
-        action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
-        return observation_spec, action_spec
+        return observation_spec, act_spec
+
+    # ---- LoRA 兼容：确保 Sonata.projector 在默认冻结策略下可训练 ----
+    def get_freeze_filter(self) -> nnx.filterlib.Filter:
+        base = super().get_freeze_filter()
+        try:
+            return nnx.Any(base, nnx.Name("Sonata.projector"))
+        except Exception:
+            # 老版 filterlib 兼容：找不到原语则回退
+            return base
 class Pi0FASTSonata(_model.BaseModel):
     """
     Pi0FASTSonata model: Extends Pi0-FAST to incorporate a Sonata point cloud encoder.
@@ -264,14 +262,13 @@ class Pi0FASTSonata(_model.BaseModel):
         # 记录是否强制要求点云
         self._require_pointcloud = bool(getattr(config, "require_pointcloud", True))
         self._require_image = bool(getattr(config, "require_image", True))
-        # 设定统一 device（GPU，为了调试方便，禁止CPU模式）
+        # 设定统一 device（默认允许 CPU；如需强制请在 config.require_cuda=True）
         # --------------------------------------------------------------
-        if not torch.cuda.is_available():
+        if getattr(config, "require_cuda", False) and not torch.cuda.is_available():
             raise RuntimeError(
-                "Pi0FAST‑Sonata requires CUDA for spconv/flash‑attn. "
-                "Please install CUDA builds and ensure a GPU is available."
+                "Pi0FAST‑Sonata requires CUDA for spconv/flash‑attn when require_cuda=True."
             )
-        self.device = torch.device("cuda")
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         
         # ------------------------------------------------------------------
         # 1) 语言模型  Gemma  ------------------------------------------------
@@ -296,16 +293,22 @@ class Pi0FASTSonata(_model.BaseModel):
         # 2) 图像编码器  SigLIP  --------------------------------------------
         # ------------------------------------------------------------------
         # 与 pi0_fast.py 同源：统一使用 LLM 的 width
-        _model_width = paligemma_config["width"]
-        
+        model_width = paligemma_config.get("width", paligemma_config.get("hidden_size", 1024))
+
+        # 兼容不同版本的 siglip.Module：仅传入其签名里存在的参数
+        _sig_params = set(inspect.signature(_siglip.Module).parameters.keys())
         raw_img_kwargs = dict(
-            # _siglip.Module 可能不需要 num_classes；如果 signature 里没有会被自动丢弃
-            num_classes=_model_width,
             variant="So400m/14",
             pool_type="none",
             scan=True,
-            dtype_mm=config.dtype,
         )
+        if "num_classes" in _sig_params:
+            raw_img_kwargs["num_classes"] = model_width
+        # dtype 参数名在不同版本里可能叫 dtype 或 dtype_mm
+        if "dtype" in _sig_params:
+            raw_img_kwargs["dtype"] = config.dtype
+        elif "dtype_mm" in _sig_params:
+            raw_img_kwargs["dtype_mm"] = config.dtype
 
         # ---------------------------------------------------------------------------------
 
@@ -324,10 +327,7 @@ class Pi0FASTSonata(_model.BaseModel):
             raise ValueError("本实现严格复刻 SpatialLM：point_feat_dim 必须为 6（xyz+rgb）。")
         _in_channels = 6
         # 若未安装 flash_attn，自动禁用以避免断言失败
-        _enable_flash = (
-            torch.cuda.is_available()
-            and (getattr(sonata_encoder, "flash_attn", None) is not None)
-        )
+        _enable_flash = (self.device.type == "cuda" and getattr(sonata_encoder, "flash_attn", None) is not None)
         if not _enable_flash and not getattr(Pi0FASTSonata, "_warned_no_flash", False):
             logger.warning("[Sonata] flash-attn not found; falling back to non-flash path (slower, it is highly recommended to use flash-attn).")
             Pi0FASTSonata._warned_no_flash = True
@@ -354,18 +354,25 @@ class Pi0FASTSonata(_model.BaseModel):
             # 文件放置: <repo_root>/openpi/pretrain/SpatialLM_Sonata_encoder.pth
             # 如果没有模型，请使用uv run scripts/sonata_weight_gen.py来获取sonata的checkpoint
             # ------------------------------------------------------------------
-            # 路径指向 <repo_root>/src/pretrain/
-            ckpt_path = (
-                Path(__file__).resolve().parents[2]  # -> …/openpi/src
-                / "pretrain" / "SpatialLM_Sonata_encoder.pth"
-            )
-            if not ckpt_path.is_file():
+            # 兼容旧路径：ENV → <repo_root>/pretrain → <repo_root>/src/pretrain
+            repo_root = Path(__file__).resolve().parents[3]
+            candidates = [
+                os.getenv("OPENPI_SONATA_CKPT", "").strip(),
+                repo_root / "pretrain" / "SpatialLM_Sonata_encoder.pth",
+                Path(__file__).resolve().parents[2] / "pretrain" / "SpatialLM_Sonata_encoder.pth",
+            ]
+            ckpt_path = None
+            for p in candidates:
+                p = Path(p)
+                if str(p) and p.is_file():
+                    ckpt_path = p
+                    break
+            if ckpt_path is None:
                 raise FileNotFoundError(
-                    f"Sonata 预训练权重未找到: {ckpt_path}\n"
-                    "请先运行 scripts/sonata_weight_gen.py 生成文件，"
-                    "并放置到 src/pretrain/ 目录。"
+                    "Sonata 预训练权重未找到。请设置 OPENPI_SONATA_CKPT，"
+                    "或将权重放到 <repo_root>/pretrain/ 或 <repo_root>/src/pretrain/。"
                 )
-            logger.info("Using local Sonata weights: %s", ckpt_path)
+            logger.info("Using Sonata weights: %s", ckpt_path)
 
 
             # 加载权重 —— PyTorch 2.6+ 默认 weights_only=True，会拦住包含
@@ -742,7 +749,7 @@ class Pi0FASTSonata(_model.BaseModel):
                 return target_fn(*args, **kwargs)
 
         # ---------- 4) 原生 NNX 线性投影：enc_out_dim → PaLI‑Gemma hidden_size ----------
-        point_proj = nnx.Linear(self._enc_out_dim, _model_width, rngs=rngs)
+        point_proj = nnx.Linear(self._enc_out_dim, model_width, rngs=rngs)
 
         # 让投影层跟随 PyTorch 的 device，不必手动迁移除非后续继续重写到jax
 
@@ -829,7 +836,12 @@ class Pi0FASTSonata(_model.BaseModel):
         img_tok_list = []
         img_msk_list = []
         for cam_name, image in obs.images.items():
-            img_t, _ = self.PaliGemma.img(image, train=False)       # [B, n_img_tok, D]
+            # 兼容返回 (tokens, pooled) 或仅 tokens 的实现
+            _img_out = self.PaliGemma.img(image, train=False)
+            if isinstance(_img_out, tuple):
+                img_t = _img_out[0]
+            else:
+                img_t = _img_out
             img_tok_list.append(img_t)
             m = jnp.broadcast_to(
                 obs.image_masks[cam_name][:, None],
@@ -1019,7 +1031,8 @@ class Pi0FASTSonata(_model.BaseModel):
         # Compute attention mask for the sequence (prefix + causal masking as needed)
         attn_mask = _pi0_fast.make_attn_mask(mask, ar)
         # === SpatialLM‑exact：原位插入后文本位置改变，按新位置对齐标签 ===
-        vocab_size = self.PaliGemma.llm.module.vocab_size
+        llm_mod = getattr(self.PaliGemma.llm, "module", self.PaliGemma.llm)
+        vocab_size = getattr(llm_mod, "vocab_size")
         B, L = observation.tokenized_prompt.shape
         # 1) 先得到整段 pre_logits → logits_all
         # 显式给出 positions，确保训练前向与解码路径使用完全一致的绝对位置编号
