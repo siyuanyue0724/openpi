@@ -10,10 +10,13 @@ from flax.training import common_utils
 import flax.traverse_util as traverse_util
 import jax
 import jax.numpy as jnp
+import jax.dlpack as jdlpack
 import numpy as np
 import optax
 import tqdm_loggable.auto as tqdm
 import wandb
+import torch
+from torch.utils import dlpack as tdlpack
 
 import openpi.models.model as _model
 import openpi.shared.array_typing as at
@@ -314,6 +317,77 @@ def train_step(
     }
     return new_state, info
 
+@at.typecheck
+def train_step_all(
+    config: _config.TrainConfig,
+    rng: at.KeyArrayLike,
+    state: training_utils.TrainState,
+    batch: tuple[_model.Observation, _model.Actions],
+    pt_feat_override: at.Array,
+    pt_mask_override: at.Array,
+) -> tuple[training_utils.TrainState, dict[str, at.Array], at.Array]:
+    """
+    all 模式专用的训练步：
+      • JAX 侧：更新除 Sonata.encoder 以外的训练参数（含 projector/LLM/SigLIP/LoRA 等）
+      • 返回对输入 override（pt_feat_override）的梯度，供 host 侧 Torch 回传更新 Sonata.encoder
+    """
+    model = nnx.merge(state.model_def, state.params)
+    model.train()
+
+    @at.typecheck
+    def loss_fn(
+        model: _model.BaseModel,
+        rng: at.KeyArrayLike,
+        observation: _model.Observation,
+        actions: _model.Actions,
+        feat_override: at.Array,
+        mask_override: at.Array,
+    ):
+        # 关键：把 override 显式传入，驱动 A 方案
+        chunked_loss = model.compute_loss(
+            rng, observation, actions, train=True,
+            pt_feat_override=feat_override, pt_mask_override=mask_override,
+        )
+        return jnp.mean(chunked_loss)
+
+    train_rng = jax.random.fold_in(rng, state.step)
+    observation, actions = batch
+
+    # --------- (1) 对 NNX 可训练参数求梯度（保持原逻辑的 filter） ---------
+    diff_state = nnx.DiffState(0, config.trainable_filter)
+    def _lfn_for_params(m, r, o, a, fov, mov):
+        return loss_fn(m, r, o, a, fov, mov)
+    loss, grads = nnx.value_and_grad(_lfn_for_params, argnums=diff_state)(
+        model, train_rng, observation, actions, pt_feat_override, pt_mask_override
+    )
+
+    # --------- (2) 对 override（输入特征）求梯度 ---------
+    def _lfn_for_feat(fov):
+        return loss_fn(model, train_rng, observation, actions, fov, pt_mask_override)
+    g_feat = jax.grad(_lfn_for_feat)(pt_feat_override)  # 形状 = pt_feat_override
+
+    # --------- (3) 应用梯度到 JAX 侧参数 ---------
+    params = state.params.filter(config.trainable_filter)
+    updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
+    new_params = optax.apply_updates(params, updates)
+    nnx.update(model, new_params)
+    new_params = nnx.state(model)
+
+    new_state = dataclasses.replace(state, step=state.step + 1, params=new_params, opt_state=new_opt_state)
+    if state.ema_decay is not None:
+        new_state = dataclasses.replace(
+            new_state,
+            ema_params=jax.tree.map(
+                lambda old, new: state.ema_decay * old + (1 - state.ema_decay) * new, state.ema_params, new_params
+            ),
+        )
+
+    kernel_params = nnx.state(
+        model,
+        nnx.All(nnx.Param, nnx.Not(nnx_utils.PathRegex(".*/(bias|scale|pos_embedding|input_embedding)")), lambda _, x: x.value.ndim > 1),
+    )
+    info = {"loss": loss, "grad_norm": optax.global_norm(grads), "param_norm": optax.global_norm(kernel_params)}
+    return new_state, info, g_feat
 
 def main(config: _config.TrainConfig):
     init_logging()
@@ -364,12 +438,24 @@ def main(config: _config.TrainConfig):
     if resuming:
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
 
-    ptrain_step = jax.jit(
-        functools.partial(train_step, config),
-        in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
-        out_shardings=(train_state_sharding, replicated_sharding),
-        donate_argnums=(1,),
-    )
+    # ============== 根据训练模式选择 jitted 步骤（保持非 all 模式完全不变） ==============
+    mode_all = str(getattr(config.model, "sonata_train_mode", "projector")).lower() == "all"
+    if mode_all:
+        # all：额外接受 override（按 data_sharding 分片），并额外返回对 override 的梯度（同分片）
+        ptrain_step = jax.jit(
+            functools.partial(train_step_all, config),
+            in_shardings=(replicated_sharding, train_state_sharding, data_sharding, data_sharding, data_sharding),
+            out_shardings=(train_state_sharding, replicated_sharding, data_sharding),
+            donate_argnums=(1,),
+        )
+    else:
+        # projector / frozen：原样
+        ptrain_step = jax.jit(
+            functools.partial(train_step, config),
+            in_shardings=(replicated_sharding, train_state_sharding, data_sharding),
+            out_shardings=(train_state_sharding, replicated_sharding),
+            donate_argnums=(1,),
+        )
 
     start_step = int(train_state.step)
     pbar = tqdm.tqdm(
@@ -379,10 +465,88 @@ def main(config: _config.TrainConfig):
         dynamic_ncols=True,
     )
 
+    # ============== all 模式：构造 Torch 端 Sonata 优化器（独立于 JAX 优化器） ==============
+    if mode_all:
+        # 复用当前 GraphDef/Params 合并出的模型实例以拿到 Torch Sonata 句柄；
+        # 不必担心与 JAX 参数不同步：all 模式里点云分支走 override，不使用模型内置的 Sonata。
+        host_model_for_sonata = nnx.merge(train_state.model_def, train_state.params)
+        # 通过模型方法稳健获取 Torch Sonata 句柄（避免 GraphDef/Params merge 后属性丢失）
+        try:
+            sonata_torch = host_model_for_sonata.get_torch_sonata()
+        except AttributeError as e:
+            raise RuntimeError("[SONATA/all] Failed to obtain Torch Sonata handle from model.") from e
+        # 独立优化器（可用 config.sonata_lr / config.sonata_weight_decay 覆盖）
+        sonata_lr = float(getattr(config, "sonata_lr", 1e-4))
+        sonata_wd = float(getattr(config, "sonata_weight_decay", 0.0))
+        sonata_optim = torch.optim.AdamW(sonata_torch.parameters(), lr=sonata_lr, weight_decay=sonata_wd)
+        logging.info(f"[SONATA/all] Torch optimizer ready (lr={sonata_lr}, wd={sonata_wd}).")
+
     infos = []
     for step in pbar:
         with sharding.set_mesh(mesh):
-            train_state, info = ptrain_step(train_rng, train_state, batch)
+            if mode_all:
+                # 1) Torch 上先做 Sonata 前向（batch 级），产生 override
+                #    注意：该函数内部会把 JAX / Sharded 数组转到 host（通过 np.asarray），
+                #    但输出（pt_feat_t）→ JAX 我们优先用 DLPack（单卡零拷贝；多卡回退 host 拷贝）
+                pt_feat_t, pt_mask_t = host_model_for_sonata.torch_sonata_encode_batch(batch[0], train=True)
+                pt_feat_t.requires_grad_(True)  # 让 autograd 能把梯度传回 Sonata
+                # Torch -> JAX：先做设备一致性检查；仅在“同一 GPU”时走 DLPack，否则回退 host-copy
+                use_dlpack = False
+                if jax.device_count() == 1:
+                    try:
+                        j_dev = jax.devices()[0]
+                        t_dev = pt_feat_t.device
+                        # 要求 Torch 在 CUDA，JAX 在 GPU，且设备索引一致（无索引则视为 0）
+                        same_gpu = (t_dev.type == "cuda") and (j_dev.platform == "gpu") \
+                                   and ((t_dev.index is None) or (int(getattr(j_dev, "id", 0)) == int(t_dev.index)))
+                        use_dlpack = bool(same_gpu)
+                        if not use_dlpack:
+                            logging.warning(
+                                "[SONATA/all] Torch/JAX devices mismatch for DLPack (torch=%s, jax=%s). "
+                                "Falling back to host-copy.", str(t_dev), str(j_dev)
+                            )
+                    except Exception as _e:
+                        logging.warning("[SONATA/all] Device check failed (%s); falling back to host-copy.", repr(_e))
+                        use_dlpack = False
+
+                if use_dlpack:
+                    # ① DLPack 要求不能导出 require_grad=True 的张量 → 用快照导出
+                    export_feat = pt_feat_t.detach().contiguous()
+                    export_mask = pt_mask_t.detach().contiguous() if pt_mask_t.requires_grad else pt_mask_t.contiguous()
+                    # ② 新式 DLPack：直接把 tensor 传给 jax.dlpack.from_dlpack（零拷贝到 JAX）
+                    pt_feat_j = jdlpack.from_dlpack(export_feat)
+                    try:
+                        # 部分组合对 bool 的 DLPack 支持不一致；能过就直接过
+                        pt_mask_j = jdlpack.from_dlpack(export_mask)
+                    except Exception:
+                        # 回退：先转 uint8 再到 JAX 里 cast→bool
+                        pt_mask_j = jdlpack.from_dlpack(export_mask.to(torch.uint8)).astype(jnp.bool_)
+                else:
+                    # 多设备沿用 host 拷贝回退
+                    pt_feat_j = jnp.asarray(pt_feat_t.detach().cpu().numpy())
+                    pt_mask_j = jnp.asarray(pt_mask_t.detach().cpu().numpy())
+
+                # 2) JAX 步（更新 projector/LLM/SigLIP/…），并拿到 d(loss)/d(pt_feat_override)
+                train_state, info, g_feat_j = ptrain_step(train_rng, train_state, batch, pt_feat_j, pt_mask_j)
+
+                # 3) 反向把 JAX 的梯度喂回 Torch -> 更新 Sonata
+                if jax.device_count() == 1:
+                    # （可选）确保已经计算完成，减少不必要的同步隐患
+                    jax.block_until_ready(g_feat_j)
+                    g_feat_t = tdlpack.from_dlpack(jdlpack.to_dlpack(g_feat_j))
+                    # 确保梯度 dtype 与前向张量一致（通常 pt_feat_t 是 float32）
+                    if g_feat_t.dtype != pt_feat_t.dtype:
+                        g_feat_t = g_feat_t.to(pt_feat_t.dtype)
+                else:
+                    g_feat_host = np.asarray(jax.device_get(g_feat_j))
+                    # 明确 dtype 对齐到前向张量 dtype（通常 float32）
+                    g_feat_t = torch.as_tensor(g_feat_host, device=pt_feat_t.device, dtype=pt_feat_t.dtype)
+                pt_feat_t.backward(g_feat_t)
+                sonata_optim.step()
+                sonata_optim.zero_grad(set_to_none=True)
+            else:
+                # projector/frozen：延续原有逻辑
+                train_state, info = ptrain_step(train_rng, train_state, batch)
         infos.append(info)
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
@@ -404,6 +568,20 @@ def main(config: _config.TrainConfig):
 
         if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
             _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+
+        # （可选）投影器 L2 监控：存在 config.proj_l2_log_interval 时启用
+        try:
+            l2_intv = int(getattr(config, "proj_l2_log_interval", 0))
+        except Exception:
+            l2_intv = 0
+        if l2_intv and step > start_step and (step % l2_intv == 0):
+            # 取一个 host 侧模型副本做快速统计
+            host_model_dbg = nnx.merge(train_state.model_def, train_state.params)
+            delta = host_model_dbg.debug_log_projector_delta(tag=f"(step={step})")
+            try:
+                wandb.log({"projector_l2_delta": float(delta)}, step=step)
+            except Exception:
+                pass
 
     logging.info("Waiting for checkpoint manager to finish")
     checkpoint_manager.wait_until_finished()

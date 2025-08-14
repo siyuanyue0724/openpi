@@ -56,6 +56,7 @@ import torch
 import os
 import warnings
 from pathlib import Path
+from functools import partial
 from typing import Any, Dict, Tuple, Optional
 
 # ---- JAX <-> openpi 兼容：KeyArray 在 JAX 0.4.14+ 被移除 ----
@@ -76,6 +77,7 @@ from openpi.models import siglip as _siglip
 from openpi.models import PointBackboneType, ProjectorType
 import openpi.models.model as _model  # for BaseModel and Observation
 from openpi.shared import array_typing as at  # for inputs_spec override
+import openpi.shared.nnx_utils as nnx_utils
 
 logger = logging.getLogger("openpi")
 
@@ -232,6 +234,9 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     require_image: bool = True
     point_start_id: Optional[int] = None
     point_end_id:   Optional[int] = None
+    # 可选：允许 <start>/<end> 之间出现的“可见”占位 token（例如 <|point_pad|>）的 id；
+    # 若为 None，则该区间内不允许任何可见文本（mask=True 的 token）。
+    point_pad_id: Optional[int] = None
     # 可选：强制要求 CUDA；默认 False 以兼容旧流程/CI
     require_cuda: bool = False
     # 训练模式：默认 "all"（全量微调）
@@ -267,22 +272,40 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
 
     # ---- LoRA 兼容：确保 Sonata.projector 在默认冻结策略下可训练 ----
     def get_freeze_filter(self) -> nnx.filterlib.Filter:
+        """
+        使用 PathRegex 以兼容不同 flax.nnx 版本（避免依赖 nnx.Name/nnx.None_）。
+        语义：
+          - all       : 从 base 冻结集中排除 Sonata.encoder / Sonata.projector（两者可训练）
+          - projector : 冻结 Sonata.encoder，放开 Sonata.projector（其余遵循 base）
+          - frozen    : Sonata.encoder 与 Sonata.projector 都冻结（并集到 base）
+        """
         base = super().get_freeze_filter()
-        # 依据配置决定是否从“冻结集合”里排除 projector（不提供任何环境变量兜底）
         mode = (getattr(self, "sonata_train_mode", None) or "").strip().lower()
         if mode not in ("all", "projector", "frozen"):
-            raise ValueError(
-                f"config.sonata_train_mode 必须显式设为 'all' | 'projector' | 'frozen'，当前为：{getattr(self, 'sonata_train_mode', None)!r}"
-            )
-        try:
-            if mode in ("all", "projector"):
-                # 冻结集合 = base ∩ 非("Sonata.projector")  ⇒ projector 放开训练
-                return nnx.All(base, nnx.Not(nnx.Name("Sonata.projector")))
-            elif mode == "frozen":
-                # 冻结集合 = base ∪ "Sonata.projector"     ⇒ projector 一并冻结
-                return nnx.Any(base, nnx.Name("Sonata.projector"))
-        except Exception:
-            return base
+            raise ValueError("config.sonata_train_mode 必须显式设为 'all' | 'projector' | 'frozen'")
+
+        # 以路径正则匹配模块；state 路径一般形如 "Sonata/encoder/..." 或 "Sonata/projector/..."
+        enc  = nnx_utils.PathRegex(r"^Sonata/encoder($|/)")
+        proj = nnx_utils.PathRegex(r"^Sonata/projector($|/)")
+
+        if mode == "all":
+            # base ∩ ¬enc ∩ ¬proj
+            return nnx.All(base, nnx.Not(enc), nnx.Not(proj))
+        elif mode == "projector":
+            # (base ∩ ¬proj) ∪ enc
+            return nnx.Any(nnx.All(base, nnx.Not(proj)), enc)
+        else:  # "frozen"
+            # base ∪ enc ∪ proj
+            return nnx.Any(base, enc, proj)
+
+# 批量化 <start>/<end> 查找（单次回调，减少 B 次 pure_callback）的工具函数
+def _host_find_windows_batched(prompts_np: np.ndarray, start_id: int, end_id: int) -> np.ndarray:
+    # prompts_np: [B, L]
+    B = prompts_np.shape[0]
+    out = np.zeros((B, 2), dtype=np.int32)
+    for b in range(B):
+        out[b] = _host_find_window_only(prompts_np[b], start_id, end_id)
+    return out
 class Pi0FASTSonata(_model.BaseModel):
     """
     Pi0FASTSonata model: Extends Pi0-FAST to incorporate a Sonata point cloud encoder.
@@ -911,6 +934,8 @@ class Pi0FASTSonata(_model.BaseModel):
             encoder   = point,
             projector = point_proj,
         )
+        # 需要在 forward 中用到，保存成静态字段
+        self._point_pad_id = getattr(config, "point_pad_id", None)
         # special ids（原位插入必需）
         self._point_start_id = getattr(config, "point_start_id", None)
         self._point_end_id   = getattr(config, "point_end_id", None)
@@ -977,9 +1002,10 @@ class Pi0FASTSonata(_model.BaseModel):
                 mask_batch.append(torch.zeros((cap,), dtype=torch.bool, device=device))
                 continue
             arr = pc_np[b]  # [M, 3+C]
-            grid = torch.as_tensor(arr[:, :3],  dtype=torch.int32,  device=device)
-            coord= torch.as_tensor(arr[:, 3:6], dtype=torch.float32, device=device)
-            feat = torch.as_tensor(arr[:, 3:],  dtype=torch.float32, device=device)
+            # 显式 copy 以避免 "The given NumPy array is not writable" 警告与潜在 UB
+            grid = torch.from_numpy(arr[:, :3].copy()).to(device=device, dtype=torch.int32)
+            coord = torch.from_numpy(arr[:, 3:6].copy()).to(device=device, dtype=torch.float32)
+            feat  = torch.from_numpy(arr[:, 3:].copy()).to(device=device, dtype=torch.float32)
             # 契约 1：grid 非负
             if (grid < 0).any().item():
                 raise ValueError("[Sonata/override] grid_coord 含负值；请在上游体素化时保证每维索引 ≥ 0。")
@@ -1027,6 +1053,14 @@ class Pi0FASTSonata(_model.BaseModel):
         pt_mask_override: jax.Array | None = None,   # [B, P_cap] bool
         train: bool | None = None,
     ) -> tuple[jax.Array, jax.Array, jax.Array]:
+        # Safety：在非 all 模式禁止覆盖输入（避免误把 Sonata 训练起来）
+        if self._sonata_train_mode != "all" and (
+            (pt_feat_override is not None) or (pt_mask_override is not None)
+        ):
+            raise RuntimeError(
+                "sonata_train_mode != 'all' 时不应传入 pt_feat_override/pt_mask_override；"
+                "该模式下应走纯 callback（Sonata 冻结）。"
+            )
         """
         Embed all input modalities (images, point cloud, text tokens) into sequences of token embeddings.
         Returns:
@@ -1105,8 +1139,6 @@ class Pi0FASTSonata(_model.BaseModel):
                 raise ValueError("pt_mask_override is required when pt_feat_override is provided.")
             if int(pt_mask_override.shape[0]) != B:
                 raise ValueError(f"pt_mask_override.shape[0]={int(pt_mask_override.shape[0])} ≠ batch={B}。")
-            if pt_mask_override is None:
-                raise ValueError("pt_mask_override is required when pt_feat_override is provided.")
             # 1) 长度必须与 point_token_cap 一致（否则 compute_loss 内的 LM/Nimg 会错位）
             if int(pt_feat_override.shape[1]) != int(self._pt_block_len):
                 raise ValueError(
@@ -1152,7 +1184,9 @@ class Pi0FASTSonata(_model.BaseModel):
                 }
                 if "grid_coord" in single_dict and single_dict["grid_coord"].shape[-1] != 3:
                     raise ValueError(f"pointcloud grid_coord 的最后一维必须为 3，实际 shape={single_dict['grid_coord'].shape}")
-                tok, vmask = self.Sonata.encoder(single_dict, train=(train is True))
+                # projector/frozen 模式下：纯回调一律 eval，避免 Dropout/BN 训练态
+                enc_train = False
+                tok, vmask = self.Sonata.encoder(single_dict, train=enc_train)
                 # -------- 长度一致性断言 --------
                 assert tok.shape[0] == vmask.shape[0], (
                     f"Sonata 返回 token 长度 {tok.shape[0]} "
@@ -1189,6 +1223,10 @@ class Pi0FASTSonata(_model.BaseModel):
         # Ensure textual inputs are present
         assert obs.tokenized_prompt is not None and obs.tokenized_prompt_mask is not None and obs.token_ar_mask is not None, \
             "Tokenized prompt and corresponding masks must be provided for text inputs."
+        if not (obs.tokenized_prompt_mask.shape == obs.tokenized_prompt.shape[:2]):
+            raise ValueError("tokenized_prompt_mask.shape 必须与 tokenized_prompt 对齐。")
+        if not (obs.token_ar_mask.shape == obs.tokenized_prompt.shape[:2]):
+            raise ValueError("token_ar_mask.shape 必须与 tokenized_prompt 对齐。")
         txt_tokens = self.PaliGemma.llm(tokens=obs.tokenized_prompt, embed_only=True)  # [B, L, emb_dim]
         # 避免如果错误地给了空prompt或只有1个token，在后面逻辑里产生“0长度但不报错”
         if obs.tokenized_prompt.shape[1] < 2:
@@ -1206,13 +1244,58 @@ class Pi0FASTSonata(_model.BaseModel):
 
         # --- 定位每个样本的 <start>/<end>（不限制二者之间是否有文本；与 SpatialLM 一致） ---
         out_struct = (ShapeDtypeStruct((2,), jnp.int32),)
-        win_list = []
-        for b in range(B):
-            def _host_call(arr):
-                return _host_find_window_only(np.asarray(arr), int(self._point_start_id), int(self._point_end_id))
-            (w_b,) = pure_callback(_host_call, out_struct, obs.tokenized_prompt[b], vectorized=False)
-            win_list.append(w_b)
-        win_all = jnp.stack(win_list, axis=0)         # [B,2]  -> (s,e)
+        def _host_call_batch(arr):
+            return _host_find_windows_batched(np.asarray(arr), int(self._point_start_id), int(self._point_end_id))
+        (win_all,) = pure_callback(
+            _host_call_batch,
+            (ShapeDtypeStruct((B, 2), jnp.int32),),
+            obs.tokenized_prompt,
+            vectorized=False
+        )
+        # 可选防呆：<start>/<end> 不应被 mask 掉（若被屏蔽，直接 fail-fast）
+        pm = obs.tokenized_prompt_mask.astype(jnp.bool_)
+        s_ok = jnp.take_along_axis(pm, win_all[:, 0:1], axis=1).squeeze(1)
+        e_ok = jnp.take_along_axis(pm, win_all[:, 1:1+1], axis=1).squeeze(1)
+        def _host_check(vs, ve):
+            vs, ve = bool(np.asarray(vs)), bool(np.asarray(ve))
+            if not (vs and ve):
+                raise RuntimeError("[Pi0FAST-Sonata] <point_start>/<point_end> 必须是有效 token（mask=True）。")
+            return np.int32(0)
+        _ = pure_callback(_host_check, ShapeDtypeStruct((), jnp.int32), s_ok, e_ok, vectorized=False)
+
+        # ======== B1：中间文本硬断言（最小化修复）========
+        # 仅允许 mask=False 的不可见文本，或（若提供 point_pad_id）允许该 id 的可见占位 token。
+        pad_id = -1 if (self._point_pad_id is None) else int(self._point_pad_id)
+        def _host_assert_mid(prompts_np, masks_np, win_np, pad):
+            P = np.asarray(prompts_np)
+            M = np.asarray(masks_np).astype(bool)
+            W = np.asarray(win_np)
+            bad = []
+            for i in range(P.shape[0]):
+                s, e = int(W[i,0]), int(W[i,1])
+                if e - s <= 1:
+                    continue
+                vis = M[i, s+1:e]
+                if vis.any():
+                    seg = P[i, s+1:e]
+                    if pad >= 0:
+                        ok = (~vis) | (seg == pad)
+                    else:
+                        ok = ~vis
+                    if not bool(ok.all()):
+                        bad.append(i)
+            if bad:
+                raise RuntimeError(
+                    "[Pi0FAST-Sonata] Visible text between <point_start> and <point_end> is not allowed "
+                    f"(except optional point_pad_id={pad}). Offending samples: {bad[:10]}"
+                )
+            return np.int32(0)
+        _ = pure_callback(
+            _host_assert_mid,
+            ShapeDtypeStruct((), jnp.int32),
+            obs.tokenized_prompt, obs.tokenized_prompt_mask, win_all, jnp.int32(pad_id),
+            vectorized=False
+        )
 
         # --- 逐样本装配：通过“条件索引 + take”避免动态形状更新 ---
         seq_list, msk_list, ar_list = [], [], []
@@ -1249,9 +1332,9 @@ class Pi0FASTSonata(_model.BaseModel):
 
             txt_ar_src = jnp.take(obs.token_ar_mask[b].astype(jnp.int32), txt_idx, axis=0)
             ar_txt = txt_ar_src * (left_cond | right_cond).astype(jnp.int32)
-            # ★ 关键修复：点 token 也参与因果（ar=1）；仅 label=-100，不预测它们
-            ar_pt  = jnp.ones_like(t, dtype=jnp.int32)
-            ar_txtpt = jnp.where(points_cond, ar_pt, ar_txt)          # 点 token ar=1
+            # B2：点 token 作为“前缀条件”（ar=0），但其 labels 仍为 -100（不预测）
+            ar_pt  = jnp.zeros_like(t, dtype=jnp.int32)
+            ar_txtpt = jnp.where(points_cond, ar_pt, ar_txt)
 
             # 与图像拼接： [img | (text+points)]
             seq_b = jnp.concatenate([img_tokens[b], txtpts_scatter], axis=0)
@@ -1316,35 +1399,24 @@ class Pi0FASTSonata(_model.BaseModel):
         Nimg = T_total - LM
         IGNORE = jnp.int32(-100)
 
-        # --- (a) <start>/<end> 位置 ---
-        out_struct = (ShapeDtypeStruct((2,), jnp.int32),)
-        wins = []
-        for b in range(B):
-            def _host_call(arr):
-                return _host_find_window_only(
-                    np.asarray(arr),
-                    int(self._point_start_id),
-                    int(self._point_end_id),
-                )
-            (w_b,) = pure_callback(_host_call, out_struct, observation.tokenized_prompt[b], vectorized=False)
-            wins.append(w_b)
-        win_all = jnp.stack(wins, axis=0)     # [B,2] -> (s,e)
+        # --- (a) <start>/<end> 位置（批量化，减少 host 往返） ---
+        def _host_call_batch2(arr):
+            return _host_find_windows_batched(np.asarray(arr), int(self._point_start_id), int(self._point_end_id))
+        (win_all,) = pure_callback(
+            _host_call_batch2,
+            (ShapeDtypeStruct((B, 2), jnp.int32),),
+            observation.tokenized_prompt,
+            vectorized=False
+        )
         s_all = win_all[:, 0]
         e_all = win_all[:, 1]
 
-        # --- (b) 逐样本求有效点数 K —— “总有效数 - 左文本 - 右文本”
-        # 插点后的 text+point 段有效总数：
-        TOT_all = jnp.sum(mask[:, Nimg:Nimg+LM].astype(jnp.int32), axis=1)  # [B]
-
-        # —— 向量化口径，避免动态切片导致的 Tracer 报错（等价于上面的循环）——
-        L_prompt = observation.tokenized_prompt.shape[1]
-        idxs = jnp.arange(L_prompt, dtype=jnp.int32)[None, :]           # [1, L]
-        pm_i32 = observation.tokenized_prompt_mask.astype(jnp.int32)    # [B, L]
-        left_mask  = (idxs <= s_all[:, None]).astype(jnp.int32)         # [B, L]
-        right_mask = (idxs >= e_all[:, None]).astype(jnp.int32)         # [B, L]
-        left_valid_all  = jnp.sum(pm_i32 * left_mask,  axis=1)          # [B]
-        right_valid_all = jnp.sum(pm_i32 * right_mask, axis=1)          # [B]
-        K_all = (TOT_all - left_valid_all - right_valid_all).astype(jnp.int32)
+        # --- (b) 逐样本求有效点数 K —— 直接在“点区间”上对插入后 mask 求和（更直观）
+        t_rel   = jnp.arange(LM, dtype=jnp.int32)[None, :]                 # [1, LM]
+        pt_zone = (t_rel >= (s_all[:, None] + 1)) & (t_rel < (s_all[:, None] + 1 + P))
+        # 插入后（含图像前缀）的 mask 在文本+点段的切片：
+        m_txtpts = mask[:, Nimg:Nimg+LM]
+        K_all = jnp.sum(m_txtpts & pt_zone, axis=1).astype(jnp.int32)      # [B]
 
         # 可选：对原“pt_zone 计数”做一次对照（仅调试；默认不启用）
         if int(os.environ.get("OPENPI_SONATA_DEBUG_K", "0")):
@@ -1400,6 +1472,21 @@ class Pi0FASTSonata(_model.BaseModel):
         denom = jnp.maximum(jnp.sum(valid, axis=-1), 1)
         seq_loss = jnp.sum(nll, axis=-1) / denom
         return seq_loss
+
+    # --------- B3：稳健获取 Torch Sonata 句柄（供训练脚本 all 模式使用） ---------
+    def get_torch_sonata(self) -> torch.nn.Module:
+        """
+        优先从模块树（ToNNX wrapper）路径获取 Torch Sonata 实例；
+        若该路径不可用，则回退至 _torch_sonata（初始化时保存的冗余句柄）。
+        """
+        try:
+            # nnx_bridge.ToNNX(module= _TorchSonataWrapper(...)) 暴露底层 torch 模块
+            return self.Sonata.encoder.module.inner
+        except Exception:
+            handle = getattr(self, "_torch_sonata", None)
+            if handle is None:
+                raise AttributeError("Torch Sonata handle not found (encoder.module.inner / _torch_sonata).")
+            return handle
 
     def sample_actions(
         self,
