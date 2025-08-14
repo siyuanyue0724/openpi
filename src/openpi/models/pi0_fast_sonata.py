@@ -1077,7 +1077,9 @@ class Pi0FASTSonata(_model.BaseModel):
         img_msk_list = []
         for cam_name, image in obs.images.items():
             # 兼容返回 (tokens, pooled) 或仅 tokens 的实现
-            _img_out = self.PaliGemma.img(image, train=bool(train))
+            # 原版pi0_fast这里设置为false
+            # _img_out = self.PaliGemma.img(image, train=bool(train))
+            _img_out = self.PaliGemma.img(image, train=False)
             if isinstance(_img_out, tuple):
                 img_t = _img_out[0]
             else:
@@ -1108,12 +1110,16 @@ class Pi0FASTSonata(_model.BaseModel):
                 if not bool(np.asarray(x)):
                     raise RuntimeError("require_pointcloud=True 但该 batch 所有样本均无点云。")
                 return np.int32(0)
-            _ = pure_callback(
+            # 防止 DCE：将返回的“哨兵”标量绑定到图里
+            sentinel_rc = pure_callback(
                 _host_assert_any,
                 ShapeDtypeStruct((), jnp.int32),
                 present_any,
                 vectorized=False,
             )
+            # 乘 0 紧耦合到已有张量，不改变数值但保留副作用
+            # 这里绑定到 img_tokens（已在前面计算）
+            img_tokens = img_tokens + (sentinel_rc.astype(img_tokens.dtype) * 0)
 
         # —— 文本与点云 batch 维度一致性（防止 silent misalignment）
         B_txt = int(obs.tokenized_prompt.shape[0])
@@ -1261,7 +1267,12 @@ class Pi0FASTSonata(_model.BaseModel):
             if not (vs and ve):
                 raise RuntimeError("[Pi0FAST-Sonata] <point_start>/<point_end> 必须是有效 token（mask=True）。")
             return np.int32(0)
-        _ = pure_callback(_host_check, ShapeDtypeStruct((), jnp.int32), s_ok, e_ok, vectorized=False)
+        sentinel_se = pure_callback(
+            _host_check, ShapeDtypeStruct((), jnp.int32),
+            s_ok, e_ok, vectorized=False
+        )
+        # 绑定到文本嵌入，避免被 DCE
+        txt_tokens = txt_tokens + (sentinel_se.astype(txt_tokens.dtype) * 0)
 
         # ======== B1：中间文本硬断言（最小化修复）========
         # 仅允许 mask=False 的不可见文本，或（若提供 point_pad_id）允许该 id 的可见占位 token。
@@ -1290,12 +1301,29 @@ class Pi0FASTSonata(_model.BaseModel):
                     f"(except optional point_pad_id={pad}). Offending samples: {bad[:10]}"
                 )
             return np.int32(0)
-        _ = pure_callback(
-            _host_assert_mid,
+
+        # “中间文本可见就抛错”这条断言在测试时会带来一些问题，所以这里用放宽版：只告警，不抛错。日后修好数据了回来把这个改成硬性的
+        def _host_warn_mid(prompts_np, masks_np, win_np, pad):
+            try:
+                # 复用上面的判定；若违反就告警但不抛
+                _host_assert_mid(prompts_np, masks_np, win_np, pad)
+            except Exception as e:
+                import warnings as _warn
+                _warn.warn(f"{e}  -- continuing in RELAXED mode.", RuntimeWarning)
+            return np.int32(0)
+
+        # 是否严格：默认严格（=1）。设 OPENPI_SONATA_STRICT_POINT_WINDOW=0 进入放宽模式。
+        _strict_env = os.environ.get("OPENPI_SONATA_STRICT_POINT_WINDOW", "1")
+        _mid_cb = _host_assert_mid if _strict_env == "1" else _host_warn_mid
+        sentinel_mid = pure_callback(
+            _mid_cb,
             ShapeDtypeStruct((), jnp.int32),
             obs.tokenized_prompt, obs.tokenized_prompt_mask, win_all, jnp.int32(pad_id),
             vectorized=False
         )
+
+        # 再次绑定（任选一个现有张量；这里仍绑到 txt_tokens）
+        txt_tokens = txt_tokens + (sentinel_mid.astype(txt_tokens.dtype) * 0)
 
         # --- 逐样本装配：通过“条件索引 + take”避免动态形状更新 ---
         seq_list, msk_list, ar_list = [], [], []
@@ -1324,7 +1352,7 @@ class Pi0FASTSonata(_model.BaseModel):
             pt_part  = pt_part * points_cond[:, None].astype(pt_part.dtype)
             txtpts_scatter = txt_part + pt_part                      # [LM, D]
 
-            # mask / ar：文本沿用源；点 token 严格因果（ar=1，label=-100）；padding 位置全 False
+            # mask / ar：文本沿用源；点 token 作为“前缀条件”（ar=0，label=-100）；padding 位置全 False
             txt_mask_src = jnp.take(obs.tokenized_prompt_mask[b].astype(bool), txt_idx, axis=0)
             m_txt = txt_mask_src & (left_cond | right_cond)
             m_pt  = points_cond
@@ -1390,6 +1418,17 @@ class Pi0FASTSonata(_model.BaseModel):
             mask=attn_mask[:, :-1, :-1],
             return_prelogits=True
         )
+        '''
+        # 原版是使用的下面这个方案，不过，当前设置下这两个应该是不会产生实质差异的，所以我们用新版本的
+        # ------------------------------------------
+        pre_logits, _, _ = self.PaliGemma.llm(
+            embedded_prefix=tokens[:, :-1],
+            mask=attn_mask[:, :-1, :-1],
+            return_prelogits=True
+        )
+        #------------------------------------------
+        '''
+
         logits_all, *_ = self.PaliGemma.llm(pre_logits=pre_logits)   # [B, T_total-1, V]
 
         # 2) 直接重建“插入后”的 labels（包含 <start>/<end>），点位置 IGNORE

@@ -16,6 +16,7 @@ import optax
 import tqdm_loggable.auto as tqdm
 import wandb
 import torch
+import warnings
 from torch.utils import dlpack as tdlpack
 
 import openpi.models.model as _model
@@ -252,8 +253,9 @@ def init_train_state(
     # 真正初始化，同样复用模板
     train_state = jax.jit(
         init,
-        donate_argnums=(1,),
-        in_shardings=replicated_sharding,
+        donate_argnums=(1,),  # partial_params 可捐赠
+        # ⚠️ 两个位置参数：rng 与 partial_params —— 必须给两棵树
+        in_shardings=(replicated_sharding, replicated_sharding),
         out_shardings=state_sharding,
     )(init_rng, partial_params)
 
@@ -355,18 +357,23 @@ def train_step_all(
 
     # --------- (1) 对 NNX 可训练参数求梯度（保持原逻辑的 filter） ---------
     diff_state = nnx.DiffState(0, config.trainable_filter)
-    def _lfn_for_params(m, r, o, a, fov, mov):
+    # 优先尝试“一次反向”同时拿到 (参数梯度, 输入特征梯度)；不支持则回退到双路计算
+    def _lfn_for_both(m, r, o, a, fov, mov):
         return loss_fn(m, r, o, a, fov, mov)
-    loss, grads = nnx.value_and_grad(_lfn_for_params, argnums=diff_state)(
-        model, train_rng, observation, actions, pt_feat_override, pt_mask_override
-    )
+    try:
+        loss, (grads, g_feat) = nnx.value_and_grad(_lfn_for_both, argnums=(diff_state, 4))(
+            model, train_rng, observation, actions, pt_feat_override, pt_mask_override
+        )
+    except TypeError:
+        # 某些 nnx 版本不支持 (DiffState, int) 复合 argnums：回退到原实现
+        loss, grads = nnx.value_and_grad(_lfn_for_both, argnums=diff_state)(
+            model, train_rng, observation, actions, pt_feat_override, pt_mask_override
+        )
+        def _lfn_for_feat(fov):
+            return loss_fn(model, train_rng, observation, actions, fov, pt_mask_override)
+        g_feat = jax.grad(_lfn_for_feat)(pt_feat_override)  # ← 回退：第二遍只对特征求梯度
 
-    # --------- (2) 对 override（输入特征）求梯度 ---------
-    def _lfn_for_feat(fov):
-        return loss_fn(model, train_rng, observation, actions, fov, pt_mask_override)
-    g_feat = jax.grad(_lfn_for_feat)(pt_feat_override)  # 形状 = pt_feat_override
-
-    # --------- (3) 应用梯度到 JAX 侧参数 ---------
+    # --------- (2) 应用梯度到 JAX 侧参数 ---------
     params = state.params.filter(config.trainable_filter)
     updates, new_opt_state = state.tx.update(grads, state.opt_state, params)
     new_params = optax.apply_updates(params, updates)
@@ -392,6 +399,17 @@ def train_step_all(
 def main(config: _config.TrainConfig):
     init_logging()
     logging.info(f"Running on: {platform.node()}")
+
+    # 定向过滤 spconv 内部的 AMP 自定义算子 FutureWarning（不影响训练正确性）
+    try:
+        warnings.filterwarnings(
+            "ignore",
+            message=r".*torch\.cuda\.amp\.custom_",
+            category=FutureWarning,
+            module=r"spconv\.pytorch\.functional",
+        )
+    except Exception:  # 安全兜底
+        pass
 
     if config.batch_size % jax.device_count() != 0:
         raise ValueError(
@@ -425,18 +443,31 @@ def main(config: _config.TrainConfig):
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
     # Log images from first batch to sanity check.
-    images_to_log = [
-        wandb.Image(np.concatenate([np.array(img[i]) for img in batch[0].images.values()], axis=1))
-        for i in range(min(5, len(next(iter(batch[0].images.values())))))
-    ]
+    images_val_dict = batch[0].images
+    B0 = next(iter(images_val_dict.values())).shape[0]
+    images_to_log = []
+    for i in range(min(5, B0)):
+        cat = np.concatenate([np.array(img[i]) for img in images_val_dict.values()], axis=1)
+        if cat.dtype != np.uint8:
+            if np.issubdtype(cat.dtype, np.floating):
+                cat = np.clip(cat, 0, 1)
+                cat = (cat * 255).astype(np.uint8)
+            else:
+                cat = cat.astype(np.uint8, copy=False)
+        images_to_log.append(wandb.Image(cat))
     wandb.log({"camera_views": images_to_log}, step=0)
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
-    jax.block_until_ready(train_state)
-    logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
-
     if resuming:
+        # resume: 先恢复，再按需阻塞
         train_state = _checkpoints.restore_state(checkpoint_manager, train_state, data_loader)
+    else:
+        # 非 resume：可选阻塞，确保初始化完成（只对真实数组调用）
+        jax.tree_util.tree_map(
+            lambda x: x.block_until_ready() if hasattr(x, "block_until_ready") else x,
+            train_state.params,
+        )
+    logging.info(f"Initialized train state:\n{training_utils.array_tree_to_info(train_state.params)}")
 
     # ============== 根据训练模式选择 jitted 步骤（保持非 all 模式完全不变） ==============
     mode_all = str(getattr(config.model, "sonata_train_mode", "projector")).lower() == "all"
@@ -478,10 +509,22 @@ def main(config: _config.TrainConfig):
         # 独立优化器（可用 config.sonata_lr / config.sonata_weight_decay 覆盖）
         sonata_lr = float(getattr(config, "sonata_lr", 1e-4))
         sonata_wd = float(getattr(config, "sonata_weight_decay", 0.0))
-        sonata_optim = torch.optim.AdamW(sonata_torch.parameters(), lr=sonata_lr, weight_decay=sonata_wd)
-        logging.info(f"[SONATA/all] Torch optimizer ready (lr={sonata_lr}, wd={sonata_wd}).")
+        fused_ok = False
+        try:
+            sonata_optim = torch.optim.AdamW(
+                sonata_torch.parameters(), lr=sonata_lr, weight_decay=sonata_wd,
+                betas=(0.9, 0.95), eps=1e-8, fused=True
+            )
+            fused_ok = True
+        except TypeError:
+            sonata_optim = torch.optim.AdamW(
+                sonata_torch.parameters(), lr=sonata_lr, weight_decay=sonata_wd, betas=(0.9, 0.95), eps=1e-8
+            )
+        logging.info(f"[SONATA/all] Torch optimizer ready (lr={sonata_lr}, wd={sonata_wd}, fused={fused_ok}).")
+        sonata_max_grad_norm = float(getattr(config, "sonata_max_grad_norm", 0.0) or 0.0)
 
     infos = []
+    last_pt_usage_stats = None
     for step in pbar:
         with sharding.set_mesh(mesh):
             if mode_all:
@@ -510,17 +553,35 @@ def main(config: _config.TrainConfig):
                         use_dlpack = False
 
                 if use_dlpack:
-                    # ① DLPack 要求不能导出 require_grad=True 的张量 → 用快照导出
-                    export_feat = pt_feat_t.detach().contiguous()
-                    export_mask = pt_mask_t.detach().contiguous() if pt_mask_t.requires_grad else pt_mask_t.contiguous()
-                    # ② 新式 DLPack：直接把 tensor 传给 jax.dlpack.from_dlpack（零拷贝到 JAX）
-                    pt_feat_j = jdlpack.from_dlpack(export_feat)
+                    # ① 不能导出 requires_grad=True → detach；同时**强制默认内存布局**
+                    export_feat = pt_feat_t.detach().contiguous(memory_format=torch.contiguous_format)
+                    # 掩码一般不需要 grad；统一做一次 contiguous
+                    export_mask = (
+                        pt_mask_t.detach().contiguous() if pt_mask_t.requires_grad
+                        else pt_mask_t.contiguous()
+                    )
+                    # ② 为避免 JAX 报 non-default layout，先把 (B,P,C) 展平成 2D 再导出
+                    B_t, P_t, C_t = export_feat.shape
+                    export_feat_2d = export_feat.view(B_t * P_t, C_t).contiguous()
                     try:
-                        # 部分组合对 bool 的 DLPack 支持不一致；能过就直接过
-                        pt_mask_j = jdlpack.from_dlpack(export_mask)
+                        pt_feat_j = jdlpack.from_dlpack(export_feat_2d)
                     except Exception:
-                        # 回退：先转 uint8 再到 JAX 里 cast→bool
-                        pt_mask_j = jdlpack.from_dlpack(export_mask.to(torch.uint8)).astype(jnp.bool_)
+                        # 老版本栈：回退 capsule
+                        pt_feat_j = jdlpack.from_dlpack(tdlpack.to_dlpack(export_feat_2d))
+                    # 还原形状
+                    pt_feat_j = jnp.reshape(pt_feat_j, (B_t, P_t, C_t))
+
+                    # 掩码同理（2D/1D 导出，避免 strides 被记录成“非默认”）
+                    MB, MP = export_mask.shape
+                    export_mask_1d = export_mask.view(MB * MP).contiguous()
+                    try:
+                        pt_mask_j = jdlpack.from_dlpack(export_mask_1d)
+                    except Exception:
+                        pt_mask_j = jdlpack.from_dlpack(tdlpack.to_dlpack(export_mask_1d))
+                    pt_mask_j = jnp.reshape(pt_mask_j, (MB, MP))
+                    # 保底：转成布尔（部分栈可能给 uint8）
+                    if pt_mask_j.dtype != jnp.bool_:
+                        pt_mask_j = pt_mask_j.astype(jnp.bool_)
                 else:
                     # 多设备沿用 host 拷贝回退
                     pt_feat_j = jnp.asarray(pt_feat_t.detach().cpu().numpy())
@@ -542,15 +603,24 @@ def main(config: _config.TrainConfig):
                     # 明确 dtype 对齐到前向张量 dtype（通常 float32）
                     g_feat_t = torch.as_tensor(g_feat_host, device=pt_feat_t.device, dtype=pt_feat_t.dtype)
                 pt_feat_t.backward(g_feat_t)
+                if mode_all and sonata_max_grad_norm > 0.0:
+                    torch.nn.utils.clip_grad_norm_(sonata_torch.parameters(), sonata_max_grad_norm)
                 sonata_optim.step()
                 sonata_optim.zero_grad(set_to_none=True)
+                # 点 token 使用率统计（每样本 K；cap = P_cap）
+                try:
+                    K_host = np.asarray(jax.device_get(jnp.sum(pt_mask_j, axis=1)))
+                    cap = int(pt_mask_j.shape[1])
+                    last_pt_usage_stats = (K_host, cap)
+                except Exception:
+                    last_pt_usage_stats = None
             else:
                 # projector/frozen：延续原有逻辑
                 train_state, info = ptrain_step(train_rng, train_state, batch)
         infos.append(info)
         if step % config.log_interval == 0:
             stacked_infos = common_utils.stack_forest(infos)
-            reduced_info = jax.device_get(jax.tree.map(jnp.mean, stacked_infos))
+            reduced_info = jax.device_get(jax.tree_util.tree_map(jnp.mean, stacked_infos))
             def _fmt_metric(v):
                 # 支持 Python/NumPy 标量；非数值安全转为字符串，避免 "Unknown format code 'f'"
                 try:
@@ -562,6 +632,27 @@ def main(config: _config.TrainConfig):
                     return str(v)
             info_str = ", ".join(f"{k}={_fmt_metric(v)}" for k, v in reduced_info.items())
             pbar.write(f"Step {step}: {info_str}")
+            # 追加：all 模式下的 Torch 侧范数 & 点 token 使用率
+            if mode_all:
+                try:
+                    with torch.no_grad():
+                        sonata_param_norm = torch.sqrt(sum((p.detach().float()**2).sum() for p in sonata_torch.parameters())).item()
+                        sonata_grad_norm = torch.sqrt(sum((p.grad.detach().float()**2).sum() for p in sonata_torch.parameters() if p.grad is not None)).item()
+                    reduced_info = {**reduced_info,
+                                    "sonata_param_norm": float(sonata_param_norm),
+                                    "sonata_grad_norm": float(sonata_grad_norm)}
+                except Exception:
+                    pass
+                if last_pt_usage_stats is not None:
+                    K_host, cap = last_pt_usage_stats
+                    try:
+                        reduced_info = {**reduced_info,
+                                        "pt_K_max": float(np.max(K_host)) if K_host.size else 0.0,
+                                        "pt_K_p95": float(np.percentile(K_host, 95)) if K_host.size else 0.0,
+                                        "pt_K_mean_frac": float(np.mean(K_host / cap)) if K_host.size else 0.0}
+                        wandb.log({"pt_K_hist": wandb.Histogram(K_host)}, step=step)
+                    except Exception:
+                        pass
             wandb.log(reduced_info, step=step)
             infos = []
         batch = next(data_iter)
