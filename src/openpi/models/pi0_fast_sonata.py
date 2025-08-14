@@ -21,27 +21,29 @@ Pi0FAST-Sonata
   - 若可获取 reduced_grid_size，若 grid_coord 超界则 **warning**（与 SpatialLM 行为一致），建议上游修正。
 """
 
-# ========================= 可调整项（默认全量微调） =========================
-# 训练模式：
-#   "all"       : 方案A，全量微调（Sonata + projector + 其他参数）。需要训练循环传入
-#                 pt_feat_override / pt_mask_override（建议 DLPack 零拷贝）。
-#   "projector" : 冻结 Sonata，仅训练 projector（可以走 pure_callback，无需 override）。
+# ========================= 训练模式（默认全量微调；无任何环境变量兜底） =========================
+#   "all"       : 方案A，全量微调（Sonata + projector + 其他 JAX 参数）。训练循环需传入
+#                 pt_feat_override / pt_mask_override（推荐 DLPack 零拷贝）。
+#   "projector" : 冻结 Sonata，仅训练 projector（可走 pure_callback，无需 override）。
 #   "frozen"    : Sonata + projector 均冻结（只训练 LLM/SigLIP 等）。
-# 如需外部覆盖，也可设置环境变量 OPENPI_SONATA_TRAIN_MODE；配置类字段优先。
-SONATA_TRAIN_MODE = os.environ.get("OPENPI_SONATA_TRAIN_MODE", "all").strip().lower() or "all"
-# ========================================================================
+# ============================================================================================
 
 # 该版本已知问题（这些问题目前暂时不用立刻解决）：
-# 训练时梯度：不会回传到 **Sonata**（pure_callback 非可微）；**Projector 可训练**。
-# 若后续需要端到端训练 Sonata，需要把点云分支迁到 JAX（或自定义可微 callback），再讨论 flash‑attn / spconv 的可微替代。
-# 性能潜在瓶颈	CPU ↔ GPU copy / 多编译	后续迭代可能会影响这个，所以首先解决问题1
-# 1024 的“点 token 容量”先与现有预算保持；显存允许时再调大 point_token_cap（与 enc_patch_size[-1] 无关）
-# 注意，grid似乎不能是负数！
-# per-sample pure_callback batch>1 时 CPU↔GPU 来回和 XLA → host 交互会拖慢，梯度积累场景尤甚
+# 训练时梯度：pure_callback 分支不可微；override（方案A）分支可端到端训练 Sonata。
+# 端到端训练无需把点云分支迁到 JAX：按本实现的 override+DLPack 梯度交接即可；若要 XLA 单体编译/进一步融合，
+# 再考虑 JAX 化（可选优化，而非必要条件）。
+# 性能注意：
+#   - 纯 callback 路径：存在 host↔device 往返与 per-sample 调用开销，batch>1/梯度积累时更明显；
+#   - override 路径：Torch→JAX 采用 DLPack 同卡零拷贝，无 CPU copy 瓶颈（需保证 JAX 与 Torch 在同一 GPU）。
+
+# ------------------------------------------------------------------------------------------------------
+
+# 仅提醒：
+# 1024 的“点 token 容量”先与现有预算保持；显存允许时再调大 point_token_cap（与 enc_patch_size[-1] 无关）。
+# grid 必须非负（已在 pure_callback/override 侧硬断言）。
 # grid → coord 偏移：当前不会在模型内改动 grid_coord（只做“非负 + 形状 + dtype”校验）；是否归零或对齐，请在数据侧统一处理。
-# 为了避免警告，实施了JAX 端 batch/offset 用 int32，host(PyTorch) 端统一 .long()；避免 JAX_ENABLE_X64 相关警告。
-# JAX 端 batch/offset 用 int32，host (PyTorch) 端统一 .long()，避免 X64 警告。
-# 就“首个生成 token 要不要 +1”这个核心问题（这是在增量解码时决定给 LLM 的首个新生成 token的 position 应该设为已填前缀长度 prefill_len 还是再多加一变成 prefill_len+1 的取值问题；正确应取 prefill_len，以与一次性前向（one-shot）的位置对齐。），你现在的实现已经是正确的（+0），请不要再担心
+# 为避免 X64 警告：JAX 端 batch/offset 用 int32，host(PyTorch) 端统一 .long()。
+# 关于“首个生成 token +1”：本实现已采用正确的 **+0**（首个新 token 的 position = prefill_len），与 one‑shot 对齐。
 
 import dataclasses
 import inspect
@@ -266,10 +268,12 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
     # ---- LoRA 兼容：确保 Sonata.projector 在默认冻结策略下可训练 ----
     def get_freeze_filter(self) -> nnx.filterlib.Filter:
         base = super().get_freeze_filter()
-        # 依据配置/环境变量决定是否从“冻结集合”里排除 projector
-        # 这里用环境变量作兜底，避免 SONATA_TRAIN_MODE 未定义或传空造成 NameError
-        env_mode = os.environ.get("OPENPI_SONATA_TRAIN_MODE", "all")
-        mode = (getattr(self, "sonata_train_mode", None) or env_mode).strip().lower()
+        # 依据配置决定是否从“冻结集合”里排除 projector（不提供任何环境变量兜底）
+        mode = (getattr(self, "sonata_train_mode", None) or "").strip().lower()
+        if mode not in ("all", "projector", "frozen"):
+            raise ValueError(
+                f"config.sonata_train_mode 必须显式设为 'all' | 'projector' | 'frozen'，当前为：{getattr(self, 'sonata_train_mode', None)!r}"
+            )
         try:
             if mode in ("all", "projector"):
                 # 冻结集合 = base ∩ 非("Sonata.projector")  ⇒ projector 放开训练
@@ -277,9 +281,6 @@ class Pi0FASTSonataConfig(_pi0_fast.Pi0FASTConfig):
             elif mode == "frozen":
                 # 冻结集合 = base ∪ "Sonata.projector"     ⇒ projector 一并冻结
                 return nnx.Any(base, nnx.Name("Sonata.projector"))
-            else:
-                # 未知取值，回退到默认：放开 projector
-                return nnx.All(base, nnx.Not(nnx.Name("Sonata.projector")))
         except Exception:
             return base
 class Pi0FASTSonata(_model.BaseModel):
@@ -407,12 +408,11 @@ class Pi0FASTSonata(_model.BaseModel):
             # 如果没有模型，请使用uv run scripts/sonata_weight_gen.py来获取sonata的checkpoint
             # ------------------------------------------------------------------
             # 兼容旧路径：ENV → <repo_root>/pretrain → <repo_root>/src/pretrain
-            repo_root = Path(__file__).resolve().parents[3]
-            candidates = [
-                os.getenv("OPENPI_SONATA_CKPT", "").strip(),
-                repo_root / "pretrain" / "SpatialLM_Sonata_encoder.pth",
-                Path(__file__).resolve().parents[2] / "pretrain" / "SpatialLM_Sonata_encoder.pth",
-            ]
+            parents = list(Path(__file__).resolve().parents)
+            candidates = [os.getenv("OPENPI_SONATA_CKPT", "").strip()]
+            for idx in (1, 2, 3, 4):
+                if len(parents) > idx:
+                    candidates.append(parents[idx] / "pretrain" / "SpatialLM_Sonata_encoder.pth")
             ckpt_path = None
             for p in candidates:
                 p = Path(p)
@@ -917,9 +917,14 @@ class Pi0FASTSonata(_model.BaseModel):
         if (self._point_start_id is None) or (self._point_end_id is None):
             raise ValueError("必须提供 point_start_id / point_end_id 才能进行 SpatialLM‑exact 原位插入。")
 
-        # 训练模式（配置优先，其次环境变量，最后默认常量）
-        cfg_mode = (getattr(config, "sonata_train_mode", "") or "").strip().lower()
-        self._sonata_train_mode = cfg_mode if cfg_mode else SONATA_TRAIN_MODE
+        # 训练模式（必须显式配置；无环境变量兜底）
+        cfg_mode = (getattr(config, "sonata_train_mode", None) or "").strip().lower()
+        if cfg_mode not in ("all", "projector", "frozen"):
+            raise ValueError(
+                "config.sonata_train_mode 必须显式设为 'all' | 'projector' | 'frozen'；"
+                "已禁用环境变量兜底（OPENPI_SONATA_TRAIN_MODE）。未显式配置将直接报错。"
+            )
+        self._sonata_train_mode = cfg_mode
 
     # ----------------------- Debug: 30s 自检 projector 是否在学 -----------------------
     def _proj_param_ref(self):
@@ -975,8 +980,19 @@ class Pi0FASTSonata(_model.BaseModel):
             grid = torch.as_tensor(arr[:, :3],  dtype=torch.int32,  device=device)
             coord= torch.as_tensor(arr[:, 3:6], dtype=torch.float32, device=device)
             feat = torch.as_tensor(arr[:, 3:],  dtype=torch.float32, device=device)
+            # 契约 1：grid 非负
+            if (grid < 0).any().item():
+                raise ValueError("[Sonata/override] grid_coord 含负值；请在上游体素化时保证每维索引 ≥ 0。")
             good = ~(torch.isnan(coord).any(-1) | torch.isnan(feat).any(-1))
             grid, coord, feat = grid[good], coord[good], feat[good]
+            # 契约 2：feat[:,:3] 与 coord 一致（允许微小数值误差）
+            if feat.shape[1] >= 3:
+                max_abs = torch.max(torch.abs(feat[:, :3] - coord)).item()
+                if not np.isfinite(max_abs) or max_abs > 1e-4:
+                    raise ValueError(
+                        f"[Sonata/override] 契约不满足：feat[:,:3]（应为 xyz）与 coord 不一致；"
+                        f"max|diff|={max_abs:.3e}。请保证 feats = [xyz, extras] 且 coord=xyz。"
+                    )
             if feat.numel() == 0:
                 feat_batch.append(torch.zeros((cap, Cenc), dtype=torch.float32, device=device))
                 mask_batch.append(torch.zeros((cap,), dtype=torch.bool, device=device))
@@ -1027,7 +1043,7 @@ class Pi0FASTSonata(_model.BaseModel):
         img_msk_list = []
         for cam_name, image in obs.images.items():
             # 兼容返回 (tokens, pooled) 或仅 tokens 的实现
-            _img_out = self.PaliGemma.img(image, train=False)
+            _img_out = self.PaliGemma.img(image, train=bool(train))
             if isinstance(_img_out, tuple):
                 img_t = _img_out[0]
             else:
@@ -1082,8 +1098,39 @@ class Pi0FASTSonata(_model.BaseModel):
         max_len            = 0
         use_override = (pt_feat_override is not None)
         if use_override:
+            # ---------- 严格对齐 override 的形状 ----------
+            if int(pt_feat_override.shape[0]) != B:
+                raise ValueError(f"pt_feat_override.shape[0]={int(pt_feat_override.shape[0])} ≠ batch={B}。")
             if pt_mask_override is None:
                 raise ValueError("pt_mask_override is required when pt_feat_override is provided.")
+            if int(pt_mask_override.shape[0]) != B:
+                raise ValueError(f"pt_mask_override.shape[0]={int(pt_mask_override.shape[0])} ≠ batch={B}。")
+            if pt_mask_override is None:
+                raise ValueError("pt_mask_override is required when pt_feat_override is provided.")
+            # 1) 长度必须与 point_token_cap 一致（否则 compute_loss 内的 LM/Nimg 会错位）
+            if int(pt_feat_override.shape[1]) != int(self._pt_block_len):
+                raise ValueError(
+                    f"pt_feat_override.shape[1]={int(pt_feat_override.shape[1])} "
+                    f"≠ point_token_cap(self._pt_block_len)={int(self._pt_block_len)}；"
+                    "embed_inputs/compute_loss 的文本/点/图像拼接假设将出现错位。"
+                )
+            if int(pt_mask_override.shape[1]) != int(self._pt_block_len):
+                raise ValueError(
+                    f"pt_mask_override.shape[1]={int(pt_mask_override.shape[1])} "
+                    f"≠ point_token_cap(self._pt_block_len)={int(self._pt_block_len)}。"
+                )
+            # 2) 通道维应等于编码器末层维度（防止错误地把“原始点特征”传进 projector）
+            if int(pt_feat_override.shape[-1]) != int(self._enc_out_dim):
+                raise ValueError(
+                    f"pt_feat_override.shape[-1]={int(pt_feat_override.shape[-1])} "
+                    f"≠ enc_out_dim={int(self._enc_out_dim)}；请传入 Sonata 编码后的特征而非原始点特征。"
+                )
+            # 明确两者的前两维应一致（防止静默广播）
+            if (int(pt_feat_override.shape[0]) != int(pt_mask_override.shape[0])) or \
+               (int(pt_feat_override.shape[1]) != int(pt_mask_override.shape[1])):
+                raise ValueError(
+                    "pt_feat_override 与 pt_mask_override 的前两维（B 与 P_cap）必须一致。"
+                )
             # 方案A：外部已在 PyTorch 侧计算好 Sonata 特征（enc_out_dim）
             pt_tokens = self.Sonata.projector(pt_feat_override.astype(self._proj_dtype))   # [B, P_cap, D]
             valid_m   = pt_mask_override.astype(bool)                                      # [B, P_cap]
@@ -1124,8 +1171,13 @@ class Pi0FASTSonata(_model.BaseModel):
             pad = [(0, tgt - x.shape[0])] + [(0, 0)]*(x.ndim-1)
             return jnp.pad(x, pad)
         if not use_override:
-            pt_tokens = jnp.stack([_pad_to(t, max_len) for t in per_sample_tokens], axis=0)  # (B,P,C)
-            valid_m   = jnp.stack([_pad_to(m, max_len) for m in per_sample_masks], axis=0)   # (B,P)
+            # wrapper 恒定返回 cap 长度，这里防御性断言一致
+            assert int(max_len) == int(self._pt_block_len), (
+                f"Sonata wrapper token_len={int(max_len)} "
+                f"!= point_token_cap={int(self._pt_block_len)}"
+            )
+            pt_tokens = jnp.stack([_pad_to(t, max_len) for t in per_sample_tokens], axis=0)
+            valid_m   = jnp.stack([_pad_to(m, max_len) for m in per_sample_masks], axis=0)
         assert (pt_tokens.shape[1] == valid_m.shape[1] == max_len), "pad 后 token / mask 长度不一致"
 
         # --- 帧级掩码广播到 token 维 ---
