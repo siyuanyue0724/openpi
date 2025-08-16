@@ -1,0 +1,4 @@
+gs://gresearch/robotics/droid_raw/1.0.1/AUTOLab/failure/2023-07-07/Fri_Jul__7_09:45:39_2023
+gs://gresearch/robotics/droid_raw/1.0.1/AUTOLab/failure/2023-07-07/Fri_Jul__7_09:48:37_2023
+gs://gresearch/robotics/droid_raw/1.0.1/AUTOLab/failure/2023-07-07/Fri_Jul__7_09:49:13_2023
+gs://gresearch/robotics/droid_raw/1.0.1/AUTOLab/failure/2023-07-07/Fri_Jul__7_09:50:13_2023

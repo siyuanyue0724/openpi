@@ -1249,7 +1249,6 @@ class Pi0FASTSonata(_model.BaseModel):
         pt_tokens  = pt_tokens.astype(target_dtype)
 
         # --- 定位每个样本的 <start>/<end>（不限制二者之间是否有文本；与 SpatialLM 一致） ---
-        out_struct = (ShapeDtypeStruct((2,), jnp.int32),)
         def _host_call_batch(arr):
             return _host_find_windows_batched(np.asarray(arr), int(self._point_start_id), int(self._point_end_id))
         (win_all,) = pure_callback(

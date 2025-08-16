@@ -167,3 +167,9 @@ cython_debug/
 #  option (not recommended) you can uncomment the following to ignore the entire idea folder.
 #.idea/
 src/pretrain/SpatialLM_Sonata_encoder.pth
+
+# 忽略 dataset 下的所有内容
+src/dataset/*
+
+# 但不要忽略 dataset 目录本身
+!src/dataset/
