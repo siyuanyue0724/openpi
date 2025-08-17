@@ -868,20 +868,41 @@ _CONFIGS = [
     #
     TrainConfig(
         name="pi0_fast_sonata_libero10",
-        model=pi0_fast.Pi0FASTConfig(
-            action_dim=7,                 # ★ 数据集动作是 7 维
+        model=pi0_fast_sonata.Pi0FASTSonataConfig(
+            paligemma_variant="gemma_2b_lora",   # ← LoRA 变体（关键）
+            action_dim=7,
             action_horizon=10,
-            point_feat_dim=6,             # ★ extras=xyz(3)+rgb(3)=6；总列 = 3(grid)+6 = 9
+            max_token_len=180,                   # 建议：收敛几乎不受影响，显存大幅降低
+            point_feat_dim=6,                    # Sonata 严格 6 通道（xyz+rgb），此处必须为 6
             projector_type=pi0_fast.ProjectorType.LINEAR,
             point_backbone_type=pi0_fast.PointBackboneType.SONATA,
-            # 其他超参按需加，比如 max_token_len
+            # 供 tokenizer 在 Prompt 里识别点窗标记；和 dbg 一致
+            point_start_id=POINT_START_ID,
+            point_end_id=POINT_END_ID,
+
+            # ★★★ 关键：开启 “all” 端到端训练模式（Sonata encoder + projector 可训练）
+            # 若只想训 projector：改为 "projector"；若全冻结 Sonata：改 "frozen"
+            sonata_train_mode="all",
+
+            # （可选）严格要求 CUDA，可在需要时打开（当前保持默认 False 以兼容开发环境）
+            # require_cuda=True,
+            # （可选）如每帧点 token 很多且显存允许，可增大点 token 容量上限（与 enc_patch_size 无关）
+            # point_token_cap=1024,
         ),
+
         data=SimpleDataConfig(
             # 用 HF id（最省事）。要用本地，就把 repo_id 则改成本地绝对路径。
             # repo_id="binhng/libero_10_lerobot_mask_depth",
             # assets=AssetsConfig(asset_id="libero_10_lerobot_mask_depth"),
             # https://huggingface.co/datasets/binhng/libero_10_lerobot_mask_depth
-            
+
+            # ----------------------------
+            # 路径选一：服务器版本（两处要一起改）
+            # repo_id="/mnt/libero_10_lerobot_mask_depth",
+            # assets=AssetsConfig(assets_dir="/mnt", asset_id="libero_10_lerobot_mask_depth"),
+            # ----------------------------
+
+            # 当前（本地）版本：确保 repo_id 与 tasks_jsonl 前缀一致（关键）
             repo_id="/home/siyuanyue/Documents/openpi/src/dataset/libero_10_lerobot_mask_depth",
             assets=AssetsConfig(
                 assets_dir="/home/siyuanyue/Documents/openpi/src/dataset",  # 指向数据集根
@@ -890,65 +911,134 @@ _CONFIGS = [
 
             # ① repack（键名对齐）→ 把数据集键重命名成策略/模型侧的常用键
             base_config=DataConfig(
-                 # 这个数据集没有文本列 `task`，不要依赖 prompt_from_task（改为 False）
-                 prompt_from_task=False,
-                action_sequence_keys=("action",),   # ★ 关键：原始数据集列名是 'action'
+                # 该数据集没有文本列 `task`，不能依赖 prompt_from_task；改为 False
+                # prompt 由下游的 InjectPromptFromTaskIndex 从 meta/tasks.jsonl 注入
+                prompt_from_task=False,
+                # 这里必须写“数据集真实列名”，HF 列是 'action' 而不是 'actions'！
+                # 读取后会在 repack 阶段把 'action' 重命名为 'actions'，供下游 transforms / 模型使用
+                action_sequence_keys=("action",),
                 repack_transforms=_transforms.Group(inputs=[
                     _transforms.RepackTransform({
-                        # 图像（LiberoInputs 预期的键）
-                        "observation/image":        "observation.images.image",
-                        "observation/wrist_image":  "observation.images.wrist_image",
-                        "observation/state":        "observation.state",
+                        # 目标键（左）= LiberoInputs 期望；源键（右）= 数据集真实列名（注意：该数据集使用点号扁平键）
+                        "observation/image":       "observation.images.image",
+                        "observation/wrist_image": "observation.images.wrist_image",
+                        "observation/state":       "observation.state",
 
-                        # 动作：把 action → actions，匹配默认 action_sequence_keys=("actions",)
+                        # 动作：把数据集的 'action' 规范化为 'actions'
                         "actions":                  "action",
 
-                        # 深度：供 DecodeLiberoDepth 使用
+                        # 深度：供 DecodeLiberoDepth 使用（数据集真实列在 observation.images.* 下）
                         "depth/front/raw":          "observation.images.image_depth",
                         "depth/wrist/raw":          "observation.images.wrist_depth",
 
-                        # 把 task_index 也明确透传，供后续注入 prompt 使用
-                         "task_index":               "task_index",
+                        # 透传任务索引，供 InjectPromptFromTaskIndex 使用
+                        "task_index":               "task_index",
                     }),
                 ]),
             ),
 
             # ② 深度解码 → 点云 → 校验 → Libero 输入/输出（顺序不要改）
-            data_transforms=lambda model: _transforms.Group(
-                inputs=[
-                     # 先根据 task_index 注入文本指令（从 meta/tasks.jsonl 读取）
-                     _transforms.InjectPromptFromTaskIndex(
-                         tasks_jsonl="/home/siyuanyue/Documents/openpi/src/dataset/libero_10_lerobot_mask_depth/meta/tasks.jsonl",
-                         task_index_key="task_index",
-                         dst_key="prompt",
-                     ),
-                    _transforms.DecodeLiberoDepth(
-                        src_keys=["depth/front/raw", "depth/wrist/raw"],
-                        dst_keys=["depth/front/decoded", "depth/wrist/decoded"],
-                        scale=None,   # 先相对尺度；确认毫米→米后可改 0.001
-                    ),
-                    _transforms.DepthToPointCloud(
-                        depth_map={"front": "depth/front/decoded", "wrist": "depth/wrist/decoded"},
-                        rgb_map={"front": "observation/image", "wrist": "observation/wrist_image"},
-                        intrinsics=None,  # 如有 (fx,fy,cx,cy) 可填 dict，得到米制点云
-                        stride=4,
-                        out_key="pointcloud",
-                    ),
-                    ValidatePointCloud(
-                        key="pointcloud",
-                        feat_dim=getattr(model, "point_feat_dim", 6),
-                        min_points=1,
-                    ),
-                    libero_policy.LiberoInputs(
-                        action_dim=model.action_dim,
-                        model_type=ModelType.PI0_FAST,
-                    ),
-                ],
-                outputs=[libero_policy.LiberoOutputs()],
+            data_transforms=lambda model: (
+                _transforms.Group(
+                    inputs=[
+                        # 先根据 task_index 注入文本指令（从 meta/tasks.jsonl 读取）
+                        _transforms.InjectPromptFromTaskIndex(
+                            # 路径选一：服务器版本
+                            # tasks_jsonl="/mnt/libero_10_lerobot_mask_depth/meta/tasks.jsonl",
+                            # 本地版本（与 repo_id 前缀保持一致 —— 关键）
+                            tasks_jsonl="/home/siyuanyue/Documents/openpi/src/dataset/libero_10_lerobot_mask_depth/meta/tasks.jsonl",
+                            #===============================================================================
+                            task_index_key="task_index",
+                            dst_key="prompt",
+                            strict=True,
+                        ),
+                        _transforms.DecodeLiberoDepth(
+                            src_keys=["depth/front/raw", "depth/wrist/raw"],
+                            dst_keys=["depth/front/decoded", "depth/wrist/decoded"],
+                            scale=None,   # 先相对尺度；若深度单位为毫米，可设 0.001 得到米制
+                        ),
+                        _transforms.DepthToPointCloud(
+                            depth_map={"front": "depth/front/decoded", "wrist": "depth/wrist/decoded"},
+                            rgb_map={"front": "observation/image", "wrist": "observation/wrist_image"},
+                            intrinsics=None,  # 如有 (fx,fy,cx,cy) 可填 dict，得到米制点云
+                            stride=4,
+                            out_key="pointcloud",
+                        ),
+
+                        # —— 关键点 1：先把点云挂到“字典版 observation”，并校验 —— #
+                        _transforms.AttachPointCloudToObservation(key="pointcloud"),
+                        ValidatePointCloud(
+                            key="pointcloud",
+                            feat_dim=getattr(model, "point_feat_dim", 6),
+                            min_points=1,
+                        ),
+
+                        # —— 关键点 2：构造“对象版 Observation”并保留/回挂点云 —— #
+                        _transforms.LiberoInputsKeepExtras(
+                            action_dim=model.action_dim,
+                            model_type=ModelType.PI0_FAST,
+                        ),
+
+                        # 训练用 delta（前6维关节）
+                        _transforms.DeltaActions(_transforms.make_bool_mask(6, -1)),
+                    ],
+                    outputs=[
+                        libero_policy.LiberoOutputs(),
+                        # 推理端把 delta → absolute（前6维关节）
+                        _transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1)),
+
+                        # 关键：显式“锚定”点云到结构里，避免批处理时被裁掉
+                        _transforms.RepackTransform({
+                            "observation/point_clouds/pointcloud": "observation/point_clouds/pointcloud",
+                            "observation/point_cloud_masks/pointcloud": "observation/point_cloud_masks/pointcloud",
+                        }),
+                    ],
+                )
             ),
 
-            # 模型 transforms 用默认的 ModelTransformFactory（已在 SimpleDataConfig 里处理）
+            # ★ 模型 transforms：复用 FAST tokenizer，但在 tokenize 之前“保证点窗标记存在且恰好一对”
+            #   - 若 tasks.jsonl 中 prompt 已含窗口标记，MapPrompt 不会重复添加；
+            #   - RequirePointWindow 在训练/推理均严格校验，缺失或顺序错误会早失败。
+            # 模型 transforms：只做 prompt/resize/tokenize，不再在这里回挂点云
+            model_transforms=lambda model: (
+                (lambda _tk=_tokenizer.FASTTokenizer(model.max_token_len): _transforms.Group(
+                    inputs=[
+                        # 若 prompt 未包含 <|point_start|><|point_end|>，在末尾追加一对（与 dbg 一致）
+                        MapPrompt(lambda s: s if (s and (POINT_START_TOKEN in s and POINT_END_TOKEN in s))
+                                else (f"{(s or '').strip()} {POINT_START_TOKEN}{POINT_END_TOKEN}").strip()),
+                        RequirePointWindow(),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.TokenizeFASTInputs(_tk),
+                    ],
+                    outputs=[
+                        _transforms.ExtractFASTActions(
+                            _tk,
+                            action_horizon=model.action_horizon,
+                            action_dim=model.action_dim,
+                        )
+                    ],
+                ))()
+            ),
         ),
+
+        # 加载 pi0‑FAST 基座权重：避免 PaliGemma 随机初始化（训练更稳、更快收敛）
+        weight_loader=weight_loaders.CheckpointWeightLoader(
+            "gs://openpi-assets/checkpoints/pi0_fast_base/params"
+        ),
+
+        # ★ 与“all”模式一致：只冻结 LoRA 以外的基座；同时 **解冻** Sonata encoder + projector
+        #   注意：get_freeze_filter 需要读到 config.sonata_train_mode，故这里也显式传入 "all"
+        freeze_filter=pi0_fast_sonata.Pi0FASTSonataConfig(
+            paligemma_variant="gemma_2b_lora",
+            point_feat_dim=6,
+            sonata_train_mode="all",    # ← 与上面的 model 保持一致
+        ).get_freeze_filter(),
+
+        # LoRA 训练关闭 EMA（省显存、和 dbg 一致）
+        ema_decay=None,
+
+        log_interval=1,
+        num_workers=0,
     ),
     #
     # Debugging configs.

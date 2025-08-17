@@ -2,6 +2,9 @@
 from .decode_libero_depth import DecodeLiberoDepth
 from .depth_to_pointcloud import DepthToPointCloud
 from .inject_prompt import InjectPromptFromTaskIndex
+from .state_adapters import SplitStateToDroid
+from .pointcloud_attach import AttachPointCloudToObservation, AttachPointCloudToLiberoObservation
+from .libero_keep_extras import LiberoInputsKeepExtras
 
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
