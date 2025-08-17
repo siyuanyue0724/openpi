@@ -1,3 +1,8 @@
+# openpi/transforms/__init__.py
+from .decode_libero_depth import DecodeLiberoDepth
+from .depth_to_pointcloud import DepthToPointCloud
+from .inject_prompt import InjectPromptFromTaskIndex
+
 from collections.abc import Callable, Mapping, Sequence
 import dataclasses
 import re
@@ -431,3 +436,4 @@ def _assert_quantile_stats(norm_stats: at.PyTree[NormStats]) -> None:
             raise ValueError(
                 f"quantile stats must be provided if use_quantile_norm is True. Key {k} is missing q01 or q99."
             )
+
