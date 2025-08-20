@@ -17,6 +17,7 @@ import tqdm_loggable.auto as tqdm
 import wandb
 import torch
 import warnings
+import shutil
 from torch.utils import dlpack as tdlpack
 
 import openpi.models.model as _model
@@ -115,6 +116,34 @@ def init_logging(log_file: str | Path | None = None, level: int = logging.INFO):
 
 # === END PATCH ===============================================================
 
+# --- distributed helpers -----------------------------------------------------
+def _is_leader() -> bool:
+    """Return True only for process 0 (single writer)."""
+    try:
+        return jax.process_index() == 0
+    except Exception:
+        # 单机或老版本 JAX 兜底
+        return True
+
+def _cleanup_orbax_tmp_dirs(base_dir: str | Path | epath.Path) -> int:
+    """清理残留的 '*.orbax-checkpoint-tmp-*' 目录；返回移除数量。
+    仅 leader 执行一次；用于处理上次运行异常中断遗留的 tmp 目录。
+    """
+    try:
+        base = Path(str(base_dir))
+        if not base.exists():
+            return 0
+        removed = 0
+        for p in base.glob("*.orbax-checkpoint-tmp-*"):
+            if p.is_dir():
+                shutil.rmtree(p, ignore_errors=True)
+                removed += 1
+        if removed:
+            logging.warning("[ckpt-cleanup] Removed %d stale orbax tmp dirs under %s", removed, base)
+        return removed
+    except Exception as e:
+        logging.error("[ckpt-cleanup] Failed to clean tmp dirs in %s: %s", base_dir, e)
+        return 0
 
 def init_wandb(config: _config.TrainConfig, *, resuming: bool, log_code: bool = False, enabled: bool = True):
     if not enabled:
@@ -398,7 +427,12 @@ def train_step_all(
 
 def main(config: _config.TrainConfig):
     init_logging()
-    logging.info(f"Running on: {platform.node()}")
+    IS_LEADER = _is_leader()
+    logging.info(
+        f"Running on: {platform.node()} ; "
+        f"jax.process_index={getattr(jax,'process_index',lambda:0)()} / jax.process_count={getattr(jax,'process_count',lambda:1)()} ; "
+        f"leader={IS_LEADER}"
+    )
 
     # 定向过滤 spconv 内部的 AMP 自定义算子 FutureWarning（不影响训练正确性）
     try:
@@ -424,6 +458,9 @@ def main(config: _config.TrainConfig):
     mesh = sharding.make_mesh(config.fsdp_devices)
     data_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec(sharding.DATA_AXIS))
     replicated_sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())
+    # leader 启动前清一次残留 tmp，避免上次异常中断导致 finalize 冲突
+    if IS_LEADER:
+        _cleanup_orbax_tmp_dirs(config.checkpoint_dir)
 
     checkpoint_manager, resuming = _checkpoints.initialize_checkpoint_dir(
         config.checkpoint_dir,
@@ -431,7 +468,10 @@ def main(config: _config.TrainConfig):
         overwrite=config.overwrite,
         resume=config.resume,
     )
-    init_wandb(config, resuming=resuming, enabled=config.wandb_enabled)
+    # W&B 仅 leader 写；非 leader 走 disabled 模式以吞掉随后的 log 调用
+    init_wandb(config, resuming=resuming, enabled=(config.wandb_enabled and IS_LEADER))
+    if IS_LEADER:
+        logging.info("[ckpt] Leader-only save enabled. directory=%s, save_interval=%s", config.checkpoint_dir, str(getattr(config, 'save_interval', None)))
 
     data_loader = _data_loader.create_data_loader(
         config,
@@ -442,20 +482,21 @@ def main(config: _config.TrainConfig):
     batch = next(data_iter)
     logging.info(f"Initialized data loader:\n{training_utils.array_tree_to_info(batch)}")
 
-    # Log images from first batch to sanity check.
-    images_val_dict = batch[0].images
-    B0 = next(iter(images_val_dict.values())).shape[0]
-    images_to_log = []
-    for i in range(min(5, B0)):
-        cat = np.concatenate([np.array(img[i]) for img in images_val_dict.values()], axis=1)
-        if cat.dtype != np.uint8:
-            if np.issubdtype(cat.dtype, np.floating):
-                cat = np.clip(cat, 0, 1)
-                cat = (cat * 255).astype(np.uint8)
-            else:
-                cat = cat.astype(np.uint8, copy=False)
-        images_to_log.append(wandb.Image(cat))
-    wandb.log({"camera_views": images_to_log}, step=0)
+    # Log images from first batch to sanity check (leader only).
+    if IS_LEADER:
+        images_val_dict = batch[0].images
+        B0 = next(iter(images_val_dict.values())).shape[0]
+        images_to_log = []
+        for i in range(min(5, B0)):
+            cat = np.concatenate([np.array(img[i]) for img in images_val_dict.values()], axis=1)
+            if cat.dtype != np.uint8:
+                if np.issubdtype(cat.dtype, np.floating):
+                    cat = np.clip(cat, 0, 1)
+                    cat = (cat * 255).astype(np.uint8)
+                else:
+                    cat = cat.astype(np.uint8, copy=False)
+            images_to_log.append(wandb.Image(cat))
+        wandb.log({"camera_views": images_to_log}, step=0)
 
     train_state, train_state_sharding = init_train_state(config, init_rng, mesh, resume=resuming)
     if resuming:
@@ -489,12 +530,8 @@ def main(config: _config.TrainConfig):
         )
 
     start_step = int(train_state.step)
-    pbar = tqdm.tqdm(
-        range(start_step, config.num_train_steps),
-        initial=start_step,
-        total=config.num_train_steps,
-        dynamic_ncols=True,
-    )
+    _iter = range(start_step, config.num_train_steps)
+    pbar = tqdm.tqdm(_iter, initial=start_step, total=config.num_train_steps, dynamic_ncols=True) if IS_LEADER else _iter
 
     # ============== all 模式：构造 Torch 端 Sonata 优化器（独立于 JAX 优化器） ==============
     if mode_all:
@@ -631,7 +668,8 @@ def main(config: _config.TrainConfig):
                 except Exception:
                     return str(v)
             info_str = ", ".join(f"{k}={_fmt_metric(v)}" for k, v in reduced_info.items())
-            pbar.write(f"Step {step}: {info_str}")
+            if IS_LEADER and hasattr(pbar, "write"):
+                pbar.write(f"Step {step}: {info_str}")
             # 追加：all 模式下的 Torch 侧范数 & 点 token 使用率
             if mode_all:
                 try:
@@ -643,7 +681,7 @@ def main(config: _config.TrainConfig):
                                     "sonata_grad_norm": float(sonata_grad_norm)}
                 except Exception:
                     pass
-                if last_pt_usage_stats is not None:
+                if IS_LEADER and last_pt_usage_stats is not None:
                     K_host, cap = last_pt_usage_stats
                     try:
                         reduced_info = {**reduced_info,
@@ -653,12 +691,23 @@ def main(config: _config.TrainConfig):
                         wandb.log({"pt_K_hist": wandb.Histogram(K_host)}, step=step)
                     except Exception:
                         pass
-            wandb.log(reduced_info, step=step)
+            if IS_LEADER:
+                wandb.log(reduced_info, step=step)
             infos = []
         batch = next(data_iter)
 
-        if (step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1:
-            _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+        if IS_LEADER and ((step % config.save_interval == 0 and step > start_step) or step == config.num_train_steps - 1):
+            logging.info("[ckpt-save] Requesting save for step=%d (train_state.step=%d)", step, int(train_state.step))
+            # safe save: stale tmp 清理后重试一次
+            try:
+                _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+            except Exception as e:
+                if "orbax-checkpoint-tmp" in str(e):
+                    logging.error("[ckpt-save] Save for step=%d failed due to stale tmp dirs; cleaning and retrying once.", step)
+                    _cleanup_orbax_tmp_dirs(config.checkpoint_dir)
+                    _checkpoints.save_state(checkpoint_manager, train_state, data_loader, step)
+                else:
+                    raise
 
         # （可选）投影器 L2 监控：存在 config.proj_l2_log_interval 时启用
         try:
@@ -670,12 +719,14 @@ def main(config: _config.TrainConfig):
             host_model_dbg = nnx.merge(train_state.model_def, train_state.params)
             delta = host_model_dbg.debug_log_projector_delta(tag=f"(step={step})")
             try:
-                wandb.log({"projector_l2_delta": float(delta)}, step=step)
+                if IS_LEADER:
+                    wandb.log({"projector_l2_delta": float(delta)}, step=step)
             except Exception:
                 pass
 
-    logging.info("Waiting for checkpoint manager to finish")
-    checkpoint_manager.wait_until_finished()
+    if IS_LEADER:
+        logging.info("Waiting for checkpoint manager to finish")
+        checkpoint_manager.wait_until_finished()
 
 
 if __name__ == "__main__":

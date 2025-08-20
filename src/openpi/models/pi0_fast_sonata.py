@@ -154,12 +154,15 @@ def _host_find_window_only(
     s, e = s_pos[0], e_pos[0]
     if not (0 <= s < e < L): raise ValueError(f"[point-window] invalid order: start={s}, end={e}, L={L}")
     # D) 软提示：start 与 end 相邻（或几乎无夹层文本）
+    # 默认压制；将环境变量 OPENPI_SUPPRESS_ADJ_POINT_WARN=0 可恢复此告警
     if e - s <= 1:
-        warnings.warn(
-            f"[Pi0FAST-Sonata] <point_start> and <point_end> are adjacent at positions ({s},{e}). "
-            "No textual context between them.",
-            RuntimeWarning
-        )
+        _suppress = os.environ.get("OPENPI_SUPPRESS_ADJ_POINT_WARN", "1") == "1"
+        if not _suppress:
+            warnings.warn(
+                f"[Pi0FAST-Sonata] <point_start> and <point_end> are adjacent at positions ({s},{e}). "
+                "No textual context between them.",
+                RuntimeWarning
+            )
     return np.array([s, e], dtype=np.int32)
 
 # -------- 仅支持“新接口”抽取点云 ----------
@@ -1262,10 +1265,18 @@ class Pi0FASTSonata(_model.BaseModel):
         s_ok = jnp.take_along_axis(pm, win_all[:, 0:1], axis=1).squeeze(1)
         e_ok = jnp.take_along_axis(pm, win_all[:, 1:1+1], axis=1).squeeze(1)
         def _host_check(vs, ve):
-            vs, ve = bool(np.asarray(vs)), bool(np.asarray(ve))
-            if not (vs and ve):
-                raise RuntimeError("[Pi0FAST-Sonata] <point_start>/<point_end> 必须是有效 token（mask=True）。")
+            # 支持批量：vs/ve 形状为 (B,)
+            vs_arr = np.asarray(vs).astype(bool).reshape(-1)
+            ve_arr = np.asarray(ve).astype(bool).reshape(-1)
+            bad_s = np.where(~vs_arr)[0].tolist()
+            bad_e = np.where(~ve_arr)[0].tolist()
+            if bad_s or bad_e:
+                raise RuntimeError(
+                    "[Pi0FAST-Sonata] <point_start>/<point_end> 必须是有效 token（mask=True）。"
+                    f" 无效 start 样本: {bad_s[:10]} 无效 end 样本: {bad_e[:10]}"
+                )
             return np.int32(0)
+
         sentinel_se = pure_callback(
             _host_check, ShapeDtypeStruct((), jnp.int32),
             s_ok, e_ok, vectorized=False
@@ -1323,6 +1334,42 @@ class Pi0FASTSonata(_model.BaseModel):
 
         # 再次绑定（任选一个现有张量；这里仍绑到 txt_tokens）
         txt_tokens = txt_tokens + (sentinel_mid.astype(txt_tokens.dtype) * 0)
+
+        # ------------------------------------------------------------------------------
+        #----------------------------  SONATA DEBUG PRINT  -----------------------------
+        # 可选：打印每个样本的点 token 有效数 K 以及窗口位置，便于快速确认“点云是否被用上”。
+        # 开关：设置环境变量 OPENPI_SONATA_DEBUG_POINT_APPLY=1 时启用；默认关闭。
+        # 说明：通过 pure_callback 绑定到图，JIT 训练时也会在 host 输出。
+        # ------------------------------------------------------------------------------
+        if os.environ.get("OPENPI_SONATA_DEBUG_POINT_APPLY", "0") == "1":
+            K_vec = jnp.sum(pt_final_mask.astype(jnp.int32), axis=1)  # [B]
+            cap   = int(self._pt_token_cap)
+            encd  = int(self._enc_out_dim)
+            def _host_dbg_print(K_np, win_np, frame_np):
+                import numpy as _np
+                K = _np.asarray(K_np).astype(int).tolist()
+                W = _np.asarray(win_np)
+                F = _np.asarray(frame_np).astype(bool).tolist()
+                lines = []
+                for i in range(len(K)):
+                    s, e = int(W[i,0]), int(W[i,1])
+                    status = "OK" if (F[i] and K[i] > 0) else ("EMPTY" if K[i] == 0 else "MASKED-OUT")
+                    lines.append(f"  sample {i:02d}: frame={F[i]}, K={K[i]}, window=({s},{e}) -> {status}")
+                print("\n#---------------------------- Pi0FAST-Sonata Debug ----------------------------")
+                print(f"  point_token_cap={cap}, enc_out_dim={encd}, batch_size={len(K)}")
+                print("\n".join(lines))
+                print("#--------------------------------------------------------------------------------\n")
+                return _np.int32(0)
+            _sentinel_dbg = pure_callback(
+                _host_dbg_print,
+                ShapeDtypeStruct((), jnp.int32),
+                K_vec, win_all, pc_frame_mask,
+                vectorized=False
+            )
+            # 绑定 sentinel 以防 DCE（不改变数值）
+            txt_tokens = txt_tokens + (jnp.asarray(_sentinel_dbg, dtype=txt_tokens.dtype) * 0)
+        #----------------------------  END SONATA DEBUG PRINT  -------------------------
+        # ------------------------------------------------------------------------------
 
         # --- 逐样本装配：通过“条件索引 + take”避免动态形状更新 ---
         seq_list, msk_list, ar_list = [], [], []

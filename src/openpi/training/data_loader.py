@@ -69,17 +69,72 @@ class IterableTransformedDataset(IterableDataset[T_co]):
         self._is_batched = is_batched
     def __iter__(self):
         for sample in self._dataset:
-            if self._is_batched:
-                # If dataset yields batched data, apply transform to each element in the batch individually.
-                batch_size = next(v.shape[0] for v in sample.values())
-                # Split batch into individual samples
-                individual_samples = [jax.tree_map(lambda x: x[i], sample) for i in range(batch_size)]
-                # Transform each sample
-                transformed_samples = [self._transform(s) for s in individual_samples]
-                # Recombine into a batch
-                yield jax.tree_map(lambda *xs: np.stack(xs, axis=0), *transformed_samples)
-            else:
+            if not self._is_batched:
                 yield self._transform(sample)
+                continue
+
+            # 1) 只从“有batch维的 array 叶子”里推断 batch size
+            bs = None
+            for leaf in jax.tree_util.tree_leaves(sample):
+                if hasattr(leaf, "shape") and getattr(leaf, "ndim", 0) >= 1:
+                    bs = int(leaf.shape[0]); break
+            if bs is None:
+                raise ValueError("IterableTransformedDataset: cannot infer batch size from sample.")
+
+            # 2) 拆成单样本：array 取第0维；list/tuple 长度为B则取第i个；其余（标量/字符串等）视为样本无关
+            def _take_i(x, i):
+                if hasattr(x, "shape") and getattr(x, "ndim", 0) >= 1 and x.shape[0] > i:
+                    return x[i]
+                if isinstance(x, (list, tuple)) and len(x) > i:
+                    return x[i]
+                return x
+            singles = [
+                # 只把 str/bytes 视作叶子，允许对 dict/list/tuple 递归
+                jax.tree_map(lambda x, i=i: _take_i(x, i), sample,
+                             is_leaf=lambda z: isinstance(z, (str, bytes)))
+                for i in range(bs)
+            ]
+
+            # 3) 逐样本做 transform
+            singles_t = [self._transform(s) for s in singles]
+
+            # 4) 合回批：形状一致→stack；若仅轴0变长→pad后stack（仅数值/布尔）；否则→list
+            def _stack_or_pad(*xs):
+                arrays = []
+                # 能转 ndarray 就优先按数组规则处理；否则退化为 list
+                try:
+                    for x in xs:
+                        arrays.append(np.asarray(x))
+                except Exception:
+                    return list(xs)
+                kinds = [a.dtype.kind for a in arrays]
+                if not all(k in "biufc" for k in kinds):
+                    return list(xs)
+                shapes = [a.shape for a in arrays]
+                if all(s == shapes[0] for s in shapes):
+                    return np.stack(arrays, axis=0)
+                ndims = {a.ndim for a in arrays}
+                if len(ndims) == 1 and next(iter(ndims)) >= 1:
+                    trailing = [a.shape[1:] for a in arrays]
+                    if all(t == trailing[0] for t in trailing):
+                        maxn = max(a.shape[0] for a in arrays)
+                        out_shape = (len(arrays), maxn) + trailing[0]
+                        out = np.zeros(out_shape, dtype=np.result_type(*[a.dtype for a in arrays]))
+                        for i, a in enumerate(arrays):
+                            out[i, : a.shape[0], ...] = a
+                        return out
+                # 非数组或不兼容 → 若值全等保留一个，否则 list
+                try:
+                    all_eq = all((x == xs[0]) for x in xs)
+                except Exception:
+                    all_eq = False
+                return xs[0] if all_eq else list(xs)
+
+            # 保持递归到 dict/list/tuple；只把 str/bytes 当叶子
+            yield jax.tree_map(
+                _stack_or_pad, *singles_t,
+                is_leaf=lambda z: isinstance(z, (str, bytes))
+            )
     def __len__(self) -> int:
         return len(self._dataset)
 
@@ -355,6 +410,12 @@ class TorchDataLoader:
             )
         self._sharding = sharding
         self._num_batches = num_batches
+        # 保证本地 batch 能均分到本地设备
+        ndev = max(1, jax.local_device_count())
+        if local_batch_size % ndev != 0:
+            raise ValueError(
+                f"local_batch_size ({local_batch_size}) must be divisible by number of local devices ({ndev})."
+            )
 
         mp_ctx = None
         if num_workers > 0:
@@ -377,9 +438,44 @@ class TorchDataLoader:
 
     @staticmethod
     def _collate_fn(items):
-        """Stack batch elements into numpy arrays (since JAX cannot directly handle torch Tensors)."""
-        # Convert each item to numpy (in case they are JAX DeviceArrays) and stack
-        return jax.tree_map(lambda *x: np.stack([np.array(xi) for xi in x], axis=0), *items)
+        """Stack when shapes match; if only axis-0 is ragged, pad-to-max then stack (numeric/bool only);
+        otherwise collect as list (e.g., strings)."""
+        def _stack_or_pad(*xs):
+            # 1) 全部能转为 ndarray 吗？
+            arrays = []
+            try:
+                for x in xs:
+                    arrays.append(np.asarray(x))
+            except Exception:
+                # 非数组（如 str/None/对象）→ 列表返回，避免报错
+                return list(xs)
+
+            # 1.5) 仅对数值/布尔数组做 pad/stack；字符串、对象等直接 list
+            kinds = [a.dtype.kind for a in arrays]
+            if not all(k in "biufc" for k in kinds):  # b:bool i:int u:uint f:float c:complex
+                return list(xs)
+
+            # 2) 形状完全一致 → 直接 stack
+            shapes = [a.shape for a in arrays]
+            if all(s == shapes[0] for s in shapes):
+                return np.stack(arrays, axis=0)
+
+            # 3) 若仅第 0 维不同，且“后续维度完全一致” → 沿轴 0 零填充到本批最大长度
+            ndims = {a.ndim for a in arrays}
+            if len(ndims) == 1 and next(iter(ndims)) >= 1:
+                trailing = [a.shape[1:] for a in arrays]
+                if all(t == trailing[0] for t in trailing):
+                    maxn = max(a.shape[0] for a in arrays)
+                    out_shape = (len(arrays), maxn) + trailing[0]
+                    out = np.zeros(out_shape, dtype=np.result_type(*[a.dtype for a in arrays]))
+                    for i, a in enumerate(arrays):
+                        out[i, : a.shape[0], ...] = a
+                    return out
+
+            # 4) 其余情况 → 列表返回（如维度本身不同或 trailing 维不同）
+            return list(xs)
+
+        return jax.tree_map(_stack_or_pad, *items)
 
     @staticmethod
     def _worker_init_fn(worker_id: int):
@@ -395,8 +491,17 @@ class TorchDataLoader:
                 if self._num_batches is not None and num_yielded >= self._num_batches:
                     return
                 num_yielded += 1
-                # Move data from process local (CPU) to correct device sharding
-                yield jax.tree_map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
+                # 只对 array 叶子做 device_put 到指定 sharding；其他类型原样返回
+                def _to_sharded(x):
+                    if hasattr(x, "shape"):
+                        try:
+                            dt = np.asarray(x).dtype
+                            if dt.kind in "biufc":
+                                return jax.device_put(x, self._sharding)
+                        except Exception:
+                            pass
+                    return x
+                yield jax.tree_map(_to_sharded, batch)
 
 class RLDSDataLoader:
     """Wrapper for an iterable RLDS dataset to provide the same interface as TorchDataLoader."""
@@ -420,12 +525,32 @@ class RLDSDataLoader:
 
     def __iter__(self):
         num_yielded = 0
+        ndev = max(1, jax.local_device_count())
         while True:
             for batch in self._dataset:
                 if self._num_batches is not None and num_yielded >= self._num_batches:
                     return
                 num_yielded += 1
-                yield jax.tree_map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
+                # 一次性检查：能找到 array 叶子就推断 B，并校验能均分到本地设备
+                B = None
+                for leaf in jax.tree_util.tree_leaves(batch):
+                    if hasattr(leaf, "shape") and getattr(leaf, "ndim", 0) >= 1:
+                        B = int(leaf.shape[0]); break
+                if B is not None and B % ndev != 0:
+                    raise ValueError(
+                        f"RLDS batch size ({B}) must be divisible by number of local devices ({ndev})."
+                    )
+                # 与 TorchDataLoader 保持一致：仅对 array 叶子 device_put 到给定 sharding
+                def _to_sharded(x):
+                    if hasattr(x, "shape"):
+                        try:
+                            dt = np.asarray(x).dtype
+                            if dt.kind in "biufc":
+                                return jax.device_put(x, self._sharding)
+                        except Exception:
+                            pass
+                    return x
+                yield jax.tree_map(_to_sharded, batch)
 
 class DataLoaderImpl(DataLoader):
     def __init__(self, data_config: _config.DataConfig, data_loader: TorchDataLoader | RLDSDataLoader):
