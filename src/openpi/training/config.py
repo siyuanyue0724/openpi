@@ -1063,6 +1063,7 @@ _CONFIGS = [
             require_pointcloud=True,
         ),
 
+        data=SimpleDataConfig(
             # ----------------------------
             # 路径选一：服务器版本（两处要一起改）
             # repo_id="/mnt/agiworldbot_task_390",
