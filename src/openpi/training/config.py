@@ -1041,6 +1041,153 @@ _CONFIGS = [
         num_workers=0,
     ),
     #
+    # agibotworld方案（最小改动、无任务表依赖版）
+    #
+    TrainConfig(
+        name="pi0_fast_sonata_agibotworld",
+
+        # —— 模型：沿用 Sonata + LoRA 方案（dim/horizon 按需改）——
+        model=pi0_fast_sonata.Pi0FASTSonataConfig(
+            paligemma_variant="gemma_2b_lora",
+            action_dim=7,              # ★ 若你是 6 关节 + 1 指，留 7；否则改成你的动作维度
+            action_horizon=10,         # ★ 每段动作长度，按你需要的 chunk 长度改
+            max_token_len=180,
+            point_feat_dim=6,          # 固定 6（xyz+rgb）
+            projector_type=pi0_fast.ProjectorType.LINEAR,
+            point_backbone_type=pi0_fast.PointBackboneType.SONATA,
+            point_start_id=POINT_START_ID,
+            point_end_id=POINT_END_ID,
+            # 端到端训练 Sonata（建议）
+            sonata_train_mode="all",
+            # 没有点云就会报错（更早暴露问题）；若需暂时绕过，把它改成 False
+            require_pointcloud=True,
+        ),
+
+        data=SimpleDataConfig(
+            # ★★ 把 repo_id 改成你的“数据集根目录（含 meta/ 和 data/ 的那一层）”
+            repo_id="/home/siyuanyue/Documents/openpi/src/dataset/agiworldbot_task_390",
+
+            # ★★ norm_stats 加载位置；asset_id 建议与目录名一致
+            assets=AssetsConfig(
+                assets_dir="/home/siyuanyue/Documents/openpi/src/dataset",
+                asset_id="agiworldbot_task_390",
+            ),
+
+            # ① repack（把数据集真实键名映射成管线常用键）
+            base_config=DataConfig(
+                prompt_from_task=False,           # 不再依赖 tasks.jsonl；下方会用 MapPrompt 兜底
+                action_sequence_keys=("action",), # 若你的列名是 'actions' 就写成 ("actions",)
+                repack_transforms=_transforms.Group(inputs=[
+                    _transforms.RepackTransform({
+                        # ====== 按你的相机键名改（与数据集真实列对齐）======
+                        # front 视角：用 top_head（480×640，与深度同分辨率）
+                        "observation/image":       "observation.images.top_head",
+                        # wrist 视角：用 hand_left（或 hand_right）
+                        "observation/wrist_image": "observation.images.hand_left",
+
+                        # 机器人状态（若无就删掉这行，同时确保下游 transform 不依赖它）
+                        "observation/state":       "observation.state",
+
+                        # 动作：把真实列名映射为 'actions'
+                        "actions":                 "action",
+
+                        # ====== 深度键（你的数据只有 cam_top_depth）======
+                        # 把 cam_top_depth 当作“raw”，交给 DecodeLiberoDepth 去 squeeze/cast
+                        "depth/front/raw":         "observation.images.cam_top_depth",
+
+                        # ⚠️ 去掉 task_index 的强制映射，避免数据里没有该列时直接报错
+                        # "task_index":              "task_index",
+                    }),
+                ]),
+            ),
+
+            # ② 数据变换：深度→点云→校验→组装 Libero 输入/输出（无任务表依赖）
+            data_transforms=lambda model: (
+                _transforms.Group(
+                    inputs=[
+                        # 先把 raw (1,H,W 或 uint16) 解码成 HxW float32
+                        _transforms.DecodeLiberoDepth(
+                            src_keys=["depth/front/raw"],
+                            dst_keys=["depth/front/decoded"],
+                            scale=None,  # ✅ 最稳妥：先不假设单位；确认是毫米后再改成 0.001
+                        ),
+                        # 用 front 深度 + front RGB 生成点云
+                        _transforms.DepthToPointCloud(
+                            depth_map={"front": "depth/front/decoded"},          # 仅 front
+                            rgb_map={"front": "observation/image"},              # 与之配对的 RGB
+                            intrinsics=None,  # ✅ 若你有 (fx,fy,cx,cy) 可填 dict 得到米制；暂无就先相对值
+                            stride=4,
+                            out_key="pointcloud",
+                        ),
+
+                        # 把点云“挂”到 Observation 新接口上，并做严格校验
+                        _transforms.AttachPointCloudToObservation(key="pointcloud"),
+                        ValidatePointCloud(
+                            key="pointcloud",
+                            feat_dim=getattr(model, "point_feat_dim", 6),
+                            min_points=1,
+                            allow_mask_all_false=False,
+                        ),
+
+                        # 组装为 Libero 风格输入（包含 images/state/prompt；并保持额外字段）
+                        _transforms.LiberoInputsKeepExtras(
+                            action_dim=model.action_dim,
+                            model_type=ModelType.PI0_FAST,
+                        ),
+
+                        # 训练端使用 delta（如你的动作本来就是 delta，可移除）
+                        _transforms.DeltaActions(_transforms.make_bool_mask(6, -1)),
+                    ],
+                    outputs=[
+                        libero_policy.LiberoOutputs(),
+                        _transforms.AbsoluteActions(_transforms.make_bool_mask(6, -1)),
+                        _transforms.RepackTransform({
+                            # 显式锚定点云到 Observation 里，避免批处理时被裁掉
+                            "observation/point_clouds/pointcloud": "observation/point_clouds/pointcloud",
+                            "observation/point_cloud_masks/pointcloud": "observation/point_cloud_masks/pointcloud",
+                        }),
+                    ],
+                )
+            ),
+
+            # ③ 模型变换：保证 prompt 含 <|point_start|><|point_end|>，再 Tokenize FAST
+            model_transforms=lambda model: (
+                (lambda _tk=_tokenizer.FASTTokenizer(model.max_token_len): _transforms.Group(
+                    inputs=[
+                        # 没有任务表：自动补一对点窗标记
+                        MapPrompt(lambda s: s if (s and (POINT_START_TOKEN in s and POINT_END_TOKEN in s))
+                                else (f"{(s or '').strip()} {POINT_START_TOKEN}{POINT_END_TOKEN}").strip() ),
+                        RequirePointWindow(),
+                        _transforms.ResizeImages(224, 224),
+                        _transforms.TokenizeFASTInputs(_tk),
+                    ],
+                    outputs=[
+                        _transforms.ExtractFASTActions(
+                            _tk,
+                            action_horizon=model.action_horizon,
+                            action_dim=model.action_dim,
+                        )
+                    ],
+                ))()
+            ),
+        ),
+
+        # 载入 pi0‑FAST 基座，LoRA 训练建议关闭 EMA（与既有配置一致）
+        weight_loader=weight_loaders.CheckpointWeightLoader("gs://openpi-assets/checkpoints/pi0_fast_base/params"),
+        freeze_filter=pi0_fast_sonata.Pi0FASTSonataConfig(
+            paligemma_variant="gemma_2b_lora",
+            point_feat_dim=6,
+            sonata_train_mode="all",
+        ).get_freeze_filter(),
+        ema_decay=None,
+
+        # 其他超参按需改
+        batch_size=2,
+        log_interval=50,
+        save_interval=5000,
+        num_workers=0,
+    ),
+    #
     # Debugging configs.
     #
     TrainConfig(
