@@ -1063,11 +1063,13 @@ _CONFIGS = [
             require_pointcloud=True,
         ),
 
-        data=SimpleDataConfig(
-            # ★★ 把 repo_id 改成你的“数据集根目录（含 meta/ 和 data/ 的那一层）”
+            # ----------------------------
+            # 路径选一：服务器版本（两处要一起改）
+            # repo_id="/mnt/agiworldbot_task_390",
+            # assets=AssetsConfig(assets_dir="/mnt", asset_id="agiworldbot_task_390"),
+            # ----------------------------
+            # 本地版本（默认启用）
             repo_id="/home/siyuanyue/Documents/openpi/src/dataset/agiworldbot_task_390",
-
-            # ★★ norm_stats 加载位置；asset_id 建议与目录名一致
             assets=AssetsConfig(
                 assets_dir="/home/siyuanyue/Documents/openpi/src/dataset",
                 asset_id="agiworldbot_task_390",
