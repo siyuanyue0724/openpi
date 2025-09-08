@@ -5,7 +5,7 @@ openpi holds open-source models and packages for robotics, published by the [Phy
 Currently, this repo contains three types of models:
 - the [π₀ model](https://www.physicalintelligence.company/blog/pi0), a flow-based vision-language-action model (VLA).
 - the [π₀-FAST model](https://www.physicalintelligence.company/research/fast), an autoregressive VLA, based on the FAST action tokenizer.
-- the [π₀.₅ model](https://www.physicalintelligence.company/blog/pi05), an upgraded version of π₀ with better open-world generalization trained with [knowledge insulation](https://www.physicalintelligence.company/research/knowledge_insulation). Note that, in this repository, we currently only support the flow matching head for both $\pi_{0.5}$ training and inference.
+- the [π₀.₅ model](https://www.physicalintelligence.company/blog/pi05), an upgraded version of π₀ with better open-world generalization trained with [knowledge insulation](https://www.physicalintelligence.company/research/knowledge_insulation).
 
 For all models, we provide _base model_ checkpoints, pre-trained on 10k+ hours of robot data, and examples for using them out of the box or fine-tuning them to your own datasets.
 
@@ -198,7 +198,10 @@ openpi now provides PyTorch implementations of π₀ and π₀.₅ models alongs
 - EMA (exponential moving average) weights during training
 
 ### Setup
-1. Make sure that you have the latest version of all dependencies installed: `uv sync`
+1. Make sure that you have the latest version of all dependencies installed:
+   ```bash
+   uv sync
+   ```
 
 2. Double check that you have transformers 4.53.2 installed: `uv pip show transformers`
 
@@ -206,10 +209,9 @@ openpi now provides PyTorch implementations of π₀ and π₀.₅ models alongs
    ```bash
    cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/
    ```
+   This overwrites several files in the transformers library with necessary model changes.
 
-This overwrites several files in the transformers library with necessary model changes: 1) supporting AdaRMS, 2) correctly controlling the precision of activations, and 3) allowing the KV cache to be used without being updated.
-
-**WARNING**: With the default uv link mode (hardlink), this will permanently affect the transformers library in your uv cache, meaning the changes will survive reinstallations of transformers and could even propagate to other projects that use transformers. To fully undo this operation, you must run `uv cache clean transformers`.
+**WARNING**: With the default uv link mode (hardlink), this will permanently affect the transformers library in your uv cache. To fully undo this operation, you must run `uv cache clean transformers`.
 
 ### Converting JAX Models to PyTorch
 
