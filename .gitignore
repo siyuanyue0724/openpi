@@ -170,3 +170,9 @@ src/pretrain/SpatialLM_Sonata_encoder.pth
 
 # 忽略 dataset 下的所有内容
 src/dataset/*
+
+.merge_*.tsv
+.merge_*.txt
+
+.merge_*.tsv
+.merge_*.txt
