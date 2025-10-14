@@ -22,11 +22,15 @@ Multi-Node Training:
     scripts/train_pytorch.py <config_name> --exp_name=<run_name> --save_interval <interval>
 """
 
+import os
+# Ensure CUDA allocator config is set before torch (or any extension importing torch)
+# initializes CUDA. This is a no-op if the user already set it in the shell.
+os.environ.setdefault("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:128,expandable_segments:True")
+
 import dataclasses
 import dataclasses as _dc
 import gc
 import logging
-import os
 import platform
 import shutil
 import time
@@ -402,31 +406,31 @@ def train_loop(config: _config.TrainConfig):
     # Pass the original batch size to data loader - it will handle DDP splitting internally
     loader, data_config = build_datasets(config)
 
-    # Log sample images to wandb on first batch (fail-fast: require 'image', notice this when masking data)
+    # Log sample images to wandb on first batch (fail-fast: require 'image' or 'images')
     if is_main and config.wandb_enabled and not resuming:
         # Create a separate data loader for sample batch to avoid consuming the main loader
         sample_data_loader = _data.create_data_loader(config, framework="pytorch", shuffle=False)
         sample_batch = next(iter(sample_data_loader))
         # Convert observation and actions to torch tensors
         observation, actions = sample_batch
-        sample_dict = observation.to_dict()   # fail-fast: must contain 'image'
+        sample_dict = observation.to_dict()
+        img_dict = sample_dict.get("images")
+        if img_dict is None:
+            img_dict = sample_dict["image"]  # 若两者都无，立刻 KeyError（契约不满足就崩）
 
         images_to_log = []
         # Get batch size from the first image tensor
-        batch_size = next(iter(sample_dict["image"].values())).shape[0]
+        batch_size = next(iter(img_dict.values())).shape[0]
         for i in range(min(5, batch_size)):
             # Concatenate all camera views horizontally for this batch item
             # Convert from NCHW to NHWC format for wandb
-            img_concatenated = torch.cat(
-                [img[i].permute(1, 2, 0) for img in sample_dict["image"].values()],
-                dim=1  # PyTorch uses dim (not axis)
-            )
+            img_concatenated = torch.cat([img[i].permute(1, 2, 0) for img in img_dict.values()], dim=1)
             images_to_log.append(wandb.Image(img_concatenated.cpu().numpy()))
 
         wandb.log({"camera_views": images_to_log}, step=0)
 
         # Clear sample batch from memory aggressively
-        del sample_batch, observation, actions, images_to_log, img_concatenated
+        del sample_batch, observation, actions, images_to_log
         del sample_data_loader  # Also delete the sample data loader
         gc.collect()
         if torch.cuda.is_available():
@@ -469,17 +473,20 @@ def train_loop(config: _config.TrainConfig):
         torch.backends.cudnn.benchmark = True
         torch.backends.cuda.matmul.allow_tf32 = True
         torch.backends.cudnn.allow_tf32 = True
-        # Set memory allocation configuration
-        os.environ["PYTORCH_CUDA_ALLOC_CONF"] = "max_split_size_mb:128,expandable_segments:True"
-        logging.info("Enabled memory optimizations for 8+ GPU training")
+        # Allocator configuration was set at import-time via `setdefault` (see top of file).
+        logging.info("Enabled memory optimizations for 8+ GPU training (allocator configured at import-time)")
 
     if use_ddp:
+        # Keep prior-tested behavior: find_unused_parameters=True.
+        # static_graph is incompatible with find_unused=True; leave it off unless you switch to find_unused=False.
+        find_unused = True
+        static_graph = False  # (world_size >= 8) and (not find_unused)
         model = torch.nn.parallel.DistributedDataParallel(
             model,
             device_ids=[device.index] if device.type == "cuda" else None,
-            find_unused_parameters=True,  # Disable for memory efficiency
-            gradient_as_bucket_view=True,  # Enable for memory efficiency
-            static_graph=world_size >= 8,  # Enable for 8+ GPUs
+            find_unused_parameters=find_unused,
+            gradient_as_bucket_view=True,
+            static_graph=static_graph,
         )
 
     # Load weights from weight_loader if specified (for fine-tuning)
@@ -488,7 +495,9 @@ def train_loop(config: _config.TrainConfig):
 
         model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
         safetensors.torch.load_model(
-            (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model), model_path
+            (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model),
+            model_path,
+            device=str(device),
         )
         logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
 
@@ -503,22 +512,42 @@ def train_loop(config: _config.TrainConfig):
         if not cond:
             raise RuntimeError(msg)
 
-    sonata_mode = os.environ.get("OPENPI_SONATA_MODE", getattr(getattr(config, "model", object()), "sonata_train_mode", "off"))
+    # Accept both new and legacy env var names; conflict ⇒ fail fast.
+    env_new = os.environ.get("OPENPI_SONATA_MODE")
+    env_old = os.environ.get("OPENPI_SONATA_TRAIN_MODE")
+    if env_new and env_old and env_new.lower() != env_old.lower():
+        raise RuntimeError("Conflicting SONATA mode env vars: OPENPI_SONATA_MODE vs OPENPI_SONATA_TRAIN_MODE")
+    sonata_mode = (env_new or env_old or getattr(getattr(config, "model", object()), "sonata_train_mode", "off"))
     sonata_mode = str(sonata_mode or "off").lower()
     if sonata_mode not in {"off", "projector", "all"}:
-        sonata_mode = "off"
+        raise ValueError(f"Invalid SONATA mode: {sonata_mode!r}. Expected one of: off|projector|all")
 
-    def _split_main_and_sonata_params(m):
+    def _split_main_and_sonata_params(m, mode: str):
         base = m.module if isinstance(m, torch.nn.parallel.DistributedDataParallel) else m
+        s_params = []
+        # 1) encoder（旧契约）
         enc = None
         if hasattr(base, "get_torch_sonata"):
             try:
                 enc = base.get_torch_sonata()
             except Exception:
                 enc = None
-        if enc is None:
+        if enc is not None:
+            s_params += list(enc.parameters())
+        # 2) projector（仅在 all 模式并入 SONATA 优化器；否则留在主干优化器）
+        if mode == "all":
+            proj = None
+            if hasattr(base, "sonata_projector"):
+                proj = getattr(base, "sonata_projector")
+            elif hasattr(base, "get_torch_sonata_projector"):
+                try:
+                    proj = base.get_torch_sonata_projector()
+                except Exception:
+                    proj = None
+            if proj is not None:
+                s_params += list(p for p in proj.parameters() if p.requires_grad)
+        if not s_params:
             return list(base.parameters()), []
-        s_params = list(enc.parameters())
         s_ids = {id(p) for p in s_params}
         main = [p for p in base.parameters() if id(p) not in s_ids]
         return main, s_params
@@ -534,7 +563,7 @@ def train_loop(config: _config.TrainConfig):
             except Exception:
                 logging.info("[SONATA] projector mode requested but encoder not found.")
 
-    main_params, sonata_params = _split_main_and_sonata_params(model)
+    main_params, sonata_params = _split_main_and_sonata_params(model, sonata_mode)
     use_sonata_optim = (sonata_mode == "all")
     if use_sonata_optim:
         _require(len(sonata_params) > 0, "sonata_train_mode='all' requires SONATA parameters in the model.")
@@ -675,6 +704,8 @@ def train_loop(config: _config.TrainConfig):
                 params_for_clip = (main_params if sonata_optim is not None
                                    else (model.module.parameters() if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model.parameters()))
                 grad_norm = torch.nn.utils.clip_grad_norm_(params_for_clip, max_norm=float(max_gn))
+                if sonata_optim is not None:
+                    torch.nn.utils.clip_grad_norm_(sonata_params, max_norm=float(max_gn))
 
             # Optimizer step（若 all 模式则同时 step 第二优化器）
             optim.step()
