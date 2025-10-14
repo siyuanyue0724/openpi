@@ -98,13 +98,11 @@ def init_wandb(config: _config.TrainConfig, *, resuming: bool, enabled: bool = T
 def setup_ddp():
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     use_ddp = world_size > 1
+    # Enable DDP debug logs *before* initialization so init-time messages are not missed.
+    os.environ.setdefault("TORCH_DISTRIBUTED_DEBUG", "INFO")
     if use_ddp and not torch.distributed.is_initialized():
         backend = "nccl" if torch.cuda.is_available() else "gloo"
         torch.distributed.init_process_group(backend=backend, init_method="env://")
-
-        # Set up debugging environment variables for DDP issues
-        if os.environ.get("TORCH_DISTRIBUTED_DEBUG") is None:
-            os.environ["TORCH_DISTRIBUTED_DEBUG"] = "INFO"
 
     # Fail-fast: 在 DDP 模式下必须由 torchrun 设置 LOCAL_RANK；禁止把全局 RANK 当本地设备号用
     local_rank_env = os.environ.get("LOCAL_RANK")
@@ -497,7 +495,8 @@ def train_loop(config: _config.TrainConfig):
         safetensors.torch.load_model(
             (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model),
             model_path,
-            device=str(device),
+            # device=str(device),
+            # 注：device 参数在 safetensors ≥ 0.4.3 可用；启用可少一次 CPU→GPU 中转
         )
         logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
 
@@ -731,7 +730,7 @@ def train_loop(config: _config.TrainConfig):
                     }
                 )
 
-            if is_main and (global_step % config.log_interval == 0):
+            if is_main and ((global_step + 1) % config.log_interval == 0):
                 elapsed = time.time() - start_time
 
                 # Average stats over log interval
@@ -746,9 +745,9 @@ def train_loop(config: _config.TrainConfig):
                     if len(vals) > 0:
                         avg_grad_norm = sum(vals) / len(vals)
                 logging.info(
-                    f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s"
+                    f"step={global_step + 1} loss={avg_loss:.4f} lr={avg_lr:.2e} grad_norm={avg_grad_norm:.2f} time={elapsed:.1f}s"
                     if avg_grad_norm is not None
-                    else f"step={global_step} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s"
+                    else f"step={global_step + 1} loss={avg_loss:.4f} lr={avg_lr:.2e} time={elapsed:.1f}s"
                 )
 
                 # Log to wandb
@@ -756,12 +755,12 @@ def train_loop(config: _config.TrainConfig):
                     log_payload = {
                         "loss": avg_loss,
                         "learning_rate": avg_lr,
-                        "step": global_step,
+                        "step": global_step + 1,
                         "time_per_step": elapsed / config.log_interval,
                     }
                     if avg_grad_norm is not None:
                         log_payload["grad_norm"] = avg_grad_norm
-                    wandb.log(log_payload, step=global_step)
+                    wandb.log(log_payload, step=global_step + 1)
 
                 start_time = time.time()
                 infos = []  # Reset stats collection
