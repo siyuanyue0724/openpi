@@ -495,8 +495,7 @@ def train_loop(config: _config.TrainConfig):
         safetensors.torch.load_model(
             (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model),
             model_path,
-            # device=str(device),
-            # 注：device 参数在 safetensors ≥ 0.4.3 可用；启用可少一次 CPU→GPU 中转
+            device=str(device),
         )
         logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
 
