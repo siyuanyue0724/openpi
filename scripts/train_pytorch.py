@@ -206,10 +206,12 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_config,
         }
         torch.save(metadata, tmp_ckpt_dir / "metadata.pt")
 
-        # save norm stats：与上游保持一致（两者同时存在才保存，否则跳过）
+        # save norm stats：契约加严（必须同时存在或同时缺失）
         norm_stats = getattr(data_config, "norm_stats", None)
         asset_id = getattr(data_config, "asset_id", None)
-        if norm_stats is not None and asset_id is not None:
+        if (norm_stats is None) ^ (asset_id is None):
+            raise RuntimeError("Inconsistent norm_stats saving contract: norm_stats and asset_id must both exist or both be None.")
+        if norm_stats is not None:
             assets_root = tmp_ckpt_dir / "assets" / asset_id
             assets_root.mkdir(parents=True, exist_ok=True)
             _normalize.save(assets_root, norm_stats)
