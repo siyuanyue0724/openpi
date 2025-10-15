@@ -1,6 +1,7 @@
 import abc
 from collections.abc import Sequence
 import dataclasses
+from dataclasses import field
 import enum
 import logging
 import pathlib
@@ -24,7 +25,7 @@ import openpi.shared.array_typing as at
 logger = logging.getLogger("openpi")
 
 # Type variable for array types (JAX arrays, PyTorch tensors, or numpy arrays)
-ArrayT = TypeVar("ArrayT", bound=jax.Array | torch.Tensor | np.ndarray)
+ArrayT = TypeVar("ArrayT", jax.Array, jax.ShapeDtypeStruct, np.ndarray, torch.Tensor)
 
 
 class ModelType(enum.Enum):
@@ -106,26 +107,108 @@ class Observation(Generic[ArrayT]):
     # Token loss mask (for FAST autoregressive model).
     token_loss_mask: at.Bool[ArrayT, "*b l"] | None = None
 
+    # Legacy point cloud (兼容旧管线)
+    pointcloud_data: dict[str, ArrayT] | None = None
+    # New point cloud (SpatialLM 对齐，帧级 mask)
+    point_clouds: dict[str, ArrayT] = field(default_factory=dict)
+    point_cloud_masks: dict[str, ArrayT] = field(default_factory=dict)
+
     @classmethod
     def from_dict(cls, data: at.PyTree[ArrayT]) -> "Observation[ArrayT]":
-        """This method defines the mapping between unstructured data (i.e., nested dict) to the structured Observation format."""
-        # Ensure that tokenized_prompt and tokenized_prompt_mask are provided together.
+        """Preserve backends: Torch stays Torch; NumPy -> JAX; JAX stays JAX."""
         if ("tokenized_prompt" in data) != ("tokenized_prompt_mask" in data):
             raise ValueError("tokenized_prompt and tokenized_prompt_mask must be provided together.")
-        # If images are uint8, convert them to [-1, 1] float32.
-        for key in data["image"]:
-            if data["image"][key].dtype == np.uint8:
-                data["image"][key] = data["image"][key].astype(np.float32) / 255.0 * 2.0 - 1.0
-            elif hasattr(data["image"][key], "dtype") and data["image"][key].dtype == torch.uint8:
-                data["image"][key] = data["image"][key].to(torch.float32).permute(0, 3, 1, 2) / 255.0 * 2.0 - 1.0
+        # images
+        imgs = {}
+        for k, img in data["image"].items():
+            if isinstance(img, torch.Tensor):
+                if img.dtype == torch.uint8:
+                    img = img.to(torch.float32) / 255.0 * 2.0 - 1.0
+                # 统一 Observation 为 BHWC；若输入是 NCHW（B,C,H,W），则转为 NHWC（B,H,W,C）
+                if img.ndim == 4 and (img.shape[1] in (1, 3, 4)) and (img.shape[-1] not in (1, 3, 4)):
+                    img = img.permute(0, 2, 3, 1)  # NCHW -> NHWC
+                imgs[k] = img
+            else:
+                # 同时处理 np.uint8 与 jnp.uint8
+                if hasattr(img, "dtype") and img.dtype in (np.uint8, jnp.uint8):
+                    img = img.astype(np.float32) / 255.0 * 2.0 - 1.0
+                imgs[k] = jnp.asarray(img)
+        data["image"] = imgs
+        # image_mask -> bool (preserve backend)
+        def _to_bool_mask(x):
+            if isinstance(x, torch.Tensor):
+                return x.to(torch.bool)
+            x = jnp.asarray(x); return x if x.dtype == jnp.bool_ else (x != 0)
+        data["image_mask"] = {k: _to_bool_mask(v) for k,v in data["image_mask"].items()}
+        # state & token_* (preserve backend)
+        def _keep(x): return x if isinstance(x, torch.Tensor) else jnp.asarray(x)
+        data["state"] = _keep(data["state"])
+        for fld in ("tokenized_prompt","tokenized_prompt_mask","token_ar_mask","token_loss_mask"):
+            if fld in data and data[fld] is not None:
+                data[fld] = _keep(data[fld])
+        # new point clouds (preserve backend; mask -> bool; auto-synthesize)
+        new_pc, new_pm = {}, {}
+        use_new = ("point_clouds" in data) and (data["point_clouds"] is not None)
+        if use_new:
+            if not isinstance(data["point_clouds"], dict):
+                raise TypeError("point_clouds must be a dict[str, array].")
+            new_pc = {k: (v if isinstance(v, torch.Tensor) else jnp.asarray(v))
+                      for k, v in data["point_clouds"].items()}
+            if "pointcloud" in new_pc:
+                arr = new_pc["pointcloud"]
+                if getattr(arr, "ndim", None) != 3:
+                    raise ValueError(f"point_clouds['pointcloud'] must be 3D [B,M,3+C], got {getattr(arr,'shape',None)}.")
+                if arr.shape[-1] < 6:
+                    logger.warning("pointcloud last dim %d (<6); expect [3 grid | 3 xyz | extras].", arr.shape[-1])
+        if "point_cloud_masks" in data and data["point_cloud_masks"] is not None:
+            if not isinstance(data["point_cloud_masks"], dict):
+                raise TypeError("point_cloud_masks must be a dict[str, array].")
+            new_pm = {k: (v.to(torch.bool) if isinstance(v, torch.Tensor) else jnp.asarray(v, dtype=jnp.bool_))
+                      for k,v in data["point_cloud_masks"].items()}
+        if new_pc and not new_pm:
+            for k,v in new_pc.items():
+                new_pm[k] = (torch.ones((v.shape[0],), dtype=torch.bool, device=v.device)
+                             if isinstance(v, torch.Tensor) else jnp.ones((v.shape[0],), dtype=jnp.bool_))
+        elif new_pc and new_pm:
+            for k,v in new_pc.items():
+                if k not in new_pm:
+                    new_pm[k] = (torch.ones((v.shape[0],), dtype=torch.bool, device=v.device)
+                                 if isinstance(v, torch.Tensor) else jnp.ones((v.shape[0],), dtype=jnp.bool_))
+        # Ensure every provided mask matches [B].
+        if new_pc and new_pm:
+            for k, v in new_pc.items():
+                if k in new_pm:
+                    pm = new_pm[k]
+                    expected = (v.shape[0],)
+                    if tuple(pm.shape) != expected:
+                        raise ValueError(
+                            f"point_cloud_masks['{k}'] must have shape {expected}, got {tuple(pm.shape)}."
+                        )
+        if new_pc and new_pm and set(new_pc.keys()) != set(new_pm.keys()):
+            logger.warning("point_clouds keys %s != point_cloud_masks keys %s.", sorted(new_pc), sorted(new_pm))
+        # legacy pointcloud_data
+        pc = None
+        if use_new and "pointcloud_data" in data and data["pointcloud_data"] is not None:
+            logger.warning("Both 'point_clouds' (new) and 'pointcloud_data' (legacy) provided; using NEW.")
+        if (not use_new) and "pointcloud_data" in data and data["pointcloud_data"] is not None:
+            if not isinstance(data["pointcloud_data"], dict):
+                raise TypeError("pointcloud_data must be a dict[str, array].")
+            pc = {k: (v if isinstance(v, torch.Tensor) else jnp.asarray(v)) for k,v in data["pointcloud_data"].items()}
+            required = {"coord","batch"}; missing = required - pc.keys()
+            if missing: raise ValueError(f"pointcloud_data missing {sorted(missing)}; have {sorted(pc.keys())}")
+            if pc["coord"].ndim < 2 or pc["coord"].shape[-1] != 3:
+                raise ValueError(f"pointcloud_data['coord'] must be (...,N,3); got {pc['coord'].shape}")
+            n = pc["coord"].shape[-2]
+            if pc["batch"].shape[-1] != n: raise ValueError("batch length != coord N")
+            if "feat" in pc and pc["feat"].shape[-2] != n: raise ValueError("feat N != coord N")
+            if "grid_size" in pc and pc["grid_size"].shape[-1] != 3: raise ValueError("grid_size last dim != 3")
         return cls(
-            images=data["image"],
-            image_masks=data["image_mask"],
-            state=data["state"],
+            images=data["image"], image_masks=data["image_mask"], state=data["state"],
             tokenized_prompt=data.get("tokenized_prompt"),
             tokenized_prompt_mask=data.get("tokenized_prompt_mask"),
             token_ar_mask=data.get("token_ar_mask"),
             token_loss_mask=data.get("token_loss_mask"),
+            pointcloud_data=pc, point_clouds=new_pc if use_new else {}, point_cloud_masks=new_pm if use_new else {},
         )
 
     def to_dict(self) -> at.PyTree[ArrayT]:
@@ -133,6 +216,9 @@ class Observation(Generic[ArrayT]):
         result = dataclasses.asdict(self)
         result["image"] = result.pop("images")
         result["image_mask"] = result.pop("image_masks")
+        if result.get("pointcloud_data") is None: result.pop("pointcloud_data", None)
+        if not result.get("point_clouds"): result.pop("point_clouds", None)
+        if not result.get("point_cloud_masks"): result.pop("point_cloud_masks", None)
         return result
 
 
@@ -157,10 +243,24 @@ def preprocess_observation(
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 
     batch_shape = observation.state.shape[:-1]
+    if train and rng is None:
+        raise ValueError("rng must be provided when `train=True` for image augmentations.")
+    # JAX-only guard: state must not be a torch.Tensor
+    if isinstance(observation.state, torch.Tensor):
+        raise TypeError(
+            "preprocess_observation expects JAX/NumPy state. "
+            "Got torch.Tensor; run state preprocessing in the PyTorch pipeline instead."
+        )
 
     out_images = {}
     for key in image_keys:
         image = observation.images[key]
+        # This function is JAX-only; Torch images should be preprocessed in the PyTorch pipeline.
+        if isinstance(image, torch.Tensor):
+            raise TypeError(
+                "preprocess_observation expects JAX/NumPy images (BHWC). "
+                "Got torch.Tensor; run image preprocessing in the PyTorch pipeline instead."
+            )
         if image.shape[1:3] != image_resolution:
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad(image, *image_resolution)
@@ -193,9 +293,28 @@ def preprocess_observation(
     for key in out_images:
         if key not in observation.image_masks:
             # do not mask by default
-            out_masks[key] = jnp.ones(batch_shape, dtype=jnp.bool)
+            out_masks[key] = jnp.ones(batch_shape, dtype=jnp.bool_)
         else:
             out_masks[key] = jnp.asarray(observation.image_masks[key])
+    # new point cloud pass-through
+    out_point_clouds = dict(getattr(observation, "point_clouds", {}) or {})
+    out_point_cloud_masks = dict(getattr(observation, "point_cloud_masks", {}) or {})
+    # JAX-only guard: point clouds and masks must not be torch.Tensors
+    for k, arr in out_point_clouds.items():
+        if isinstance(arr, torch.Tensor):
+            raise TypeError(
+                f"preprocess_observation expects JAX/NumPy point clouds; got torch.Tensor for key '{k}'. "
+                "Run point-cloud preprocessing in the PyTorch pipeline instead."
+            )
+    for k, m in out_point_cloud_masks.items():
+        if isinstance(m, torch.Tensor):
+            raise TypeError(
+                f"preprocess_observation expects JAX/NumPy point cloud masks; got torch.Tensor for key '{k}'. "
+                "Run point-cloud preprocessing in the PyTorch pipeline instead."
+            )
+    for k, arr in out_point_clouds.items():
+        if k not in out_point_cloud_masks:
+            out_point_cloud_masks[k] = jnp.ones((arr.shape[0],), dtype=jnp.bool_)
 
     return Observation(
         images=out_images,
@@ -205,6 +324,9 @@ def preprocess_observation(
         tokenized_prompt_mask=observation.tokenized_prompt_mask,
         token_ar_mask=observation.token_ar_mask,
         token_loss_mask=observation.token_loss_mask,
+        pointcloud_data=getattr(observation, "pointcloud_data", None),
+        point_clouds=out_point_clouds,
+        point_cloud_masks=out_point_cloud_masks,
     )
 
 
