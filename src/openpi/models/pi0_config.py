@@ -112,9 +112,13 @@ class Pi0Config(_model.BaseModelConfig):
                     "right_wrist_0_rgb": image_mask_spec,
                 },
                 point_clouds=(
-                    {"pointcloud": jax.ShapeDtypeStruct(
-                        [batch_size, self.max_points, 3 + self.point_feat_dim], jnp.float32
-                    )} if enable_pc else {}
+                    {
+                        "pointcloud": jax.ShapeDtypeStruct(
+                            [batch_size, self.max_points, 3 + self.point_feat_dim], jnp.float32
+                        )
+                        # 约定：最后一维 = 3 + point_feat_dim，其中前 3 为 grid_coord（推荐上游直接给 int32/int64），
+                        # 后面包含 [xyz(3) + extras]；模型内部会校验 feats[:,:3] == coord(xyz)。
+                    } if enable_pc else {}
                 ),
                 point_cloud_masks=(
                     {"pointcloud": jax.ShapeDtypeStruct([batch_size], jnp.bool_)} if enable_pc else {}

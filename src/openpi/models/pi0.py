@@ -251,12 +251,20 @@ class _TorchSonataRunner:
             if not isinstance(enc, torch.Tensor):
                 raise TypeError(f"Sonata.forward 必须返回 Tensor 或 Point.feat，实际 {type(out_any)}")
             real = int(enc.size(0))
+            # 超出上限：与 backup 一致——直接 fail，而非静默截断
             if real > self._cap:
-                enc = enc[: self._cap]
-                real = self._cap
+                raise RuntimeError(
+                    f"[Sonata] token_len={real} exceeds point_token_cap={self._cap}. "
+                    "Increase point_token_cap or downsample points."
+                )
             if real < self._cap:
                 pad = torch.zeros(self._cap - real, enc.size(1), dtype=enc.dtype, device=enc.device)
                 enc = torch.cat([enc, pad], dim=0)
+            elif real >= int(0.95 * self._cap):
+                logger.warning(
+                    "[Sonata] token_len=%d is close to cap (%d). Consider increasing it.",
+                    real, self._cap
+                )
         valid = np.zeros((self._cap,), dtype=bool)
         valid[:real] = True
         return enc.float().cpu().numpy(), valid
@@ -270,6 +278,10 @@ class _TorchSonataRunner:
         offset: np.ndarray,
         frame_mask: np.ndarray,
     ) -> tuple[np.ndarray, np.ndarray]:
+        """
+        批处理编码一个 batch 的点云样本。
+        Note: `batch` 参数在本实现未使用，保留仅为与早期接口/调用点兼容。
+        """
         B = int(offset.shape[0])
         out_feat = np.zeros((B, self._cap, self._enc_out_dim), dtype=np.float32)
         out_mask = np.zeros((B, self._cap), dtype=bool)
@@ -318,6 +330,12 @@ def _host_insert_points(
         ends = np.where(ids == end_id)[0]
         if len(starts) == 0 or len(ends) == 0:
             raise RuntimeError(f"[Sonata insert] point_start_id/point_end_id not found in sample {b}.")
+        # 窗口唯一性：与 backup 一致，要求各出现恰好一次
+        if len(starts) != 1 or len(ends) != 1:
+            raise RuntimeError(
+                f"[Sonata insert] sample {b} expects exactly one <start> and one <end>, "
+                f"got {len(starts)} and {len(ends)}."
+            )
         s_idx = int(starts[0])
         e_idx = int(ends[0])
         if not (0 <= s_idx < e_idx < S):
@@ -461,6 +479,8 @@ class Pi0(_model.BaseModel):
             if int(Ctot) != expected_last:
                 raise ValueError(f"pointcloud 最后一维应为 3+in_channels ({expected_last})，实际 {int(Ctot)}。")
             # 拆分并展平
+            # grid_coord 推荐上游直接提供 int32/int64；此处会在 JAX 侧统一 cast 到 int32，
+            # Torch 侧 forward 时再提升到 int64，避免隐式 float→int 带来的歧义。
             grid_int = pc_arr[..., :3].astype(jnp.int32)
             coords   = pc_arr[..., 3:6].astype(jnp.float32)
             feats    = pc_arr[..., 3:].astype(jnp.float32)
@@ -475,6 +495,7 @@ class Pi0(_model.BaseModel):
                 jax.ShapeDtypeStruct((B, self._sonata_runner.cap), jnp.bool_),
             )
             def _host_call(coord, feat, grid_coord, batch, offset, frame_mask):
+                # `batch` 参数本实现未使用（保留占位以兼容旧接口）
                 coord = np.asarray(coord); feat = np.asarray(feat); grid_coord = np.asarray(grid_coord)
                 batch = np.asarray(batch); offset = np.asarray(offset); frame_mask = np.asarray(frame_mask)
                 return self._sonata_runner.forward_batched(coord, feat, grid_coord, batch, offset, frame_mask)  # type: ignore
@@ -500,6 +521,29 @@ class Pi0(_model.BaseModel):
                 end_id   = getattr(self.config, "point_end_id", None)
                 if (start_id is None) or (end_id is None):
                     raise RuntimeError("enable_sonata=True 但未设置 Pi0Config.point_start_id/point_end_id（fail fast）。")
+                # （可选强约束）窗口中不得出现可见文本，保持与 backup 一致
+                def _host_check_no_visible_between(prompt_np, mask_np, s_id, e_id):
+                    P = np.asarray(prompt_np, dtype=np.int32)
+                    M = np.asarray(mask_np, dtype=bool)
+                    bad = []
+                    for bb in range(P.shape[0]):
+                        s = np.where(P[bb] == s_id)[0]
+                        e = np.where(P[bb] == e_id)[0]
+                        if len(s) == 0 or len(e) == 0:
+                            continue
+                        s0, e0 = int(s[0]), int(e[0])
+                        if s0 < e0:
+                            mid = M[bb, s0 + 1 : e0]  # True 表示可见
+                            if mid.any():
+                                bad.append(bb)
+                    if bad:
+                        raise RuntimeError(f"Visible tokens between <point_start> and <point_end> in samples: {bad[:8]}")
+                    return np.int32(0)
+                _ = pure_callback(  # type: ignore
+                    _host_check_no_visible_between,
+                    jax.ShapeDtypeStruct((), jnp.int32),
+                    obs.tokenized_prompt, text_mask, int(start_id), int(end_id),
+                )
                 fused_text, fused_mask = _pure_insert_points(
                     text_emb, text_mask, obs.tokenized_prompt,
                     pt_tokens, pt_mask,
