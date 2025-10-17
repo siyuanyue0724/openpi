@@ -1,5 +1,6 @@
 import dataclasses
 from typing import TYPE_CHECKING
+from typing import Optional
 
 import flax.nnx as nnx
 import jax
@@ -10,6 +11,12 @@ from openpi.models import model as _model
 import openpi.models.gemma as _gemma
 from openpi.shared import array_typing as at
 import openpi.shared.nnx_utils as nnx_utils
+
+# 新枚举（软依赖，老分支不影响）
+try:
+    from openpi.models import PointBackboneType
+except Exception:  # 软降级：若无该枚举，旧布尔开关仍可用
+    PointBackboneType = object  # type: ignore
 
 if TYPE_CHECKING:
     from openpi.models.pi0 import Pi0
@@ -29,6 +36,29 @@ class Pi0Config(_model.BaseModelConfig):
     # - the state input is part of the discrete language tokens rather than a continuous input that is part of the suffix
     # - the action expert uses adaRMSNorm to inject the flow matching timestep
     pi05: bool = False
+
+    # ===== Point cloud (Sonata) 配置（严格 fail-fast） =====
+    # 旧布尔开关（向后兼容）：是否启用点云
+    enable_sonata: Optional[bool] = None
+    # 新枚举（推荐）：选择点云后端（存在即用）
+    point_backbone_type: Optional["PointBackboneType"] = None  # type: ignore[name-defined]
+    # feats = [xyz(3) + extras]，常见 xyz+rgb => 6；Observation 的最后一维为 3 + point_feat_dim
+    point_feat_dim: int = 6
+    # 每帧原始点的静态上界（仅用于 inputs_spec 的静态形状；真实可小于等于此值）
+    max_points: int = 32768
+    # 编码后固定 token 上限（JAX 需要静态长度）
+    point_token_cap: int = 1024
+    # Sonata 编码器超参覆盖（None 用 SpatialLM 默认）
+    point_config: dict | None = None
+    # 权重路径（优先本字段，其次 OPENPI_SONATA_CKPT；找不到仅 warning）
+    sonata_ckpt_path: str | None = None
+    # 无 GPU 是否允许回退到 CPU（False=允许；True=强制 CUDA）
+    require_cuda: bool = False
+    # 严格策略固定开启（fail-fast）；此字段保留仅为兼容，不影响行为
+    strict_point_checks: bool = True
+    # 是否尝试加载预训练（找不到仅警告，不阻断）
+    use_pretrained_point: bool = True
+
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
 
@@ -56,6 +86,16 @@ class Pi0Config(_model.BaseModelConfig):
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
         image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
 
+        # 是否启用点云（双开关兼容）
+        enable_pc = False
+        if self.enable_sonata is True:
+            enable_pc = True
+        try:
+            if self.point_backbone_type == PointBackboneType.SONATA:  # type: ignore[attr-defined]
+                enable_pc = True
+        except Exception:
+            pass
+
         with at.disable_typechecking():
             observation_spec = _model.Observation(
                 images={
@@ -68,6 +108,14 @@ class Pi0Config(_model.BaseModelConfig):
                     "left_wrist_0_rgb": image_mask_spec,
                     "right_wrist_0_rgb": image_mask_spec,
                 },
+                point_clouds=(
+                    {"pointcloud": jax.ShapeDtypeStruct(
+                        [batch_size, self.max_points, 3 + self.point_feat_dim], jnp.float32
+                    )} if enable_pc else {}
+                ),
+                point_cloud_masks=(
+                    {"pointcloud": jax.ShapeDtypeStruct([batch_size], jnp.bool_)} if enable_pc else {}
+                ),
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
                 tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),

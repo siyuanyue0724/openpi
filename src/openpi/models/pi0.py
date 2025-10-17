@@ -6,12 +6,37 @@ import flax.nnx.bridge as nnx_bridge
 import jax
 import jax.numpy as jnp
 from typing_extensions import override
+import numpy as np
+import os
+import inspect
 
 from openpi.models import model as _model
 from openpi.models import pi0_config
 import openpi.models.gemma as _gemma
 import openpi.models.siglip as _siglip
 from openpi.shared import array_typing as at
+
+# 可选依赖（启用后缺失即 fail fast）
+try:
+    import torch  # type: ignore
+except Exception:
+    torch = None  # type: ignore
+try:
+    import openpi.models.sonata_encoder as sonata_encoder  # type: ignore
+except Exception:
+    sonata_encoder = None  # type: ignore
+# 回调：优先 pure_callback；其次 io_callback；若均缺失且启用点云→fail fast
+try:
+    pure_callback = jax.pure_callback  # type: ignore[attr-defined]
+except Exception:
+    try:
+        from jax.experimental import io_callback as pure_callback  # type: ignore
+    except Exception:
+        pure_callback = None  # type: ignore
+try:
+    from openpi.models import PointBackboneType as _PBT  # type: ignore
+except Exception:
+    _PBT = None  # type: ignore
 
 logger = logging.getLogger("openpi")
 
@@ -62,6 +87,211 @@ def posemb_sincos(
     )
     return jnp.concatenate([jnp.sin(sinusoid_input), jnp.cos(sinusoid_input)], axis=-1)
 
+class _TorchSonataRunner:
+    """Host 侧运行 Sonata（PyTorch），通过 JAX 回调整 batch 取特征（fail fast）。"""
+    def __init__(
+        self,
+        *,
+        point_feat_dim: int,
+        point_token_cap: int,
+        point_cfg: dict | None,
+        use_pretrained: bool,
+        ckpt_path: str | None,
+        require_cuda: bool,
+    ):
+        if sonata_encoder is None or torch is None:
+            raise ImportError("Sonata/Torch 不可用（启用了点云分支，fail fast）。")
+        # 默认配置（可被 point_cfg 覆盖）
+        sp_cfg = dict(
+            in_channels=point_feat_dim,
+            order=("z", "z-trans"),
+            stride=(2, 2, 2, 2),
+            enc_depths=(3, 3, 3, 12, 3),
+            enc_channels=(48, 96, 192, 384, 512),
+            enc_num_head=(3, 6, 12, 24, 32),
+            enc_patch_size=(1024, 1024, 1024, 1024, 1024),
+            mlp_ratio=4.0,
+            qkv_bias=True,
+            attn_drop=0.0,
+            proj_drop=0.0,
+            drop_path=0.3,
+            pre_norm=True,
+            shuffle_orders=True,
+            enable_rpe=False,
+            enable_flash=True,
+            enc_mode=True,  # 有些实现是 bool，有些是 'voxel'/'point'
+            upcast_attention=False,
+            upcast_softmax=False,
+            mask_token=False,
+            num_bins=1280,
+        )
+        if point_cfg:
+            sp_cfg.update(point_cfg)
+        self._cap = int(point_token_cap)
+        self._enc_out_dim = int(sp_cfg["enc_channels"][-1])
+        self._in_channels = int(sp_cfg.get("in_channels", point_feat_dim))
+
+        # 设备选择：require_cuda=True 且无 CUDA → 直接报错（fail fast）
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        if require_cuda and dev != "cuda":
+            raise RuntimeError("require_cuda=True，但未检测到 CUDA（fail fast）。")
+        self._device = torch.device(dev)
+
+        # 使用 inspect.signature 更稳健地判断参数可用性
+        try:
+            sig = inspect.signature(sonata_encoder.Sonata)  # type: ignore[attr-defined]
+            params = sig.parameters
+        except Exception:
+            params = {}
+        if isinstance(sp_cfg.get("enc_mode"), bool):
+            if ("enc_mode" in params) and (
+                (getattr(params["enc_mode"], "annotation", None) is str)
+                or isinstance(getattr(params["enc_mode"], "default", None), str)
+            ):
+                sp_cfg["enc_mode"] = "voxel" if sp_cfg["enc_mode"] else "point"
+        if "enable_flash" in params:
+            # 环境自适配：仅在 GPU + 实现支持时开启 flash；否则显式关闭，避免 CPU 场景下的构造/前向报错
+            sp_cfg["enable_flash"] = bool(torch.cuda.is_available()) and hasattr(sonata_encoder, "flash_attn")
+        else:
+            sp_cfg.pop("enable_flash", None)
+
+        # 构造 & 可选加载权重（权重缺失仅告警，不属于数据校验的严格性）
+        self._inner = sonata_encoder.Sonata(**sp_cfg).to(self._device).eval()  # type: ignore
+        if use_pretrained:
+            self._maybe_load_pretrained(ckpt_path)
+
+    @property
+    def cap(self) -> int:
+        return self._cap
+
+    @property
+    def enc_out_dim(self) -> int:
+        return self._enc_out_dim
+
+    @property
+    def in_channels(self) -> int:
+        return self._in_channels
+
+    def _maybe_load_pretrained(self, ckpt_path: str | None) -> None:
+        cands: list[str] = []
+        if ckpt_path:
+            cands.append(ckpt_path)
+        envp = os.getenv("OPENPI_SONATA_CKPT", "").strip()
+        if envp:
+            cands.append(envp)
+        try:
+            here = os.path.abspath(__file__)
+            p = os.path.dirname(here)
+            for _ in range(4):
+                p = os.path.dirname(p)
+                cands.append(os.path.join(p, "pretrain", "SpatialLM_Sonata_encoder.pth"))
+        except Exception:
+            pass
+        path = None
+        for c in cands:
+            if isinstance(c, str) and c and os.path.isfile(c):
+                path = c
+                break
+        if path is None:
+            logger.warning("Sonata 预训练权重未找到，使用随机初始化（仅警告，不阻断）。")
+            return
+        try:
+            try:
+                sd = torch.load(path, map_location="cpu", weights_only=True)  # torch>=2.0
+            except TypeError:
+                sd = torch.load(path, map_location="cpu")
+            if isinstance(sd, dict) and "state_dict" in sd:
+                sd = sd["state_dict"]
+            missing, unexpected = self._inner.load_state_dict(sd, strict=False)  # type: ignore
+            if missing or unexpected:
+                logger.warning("加载 Sonata 权重时存在 missing=%d / unexpected=%d 键。", len(missing), len(unexpected))
+            logger.info("已加载 Sonata 权重：%s", str(path))
+        except Exception as e:
+            logger.warning("Sonata 权重加载失败（忽略并继续）：%s", e)
+
+    # —— 严格清洗（fail fast）：发现异常直接抛错；允许剔除全零 padding 行 ——
+    def _sanitize_sample_arrays(
+        self, coord: np.ndarray, feat: np.ndarray, grid: np.ndarray
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        # 1) NaN/Inf：严格报错
+        if not (np.isfinite(coord).all() and np.isfinite(feat).all()):
+            raise ValueError("[Sonata strict] 检测到 NaN/Inf。")
+        # 2) 网格坐标必须非负
+        if (grid < 0).any():
+            raise ValueError("[Sonata strict] grid_coord 含负值（体素索引必须非负）。")
+        # 3) 剔除显著 padding（grid/coord/feat 全零行）
+        pad = (grid == 0).all(axis=1) & (coord == 0).all(axis=1) & (feat == 0).all(axis=1)
+        if pad.any():
+            keep = ~pad
+            coord, feat, grid = coord[keep], feat[keep], grid[keep]
+        # 4) feats[:,:3] 与 coord 一致性（L∞ < 1e-4）
+        if feat.shape[1] >= 3 and coord.shape[0] > 0:
+            err = float(np.max(np.abs(feat[:, :3] - coord)))
+            if not np.isfinite(err) or err > 1e-4:
+                raise ValueError("[Sonata strict] 契约违反：feat[:,:3] 必须等于 coord (xyz)。")
+        return coord.astype(np.float32, copy=False), feat.astype(np.float32, copy=False), grid.astype(np.int64, copy=False)
+
+    def _run_single(self, sample: dict[str, np.ndarray]) -> tuple[np.ndarray, np.ndarray]:
+        tch = {k: torch.from_numpy(v).to(self._device) for k, v in sample.items()}
+        # 统一 dtype
+        tch["coord"] = tch["coord"].to(torch.float32)
+        tch["feat"] = tch["feat"].to(torch.float32)
+        tch["grid_coord"] = tch["grid_coord"].to(torch.int64)
+        tch["batch"] = tch["batch"].to(torch.int64)
+        tch["offset"] = tch["offset"].to(torch.int64)
+        with torch.inference_mode():
+            out_any = self._inner(sonata_encoder.Point(**tch))  # type: ignore
+            enc = getattr(out_any, "feat", out_any)
+            if not isinstance(enc, torch.Tensor):
+                raise TypeError(f"Sonata.forward 必须返回 Tensor 或 Point.feat，实际 {type(out_any)}")
+            real = int(enc.size(0))
+            if real > self._cap:
+                enc = enc[: self._cap]
+                real = self._cap
+            if real < self._cap:
+                pad = torch.zeros(self._cap - real, enc.size(1), dtype=enc.dtype, device=enc.device)
+                enc = torch.cat([enc, pad], dim=0)
+        valid = np.zeros((self._cap,), dtype=bool)
+        valid[:real] = True
+        return enc.float().cpu().numpy(), valid
+
+    def forward_batched(
+        self,
+        coord: np.ndarray,
+        feat: np.ndarray,
+        grid_coord: np.ndarray,
+        batch: np.ndarray,
+        offset: np.ndarray,
+        frame_mask: np.ndarray,
+    ) -> tuple[np.ndarray, np.ndarray]:
+        B = int(offset.shape[0])
+        out_feat = np.zeros((B, self._cap, self._enc_out_dim), dtype=np.float32)
+        out_mask = np.zeros((B, self._cap), dtype=bool)
+        start = 0
+        for b in range(B):
+            end = int(offset[b])
+            present = bool(frame_mask[b])
+            if (not present) or end <= start:
+                start = end
+                continue
+            c = coord[start:end, :]
+            f = feat[start:end, :]
+            g = grid_coord[start:end, :]
+            c, f, g = self._sanitize_sample_arrays(c, f, g)
+            n = int(c.shape[0])
+            sample = {
+                "coord": c,
+                "feat":  f,
+                "grid_coord": g,
+                "batch": np.zeros((n,), dtype=np.int64),
+                "offset": np.array([n], dtype=np.int64),
+            }
+            enc, m = self._run_single(sample)
+            out_feat[b] = enc
+            out_mask[b] = m
+            start = end
+        return out_feat, out_mask
+
 
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
@@ -89,6 +319,26 @@ class Pi0(_model.BaseModel):
         )
         img.lazy_init(next(iter(config.fake_obs().images.values())), train=False, rngs=rngs)
         self.PaliGemma = nnx.Dict(llm=llm, img=img)
+        # ----- Sonata（严格 fail fast）-----
+        enable_pc = False
+        if getattr(config, "enable_sonata", None) is True:
+            enable_pc = True
+        if _PBT is not None and getattr(config, "point_backbone_type", None) == getattr(_PBT, "SONATA", None):
+            enable_pc = True
+        self._sonata_runner = None
+        self._pt_projector = None
+        if enable_pc:
+            if (torch is None) or (sonata_encoder is None) or (pure_callback is None):
+                raise RuntimeError("启用了点云分支但缺少依赖（torch/sonata_encoder/pure_callback）——fail fast。")
+            self._sonata_runner = _TorchSonataRunner(
+                point_feat_dim=int(getattr(config, "point_feat_dim", 6)),
+                point_token_cap=int(getattr(config, "point_token_cap", 1024)),
+                point_cfg=getattr(config, "point_config", None),
+                use_pretrained=bool(getattr(config, "use_pretrained_point", True)),
+                ckpt_path=getattr(config, "sonata_ckpt_path", None),
+                require_cuda=bool(getattr(config, "require_cuda", False)),
+            )
+            self._pt_projector = nnx.Linear(self._sonata_runner.enc_out_dim, paligemma_config.width, rngs=rngs)
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         if config.pi05:
             self.time_mlp_in = nnx.Linear(action_expert_config.width, action_expert_config.width, rngs=rngs)
@@ -123,6 +373,48 @@ class Pi0(_model.BaseModel):
             )
             # image tokens attend to each other
             ar_mask += [False] * image_tokens.shape[1]
+
+        # embed point clouds（Sonata，作为前缀，接在图像后、文本前；严格 fail fast）
+        if self._sonata_runner is not None:
+            # 前置字段/形状检查
+            if not (hasattr(obs, "point_clouds") and hasattr(obs, "point_cloud_masks") and "pointcloud" in obs.point_clouds):
+                raise ValueError("Observation 缺少 pointcloud/point_cloud_masks 字段（fail fast）。")
+            pc_arr  = obs.point_clouds["pointcloud"]  # [B, M, 3+C]
+            pc_mask = obs.point_cloud_masks.get("pointcloud", None)
+            if pc_mask is None:
+                raise ValueError("缺少 point_cloud_masks['pointcloud']（fail fast）。")
+            B, M, Ctot = pc_arr.shape
+            expected_last = 3 + int(self._sonata_runner.in_channels)
+            if int(Ctot) != expected_last:
+                raise ValueError(f"pointcloud 最后一维应为 3+in_channels ({expected_last})，实际 {int(Ctot)}。")
+            # 拆分并展平
+            grid_int = pc_arr[..., :3].astype(jnp.int32)
+            coords   = pc_arr[..., 3:6].astype(jnp.float32)
+            feats    = pc_arr[..., 3:].astype(jnp.float32)
+            coord_f = coords.reshape(B * M, 3)
+            feat_f  = feats.reshape(B * M, feats.shape[-1])
+            grid_f  = grid_int.reshape(B * M, 3)
+            batch_f = jnp.repeat(jnp.arange(B, dtype=jnp.int32), M)
+            offset  = jnp.cumsum(jnp.full((B,), M, dtype=jnp.int32))
+            # 回调输出规格（静态）
+            out_struct = (
+                jax.ShapeDtypeStruct((B, self._sonata_runner.cap, self._sonata_runner.enc_out_dim), jnp.float32),
+                jax.ShapeDtypeStruct((B, self._sonata_runner.cap), jnp.bool_),
+            )
+            def _host_call(coord, feat, grid_coord, batch, offset, frame_mask):
+                coord = np.asarray(coord); feat = np.asarray(feat); grid_coord = np.asarray(grid_coord)
+                batch = np.asarray(batch); offset = np.asarray(offset); frame_mask = np.asarray(frame_mask)
+                return self._sonata_runner.forward_batched(coord, feat, grid_coord, batch, offset, frame_mask)  # type: ignore
+            pt_feat, pt_valid = pure_callback(  # type: ignore
+                _host_call, out_struct, coord_f, feat_f, grid_f, batch_f, offset, pc_mask
+            )
+            pt_tokens = self._pt_projector(pt_feat) if (self._pt_projector is not None) else pt_feat
+            # 失效 token 数值置零，更稳健
+            pt_mask = jnp.broadcast_to(pc_mask[:, None], pt_tokens.shape[:2]) & pt_valid
+            pt_tokens = pt_tokens * pt_mask[..., None]
+            tokens.append(pt_tokens)
+            input_mask.append(pt_mask)
+            ar_mask += [False] * int(pt_tokens.shape[1])
 
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
