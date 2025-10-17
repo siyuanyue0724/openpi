@@ -120,9 +120,10 @@ class _TorchSonataRunner:
             enable_rpe=False,
             enable_flash=True,
             enc_mode=True,  # 有些实现是 bool，有些是 'voxel'/'point'
+            enable_fourier_encode=True,  # 与 backup 对齐：默认开启 Fourier 编码
             upcast_attention=False,
             upcast_softmax=False,
-            mask_token=False,
+            mask_token=True,  # 与 backup 对齐
             num_bins=1280,
         )
         if point_cfg:
@@ -154,6 +155,11 @@ class _TorchSonataRunner:
             sp_cfg["enable_flash"] = bool(torch.cuda.is_available()) and hasattr(sonata_encoder, "flash_attn")
         else:
             sp_cfg.pop("enable_flash", None)
+        # 兼容不同 Sonata 版本：若构造签名里没有这些参数，则移除
+        if "enable_fourier_encode" not in params:
+            sp_cfg.pop("enable_fourier_encode", None)
+        if "mask_token" not in params:
+            sp_cfg.pop("mask_token", None)
 
         # 构造 & 可选加载权重（权重缺失仅告警，不属于数据校验的严格性）
         self._inner = sonata_encoder.Sonata(**sp_cfg).to(self._device).eval()  # type: ignore
@@ -338,6 +344,10 @@ class Pi0(_model.BaseModel):
                 ckpt_path=getattr(config, "sonata_ckpt_path", None),
                 require_cuda=bool(getattr(config, "require_cuda", False)),
             )
+            # 契约前置：feats[:,:3] 将与 coord 对齐校验，要求 in_channels >= 3
+            if self._sonata_runner.in_channels < 3:
+                raise ValueError("point_feat_dim 必须 >= 3（feats[:,:3] 将与 coord 对齐校验）。")
+
             self._pt_projector = nnx.Linear(self._sonata_runner.enc_out_dim, paligemma_config.width, rngs=rngs)
         self.action_in_proj = nnx.Linear(config.action_dim, action_expert_config.width, rngs=rngs)
         if config.pi05:
@@ -359,6 +369,7 @@ class Pi0(_model.BaseModel):
         input_mask = []
         ar_mask = []
         tokens = []
+        ref_dtype = None  # 用于对齐点云 token 的 dtype
         # embed images
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
@@ -373,6 +384,8 @@ class Pi0(_model.BaseModel):
             )
             # image tokens attend to each other
             ar_mask += [False] * image_tokens.shape[1]
+            if ref_dtype is None:
+                ref_dtype = image_tokens.dtype
 
         # embed point clouds（Sonata，作为前缀，接在图像后、文本前；严格 fail fast）
         if self._sonata_runner is not None:
@@ -383,6 +396,8 @@ class Pi0(_model.BaseModel):
             pc_mask = obs.point_cloud_masks.get("pointcloud", None)
             if pc_mask is None:
                 raise ValueError("缺少 point_cloud_masks['pointcloud']（fail fast）。")
+            # 确保为 bool，避免上游 int/float 触发 & 类型错误
+            pc_mask = (pc_mask != 0)
             B, M, Ctot = pc_arr.shape
             expected_last = 3 + int(self._sonata_runner.in_channels)
             if int(Ctot) != expected_last:
@@ -409,6 +424,9 @@ class Pi0(_model.BaseModel):
                 _host_call, out_struct, coord_f, feat_f, grid_f, batch_f, offset, pc_mask
             )
             pt_tokens = self._pt_projector(pt_feat) if (self._pt_projector is not None) else pt_feat
+            # 统一 dtype，避免把整个前缀提升为 float32
+            if ref_dtype is not None and pt_tokens.dtype != ref_dtype:
+                pt_tokens = pt_tokens.astype(ref_dtype)
             # 失效 token 数值置零，更稳健
             pt_mask = jnp.broadcast_to(pc_mask[:, None], pt_tokens.shape[:2]) & pt_valid
             pt_tokens = pt_tokens * pt_mask[..., None]
