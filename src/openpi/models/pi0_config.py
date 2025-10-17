@@ -58,6 +58,9 @@ class Pi0Config(_model.BaseModelConfig):
     strict_point_checks: bool = True
     # 是否尝试加载预训练（找不到仅警告，不阻断）
     use_pretrained_point: bool = True
+    # 原位插入所需的哨兵 token id（启用点云并做 <point_start>/<point_end> 插入时必须提供）
+    point_start_id: Optional[int] = None
+    point_end_id:   Optional[int] = None
 
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore

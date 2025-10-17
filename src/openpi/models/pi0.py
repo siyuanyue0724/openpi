@@ -298,10 +298,66 @@ class _TorchSonataRunner:
             start = end
         return out_feat, out_mask
 
+# === Host-side helper: 将点云 token 原位插入到 <point_start>/<point_end> 窗口 ===
+def _host_insert_points(
+    text_emb: np.ndarray,          # (B, S, E)
+    text_mask: np.ndarray,         # (B, S) bool
+    token_ids: np.ndarray,         # (B, S) int
+    pt_emb: np.ndarray,            # (B, P, E)
+    pt_mask: np.ndarray,           # (B, P) bool
+    start_id: int,
+    end_id: int,
+) -> tuple[np.ndarray, np.ndarray]:
+    B, S, E = text_emb.shape
+    P = pt_emb.shape[1]
+    fused_emb = np.zeros((B, S + P, E), dtype=text_emb.dtype)
+    fused_mask = np.zeros((B, S + P), dtype=np.bool_)
+    for b in range(B):
+        ids = token_ids[b]
+        starts = np.where(ids == start_id)[0]
+        ends = np.where(ids == end_id)[0]
+        if len(starts) == 0 or len(ends) == 0:
+            raise RuntimeError(f"[Sonata insert] point_start_id/point_end_id not found in sample {b}.")
+        s_idx = int(starts[0])
+        e_idx = int(ends[0])
+        if not (0 <= s_idx < e_idx < S):
+            raise RuntimeError(f"[Sonata insert] Invalid window [{s_idx}, {e_idx}] in sample {b}.")
+        left_len = s_idx + 1  # 包含 <point_start>
+        # 左段
+        fused_emb[b, 0:left_len, :] = text_emb[b, 0:left_len, :]
+        fused_mask[b, 0:left_len] = text_mask[b, 0:left_len]
+        # 点云段
+        fused_emb[b, left_len:left_len + P, :] = pt_emb[b]
+        fused_mask[b, left_len:left_len + P] = pt_mask[b]
+        # 右段（含 <point_end> 以及其后的 token）——兼容 <start>/<end> 非相邻；保持总长 S+P
+        right_len = S - e_idx
+        fused_emb[b, left_len + P : left_len + P + right_len, :] = text_emb[b, e_idx:, :]
+        fused_mask[b, left_len + P : left_len + P + right_len]   = text_mask[b, e_idx:]
+    return fused_emb, fused_mask
+
+
+def _pure_insert_points(
+    text_emb: jnp.ndarray,
+    text_mask: jnp.ndarray,
+    token_ids: jnp.ndarray,
+    pt_emb: jnp.ndarray,
+    pt_mask: jnp.ndarray,
+    start_id: int,
+    end_id: int,
+) -> tuple[jnp.ndarray, jnp.ndarray]:
+    B, S, E = text_emb.shape
+    P = pt_emb.shape[1]
+    out_emb = jax.ShapeDtypeStruct((B, S + P, E), text_emb.dtype)
+    out_msk = jax.ShapeDtypeStruct((B, S + P), text_mask.dtype)
+    return pure_callback(  # type: ignore
+        lambda te, tm, ti, pe, pm: _host_insert_points(te, tm, ti, pe, pm, start_id, end_id),
+        (out_emb, out_msk), text_emb, text_mask, token_ids, pt_emb, pt_mask,
+    )
 
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
+        self.config = config  # <-- 必须：embed_prefix() 里读取 point_start_id/point_end_id 要用
         self.pi05 = config.pi05
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -370,6 +426,8 @@ class Pi0(_model.BaseModel):
         ar_mask = []
         tokens = []
         ref_dtype = None  # 用于对齐点云 token 的 dtype
+        pt_tokens = None
+        pt_mask = None
         # embed images
         for name in obs.images:
             image_tokens, _ = self.PaliGemma.img(obs.images[name], train=False)
@@ -387,7 +445,7 @@ class Pi0(_model.BaseModel):
             if ref_dtype is None:
                 ref_dtype = image_tokens.dtype
 
-        # embed point clouds（Sonata，作为前缀，接在图像后、文本前；严格 fail fast）
+        # embed point clouds（Sonata，严格 fail fast；先得到 pt_tokens/pt_mask，稍后原位插入到文本窗口）
         if self._sonata_runner is not None:
             # 前置字段/形状检查
             if not (hasattr(obs, "point_clouds") and hasattr(obs, "point_cloud_masks") and "pointcloud" in obs.point_clouds):
@@ -430,17 +488,36 @@ class Pi0(_model.BaseModel):
             # 失效 token 数值置零，更稳健
             pt_mask = jnp.broadcast_to(pc_mask[:, None], pt_tokens.shape[:2]) & pt_valid
             pt_tokens = pt_tokens * pt_mask[..., None]
-            tokens.append(pt_tokens)
-            input_mask.append(pt_mask)
-            ar_mask += [False] * int(pt_tokens.shape[1])
+            # 注意：此处不直接 append；稍后插入到文本窗口
 
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
-            tokenized_inputs = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
-            tokens.append(tokenized_inputs)
-            input_mask.append(obs.tokenized_prompt_mask)
-            # full attention between image and language inputs
-            ar_mask += [False] * tokenized_inputs.shape[1]
+            text_emb  = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
+            text_mask = obs.tokenized_prompt_mask
+            if self._sonata_runner is not None:
+                # 原位插入到 <point_start>/<point_end> 窗口（backup 语义）
+                start_id = getattr(self.config, "point_start_id", None)
+                end_id   = getattr(self.config, "point_end_id", None)
+                if (start_id is None) or (end_id is None):
+                    raise RuntimeError("enable_sonata=True 但未设置 Pi0Config.point_start_id/point_end_id（fail fast）。")
+                fused_text, fused_mask = _pure_insert_points(
+                    text_emb, text_mask, obs.tokenized_prompt,
+                    pt_tokens, pt_mask,
+                    int(start_id), int(end_id),
+                )
+                tokens.append(fused_text)
+                input_mask.append(fused_mask)
+                # 前缀内部完全互看
+                ar_mask += [False] * int(fused_text.shape[1])
+            else:
+                tokens.append(text_emb)
+                input_mask.append(text_mask)
+                ar_mask += [False] * int(text_emb.shape[1])
+        else:
+            if self._sonata_runner is not None:
+                # 启用点云但无文本窗口 → 直接失败（与 backup 行为一致）
+                raise RuntimeError("启用 Sonata 但缺少文本（无法进行 <point_start>/<point_end> 插入）。")
+
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)
         ar_mask = jnp.array(ar_mask)
@@ -549,7 +626,7 @@ class Pi0(_model.BaseModel):
         def step(carry):
             x_t, time = carry
             suffix_tokens, suffix_mask, suffix_ar_mask, adarms_cond = self.embed_suffix(
-                observation, x_t, jnp.broadcast_to(time, batch_size)
+                observation, x_t, jnp.broadcast_to(time, (batch_size,))
             )
             # `suffix_attn_mask` is shape (b, suffix_len, suffix_len) indicating how the suffix tokens can attend to each
             # other
