@@ -505,87 +505,29 @@ def train_loop(config: _config.TrainConfig):
     decay_steps = config.lr_schedule.decay_steps
     end_lr = config.lr_schedule.decay_lr
 
-    # -------- SONATA 合流（off/projector/all） --------
-    def _require(cond: bool, msg: str):
-        if not cond:
-            raise RuntimeError(msg)
-
-    # Accept both new and legacy env var names; conflict ⇒ fail fast.
+    # -------- 优化器：单一 AdamW，惰性模块将动态注册到该优化器 --------
+    # 读取训练期 SONATA 模式（只用于“projector 冻结 encoder”的语义；其余逻辑交由模型内部驱动）
     env_new = os.environ.get("OPENPI_SONATA_MODE")
     env_old = os.environ.get("OPENPI_SONATA_TRAIN_MODE")
     if env_new and env_old and env_new.lower() != env_old.lower():
         raise RuntimeError("Conflicting SONATA mode env vars: OPENPI_SONATA_MODE vs OPENPI_SONATA_TRAIN_MODE")
-    sonata_mode = (env_new or env_old or getattr(getattr(config, "model", object()), "sonata_train_mode", "off"))
-    sonata_mode = str(sonata_mode or "off").lower()
+    sonata_mode = str((env_new or env_old or getattr(getattr(config, "model", object()), "sonata_train_mode", "off")) or "off").lower()
     if sonata_mode not in {"off", "projector", "all"}:
         raise ValueError(f"Invalid SONATA mode: {sonata_mode!r}. Expected one of: off|projector|all")
 
-    def _split_main_and_sonata_params(m, mode: str):
-        base = m.module if isinstance(m, torch.nn.parallel.DistributedDataParallel) else m
-        s_params = []
-        # 1) encoder（旧契约）
-        enc = None
-        if hasattr(base, "get_torch_sonata"):
-            try:
-                enc = base.get_torch_sonata()
-            except Exception:
-                enc = None
-        if enc is not None:
-            s_params += list(enc.parameters())
-        # 2) projector（仅在 all 模式并入 SONATA 优化器；否则留在主干优化器）
-        if mode == "all":
-            proj = None
-            if hasattr(base, "sonata_projector"):
-                proj = getattr(base, "sonata_projector")
-            elif hasattr(base, "get_torch_sonata_projector"):
-                try:
-                    proj = base.get_torch_sonata_projector()
-                except Exception:
-                    proj = None
-            if proj is not None:
-                s_params += list(p for p in proj.parameters() if p.requires_grad)
-        if not s_params:
-            return list(base.parameters()), []
-        s_ids = {id(p) for p in s_params}
-        main = [p for p in base.parameters() if id(p) not in s_ids]
-        return main, s_params
-
-    if sonata_mode == "projector":
-        base = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-        if hasattr(base, "get_torch_sonata"):
-            try:
-                enc = base.get_torch_sonata()
-                for p in enc.parameters():
-                    p.requires_grad = False
-                logging.info("[SONATA] projector mode: Sonata encoder parameters are frozen.")
-            except Exception:
-                logging.info("[SONATA] projector mode requested but encoder not found.")
-
-    main_params, sonata_params = _split_main_and_sonata_params(model, sonata_mode)
-    use_sonata_optim = (sonata_mode == "all")
-    if use_sonata_optim:
-        _require(len(sonata_params) > 0, "sonata_train_mode='all' requires SONATA parameters in the model.")
-
-    # Create optimizer with config parameters（若 all 模式则只管主干，SONATA 单独优化器）
     optim = torch.optim.AdamW(
-        main_params if use_sonata_optim else (model.module.parameters() if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model.parameters()),
+        get_model_parameters(model),
         lr=peak_lr,
         betas=(config.optimizer.b1, config.optimizer.b2),
         eps=config.optimizer.eps,
         weight_decay=config.optimizer.weight_decay,
     )
-    sonata_optim = (torch.optim.AdamW(
-        sonata_params,
-        lr=float(getattr(config, "sonata_lr", 1e-4)),
-        betas=(getattr(config.optimizer, "b1", 0.9), getattr(config.optimizer, "b2", 0.999)),
-        eps=getattr(config.optimizer, "eps", 1e-8),
-        weight_decay=float(getattr(config, "sonata_weight_decay", 0.0)),
-    ) if use_sonata_optim else None)
+    sonata_optim = None  # 已取消第二优化器；保持接口占位以兼容 load/save 调用
 
     # Load checkpoint if resuming
     global_step = 0
     if resuming:
-        global_step = load_checkpoint(model, optim, config.checkpoint_dir, device, sonata_optimizer=sonata_optim)
+        global_step = load_checkpoint(model, optim, config.checkpoint_dir, device, sonata_optimizer=None)
         logging.info(f"Resumed training from step {global_step}")
 
     def lr_schedule(step: int):
@@ -597,6 +539,33 @@ def train_loop(config: _config.TrainConfig):
         progress = min(1.0, (step - warmup_steps) / max(1, decay_steps - warmup_steps))
         cos = 0.5 * (1 + np.cos(np.pi * progress))
         return end_lr + (peak_lr - end_lr) * cos
+
+    # 惰性模块（Sonata encoder / projector）首次出现时，自动注册到现有 optimizer
+    def _maybe_register_new_params(optimizer, wrapped_model, mode: str):
+        base_model = wrapped_model.module if isinstance(wrapped_model, torch.nn.parallel.DistributedDataParallel) else wrapped_model
+        existing = {id(p) for g in optimizer.param_groups for p in g["params"]}
+        new_params = []
+        # projector
+        proj = getattr(base_model, "pc_projector", None)
+        if proj is not None:
+            for p in proj.parameters():
+                if p.requires_grad and id(p) not in existing:
+                    new_params.append(p)
+        # encoder
+        enc = getattr(base_model, "sonata", None)
+        if enc is not None:
+            if mode == "projector":
+                for p in enc.parameters():
+                    if p.requires_grad:
+                        p.requires_grad_(False)
+            else:
+                for p in enc.parameters():
+                    if p.requires_grad and id(p) not in existing:
+                        new_params.append(p)
+        if new_params:
+            optimizer.add_param_group({"params": new_params})
+            logging.info("[SONATA] registered %d new parameters into optimizer", len(new_params))
+        return
 
     model.train()
     start_time = time.time()
@@ -669,6 +638,31 @@ def train_loop(config: _config.TrainConfig):
 
 
             obs_dict = _to_device_tree(obs_dict, device)
+            # --- Sonata: 最小字段映射（fail-fast；只做键名对齐，不造假） ---
+            try:
+                base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+                cfg = getattr(base_model, "config", None)
+                enable_sonata = True if getattr(cfg, "enable_sonata", None) is None else bool(getattr(cfg, "enable_sonata", True))
+                sonata_mode = str(getattr(cfg, "sonata_mode", os.environ.get("OPENPI_SONATA_MODE", "all")))
+            except Exception:
+                enable_sonata, sonata_mode = True, "all"
+            need_points = enable_sonata and (sonata_mode in ("projector", "all"))
+            pcs_ok = isinstance(obs_dict.get("point_clouds"), dict) and ("pointcloud" in obs_dict["point_clouds"])
+            if not pcs_ok:
+                # 兼容旧键：pointcloud / pointcloud_mask → Observation.point_clouds/point_cloud_masks
+                pc = obs_dict.pop("pointcloud", None)
+                pm = obs_dict.pop("pointcloud_mask", None)
+                if pc is not None:
+                    if not isinstance(pc, torch.Tensor):
+                        pc = torch.as_tensor(pc, dtype=torch.float32, device=device)
+                    obs_dict.setdefault("point_clouds", {})["pointcloud"] = pc
+                    if pm is None:
+                        B = int(pc.shape[0]); pm = torch.ones(B, dtype=torch.bool, device=device)
+                    elif not isinstance(pm, torch.Tensor):
+                        pm = torch.as_tensor(pm, dtype=torch.bool, device=device)
+                    obs_dict.setdefault("point_cloud_masks", {})["pointcloud"] = pm
+                elif need_points:
+                    raise RuntimeError("Sonata enabled but Observation.point_clouds['pointcloud'] is missing (fail-fast).")
             if not hasattr(_model, "Observation") or not hasattr(_model.Observation, "from_dict"):
                 raise RuntimeError("openpi.models.model.Observation.from_dict is required.")
             observation = _model.Observation.from_dict(obs_dict)
@@ -686,33 +680,22 @@ def train_loop(config: _config.TrainConfig):
                 for pg in sonata_optim.param_groups:
                     pg["lr"] = cur_lr_sonata
 
-            # Forward（SONATA 开启时强制契约）
-            if sonata_mode in {"projector", "all"}:
-                base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-                if not hasattr(base_model, "torch_sonata_encode_batch"):
-                    raise RuntimeError("SONATA enabled but model.torch_sonata_encode_batch is missing.")
-                pt_feat, pt_mask = base_model.torch_sonata_encode_batch(observation, train=True)
-                if not (isinstance(pt_feat, torch.Tensor) and isinstance(pt_mask, torch.Tensor)):
-                    raise RuntimeError("SONATA encode must return (Tensor, Tensor).")
-                pt_feat = pt_feat.to(device)
-                pt_mask = pt_mask.to(device)
-                if sonata_mode == "all":
-                    pt_feat.requires_grad_(True)
-                try:
-                    losses = model(observation, actions, pt_feat_override=pt_feat, pt_mask_override=pt_mask)
-                except TypeError as e:
-                    raise TypeError("SONATA enabled but model.forward(...) does not accept pt_feat_override/pt_mask_override.") from e
-            else:
-                losses = model(observation, actions)
+
+            # Forward（由模型内部决定是否编码/插窗；训练脚本不越权）
+            losses = model(observation, actions)
+
+
             # Ensure losses is a tensor and handle different return types
             if isinstance(losses, (list, tuple)):
                 losses = torch.stack(losses)
             elif not isinstance(losses, torch.Tensor):
                 losses = torch.tensor(losses, device=device, dtype=torch.float32)
 
+            # 动态注册惰性模块参数（首个前向后可能才创建）
+            _maybe_register_new_params(optim, model, sonata_mode)
+
             loss = losses.mean()
 
-            # Backward pass
             loss.backward()
 
             # Log memory usage after backward pass
@@ -723,19 +706,12 @@ def train_loop(config: _config.TrainConfig):
             grad_norm = None
             max_gn = getattr(config.optimizer, "clip_gradient_norm", None)
             if isinstance(max_gn, (int, float)) and max_gn and max_gn > 0:
-                params_for_clip = (main_params if sonata_optim is not None
-                                   else (model.module.parameters() if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model.parameters()))
+                params_for_clip = (get_model_parameters(model))
                 grad_norm = torch.nn.utils.clip_grad_norm_(params_for_clip, max_norm=float(max_gn))
-                if sonata_optim is not None:
-                    torch.nn.utils.clip_grad_norm_(sonata_params, max_norm=float(max_gn))
 
             # Optimizer step（若 all 模式则同时 step 第二优化器）
             optim.step()
-            if sonata_optim is not None:
-                sonata_optim.step()
             optim.zero_grad(set_to_none=True)
-            if sonata_optim is not None:
-                sonata_optim.zero_grad(set_to_none=True)
 
             # Clear gradients more aggressively
             for param in model.parameters():
@@ -790,7 +766,7 @@ def train_loop(config: _config.TrainConfig):
 
             global_step += 1
             # Save checkpoint using the new mechanism（以完成步数为名）
-            save_checkpoint(model, optim, global_step, config, is_main, data_config, sonata_optimizer=sonata_optim)
+            save_checkpoint(model, optim, global_step, config, is_main, data_config, sonata_optimizer=None)
 
             # Update progress bar
             if pbar is not None:

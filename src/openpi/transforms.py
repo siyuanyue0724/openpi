@@ -458,3 +458,198 @@ def _assert_quantile_stats(norm_stats: at.PyTree[NormStats]) -> None:
             raise ValueError(
                 f"quantile stats must be provided if use_quantile_norm is True. Key {k} is missing q01 or q99."
             )
+
+
+ # === Sonata / Point Cloud transforms (ported from intergrate_test_backup) ===
+ # 这些是简单的可调用 dataclass；隐式满足 DataTransformFn 协议。
+ 
+ # --- DecodeLiberoDepth ---
+ from dataclasses import dataclass
+ from typing import List, Optional, Tuple, Any
+ import numpy as np
+ 
+ def _to_numpy(x: Any) -> np.ndarray:
+     try:
+         return np.asarray(x)
+     except Exception:
+         try:
+             import torch
+             if isinstance(x, torch.Tensor):
+                 return x.detach().cpu().numpy()
+         except Exception:
+             pass
+         return np.array(x)
+ 
+ def _as_hwc(x: np.ndarray) -> np.ndarray:
+     # 支持 HWC / CHW -> HWC
+     if x.ndim == 3 and x.shape[0] in (1,3):
+         return np.transpose(x, (1,2,0))
+     return x
+ 
+ def _float_to_u8(a: np.ndarray) -> np.ndarray:
+     # 将 [0,1] 或 [0,255] 的浮点域近似映射回 uint8（避免因浮点误差误判“通道全等”）
+     a = np.asarray(a, dtype=np.float32)
+     if a.max() <= 1.0:
+         a = a * 255.0
+     return np.clip(np.round(a), 0, 255).astype(np.uint8)
+ 
+ @dataclass(frozen=True)
+ class DecodeLiberoDepth:
+     """
+     支持三种输入：
+       1) 单通道 uint16/float (H,W,1) / (1,H,W) / (H,W)
+       2) 三通道“灰度复制”（C==3 && 三通道近似全等）
+       3) 三通道 24-bit 打包 (R,G,B) -> (R*65536 + G*256 + B)
+     输出 float32 深度（可选缩放与裁剪），写入 dst_keys。
+     """
+     src_keys: List[str]
+     dst_keys: List[str]
+     scale: Optional[float] = None
+     clip_min: float = 0.0
+     clip_max: Optional[float] = None
+     identical_eps: float = 1e-5
+     def __call__(self, sample: dict) -> dict:
+         assert len(self.src_keys) == len(self.dst_keys)
+         for s, d in zip(self.src_keys, self.dst_keys):
+             arr = _as_hwc(_to_numpy(sample[s]))
+             if arr.ndim == 2:
+                 depth = arr.astype(np.float32)
+             elif arr.ndim == 3 and arr.shape[-1] == 1:
+                 depth = arr[..., 0].astype(np.float32)
+             elif arr.ndim == 3 and arr.shape[-1] == 3:
+                 ch0, ch1, ch2 = arr[..., 0], arr[..., 1], arr[..., 2]
+                 if np.allclose(ch0, ch1, atol=self.identical_eps) and np.allclose(ch0, ch2, atol=self.identical_eps):
+                     depth = ch0.astype(np.float32)
+                 else:
+                     a_u8 = _float_to_u8(arr)
+                     r, g, b = a_u8[..., 0].astype(np.uint32), a_u8[..., 1].astype(np.uint32), a_u8[..., 2].astype(np.uint32)
+                     depth = (r << 16) + (g << 8) + b
+                     depth = depth.astype(np.float32)
+             else:
+                 raise TypeError(f"Unsupported depth array shape: {arr.shape}")
+             if self.scale is not None:
+                 depth = depth * float(self.scale)
+             depth = np.clip(depth, self.clip_min, self.clip_max) if self.clip_max is not None else np.clip(depth, self.clip_min, None)
+             sample[d] = depth.astype(np.float32)
+         return sample
+ 
+ # --- DepthToPointCloud ---
+ @dataclass(frozen=True)
+ class DepthToPointCloud:
+     """
+     深度 -> 点云（可带相机内参，输出 [grid(3)|xyz(3)|extras(C)] 共 3+C 列；grid 填 0 以满足 PI0 契约）
+     - depth_map: dict 名到深度图键
+     - color_map: dict 名到 RGB 图键（可选，缺省则 extras 置零）
+     - intrinsics: {name: (fx,fy,cx,cy)} 或 None（None 走相对尺度）
+     - stride: 下采样步长
+     - out_key: 写入 point_clouds[out_key] / point_cloud_masks[out_key]
+     """
+     depth_map: dict
+     color_map: Optional[dict] = None
+     intrinsics: Optional[dict] = None
+     stride: int = 4
+     out_key: str = "pointcloud"
+     max_points: int = 32768
+     def __call__(self, sample: dict) -> dict:
+         pts_all, rgb_all = [], []
+         for name, dkey in self.depth_map.items():
+             depth = _to_numpy(sample[dkey])
+             if self.stride > 1:
+                 depth = depth[:: self.stride, :: self.stride]
+             H, W = depth.shape[:2]
+             yy, xx = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
+             Z = depth.astype(np.float32)
+             if self.intrinsics and name in self.intrinsics:
+                 fx, fy, cx, cy = self.intrinsics[name]
+                 X = (xx - cx) * Z / fx
+                 Y = (yy - cy) * Z / fy
+             else:
+                 X = (xx - (W - 1) / 2.0).astype(np.float32)
+                 Y = (yy - (H - 1) / 2.0).astype(np.float32)
+             P = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
+             if self.color_map and name in self.color_map:
+                 img = _as_hwc(_to_numpy(sample[self.color_map[name]])).astype(np.float32)
+                 if img.max() > 1.5: img = img / 255.0
+                 C = img.reshape(-1, 3)
+             else:
+                 C = np.zeros((P.shape[0], 3), dtype=np.float32)
+             pts_all.append(P); rgb_all.append(C)
+         if not pts_all:
+             return sample
+         P = np.concatenate(pts_all, axis=0)
+         C = np.concatenate(rgb_all, axis=0)
+         if P.shape[0] > self.max_points:
+             idx = np.random.choice(P.shape[0], self.max_points, replace=False)
+             P, C = P[idx], C[idx]
+         grid = np.zeros_like(P, dtype=np.float32)
+         pc = np.concatenate([grid, P.astype(np.float32), C.astype(np.float32)], axis=1)
+         sample.setdefault("point_clouds", {})[self.out_key] = pc
+         sample.setdefault("point_cloud_masks", {})[self.out_key] = np.bool_(True)
+         return sample
+ 
+ # --- ValidatePointCloud (strict fail-fast) ---
+ @dataclasses.dataclass(frozen=True)
+ class ValidatePointCloud:
+     """
+     校验单路点云：
+       observation.point_clouds[key]        : [N, 3 + feat_dim] float32   （样本内点数 N）
+       observation.point_cloud_masks[key]   : bool 或 [1]                 （帧级掩码，每样本一个）
+     校验不过直接抛错（不做任何自动修复/退化）。
+     """
+     key: str = "pointcloud"
+     feat_dim: int = 6
+     min_points: int = 1
+     allow_mask_all_false: bool = False
+     def __call__(self, batch: dict) -> dict:
+         pcs = pms = None
+         if "point_clouds" in batch:
+             pcs = batch["point_clouds"]; pms = batch.get("point_cloud_masks", None)
+         elif "observation" in batch and isinstance(batch["observation"], dict):
+             pcs = batch["observation"].get("point_clouds", None)
+             pms = batch["observation"].get("point_cloud_masks", None)
+         if pcs is None or self.key not in pcs:
+             raise KeyError(f"missing point_clouds['{self.key}']")
+         x = np.asarray(pcs[self.key])
+         if x.ndim == 3 and x.shape[0] == 1: x = x[0]
+         if x.ndim != 2 or x.shape[1] != 3 + self.feat_dim:
+             raise ValueError(f"pointcloud shape must be [N,{3 + self.feat_dim}], got {tuple(x.shape)}")
+         if x.dtype != np.float32:
+             raise TypeError(f"pointcloud dtype must be float32, got {x.dtype}")
+         if not np.isfinite(x).all():
+             raise ValueError("pointcloud contains NaN/Inf")
+         if x.shape[0] < self.min_points:
+             raise ValueError(f"pointcloud must have at least {self.min_points} points, got {x.shape[0]}")
+         if pms is None or self.key not in pms:
+             raise KeyError(f"missing point_cloud_masks['{self.key}']")
+         m = np.asarray(pms[self.key])
+         if m.shape == () or m.shape == (1,):
+             valid = bool(m.reshape(-1)[0])
+         elif m.ndim == 2 and m.shape[0] == 1:
+             valid = bool(m[0])
+         else:
+             raise ValueError(f"mask must be a frame-level bool (scalar or [1]), got shape {tuple(m.shape)}")
+         if not self.allow_mask_all_false and not valid:
+             raise ValueError("frame-level mask is False")
+         return batch
+ 
+ # --- LiberoInputsKeepExtras (preserve extras through LiberoInputs) ---
+ @dataclasses.dataclass(frozen=True)
+ class LiberoInputsKeepExtras:
+     """
+     包一层 `openpi.policies.libero_policy.LiberoInputs`，并保留/回附点云字段，
+     防止它被下游丢弃。仅在你用 Libero 的默认输入转换且需要点云时使用。
+     """
+     action_dim: int
+     model_type: "_model.ModelType"
+     def __call__(self, batch: dict) -> dict:
+         pcs = batch.get("point_clouds", None)
+         pms = batch.get("point_cloud_masks", None)
+         from openpi.policies.libero_policy import LiberoInputs  # 延迟导入，避免循环
+         wrapped = LiberoInputs(model_type=self.model_type)
+         out = wrapped(batch)
+         if isinstance(out, dict):
+             if isinstance(pcs, dict) and "pointcloud" in pcs:
+                 out.setdefault("point_clouds", {})["pointcloud"] = pcs["pointcloud"]
+             if isinstance(pms, dict) and "pointcloud" in pms:
+                 out.setdefault("point_cloud_masks", {})["pointcloud"] = pms["pointcloud"]
+         return out

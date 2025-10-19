@@ -38,7 +38,7 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
 
     # ===== Point cloud (Sonata) 配置（严格 fail-fast） =====
-    # 旧布尔开关（向后兼容）：是否启用点云
+    # 旧布尔开关（向后兼容）：是否启用点云（PyTorch 路线中 None 会在模型里按“默认开启”解析）。
     enable_sonata: Optional[bool] = None
     # 新枚举（推荐）：选择点云后端（存在即用）
     point_backbone_type: Optional["PointBackboneType"] = None  # type: ignore[name-defined]
@@ -52,13 +52,18 @@ class Pi0Config(_model.BaseModelConfig):
     point_config: dict | None = None
     # 权重路径（优先本字段，其次 OPENPI_SONATA_CKPT；找不到仅 warning）
     sonata_ckpt_path: str | None = None
-    # 无 GPU 是否允许回退到 CPU（False=允许；True=强制 CUDA）
+    # 是否强制需要 CUDA（True=强制；False=允许 CPU 回退）。
     require_cuda: bool = True
     # 严格策略固定开启（fail-fast）；此字段保留仅为兼容，不影响行为
     strict_point_checks: bool = True
     # 是否尝试加载预训练（找不到仅警告，不阻断）
     use_pretrained_point: bool = True
-    # 原位插入所需的哨兵 token id（启用点云并做 <point_start>/<point_end> 插入时必须提供）
+    # 原位插入用的哨兵 token id（启用点云并做 <|point_start|>/<|point_end|> 插入时必须提供）。
+    # 与 PaligemmaTokenizer 的约定保持一致：point_start_id = vocab_size - 2；point_end_id = vocab_size - 1。
+    # 推荐在训练入口“显式”写入：
+    #   from openpi.models.tokenizer import PaligemmaTokenizer
+    #   vsz = int(PaligemmaTokenizer()._tokenizer.vocab_size())
+    #   cfg.point_start_id, cfg.point_end_id = vsz - 2, vsz - 1
     point_start_id: Optional[int] = None
     point_end_id:   Optional[int] = None
 
