@@ -146,7 +146,7 @@ class FASTTokenizer:
             postfix_tokens = (
                 self._paligemma_tokenizer.encode("Action: ")
                 + action_tokens_in_pg.tolist()
-                + self._paligemma_tokenizer.encode("|", add_eos=True)
+                + self._paligemma_tokenizer.encode("|", add_eos=False)
             )
         else:
             postfix_tokens = []
