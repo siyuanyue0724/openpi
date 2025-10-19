@@ -1,5 +1,6 @@
 import logging
 import os
+import re
 
 import jax
 import numpy as np
@@ -11,6 +12,43 @@ import openpi.models.utils.fsq_tokenizer as fsq_tokenizer
 import openpi.shared.download as download
 
 
+def _encode_prompt_with_specials_spm(spm: sentencepiece.SentencePieceProcessor,
+                                     prompt_text: str,
+                                     *,
+                                     point_start_id: int,
+                                     point_end_id: int,
+                                     add_bos_first_segment: bool,
+                                     lower_non_special: bool,
+                                     replace_newlines: bool) -> list[int]:
+    """
+    按 <|point_start|>/<|point_end|> 切分；窗口片段直接注入固定 id；
+    非特殊片段仅做轻清洗（可选 lower、'_'→' '、可选 '\n'→' '），再用 SPM 编码。
+    仅当需要时在“本段”开头加 BOS（通常我们让 BOS 由固定前缀负责）。
+    """
+    parts = re.split(r'(<\|point_start\|>|<\|point_end\|>)', str(prompt_text))
+    out: list[int] = []
+    if add_bos_first_segment:
+        bos_id = int(spm.bos_id())
+        if bos_id < 0:
+            raise RuntimeError("SentencePiece BOS id is invalid.")
+        out.append(bos_id)
+    for part in parts:
+        if not part:
+            continue
+        if part == "<|point_start|>":
+            out.append(point_start_id)
+        elif part == "<|point_end|>":
+            out.append(point_end_id)
+        else:
+            norm = part.replace("_", " ")
+            if replace_newlines:
+                norm = norm.replace("\n", " ")
+            if lower_non_special:
+                norm = norm.lower()
+            out.extend(spm.encode(norm, add_bos=False))
+    return out
+
+
 class PaligemmaTokenizer:
     def __init__(self, max_len: int = 48):
         self._max_len = max_len
@@ -20,17 +58,31 @@ class PaligemmaTokenizer:
             self._tokenizer = sentencepiece.SentencePieceProcessor(model_proto=f.read())
 
     def tokenize(self, prompt: str, state: np.ndarray | None = None) -> tuple[np.ndarray, np.ndarray]:
-        cleaned_text = prompt.strip().replace("_", " ").replace("\n", " ")
+        # 关键：不要对整串清洗，以免破坏 <|point_start|>/<|point_end|>。只在“非特殊片段”里处理。
+        prompt_raw = str(prompt).strip()
+        vsz = int(self._tokenizer.vocab_size())
+        point_start_id = vsz - 2
+        point_end_id   = vsz - 1
         if state is not None:
-            # This is the Pi05 format, where the state is part of the discrete language input.
+            # Pi05：state 离散写进文本；窗口标记在“用户 prompt”片段里注入；BOS 由固定前缀负责
             discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
             state_str = " ".join(map(str, discretized_state))
-            full_prompt = f"Task: {cleaned_text}, State: {state_str};\nAction: "
-            tokens = self._tokenizer.encode(full_prompt, add_bos=True)
+            tokens: list[int] = []
+            tokens += self._tokenizer.encode("Task: ", add_bos=True)
+            tokens += _encode_prompt_with_specials_spm(
+                self._tokenizer, prompt_raw,
+                point_start_id=point_start_id, point_end_id=point_end_id,
+                add_bos_first_segment=False, lower_non_special=False, replace_newlines=True,
+            )
+            tokens += self._tokenizer.encode(f", State: {state_str};\nAction: ", add_bos=False)
         else:
-            # This is the Pi0 format, where the state is part of the continuous action expert input.
-            # tokenize "\n" separately as the "start of answer" token
-            tokens = self._tokenizer.encode(cleaned_text, add_bos=True) + self._tokenizer.encode("\n")
+            # Pi0：只有 prompt；窗口标记同样注入；再单独追加换行作为“answer 开始”
+            tokens = _encode_prompt_with_specials_spm(
+                self._tokenizer, prompt_raw,
+                point_start_id=point_start_id, point_end_id=point_end_id,
+                add_bos_first_segment=True, lower_non_special=False, replace_newlines=True,
+            )
+            tokens += self._tokenizer.encode("\n", add_bos=False)
         tokens_len = len(tokens)
         if tokens_len < self._max_len:
             padding = [False] * (self._max_len - tokens_len)
@@ -64,15 +116,26 @@ class FASTTokenizer:
     def tokenize(
         self, prompt: str, state: np.ndarray, actions: np.ndarray | None
     ) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
-        cleaned_text = prompt.lower().strip().replace("_", " ")
+        # 避免破坏窗口标记：不要对整串 lower/replace；仅在“非特殊片段”里做清洗
+        prompt_raw = str(prompt).strip()
+        vsz = int(self._paligemma_tokenizer.vocab_size())
+        point_start_id = vsz - 2
+        point_end_id   = vsz - 1
 
         # Convention: state gets discretized into 256 discrete bins (assumed range after normalization: [-1, 1])
         discretized_state = np.digitize(state, bins=np.linspace(-1, 1, 256 + 1)[:-1]) - 1
 
         # Convention: prefix includes prompt and string-representation of state, followed by ';'
         state_str = " ".join(map(str, discretized_state))
-        prefix = f"Task: {cleaned_text}, State: {state_str};\n"
-        prefix_tokens = self._paligemma_tokenizer.encode(prefix, add_bos=True)
+        # 三段式：BOS 只由 "Task: " 段加；prompt 段做窗口注入；状态段正常编码
+        prefix_tokens: list[int] = []
+        prefix_tokens += self._paligemma_tokenizer.encode("Task: ", add_bos=True)
+        prefix_tokens += _encode_prompt_with_specials_spm(
+            self._paligemma_tokenizer, prompt_raw,
+            point_start_id=point_start_id, point_end_id=point_end_id,
+            add_bos_first_segment=False, lower_non_special=True, replace_newlines=False,
+        )
+        prefix_tokens += self._paligemma_tokenizer.encode(f", State: {state_str};\n", add_bos=False)
 
         if actions is not None:
             # Tokenize actions with FAST tokenizer --> map to last tokens in PaliGemma vocab
