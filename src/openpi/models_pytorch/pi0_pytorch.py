@@ -116,12 +116,16 @@ class PI0Pytorch(nn.Module):
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
         # ---- Sonata configuration (default: enabled; mode 'all') ----
-        self.enable_sonata = bool(getattr(config, "enable_sonata", True))
+        # Treat None as "use default(True)" to avoid bool(None)==False disabling Sonata by accident
+        _enable = getattr(config, "enable_sonata", None)
+        self.enable_sonata = True if _enable is None else bool(_enable)
         default_mode = os.environ.get("OPENPI_SONATA_MODE", "all")
         self.sonata_mode = str(getattr(config, "sonata_mode", default_mode))
         if self.sonata_mode not in ("off", "projector", "all"):
             raise RuntimeError(f"Invalid sonata_mode: {self.sonata_mode}")
-        self.require_cuda  = bool(getattr(config, "require_cuda", True))
+        # Default to True unless explicitly set to False
+        _req = getattr(config, "require_cuda", None)
+        self.require_cuda = True if _req is None else bool(_req)
         self.sonata_ckpt   = getattr(config, "sonata_ckpt_path", None)
         self.point_start_id = getattr(config, "point_start_id", None)
         self.point_end_id   = getattr(config, "point_end_id", None)
