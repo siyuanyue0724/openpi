@@ -12,6 +12,7 @@ dependencies = [
     "equinox>=0.11.8",
     "flatbuffers>=24.3.25",
     "flax==0.10.2",
+    "safetensors>=0.4.5",
     "fsspec[gcs]>=2024.6.0",
     "gym-aloha>=0.1.1",
     "imageio>=2.36.1",

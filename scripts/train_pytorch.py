@@ -644,6 +644,30 @@ def train_loop(config: _config.TrainConfig):
             if not hasattr(observation, "to_dict"):
                 raise RuntimeError("Observation must implement to_dict().")
             obs_dict = observation.to_dict()
+            # --- numpy -> torch（最小必要，避免 preprocess_pytorch 在 numpy 上出错） ---
+            def _to_torch_tree(x):
+                if isinstance(x, torch.Tensor):
+                    return x
+                # numpy / jax array -> torch
+                if hasattr(x, "dtype"):
+                    s = str(x.dtype)
+                    if s.startswith("int"):
+                        # 语言 token等整型应为 torch.long（int64）供 embedding 使用
+                        return torch.as_tensor(x, dtype=torch.long)
+                    if s.startswith("bool"):
+                        return torch.as_tensor(x, dtype=torch.bool)
+                    return torch.as_tensor(x, dtype=torch.float32)
+                return x
+            if _dc.is_dataclass(obs_dict) and not isinstance(obs_dict, type):
+                obs_dict = _dc.replace(
+                    obs_dict, **{f.name: _to_torch_tree(getattr(obs_dict, f.name)) for f in _dc.fields(obs_dict)}
+                )
+            elif isinstance(obs_dict, dict):
+                obs_dict = {k: _to_torch_tree(v) for k, v in obs_dict.items()}
+            else:
+                obs_dict = _to_torch_tree(obs_dict)
+
+
             obs_dict = _to_device_tree(obs_dict, device)
             if not hasattr(_model, "Observation") or not hasattr(_model.Observation, "from_dict"):
                 raise RuntimeError("openpi.models.model.Observation.from_dict is required.")

@@ -9,6 +9,8 @@ import torch.nn.functional as F  # noqa: N812
 import openpi.models.gemma as _gemma
 from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
+import os
+from openpi.models.sonata_encoder import Sonata
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -113,6 +115,23 @@ class PI0Pytorch(nn.Module):
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
+        # ---- Sonata configuration (default: enabled; mode 'all') ----
+        self.enable_sonata = bool(getattr(config, "enable_sonata", True))
+        default_mode = os.environ.get("OPENPI_SONATA_MODE", "all")
+        self.sonata_mode = str(getattr(config, "sonata_mode", default_mode))
+        if self.sonata_mode not in ("off", "projector", "all"):
+            raise RuntimeError(f"Invalid sonata_mode: {self.sonata_mode}")
+        self.require_cuda  = bool(getattr(config, "require_cuda", True))
+        self.sonata_ckpt   = getattr(config, "sonata_ckpt_path", None)
+        self.point_start_id = getattr(config, "point_start_id", None)
+        self.point_end_id   = getattr(config, "point_end_id", None)
+        self.point_token_cap = int(getattr(config, "point_token_cap", 0) or 0)
+        self.point_feat_dim  = int(getattr(config, "point_feat_dim", 6) or 6)
+        # Lazily constructed encoder and projector
+        self.sonata: Sonata | None = None
+        self.pc_projector: nn.Linear | None = None
+        # Cache for current batch (raw features, before projection)
+        self._pt_cache: tuple[torch.Tensor, torch.Tensor] | None = None
 
         msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
         try:
@@ -122,6 +141,154 @@ class PI0Pytorch(nn.Module):
                 raise ValueError(msg)
         except ImportError:
             raise ValueError(msg) from None
+
+
+    def _ensure_sonata_ready(self, device, dtype):
+        if not self.enable_sonata or self.sonata_mode == "off":
+            raise RuntimeError("Sonata is disabled but encoder was requested.")
+        if self.require_cuda and not torch.cuda.is_available():
+            raise RuntimeError("CUDA required for Sonata, but CUDA is not available.")
+        if self.sonata is None:
+            self.sonata = Sonata(in_channels=self.point_feat_dim)
+            if self.sonata_ckpt:
+                state = torch.load(self.sonata_ckpt, map_location="cpu")
+                missing, unexpected = self.sonata.load_state_dict(state, strict=True)
+                if missing or unexpected:
+                    raise RuntimeError(f"Sonata ckpt mismatch: missing={missing}, unexpected={unexpected}")
+            self.sonata.to(device=device, dtype=dtype).eval()
+
+    def set_point_cache(self, pt_feat_raw: torch.Tensor, pt_mask: torch.Tensor) -> None:
+        if pt_feat_raw.ndim != 3 or pt_mask.ndim != 2 or pt_feat_raw.shape[:2] != pt_mask.shape[:2]:
+            raise RuntimeError(f"Invalid pt shapes: {pt_feat_raw.shape=}, {pt_mask.shape=}")
+        self._pt_cache = (pt_feat_raw, pt_mask)
+
+    @torch.no_grad()
+    def torch_sonata_encode_batch(self, observation, train: bool = False):
+        if not self.enable_sonata or self.sonata_mode == "off":
+            raise RuntimeError("Sonata is disabled (enable_sonata=False or sonata_mode=off).")
+        if "point_clouds" not in observation.__dict__ or not observation.point_clouds:
+            raise RuntimeError("Sonata enabled but observation.point_clouds is missing or empty.")
+        if "pointcloud" not in observation.point_clouds:
+            raise RuntimeError("Sonata enabled but observation.point_clouds['pointcloud'] is missing.")
+
+        device = next(self.parameters()).device
+        dtype  = next(self.parameters()).dtype
+        self._ensure_sonata_ready(device, dtype)
+
+        pcs   = observation.point_clouds["pointcloud"]
+        pmask = observation.point_cloud_masks.get("pointcloud", None)
+        if not isinstance(pcs, torch.Tensor):
+            pcs = torch.as_tensor(pcs)
+        pcs = pcs.to(device=device, dtype=dtype)
+        B, M, D = pcs.shape
+        if D < 6:
+            raise RuntimeError(f"pointcloud last dim {D} < 6; expect [3 grid | 3 xyz | extras].")
+        if pmask is None:
+            pmask = torch.ones((B,), dtype=torch.bool, device=device)
+        elif not isinstance(pmask, torch.Tensor):
+            pmask = torch.as_tensor(pmask, dtype=torch.bool, device=device)
+        else:
+            pmask = pmask.to(device=device, dtype=torch.bool)
+        if torch.isnan(pcs).any() or torch.isinf(pcs).any():
+            raise RuntimeError("Point cloud contains NaN/Inf.")
+        grid = pcs[..., :3]
+        if (grid < 0).any():
+            raise RuntimeError("Point grid (first 3 dims) must be non-negative.")
+        feat = pcs[..., 3:]
+        if feat.shape[-1] != self.point_feat_dim:
+            raise RuntimeError(f"feat_dim mismatch: got {feat.shape[-1]}, expect config.point_feat_dim={self.point_feat_dim}")
+
+        cap = int(self.point_token_cap)
+        if cap <= 0:
+            raise RuntimeError("point_token_cap must be > 0 when Sonata is enabled.")
+
+        pt_list = []
+        mask_list = []
+        for b in range(B):
+            if not pmask[b]:
+                raise RuntimeError("Sonata enabled but point_cloud_masks['pointcloud'][b] is False.")
+            arr = pcs[b]
+            g = arr[:, :3].to(torch.int64)
+            f = arr[:, 3:].to(dtype=torch.float32)
+            c = f[:, :3].to(dtype=torch.float32)
+            pad = (g == 0).all(dim=1) & (c == 0).all(dim=1) & (f == 0).all(dim=1)
+            g = g[~pad]; c = c[~pad]; f = f[~pad]
+            n = g.shape[0]
+            if n == 0:
+                raise RuntimeError("Empty point cloud after removing paddings.")
+            sample = {"coord": c, "feat": f, "grid_coord": g,
+                      "batch": torch.zeros((n,), dtype=torch.int64, device=device),
+                      "offset": torch.tensor([n], dtype=torch.int64, device=device)}
+            out_any = self.sonata(sample)
+            enc = out_any if isinstance(out_any, torch.Tensor) else getattr(out_any, "feat", None)
+            if enc is None:
+                raise RuntimeError("Sonata.forward must return Tensor or object with .feat")
+            real = int(enc.size(0))
+            if real > cap:
+                raise RuntimeError(f"[Sonata] token_len={real} exceeds point_token_cap={cap}.")
+            if real < cap:
+                pad_zeros = torch.zeros(cap - real, enc.size(1), dtype=enc.dtype, device=enc.device)
+                enc = torch.cat([enc, pad_zeros], dim=0)
+            elif real >= int(0.95 * cap):
+                logging.getLogger("openpi").warning("[Sonata] token_len=%d is close to cap (%d).", real, cap)
+            m = torch.zeros((cap,), dtype=torch.bool, device=device)
+            m[:real] = True
+            pt_list.append(enc.to(dtype=dtype))
+            mask_list.append(m)
+        pt_feat_raw = torch.stack(pt_list, dim=0)
+        pt_mask     = torch.stack(mask_list, dim=0)
+        self._pt_cache = (pt_feat_raw, pt_mask)
+        return self._pt_cache
+
+    @staticmethod
+    def _insert_points_torch(
+        text_emb: torch.Tensor,
+        text_mask: torch.Tensor,
+        token_ids: torch.Tensor,
+        pt_emb: torch.Tensor,
+        pt_mask: torch.Tensor,
+        start_id: int,
+        end_id: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        B, S, E = text_emb.shape
+        if token_ids.dtype != torch.long:
+            raise RuntimeError("token_ids must be torch.long for embedding/indexing.")
+        starts = (token_ids == start_id).nonzero(as_tuple=False)
+        ends   = (token_ids == end_id).nonzero(as_tuple=False)
+        s_pos = torch.full((B,), -1, device=token_ids.device, dtype=torch.long)
+        e_pos = torch.full((B,), -1, device=token_ids.device, dtype=torch.long)
+        for b in range(B):
+            s_idx = starts[starts[:,0]==b][:,1]
+            e_idx = ends[ends[:,0]==b][:,1]
+            if s_idx.numel() != 1 or e_idx.numel() != 1:
+                raise RuntimeError("Each sample must contain exactly one pair of point window tokens.")
+            s_pos[b] = s_idx.item()
+            e_pos[b] = e_idx.item()
+            if not (0 <= s_pos[b] < e_pos[b] < S):
+                raise RuntimeError(f"Invalid window positions: start={s_pos[b]}, end={e_pos[b]}, S={S}")
+        fused_embs, fused_masks = [], []
+        for b in range(B):
+            s = s_pos[b].item(); e = e_pos[b].item()
+            k = int(pt_mask[b].sum().item())
+            if k == 0:
+                raise RuntimeError("Empty point token sequence for a sample with a point window.")
+            left_emb  = text_emb[b, :s+1, :]
+            left_m    = text_mask[b, :s+1]
+            mid_emb   = pt_emb[b, :k, :]
+            mid_m     = pt_mask[b, :k]
+            right_emb = text_emb[b, e:, :]
+            right_m   = text_mask[b, e:]
+            fused_embs.append(torch.cat([left_emb, mid_emb, right_emb], dim=0))
+            fused_masks.append(torch.cat([left_m,   mid_m,   right_m  ], dim=0))
+        L = max(x.shape[0] for x in fused_embs)
+        out_emb = text_emb.new_zeros((B, L, E))
+        out_msk = text_mask.new_zeros((B, L), dtype=torch.bool)
+        for b in range(B):
+            n = fused_embs[b].shape[0]
+            out_emb[b, :n, :] = fused_embs[b]
+            out_msk[b, :n]    = fused_masks[b]
+        return out_emb, out_msk
+
 
     def gradient_checkpointing_enable(self):
         """Enable gradient checkpointing for memory optimization."""
@@ -216,6 +383,22 @@ class PI0Pytorch(nn.Module):
             return lang_emb * math.sqrt(lang_emb_dim)
 
         lang_emb = self._apply_checkpoint(lang_embed_func, lang_tokens)
+
+        # --- Sonata point cloud insertion (default enabled) ---
+        if self.enable_sonata:
+            if self.point_start_id is None or self.point_end_id is None:
+                raise RuntimeError("point_start_id/point_end_id must be set in config when Sonata is enabled.")
+            if self.sonata_mode == "all":
+                if self._pt_cache is None:
+                    raise RuntimeError("Sonata mode=all requires torch_sonata_encode_batch() to be called before embed_prefix.")
+                pt_feat_raw, pt_mask = self._pt_cache
+                lang_emb_dim = lang_emb.shape[-1]
+                if self.pc_projector is None:
+                    self.pc_projector = nn.Linear(pt_feat_raw.shape[-1], lang_emb_dim, bias=False).to(device=lang_emb.device, dtype=lang_emb.dtype)
+                pt_emb = self.pc_projector(pt_feat_raw.to(dtype=lang_emb.dtype, device=lang_emb.device))
+                lang_emb, lang_masks = self._insert_points_torch(
+                    lang_emb, lang_masks, lang_tokens, pt_emb, pt_mask, int(self.point_start_id), int(self.point_end_id)
+                )
 
         embs.append(lang_emb)
         pad_masks.append(lang_masks)
@@ -316,6 +499,9 @@ class PI0Pytorch(nn.Module):
     def forward(self, observation, actions, noise=None, time=None) -> Tensor:
         """Do a full training forward pass and compute the loss (batch_size x num_steps x num_motors)"""
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=True)
+        # --- Sonata encode (default enabled): compute pt cache for this batch ---
+        if self.enable_sonata and self.sonata_mode in ("projector","all"):
+            self.torch_sonata_encode_batch(observation, train=True)
 
         if noise is None:
             noise = self.sample_noise(actions.shape, actions.device)
@@ -381,6 +567,8 @@ class PI0Pytorch(nn.Module):
             noise = self.sample_noise(actions_shape, device)
 
         images, img_masks, lang_tokens, lang_masks, state = self._preprocess_observation(observation, train=False)
+        if self.enable_sonata and self.sonata_mode in ("projector","all"):
+            self.torch_sonata_encode_batch(observation, train=False)
 
         prefix_embs, prefix_pad_masks, prefix_att_masks = self.embed_prefix(images, img_masks, lang_tokens, lang_masks)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
