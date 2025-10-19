@@ -53,7 +53,7 @@ class Pi0Config(_model.BaseModelConfig):
     # 权重路径（优先本字段，其次 OPENPI_SONATA_CKPT；找不到仅 warning）
     sonata_ckpt_path: str | None = None
     # 无 GPU 是否允许回退到 CPU（False=允许；True=强制 CUDA）
-    require_cuda: bool = False
+    require_cuda: bool = True
     # 严格策略固定开启（fail-fast）；此字段保留仅为兼容，不影响行为
     strict_point_checks: bool = True
     # 是否尝试加载预训练（找不到仅警告，不阻断）
