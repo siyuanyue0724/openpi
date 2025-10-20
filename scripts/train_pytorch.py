@@ -693,8 +693,7 @@ def train_loop(config: _config.TrainConfig):
             if not hasattr(_model, "Observation") or not hasattr(_model.Observation, "from_dict"):
                 raise RuntimeError("openpi.models.model.Observation.from_dict is required.")
             observation = _model.Observation.from_dict(obs_dict)
-            actions = actions.to(torch.float32)  # noqa: PLW2901
-            actions = actions.to(device)  # noqa: PLW2901
+            actions = torch.as_tensor(actions, dtype=torch.float32, device=device)  # robust to numpy/torch
 
             # Update LR（SONATA 使用缩放后的曲线峰值为 sonata_lr）
             cur_lr = lr_schedule(global_step)
