@@ -1012,7 +1012,7 @@ _CONFIGS = [
                         feat_dim=getattr(model, "point_feat_dim", 6),
                         min_points=1,
                     ),
-                    _transforms.LiberoInputsKeepExtras(model_type=model.model_type),
+                    _transforms.LiberoInputsKeepExtras(action_dim=model.action_dim, model_type=model.model_type),
                 ],
                 outputs=[libero_policy.LiberoOutputs()],
             ),

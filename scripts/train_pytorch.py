@@ -412,23 +412,25 @@ def train_loop(config: _config.TrainConfig):
         # Convert observation and actions to torch tensors
         observation, actions = sample_batch
         sample_dict = observation.to_dict()
-        # 支持两种形态：images(dict of views) 或 image(tensor)
-        views = None
-        if isinstance(sample_dict.get("images"), dict):
-            views = list(sample_dict["images"].values())
-        elif "image" in sample_dict:
-            img = sample_dict["image"]
-            if not isinstance(img, torch.Tensor):
-                img = torch.as_tensor(img)
-            views = [img]
-        else:
+        # 兼容 'images' 或 'image'；两者都可能是“多视角 dict”
+        img_dict = sample_dict.get("images")
+        if img_dict is None and "image" in sample_dict:
+            if isinstance(sample_dict["image"], dict):
+                img_dict = sample_dict["image"]
+            else:
+                img = sample_dict["image"]
+                if not isinstance(img, torch.Tensor):
+                    img = torch.as_tensor(img)
+                img_dict = {"image": img}
+        if img_dict is None:
             raise KeyError("No 'images' or 'image' found in sample batch for logging.")
 
         images_to_log = []
-        batch_size = views[0].shape[0]
+        first_view = next(iter(img_dict.values()))
+        batch_size = first_view.shape[0]
         for i in range(min(5, batch_size)):
             # NCHW -> NHWC；多视角横向拼接
-            nhwcs = [v[i].permute(1, 2, 0) for v in views]
+            nhwcs = [img[i].permute(1, 2, 0) for img in img_dict.values()]
             img_concatenated = torch.cat(nhwcs, dim=1) if len(nhwcs) > 1 else nhwcs[0]
             images_to_log.append(wandb.Image(img_concatenated.detach().cpu().numpy()))
 
