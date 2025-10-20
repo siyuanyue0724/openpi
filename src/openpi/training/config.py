@@ -28,6 +28,19 @@ import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
 
+# === Sonata helpers (pi0.5) ===
+@dataclasses.dataclass(frozen=True)
+class _EnsurePointWindow:
+    """如 prompt 缺少点云窗口标记，则在末尾追加一对 <|point_start|><|point_end|>。"""
+    def __call__(self, data: dict) -> dict:
+        p = data.get("prompt", "")
+        if isinstance(p, bytes):
+            p = p.decode("utf-8")
+        s, e = "<|point_start|>", "<|point_end|>"
+        if s not in p or e not in p:
+            data["prompt"] = (f"{str(p).strip()} {s}{e}").strip()
+        return data
+
 ModelType: TypeAlias = _model.ModelType
 # Work around a tyro issue with using nnx.filterlib.Filter directly.
 Filter: TypeAlias = nnx.filterlib.Filter
@@ -955,6 +968,67 @@ _CONFIGS = [
         overwrite=True,
         exp_name="debug_pi05",
         wandb_enabled=False,
+    ),
+    #
+    # === PI0.5 + SONATA (基础版：Libero depth -> point cloud) ===
+    #
+    TrainConfig(
+        name="pi05_sonata_base",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            enable_sonata=True,
+            point_feat_dim=6,
+            point_token_cap=1024,
+        ),
+        data=SimpleDataConfig(
+            base_config=DataConfig(
+                prompt_from_task=True,
+            ),
+            data_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    # （若你的数据键名已一致，可删本 Repack）
+                    _transforms.RepackTransform({
+                        "observation/image":       "observation.images.image",
+                        "observation/wrist_image": "observation.images.wrist_image",
+                        "observation/state":       "observation.state",
+                        "actions":                 "action",
+                        "depth/front/raw":         "observation.images.image_depth",
+                        "depth/wrist/raw":         "observation.images.wrist_depth",
+                    }),
+                    _transforms.DecodeLiberoDepth(
+                        src_keys=["depth/front/raw", "depth/wrist/raw"],
+                        dst_keys=["depth/front", "depth/wrist"],
+                   ),
+                    _transforms.DepthToPointCloud(
+                        depth_map={"front": "depth/front", "wrist": "depth/wrist"},
+                        color_map={"front": "observation/image", "wrist": "observation/wrist_image"},
+                        intrinsics=None,
+                        stride=4,
+                        out_key="pointcloud",
+                        max_points=32768,
+                    ),
+                    _transforms.ValidatePointCloud(
+                        key="pointcloud",
+                        feat_dim=getattr(model, "point_feat_dim", 6),
+                        min_points=1,
+                    ),
+                    _transforms.LiberoInputsKeepExtras(model_type=model.model_type),
+                ],
+                outputs=[libero_policy.LiberoOutputs()],
+            ),
+            model_transforms=lambda model: _transforms.Group(
+                inputs=[
+                    _EnsurePointWindow(),
+                    _transforms.ResizeImages(224, 224),
+                    _transforms.TokenizePrompt(
+                        _tokenizer.PaligemmaTokenizer(model.max_token_len),
+                        discrete_state_input=model.discrete_state_input,
+                    ),
+                    _transforms.PadStatesAndActions(model.action_dim),
+                ],
+            ),
+        ),
+        # 其它超参走默认；需要时用命令行覆盖（--batch_size/--num_train_steps 等）
     ),
     #
     # RoboArena configs.

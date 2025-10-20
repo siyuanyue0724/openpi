@@ -412,18 +412,25 @@ def train_loop(config: _config.TrainConfig):
         # Convert observation and actions to torch tensors
         observation, actions = sample_batch
         sample_dict = observation.to_dict()
-        img_dict = sample_dict.get("images")
-        if img_dict is None:
-            img_dict = sample_dict["image"]  # 若两者都无，立刻 KeyError（契约不满足就崩）
+        # 支持两种形态：images(dict of views) 或 image(tensor)
+        views = None
+        if isinstance(sample_dict.get("images"), dict):
+            views = list(sample_dict["images"].values())
+        elif "image" in sample_dict:
+            img = sample_dict["image"]
+            if not isinstance(img, torch.Tensor):
+                img = torch.as_tensor(img)
+            views = [img]
+        else:
+            raise KeyError("No 'images' or 'image' found in sample batch for logging.")
 
         images_to_log = []
-        # Get batch size from the first image tensor
-        batch_size = next(iter(img_dict.values())).shape[0]
+        batch_size = views[0].shape[0]
         for i in range(min(5, batch_size)):
-            # Concatenate all camera views horizontally for this batch item
-            # Convert from NCHW to NHWC format for wandb
-            img_concatenated = torch.cat([img[i].permute(1, 2, 0) for img in img_dict.values()], dim=1)
-            images_to_log.append(wandb.Image(img_concatenated.cpu().numpy()))
+            # NCHW -> NHWC；多视角横向拼接
+            nhwcs = [v[i].permute(1, 2, 0) for v in views]
+            img_concatenated = torch.cat(nhwcs, dim=1) if len(nhwcs) > 1 else nhwcs[0]
+            images_to_log.append(wandb.Image(img_concatenated.detach().cpu().numpy()))
 
         wandb.log({"camera_views": images_to_log}, step=0)
 
@@ -453,6 +460,26 @@ def train_loop(config: _config.TrainConfig):
         object.__setattr__(model_cfg, "dtype", config.pytorch_training_precision)
 
     model = openpi.models_pytorch.pi0_pytorch.PI0Pytorch(model_cfg).to(device)
+
+    # ==== Sonata: set point window token ids and enable fail-fast if mismatch ===
+    try:
+        if getattr(model, "enable_sonata", False) and getattr(model, "sonata_mode", "all") in ("projector", "all"):
+            # Use language model embedding table size to infer special ids (agrees with PaligemmaTokenizer)
+            vsz = int(model.paligemma_with_expert.paligemma.language_model.get_input_embeddings().num_embeddings)
+            exp_start, exp_end = vsz - 2, vsz - 1
+            # If not set, set them; if set but wrong, raise
+            if getattr(model, "point_start_id", None) is None or getattr(model, "point_end_id", None) is None:
+                model.point_start_id = exp_start
+                model.point_end_id   = exp_end
+            else:
+                if int(model.point_start_id) != exp_start or int(model.point_end_id) != exp_end:
+                    raise RuntimeError(
+                        f"point_start_id/point_end_id mismatch tokenizer: got ({model.point_start_id},{model.point_end_id}), "
+                        f"expected ({exp_start},{exp_end})."
+                    )
+            logging.info(f"[Sonata] point token ids set to start={model.point_start_id}, end={model.point_end_id}")
+    except Exception as e:
+        raise RuntimeError(f"Failed to set point token ids for Sonata insertion: {e}") from e
 
     if hasattr(model, "gradient_checkpointing_enable"):
         enable_gradient_checkpointing = True
