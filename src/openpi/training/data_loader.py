@@ -1,3 +1,4 @@
+from __future__ import annotations
 from collections.abc import Iterator, Sequence
 import logging
 import multiprocessing
@@ -5,11 +6,26 @@ import os
 import typing
 from typing import Literal, Protocol, SupportsIndex, TypeVar
 
-import jax
-import jax.numpy as jnp
+from torch.utils._pytree import tree_map
 import lerobot.common.datasets.lerobot_dataset as lerobot_dataset
 import numpy as np
 import torch
+try:
+    import jax  # 用于 JAX/RLDS 路线；PyTorch-only 路线不会触发
+    import jax.numpy as jnp
+except Exception:
+    jax = None
+    jnp = None
+
+def _require_jax():
+    if jax is None:
+        raise ImportError("This code path requires JAX. Install JAX or use framework='pytorch'.")
+
+# ---- Pylance-friendly type alias for JAX sharding ----
+try:
+    from jax.sharding import Sharding as _JaxShardingT  # type: ignore
+except Exception:
+    from typing import Any as _JaxShardingT  # type: ignore
 
 import openpi.models.model as _model
 import openpi.training.config as _config
@@ -62,6 +78,34 @@ class TransformedDataset(Dataset[T_co]):
         return len(self._dataset)
 
 
+class FakeDataset(Dataset):
+    def __init__(self, model_config: _model.BaseModelConfig, num_samples: int):
+        self._num_samples = num_samples
+        self._observation_spec, self._action_spec = model_config.inputs_spec()
+
+    def __getitem__(self, index: SupportsIndex) -> dict:
+        # NumPy RNG（无 JAX 依赖）
+        rng = np.random.default_rng(seed=int(index.__index__()))
+
+        def make_from_spec(spec):
+            # Remove the batch dimension.
+            shape = spec.shape[1:]
+            # Generate values based on dtype
+            if np.dtype(spec.dtype) == np.float32:
+                return rng.uniform(low=-1.0, high=1.0, size=shape).astype(np.float32)
+            if np.dtype(spec.dtype) == np.int32:
+                return rng.integers(low=0, high=2048, size=shape, dtype=np.int32)
+            return np.zeros(shape=shape, dtype=spec.dtype)
+
+        # 用 dict 视图避免依赖 pytree 对自定义 dataclass 的注册
+        obs_dict = tree_map(make_from_spec, self._observation_spec.to_dict())
+        action = tree_map(make_from_spec, self._action_spec)
+        return {**obs_dict, "actions": action}
+
+    def __len__(self) -> int:
+        return self._num_samples
+
+
 class IterableTransformedDataset(IterableDataset[T_co]):
     def __init__(
         self,
@@ -81,50 +125,19 @@ class IterableTransformedDataset(IterableDataset[T_co]):
                 # individual samples and apply the transform to each sample individually.
                 batch_size = next(v.shape[0] for v in sample.values())
 
-                # Split batch into individual samples using tree_map
-                individual_samples = [jax.tree.map(lambda x: x[i], sample) for i in range(batch_size)]  # noqa: B023
+                # Split batch（无需 JAX）
+                individual_samples = [tree_map(lambda x: x[i], sample) for i in range(batch_size)]  # noqa: B023
 
                 # Transform each sample
                 transformed = [self._transform(s) for s in individual_samples]
 
-                # Recombine batch with tree_map
-                yield jax.tree.map(lambda *x: np.stack(x, axis=0), *transformed)
+                # Recombine batch
+                yield tree_map(lambda *x: np.stack(x, axis=0), *transformed)
             else:
                 yield self._transform(sample)
 
     def __len__(self) -> int:
         return len(self._dataset)
-
-
-class FakeDataset(Dataset):
-    def __init__(self, model_config: _model.BaseModelConfig, num_samples: int):
-        self._num_samples = num_samples
-        self._observation_spec, self._action_spec = model_config.inputs_spec()
-
-    def __getitem__(self, index: SupportsIndex) -> dict:
-        rng = jax.random.key(index.__index__())
-
-        def make_from_spec(spec: jax.ShapeDtypeStruct):
-            nonlocal rng
-            rng, data_rng = jax.random.split(rng)
-            # Remove the batch dimension.
-            shape = spec.shape[1:]
-            if spec.dtype == jnp.float32:
-                return jax.random.uniform(data_rng, shape=shape, minval=-1.0, maxval=1.0)
-            if spec.dtype == jnp.int32:
-                return jax.random.randint(data_rng, shape=shape, minval=0, maxval=2048)
-            return jnp.zeros(shape=shape, dtype=spec.dtype)
-
-        observation = jax.tree.map(make_from_spec, self._observation_spec)
-        action = jax.tree.map(make_from_spec, self._action_spec)
-
-        return {
-            **observation.to_dict(),
-            "actions": action,
-        }
-
-    def __len__(self) -> int:
-        return self._num_samples
 
 
 def create_torch_dataset(
@@ -223,7 +236,7 @@ def transform_iterable_dataset(
 def create_data_loader(
     config: _config.TrainConfig,
     *,
-    sharding: jax.sharding.Sharding | None = None,
+    sharding: _JaxShardingT | None = None,
     shuffle: bool = False,
     num_batches: int | None = None,
     skip_norm_stats: bool = False,
@@ -274,7 +287,7 @@ def create_torch_data_loader(
     action_horizon: int,
     batch_size: int,
     *,
-    sharding: jax.sharding.Sharding | None = None,
+    sharding: _JaxShardingT | None = None,
     skip_norm_stats: bool = False,
     shuffle: bool = False,
     num_batches: int | None = None,
@@ -308,17 +321,21 @@ def create_torch_data_loader(
     sampler = None
     if framework == "pytorch":
         if torch.distributed.is_initialized():
+            world_size = torch.distributed.get_world_size()
+            if batch_size // world_size < 1:
+                raise ValueError(f"Global batch_size ({batch_size}) must be >= world_size ({world_size}).")
             sampler = torch.utils.data.distributed.DistributedSampler(
                 dataset,
-                num_replicas=torch.distributed.get_world_size(),
+                num_replicas=world_size,
                 rank=torch.distributed.get_rank(),
                 shuffle=shuffle,
                 drop_last=True,
             )
-            local_batch_size = batch_size // torch.distributed.get_world_size()
+            local_batch_size = batch_size // world_size
         else:
             local_batch_size = batch_size
     else:
+        _require_jax()
         local_batch_size = batch_size // jax.process_count()
 
     logging.info(f"local_batch_size: {local_batch_size}")
@@ -342,7 +359,7 @@ def create_rlds_data_loader(
     action_horizon: int,
     batch_size: int,
     *,
-    sharding: jax.sharding.Sharding | None = None,
+    sharding: _JaxShardingT | None = None,
     skip_norm_stats: bool = False,
     shuffle: bool = False,
     num_batches: int | None = None,
@@ -386,7 +403,7 @@ class TorchDataLoader:
         dataset,
         local_batch_size: int,
         *,
-        sharding: jax.sharding.Sharding | None = None,
+        sharding: _JaxShardingT | None = None,
         shuffle: bool = False,
         sampler: torch.utils.data.Sampler | None = None,
         num_batches: int | None = None,
@@ -409,8 +426,10 @@ class TorchDataLoader:
                 execute in the main process.
             seed: The seed to use for shuffling the data.
         """
-        if jax.process_count() > 1:
-            raise NotImplementedError("Data loading with multiple processes is not supported.")
+        if framework == "jax":
+            _require_jax()
+            if jax.process_count() > 1:
+                raise NotImplementedError("Data loading with multiple processes is not supported.")
 
         if len(dataset) < local_batch_size:
             raise ValueError(f"Local batch size ({local_batch_size}) is larger than the dataset size ({len(dataset)}).")
@@ -419,6 +438,7 @@ class TorchDataLoader:
         self._sharding = sharding
         if sharding is None and framework == "jax":
             # Use data parallel sharding by default for JAX only.
+            _require_jax()
             self._sharding = jax.sharding.NamedSharding(
                 jax.sharding.Mesh(jax.devices(), ("B",)),
                 jax.sharding.PartitionSpec("B"),
@@ -463,16 +483,15 @@ class TorchDataLoader:
                 num_items += 1
                 # For JAX, convert to sharded arrays; for PyTorch, return torch tensors
                 if self._sharding is not None:
+                    _require_jax()
                     yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
                 else:
-                    yield jax.tree.map(torch.as_tensor, batch)
+                    yield tree_map(torch.as_tensor, batch)
 
 
 def _collate_fn(items):
     """Collate the batch elements into batched numpy arrays."""
-    # Make sure to convert to numpy arrays before stacking since some of the incoming elements
-    # may be JAX arrays.
-    return jax.tree.map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
+    return tree_map(lambda *xs: np.stack([np.asarray(x) for x in xs], axis=0), *items)
 
 
 def _worker_init_fn(worker_id: int) -> None:
@@ -493,12 +512,13 @@ class RLDSDataLoader:
         self,
         dataset: DroidRldsDataset,
         *,
-        sharding: jax.sharding.Sharding | None = None,
+        sharding: _JaxShardingT | None = None,
         num_batches: int | None = None,
     ):
         self._dataset = dataset
         self._num_batches = num_batches
 
+        _require_jax()
         if jax.process_count() > 1:
             raise NotImplementedError("Data loading with multiple processes is not supported.")
 
@@ -524,6 +544,7 @@ class RLDSDataLoader:
                 except StopIteration:
                     break  # We've exhausted the dataset. Create a new iterator and start over.
                 num_items += 1
+                _require_jax()
                 yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
 
 
