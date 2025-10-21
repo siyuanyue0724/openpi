@@ -1,16 +1,34 @@
-import dataclasses
-from typing import TYPE_CHECKING
-from typing import Optional
+from __future__ import annotations
 
-import flax.nnx as nnx
-import jax
-import jax.numpy as jnp
+import dataclasses
+from typing import TYPE_CHECKING, Optional, Any
+
+# Optional JAX imports (allow import in PyTorch-only envs)
+try:  # pragma: no cover - best-effort fallback
+    import jax  # type: ignore
+    import jax.numpy as jnp  # type: ignore
+except Exception:  # fallback stubs
+    jax = None  # type: ignore
+    jnp = None  # type: ignore
+    import numpy as _np
+
+    class _ShapeDtypeStruct:
+        def __init__(self, shape, dtype):
+            self.shape = tuple(shape)
+            self.dtype = _np.dtype(dtype)
+
+    class _JaxStub:
+        ShapeDtypeStruct = _ShapeDtypeStruct
+
+    jax = _JaxStub()  # type: ignore
+    jnp = _np  # type: ignore
+
 from typing_extensions import override
 
 from openpi.models import model as _model
 import openpi.models.gemma as _gemma
-from openpi.shared import array_typing as at
-import openpi.shared.nnx_utils as nnx_utils
+# NOTE: avoid importing array_typing & nnx_utils at module import time;
+# they may depend on JAX/Flax. We import them lazily inside functions.
 
 # 新枚举（软依赖，老分支不影响）
 try:
@@ -39,7 +57,7 @@ class Pi0Config(_model.BaseModelConfig):
 
     # ===== Point cloud (Sonata) 配置（严格 fail-fast） =====
     # 旧布尔开关（向后兼容）：是否启用点云（PyTorch 路线中 None 会在模型里按“默认开启”解析）。
-    enable_sonata: Optional[bool] = None
+    enable_sonata: Optional[bool] = True
     # 新枚举（推荐）：选择点云后端（存在即用）
     point_backbone_type: Optional["PointBackboneType"] = None  # type: ignore[name-defined]
     # feats = [xyz(3) + extras]，常见 xyz+rgb => 6；Observation 的最后一维为 3 + point_feat_dim
@@ -84,15 +102,21 @@ class Pi0Config(_model.BaseModelConfig):
         return _model.ModelType.PI0
 
     @override
-    def create(self, rng: at.KeyArrayLike) -> "Pi0":
-        from openpi.models.pi0 import Pi0
-
+    def create(self, rng) -> "Pi0":
+        """Create the JAX model (only for JAX runs)."""
+        try:
+            import flax.nnx as nnx  # type: ignore
+            from openpi.shared import array_typing as at  # type: ignore
+            from openpi.models.pi0 import Pi0  # type: ignore
+        except Exception as e:  # pragma: no cover - only raised on PyTorch-only envs
+            raise RuntimeError("Pi0Config.create() requires JAX/Flax; not available in PyTorch-only environment.") from e
         return Pi0(self, rngs=nnx.Rngs(rng))
 
     @override
     def inputs_spec(self, *, batch_size: int = 1) -> tuple[_model.Observation, _model.Actions]:
         image_spec = jax.ShapeDtypeStruct([batch_size, *_model.IMAGE_RESOLUTION, 3], jnp.float32)
-        image_mask_spec = jax.ShapeDtypeStruct([batch_size], jnp.bool_)
+        # bool dtype fallback: numpy bool_ works with our FakeDataset logic
+        image_mask_spec = jax.ShapeDtypeStruct([batch_size], getattr(jnp, "bool_", bool))
 
         # 是否启用点云（双开关兼容）
         enable_pc = False
@@ -104,7 +128,19 @@ class Pi0Config(_model.BaseModelConfig):
         except Exception:
             pass
 
-        with at.disable_typechecking():
+        # 注意：此函数在 PyTorch-only 环境下只为 FakeDataset 提供 shape/dtype 信息；
+        # 不会真正触发 JAX/Flax 执行。
+        try:
+            from openpi.shared import array_typing as at  # type: ignore
+            _disable_ctx = at.disable_typechecking()
+        except Exception:
+            # Fallback context manager that does nothing
+            class _NullCtx:
+                def __enter__(self): return self
+                def __exit__(self, *exc): return False
+            _disable_ctx = _NullCtx()
+
+        with _disable_ctx:
             observation_spec = _model.Observation(
                 images={
                     "base_0_rgb": image_spec,
@@ -126,18 +162,25 @@ class Pi0Config(_model.BaseModelConfig):
                     } if enable_pc else {}
                 ),
                 point_cloud_masks=(
-                    {"pointcloud": jax.ShapeDtypeStruct([batch_size], jnp.bool_)} if enable_pc else {}
+                    {"pointcloud": jax.ShapeDtypeStruct([batch_size], getattr(jnp, "bool_", bool))} if enable_pc else {}
                 ),
                 state=jax.ShapeDtypeStruct([batch_size, self.action_dim], jnp.float32),
                 tokenized_prompt=jax.ShapeDtypeStruct([batch_size, self.max_token_len], jnp.int32),
-                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], bool),
+                tokenized_prompt_mask=jax.ShapeDtypeStruct([batch_size, self.max_token_len], getattr(jnp, "bool_", bool)),
             )
         action_spec = jax.ShapeDtypeStruct([batch_size, self.action_horizon, self.action_dim], jnp.float32)
 
         return observation_spec, action_spec
 
-    def get_freeze_filter(self) -> nnx.filterlib.Filter:
-        """Returns the freeze filter based on the model config."""
+    def get_freeze_filter(self) -> Any:
+        """Returns the freeze filter based on the model config (JAX-only).
+        On PyTorch-only environment, returns None.
+        """
+        try:
+            import flax.nnx as nnx  # type: ignore
+            import openpi.shared.nnx_utils as nnx_utils  # type: ignore
+        except Exception:
+            return None
         filters = []
         has_lora = False
         gemma_params_filter = nnx_utils.PathRegex(".*llm.*")
@@ -164,5 +207,5 @@ class Pi0Config(_model.BaseModelConfig):
                 nnx.Not(nnx_utils.PathRegex(".*lora.*")),
             )
         if not filters:
-            return nnx.Nothing
-        return nnx.All(*filters)
+            return nnx.Nothing  # type: ignore[attr-defined]
+        return nnx.All(*filters)  # type: ignore[attr-defined]
