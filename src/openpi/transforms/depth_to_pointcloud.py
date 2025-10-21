@@ -105,5 +105,7 @@ class DepthToPointCloud:
         pc = np.concatenate([grid, P.astype(np.float32), C.astype(np.float32)], axis=1)
 
         sample.setdefault("point_clouds", {})[self.out_key] = pc
-        sample.setdefault("point_cloud_masks", {})[self.out_key] = np.bool_(True)
+        # 帧级掩码与过滤后的点数一致：空点云 -> False；否则 True
+        # 好处：可搭配 ValidatePointCloud(min_points=0, allow_mask_all_false=True) 表达“允许空帧但不致命”
+        sample.setdefault("point_cloud_masks", {})[self.out_key] = np.bool_(P.shape[0] > 0)
         return sample
