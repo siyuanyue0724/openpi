@@ -110,7 +110,36 @@ class RepackTransform(DataTransformFn):
 
     def __call__(self, data: DataDict) -> DataDict:
         flat_item = flatten_dict(data)
-        return _repack_from_structure(self.structure, flat_item)
+        # 1) 兼容老路径：为每个 key 的点分隔形式建立别名（'a/b/c' -> 'a.b.c'）
+        flat_with_alias: dict[str, Any] = dict(flat_item)
+        for k, v in flat_item.items():
+            alias = k.replace("/", ".")
+            # 避免极端情况下覆盖真实存在的点分隔键
+            if alias not in flat_with_alias:
+                flat_with_alias[alias] = v
+
+        # 2) 规范“新结构”的键：把 "x/y/z": ... 展开成嵌套 dict，避免输出键名包含 '/'
+        def _normalize_new_keys(obj: Any) -> Any:
+            if isinstance(obj, dict):
+                out: dict[str, Any] = {}
+                for k, v in obj.items():
+                    if isinstance(k, str) and "/" in k:
+                        parts = k.split("/")
+                        d = out
+                        for p in parts[:-1]:
+                            d = d.setdefault(p, {})
+                        d[parts[-1]] = _normalize_new_keys(v)
+                    else:
+                        out[k] = _normalize_new_keys(v)
+                return out
+            elif isinstance(obj, (list, tuple)):
+                t = type(obj)
+                return t(_normalize_new_keys(x) for x in obj)
+            else:
+                return obj
+
+        structure_norm = _normalize_new_keys(self.structure)
+        return _repack_from_structure(structure_norm, flat_with_alias)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -589,46 +618,68 @@ class DecodeLiberoDepth:
         return sample
 
 # --- DepthToPointCloud ---
-@dataclass(frozen=True)
+@dataclasses.dataclass(frozen=True)
 class DepthToPointCloud:
     """
-    深度 -> 点云（可带相机内参，输出 [grid(3)|xyz(3)|extras(C)] 共 3+C 列；grid 填 0 以满足 PI0 契约）
-    - depth_map: dict 名到深度图键
-    - color_map: dict 名到 RGB 图键（可选，缺省则 extras 置零）
-    - intrinsics: {name: (fx,fy,cx,cy)} 或 None（None 走相对尺度）
-    - stride: 下采样步长
-    - out_key: 写入 point_clouds[out_key] / point_cloud_masks[out_key]
+    把单通道深度图（H×W）反投影成点云；可选从对应 RGB 取颜色。
+    - depth_map: {cam: depth_key}，sample[depth_key] 为 H×W
+    - color_map: {cam: rgb_key}（可选），支持 CHW/HWC；自动归一化到 0..1
+    - intrinsics: {cam: (fx,fy,cx,cy)}（可选），有则米制；无则相对尺度
+    - stride: 下采样；max_points: 最多点数。**先过滤无效深度再抽样**
+    输出：sample["point_clouds"][out_key] = [N, 9]（3×占位0 + 3×xyz + 3×rgb）
     """
     depth_map: dict
     color_map: Optional[dict] = None
     intrinsics: Optional[dict] = None
     stride: int = 4
     out_key: str = "pointcloud"
-    max_points: int = 32768
+    max_points: int = 65536
+    min_depth: float = 1e-6
+    max_depth: Optional[float] = None
+
     def __call__(self, sample: dict) -> dict:
         pts_all, rgb_all = [], []
-        for name, dkey in self.depth_map.items():
+        for cam, dkey in self.depth_map.items():
+            if dkey not in sample:
+                continue
             depth = _to_numpy(sample[dkey])
-            if self.stride > 1:
-                depth = depth[:: self.stride, :: self.stride]
-            H, W = depth.shape[:2]
-            yy, xx = np.meshgrid(np.arange(H), np.arange(W), indexing="ij")
-            Z = depth.astype(np.float32)
-            if self.intrinsics and name in self.intrinsics:
-                fx, fy, cx, cy = self.intrinsics[name]
-                X = (xx - cx) * Z / fx
-                Y = (yy - cy) * Z / fy
+            if depth.ndim != 2:
+                raise ValueError(f"[DepthToPointCloud] depth must be HxW, got {depth.shape} for '{dkey}'")
+
+            H, W = depth.shape
+            yy, xx = np.mgrid[0:H:self.stride, 0:W:self.stride]
+            z = depth[::self.stride, ::self.stride].astype(np.float32, copy=False)
+
+            if self.intrinsics and cam in self.intrinsics:
+                fx, fy, cx, cy = self.intrinsics[cam]
+                x = (xx - cx) / fx * z
+                y = (yy - cy) / fy * z
             else:
-                X = (xx - (W - 1) / 2.0).astype(np.float32)
-                Y = (yy - (H - 1) / 2.0).astype(np.float32)
-            P = np.stack([X, Y, Z], axis=-1).reshape(-1, 3)
-            if self.color_map and name in self.color_map:
-                img = _as_hwc(_to_numpy(sample[self.color_map[name]])).astype(np.float32)
-                if img.max() > 1.5: img = img / 255.0
-                C = img.reshape(-1, 3)
-            else:
-                C = np.zeros((P.shape[0], 3), dtype=np.float32)
-            pts_all.append(P); rgb_all.append(C)
+                x = (xx - (W - 1) * 0.5) / ((W - 1) * 0.5) * z
+                y = (yy - (H - 1) * 0.5) / ((H - 1) * 0.5) * z
+
+            # 构造候选点并按有效深度过滤（NaN/Inf/非正/超上限）
+            P_all = np.stack([x, y, z], axis=-1)              # [Hs, Ws, 3]
+            zflat = z.reshape(-1)                              # [Hs*Ws]
+            m = np.isfinite(P_all).all(axis=2).reshape(-1) & (zflat > self.min_depth)
+            if self.max_depth is not None:
+                m &= (zflat < self.max_depth)
+            P = P_all.reshape(-1, 3)[m]                        # [N, 3]
+
+            # 颜色（若提供）
+            C = np.zeros((P.shape[0], 3), dtype=np.float32)
+            if self.color_map and cam in self.color_map and self.color_map[cam] in sample:
+                rgb_raw = _to_numpy(sample[self.color_map[cam]])
+                rgb_hwc = _as_hwc(rgb_raw)
+                rgb_sub = rgb_hwc[::self.stride, ::self.stride]
+                if rgb_sub.ndim == 3 and rgb_sub.shape[-1] >= 3:
+                    C = rgb_sub.reshape(-1, rgb_sub.shape[-1])[m, :3].astype(np.float32, copy=False)
+                    if C.size and C.max() > 1.0 + 1e-6:
+                        C = C / 255.0  # 若是 0..255，统一到 0..1
+
+            pts_all.append(P)
+            rgb_all.append(C)
+
         if not pts_all:
             return sample
         P = np.concatenate(pts_all, axis=0)
