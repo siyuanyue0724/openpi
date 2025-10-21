@@ -1,12 +1,30 @@
 import contextlib
 import functools as ft
 import inspect
-from typing import TypeAlias, TypeVar, cast
+from typing import Any, TypeAlias, TypeVar, cast
 
 import beartype
-import jax
-import jax._src.tree_util as private_tree_util
-import jax.core
+# ---- Make JAX optional ------------------------------------------------------
+try:
+    import jax  # noqa: F401
+    import jax._src.tree_util as private_tree_util  # noqa: F401
+    _HAS_JAX = True
+except Exception:
+    _HAS_JAX = False
+    class _JaxArray:  # placeholder for typing union
+        pass
+    class _JaxTyping:
+        ArrayLike = Any
+    class _JaxStub:
+        Array = _JaxArray
+        typing = _JaxTyping
+        class tree_util:
+            @staticmethod
+            def keystr(_): return "<no-jax>"
+    jax = _JaxStub()  # type: ignore
+    private_tree_util = None  # type: ignore
+
+
 from jaxtyping import ArrayLike
 from jaxtyping import Bool  # noqa: F401
 from jaxtyping import DTypeLike  # noqa: F401
@@ -27,8 +45,8 @@ import torch
 # `jax.Sharding`, or even <object>) due to JAX tracing operations. this patch skips typechecking when the stack trace
 # contains `jax._src.tree_util`, which should only be the case during tree unflattening.
 _original_check_dataclass_annotations = jaxtyping._decorator._check_dataclass_annotations  # noqa: SLF001
-# Redefine Array to include both JAX arrays and PyTorch tensors
-Array = jax.Array | torch.Tensor
+# Redefine Array to include both JAX arrays and PyTorch tensors (JAX may be a stub)
+Array = jax.Array | torch.Tensor  # type: ignore[attr-defined]
 
 
 def _check_dataclass_annotations(self, typechecker):
@@ -42,7 +60,11 @@ def _check_dataclass_annotations(self, typechecker):
 
 jaxtyping._decorator._check_dataclass_annotations = _check_dataclass_annotations  # noqa: SLF001
 
-KeyArrayLike: TypeAlias = jax.typing.ArrayLike
+try:
+    KeyArrayLike: TypeAlias = jax.typing.ArrayLike  # type: ignore[attr-defined]
+except Exception:
+    # Fallback when JAX is not installed
+    KeyArrayLike: TypeAlias = Any
 Params: TypeAlias = PyTree[Float[ArrayLike, "..."]]
 
 T = TypeVar("T")
@@ -66,7 +88,13 @@ def check_pytree_equality(*, expected: PyTree, got: PyTree, check_shapes: bool =
     error message than if `jax.tree.map` is naively used on PyTrees with different structures.
     """
 
-    if errors := list(private_tree_util.equality_errors(expected, got)):
+
+    if not _HAS_JAX:
+        # This utility is only meaningful with JAX installed.
+        raise ImportError("check_pytree_equality requires JAX to be installed.")
+
+
+    if errors := list(private_tree_util.equality_errors(expected, got)):  # type: ignore[union-attr]
         raise ValueError(
             "PyTrees have different structure:\n"
             + (

@@ -5,28 +5,122 @@ from dataclasses import field
 import enum
 import logging
 import pathlib
-from typing import Generic, TypeVar
+from typing import Generic, TypeVar, Any
 
-import augmax
-from flax import nnx
-from flax import struct
-from flax import traverse_util
-import jax
-import jax.numpy as jnp
+# ---- Optional dependencies (augmax, Flax, JAX, Orbax) with safe fallbacks ---
+class _MissingModule:
+    def __init__(self, name: str):
+        self.__name = name
+    def __getattr__(self, _):
+        raise ImportError(
+            f"Optional dependency '{self.__name}' is required for this code path but is not installed."
+        )
+
+# augmax is only used in JAX preprocessing path
+try:
+    import augmax  # noqa: F401
+except Exception:
+    augmax = _MissingModule("augmax")  # type: ignore
+
+# Flax (nnx / struct / traverse_util)
+try:
+    from flax import nnx  # noqa: F401
+except Exception:
+    class _NNXModule:  # minimal placeholder for class base
+        pass
+    def _nnx_fail(*_args, **_kwargs):
+        raise ImportError("flax.nnx is required for this code path.")
+    class _NNXShim:
+        Module = _NNXModule
+        eval_shape = staticmethod(_nnx_fail)
+        split = staticmethod(_nnx_fail)
+        merge = staticmethod(_nnx_fail)
+    nnx = _NNXShim()  # type: ignore
+
+try:
+    from flax import struct as _flax_struct  # noqa: F401
+    struct = _flax_struct
+except Exception:
+    # fall back to stdlib dataclass so class definitions still succeed
+    class _StructShim:
+        dataclass = dataclasses.dataclass
+    struct = _StructShim()  # type: ignore
+
+try:
+    from flax import traverse_util  # noqa: F401
+except Exception:
+    traverse_util = _MissingModule("flax.traverse_util")  # type: ignore
+
+# JAX (optional): provide jnp fallback and minimal placeholders
+try:
+    import jax  # noqa: F401
+    import jax.numpy as jnp  # noqa: F401
+    _HAS_JAX = True
+except Exception:
+    import numpy as jnp  # type: ignore
+    _HAS_JAX = False
+    class _JaxArray:  # placeholder for typing
+        pass
+    class _JaxShapeDtypeStruct:
+        def __init__(self, shape, dtype):
+            self.shape = shape
+            self.dtype = dtype
+    class _JaxSharding:
+        class Sharding: ...
+        class Mesh:
+            def __init__(self, *args, **kwargs): ...
+        class NamedSharding:
+            def __init__(self, *args, **kwargs): ...
+        class PartitionSpec:
+            def __init__(self, *args, **kwargs): ...
+    class _JaxTyping:
+        ArrayLike = object
+    class _JaxTree:
+        @staticmethod
+        def map(*_a, **_k):  # raised on use
+            raise ImportError("JAX is required for this code path.")
+    class _JaxRandom:
+        @staticmethod
+        def split(*_a, **_k):
+            raise ImportError("JAX is required for this code path.")
+        @staticmethod
+        def key(*_a, **_k):
+            raise ImportError("JAX is required for this code path.")
+    class _JaxStub:
+        Array = _JaxArray
+        ShapeDtypeStruct = _JaxShapeDtypeStruct
+        sharding = _JaxSharding
+        typing = _JaxTyping
+        tree = _JaxTree
+        random = _JaxRandom
+        @staticmethod
+        def vmap(*_a, **_k):
+            raise ImportError("JAX is required for this code path.")
+        @staticmethod
+        def devices():
+            raise ImportError("JAX is required for this code path.")
+        @staticmethod
+        def default_device(_dev):
+            raise ImportError("JAX is required for this code path.")
+    jax = _JaxStub()  # type: ignore
+
+
 import numpy as np
-import orbax.checkpoint as ocp
+try:
+    import orbax.checkpoint as ocp  # noqa: F401
+except Exception:
+    ocp = _MissingModule("orbax.checkpoint")  # type: ignore
 import safetensors
 import torch
 
 from openpi.models_pytorch import pi0_pytorch
-from openpi.shared import image_tools
 import openpi.shared.array_typing as at
 
 logger = logging.getLogger("openpi")
 
-# Type variable for array types (JAX arrays, PyTorch tensors, or numpy arrays)
-ArrayT = TypeVar("ArrayT", jax.Array, jax.ShapeDtypeStruct, np.ndarray, torch.Tensor)
-
+# 注意：Pylance 不允许在 TypeVar 约束中使用“变量”。为兼容 Pylance，这里改为不带约束的 TypeVar。
+# 运行时精确性由 jaxtyping 的运行时检查（at.Float/at.Bool 等）保证；不影响实际行为。
+ArrayT = TypeVar("ArrayT")
 
 class ModelType(enum.Enum):
     """Supported model types."""
@@ -263,7 +357,9 @@ def preprocess_observation(
             )
         if image.shape[1:3] != image_resolution:
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
-            image = image_tools.resize_with_pad(image, *image_resolution)
+            # Lazy import; this path is JAX-only
+            from openpi.shared import image_tools as _image_tools
+            image = _image_tools.resize_with_pad(image, *image_resolution)
 
         if train:
             # Convert from [-1, 1] to [0, 1] for augmax.
@@ -408,9 +504,10 @@ class BaseModel(nnx.Module, abc.ABC):
 def restore_params(
     params_path: pathlib.Path | str,
     *,
-    restore_type: type[np.ndarray] | type[jax.Array] = jax.Array,
-    dtype: jnp.dtype | None = None,
-    sharding: jax.sharding.Sharding | None = None,
+    # Pylance 友好：避免在类型表达式中引用运行期变量（jax.Array / jnp.dtype / jax.sharding.Sharding）
+    restore_type: type | None = None,
+    dtype: np.dtype | None = None,
+    sharding: Any | None = None,
 ) -> at.Params:
     """Restores unstructured params PyTree from a checkpoint.
 
@@ -428,6 +525,9 @@ def restore_params(
     """
     params_path = pathlib.Path(params_path).resolve() if not str(params_path).startswith("gs://") else params_path
 
+    # 保持原逻辑：默认用 JAX Array；若无 JAX 则退回到 numpy.ndarray
+    if restore_type is None:
+        restore_type = jax.Array if _HAS_JAX else np.ndarray
     if restore_type is jax.Array and sharding is None:
         mesh = jax.sharding.Mesh(jax.devices(), ("x",))
         sharding = jax.sharding.NamedSharding(mesh, jax.sharding.PartitionSpec())

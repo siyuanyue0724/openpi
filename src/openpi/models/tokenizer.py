@@ -2,14 +2,33 @@ import logging
 import os
 import re
 
-import jax
 import numpy as np
-import orbax.checkpoint as ocp
 import sentencepiece
 from transformers import AutoProcessor
 
-import openpi.models.utils.fsq_tokenizer as fsq_tokenizer
 import openpi.shared.download as download
+
+
+# ---- Optional deps (JAX / Orbax) with fail-fast shims -----------------------
+class _MissingModule:
+    def __init__(self, name: str):
+        self.__name = name
+    def __getattr__(self, _):
+        raise ImportError(
+            f"Optional dependency '{self.__name}' is required for this code path but is not installed. "
+            f"If you are running the PyTorch pipeline you typically don't need it; "
+            f"if you intend to use this feature, please install '{self.__name}'."
+        )
+
+try:
+    import jax  # noqa: F401
+except Exception:
+    jax = _MissingModule("jax")  # type: ignore
+
+try:
+    import orbax.checkpoint as ocp  # noqa: F401
+except Exception:
+    ocp = _MissingModule("orbax.checkpoint")  # type: ignore
 
 
 def _encode_prompt_with_specials_spm(spm: sentencepiece.SentencePieceProcessor,
@@ -339,7 +358,15 @@ class FSQTokenizer:
             )
             config = restored["config"]
             self._params = restored["params"]
-            self._fsq_tokenizer = fsq_tokenizer.FsqAttentionTokenizer(**config)
+            # Lazy import here to avoid pulling JAX/Flax when FSQ is unused.
+            try:
+                from openpi.models.utils import fsq_tokenizer as _fsq_tokenizer
+            except Exception as e:
+                raise ImportError(
+                    "FSQTokenizer requires `openpi.models.utils.fsq_tokenizer` and its JAX/Flax deps. "
+                    "Install them to use FSQ."
+                ) from e
+            self._fsq_tokenizer = _fsq_tokenizer.FsqAttentionTokenizer(**config)
         except Exception as e:
             raise RuntimeError(
                 f"Failed to load FSQ tokenizer checkpoint from {fsq_tokenizer_path}. Error: {e!s}"
