@@ -7,9 +7,32 @@ import logging
 from typing import Protocol
 
 from etils import epath
-import jax
+try:
+    import jax
+except Exception:  # allow running without JAX
+    jax = None
 import orbax.checkpoint as ocp
 import orbax.checkpoint.future as future
+
+def _is_rank0() -> bool:
+    """Return True if this process is global rank 0 (Torch DDP or JAX), else False.
+    Falls back to True in single-process cases.
+    """
+    # Torch DDP first
+    try:
+        import torch.distributed as dist  # type: ignore
+        if dist.is_available() and dist.is_initialized():
+            return dist.get_rank() == 0
+    except Exception:
+        pass
+    # JAX (if available)
+    try:
+        if jax is not None and hasattr(jax, "process_index"):
+            return jax.process_index() == 0  # type: ignore[attr-defined]
+    except Exception:
+        pass
+    # Single process fallback
+    return True
 
 from openpi.shared import array_typing as at
 import openpi.shared.normalize as _normalize
@@ -122,7 +145,7 @@ class CallbackHandler(ocp.AsyncCheckpointHandler):
     """A CheckpointHandler for calling an arbitrary function asynchronously. Only for saving, not for restoring."""
 
     def save(self, directory: epath.Path, args: CallbackSave):
-        if jax.process_index() == 0:
+        if _is_rank0():
             args.callback(directory)
 
     async def async_save(self, directory: epath.Path, args: CallbackSave) -> list[futures.Future]:
