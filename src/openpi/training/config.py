@@ -6,10 +6,29 @@ import dataclasses
 import difflib
 import logging
 import pathlib
-from typing import Any, Literal, Protocol, TypeAlias
+from typing import Any, Literal, Protocol
 
 import etils.epath as epath
-import flax.nnx as nnx
+try:
+    import flax.nnx as nnx  # type: ignore
+except Exception:
+    # Minimal shim to avoid importing flax/jax in PT-only pipeline.
+    class _Nothing: pass
+    class _Filter:
+        def __init__(self, *args, **kwargs): pass
+    class _Param: pass
+    class _Not:
+        def __init__(self, _): pass
+    class _All:
+        def __init__(self, *_, **__): pass
+    class _NNXShim:
+        class filterlib:
+            Filter = _Filter
+        Nothing = _Nothing
+        Param = _Param
+        Not = _Not
+        All = _All
+    nnx = _NNXShim()  # type: ignore
 from typing_extensions import override
 import tyro
 
@@ -41,9 +60,10 @@ class _EnsurePointWindow:
             data["prompt"] = (f"{str(p).strip()} {s}{e}").strip()
         return data
 
-ModelType: TypeAlias = _model.ModelType
-# Work around a tyro issue with using nnx.filterlib.Filter directly.
-Filter: TypeAlias = nnx.filterlib.Filter
+# 直接在值上下文使用，不再声明 TypeAlias；避免 Pylance reportInvalidTypeForm
+ModelType = _model.ModelType
+# Filter 仅用于注释位置时的泛型参数，占位用 Any 更稳妥（运行时仍传 nnx.Nothing/过滤器实例）
+Filter = Any
 
 
 @dataclasses.dataclass(frozen=True)
@@ -224,7 +244,9 @@ class FakeDataConfig(DataConfigFactory):
 @dataclasses.dataclass(frozen=True)
 class SimpleDataConfig(DataConfigFactory):
     # Factory for the data transforms.
-    data_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=GroupFactory)
+    data_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(
+        default_factory=lambda: (lambda _m: _transforms.Group())
+    )
     # Factory for the model transforms.
     model_transforms: tyro.conf.Suppress[GroupFactory] = dataclasses.field(default_factory=ModelTransformFactory)
 
@@ -494,7 +516,7 @@ class TrainConfig:
     ema_decay: float | None = 0.99
 
     # Specifies which weights should be frozen.
-    freeze_filter: tyro.conf.Suppress[Filter] = dataclasses.field(default_factory=nnx.Nothing)
+    freeze_filter: tyro.conf.Suppress[Any] = dataclasses.field(default_factory=nnx.Nothing)
 
     # Determines the data to be trained on.
     data: DataConfigFactory = dataclasses.field(default_factory=FakeDataConfig)
@@ -551,7 +573,7 @@ class TrainConfig:
         return (pathlib.Path(self.checkpoint_base_dir) / self.name / self.exp_name).resolve()
 
     @property
-    def trainable_filter(self) -> nnx.filterlib.Filter:
+    def trainable_filter(self) -> Any:
         """Get the filter for the trainable parameters."""
         return nnx.All(nnx.Param, nnx.Not(self.freeze_filter))
 
@@ -608,7 +630,7 @@ _CONFIGS = [
         data=SimpleDataConfig(
             assets=AssetsConfig(asset_id="droid"),
             data_transforms=lambda model: _transforms.Group(
-                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI0)],
+                inputs=[droid_policy.DroidInputs(model_type=_model.ModelType.PI0)],
                 outputs=[droid_policy.DroidOutputs()],
             ),
             base_config=DataConfig(
@@ -622,7 +644,7 @@ _CONFIGS = [
         data=SimpleDataConfig(
             assets=AssetsConfig(asset_id="droid"),
             data_transforms=lambda model: _transforms.Group(
-                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI0_FAST)],
+                inputs=[droid_policy.DroidInputs(model_type=_model.ModelType.PI0_FAST)],
                 outputs=[droid_policy.DroidOutputs()],
             ),
             base_config=DataConfig(
@@ -636,7 +658,7 @@ _CONFIGS = [
         data=SimpleDataConfig(
             assets=AssetsConfig(asset_id="droid"),
             data_transforms=lambda model: _transforms.Group(
-                inputs=[droid_policy.DroidInputs(model_type=ModelType.PI05)],
+                inputs=[droid_policy.DroidInputs(model_type=_model.ModelType.PI05)],
                 outputs=[droid_policy.DroidOutputs()],
             ),
             base_config=DataConfig(
