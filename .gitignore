@@ -175,3 +175,4 @@ src/dataset/*
 .merge_applied.tsv
 .merge_conflicts.tsv
 .merge_todo.txt
+*.bak
