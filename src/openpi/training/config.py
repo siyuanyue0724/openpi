@@ -46,8 +46,27 @@ import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
 import openpi.transforms as _transforms
+from types import SimpleNamespace
 
 # === Sonata helpers (pi0.5) ===
+
+def _get_sonata_params(model):
+    """Return stride/max_points/min_depth/max_depth for DepthToPointCloud from model or defaults."""
+    s = getattr(model, "sonata", None)
+    if s is None:
+        # Default-safe fallback; keep behavior identical to before if not provided.
+        return SimpleNamespace(
+            stride=4,
+            max_points=int(getattr(model, "max_points", 32768)),
+            min_depth=1e-6,
+            max_depth=None,
+        )
+    return SimpleNamespace(
+        stride=int(getattr(s, "stride", 4)),
+        max_points=int(getattr(s, "max_points", getattr(model, "max_points", 32768))),
+        min_depth=float(getattr(s, "min_depth", 1e-6)),
+        max_depth=getattr(s, "max_depth", None),
+    )
 @dataclasses.dataclass(frozen=True)
 class _EnsurePointWindow:
     """如 prompt 缺少点云窗口标记，则在末尾追加一对 <|point_start|><|point_end|>。"""
@@ -1025,9 +1044,11 @@ _CONFIGS = [
                         depth_map={"front": "depth/front", "wrist": "depth/wrist"},
                         color_map={"front": "observation/image", "wrist": "observation/wrist_image"},
                         intrinsics=None,
-                        stride=4,
+                        stride=_get_sonata_params(model).stride,
+                        min_depth=_get_sonata_params(model).min_depth,
+                        max_depth=_get_sonata_params(model).max_depth,
                         out_key="pointcloud",
-                        max_points=32768,
+                        max_points=_get_sonata_params(model).max_points,
                     ),
                     _transforms.ValidatePointCloud(
                         key="pointcloud",
