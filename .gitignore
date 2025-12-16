@@ -176,3 +176,4 @@ src/dataset/*
 .merge_conflicts.tsv
 .merge_todo.txt
 *.bak
+debug_static84.ply
