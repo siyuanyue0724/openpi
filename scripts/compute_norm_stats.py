@@ -5,6 +5,9 @@ will compute the mean and standard deviation of the data in the dataset and save
 to the config assets directory.
 """
 
+import argparse
+import sys
+
 import numpy as np
 import tqdm
 import tyro
@@ -18,7 +21,10 @@ import openpi.transforms as transforms
 
 class RemoveStrings(transforms.DataTransformFn):
     def __call__(self, x: dict) -> dict:
-        return {k: v for k, v in x.items() if not np.issubdtype(np.asarray(v).dtype, np.str_)}
+        def _is_strlike(v):
+            dt = np.asarray(v).dtype
+            return np.issubdtype(dt, np.str_) or np.issubdtype(dt, np.bytes_)
+        return {k: v for k, v in x.items() if not _is_strlike(v)}
 
 
 def create_torch_dataloader(
@@ -53,6 +59,7 @@ def create_torch_dataloader(
         num_workers=num_workers,
         shuffle=shuffle,
         num_batches=num_batches,
+        framework="pytorch",
     )
     return data_loader, num_batches
 
@@ -86,8 +93,7 @@ def create_rlds_dataloader(
     return data_loader, num_batches
 
 
-def main(config_name: str, max_frames: int | None = None):
-    config = _config.get_config(config_name)
+def main(config: _config.TrainConfig, max_frames: int | None = None):
     data_config = config.data.create(config.assets_dirs, config.model)
 
     if data_config.rlds_data_dir is not None:
@@ -108,10 +114,16 @@ def main(config_name: str, max_frames: int | None = None):
 
     norm_stats = {key: stats.get_statistics() for key, stats in stats.items()}
 
-    output_path = config.assets_dirs / data_config.repo_id
+    output_path = config.assets_dirs / (data_config.asset_id or data_config.repo_id)
     print(f"Writing stats to: {output_path}")
     normalize.save(output_path, norm_stats)
 
 
 if __name__ == "__main__":
-    tyro.cli(main)
+    parser = argparse.ArgumentParser(add_help=True)
+    parser.add_argument("--max_frames", type=int, default=None)
+    args, remaining = parser.parse_known_args(sys.argv[1:])
+    # Let the training config CLI parse the remaining args (including the config name + overrides).
+    sys.argv = [sys.argv[0]] + remaining
+    config = _config.cli()
+    main(config, max_frames=args.max_frames)
