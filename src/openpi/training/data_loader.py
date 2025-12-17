@@ -30,6 +30,7 @@ except Exception:
 import openpi.models.model as _model
 import openpi.training.config as _config
 from openpi.training.droid_rlds_dataset import DroidRldsDataset
+from openpi.training.calvin_dataset import CalvinLangSegmentDataset
 import openpi.transforms as _transforms
 
 T_co = TypeVar("T_co", covariant=True)
@@ -147,6 +148,20 @@ def create_torch_dataset(
     repo_id = data_config.repo_id
     if repo_id is None:
         raise ValueError("Repo ID is not set. Cannot create dataset.")
+    if repo_id == "calvin":
+        if not data_config.calvin_root:
+            raise ValueError(
+                "data.calvin_root must be set when using repo_id='calvin' "
+                "(e.g. --data.calvin_root=/abs/path/to/task_ABCD_D.zip)."
+            )
+        return CalvinLangSegmentDataset(
+            root=str(data_config.calvin_root),
+            split=str(data_config.calvin_split),
+            action_horizon=action_horizon,
+            backend=str(data_config.calvin_backend),
+            action_key=str(data_config.calvin_action_key),
+            use_wrist_rgb=bool(data_config.calvin_use_wrist_rgb),
+        )
     if repo_id == "fake":
         return FakeDataset(model_config, num_samples=1024)
 
@@ -293,7 +308,7 @@ def create_torch_data_loader(
     num_batches: int | None = None,
     num_workers: int = 0,
     seed: int = 0,
-    framework: str = "jax",
+    framework: str = "pytorch",
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create a data loader for training.
 
@@ -363,7 +378,7 @@ def create_rlds_data_loader(
     skip_norm_stats: bool = False,
     shuffle: bool = False,
     num_batches: int | None = None,
-    framework: str = "jax",
+    framework: str = "pytorch",
 ) -> DataLoader[tuple[_model.Observation, _model.Actions]]:
     """Create an RLDS data loader for training.
 

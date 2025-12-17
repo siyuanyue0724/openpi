@@ -29,6 +29,8 @@ from .pointcloud_attach import (  # noqa: F401
 from .libero_keep_extras import LiberoInputsKeepExtras  # noqa: F401
 from .state_adapters import SplitStateToDroid          # noqa: F401
 from .inject_prompt import InjectPromptFromTaskIndex   # noqa: F401
+from .calvin_depth_to_sonata_pointcloud import CalvinDepthToSonataPointCloud  # noqa: F401
+from .random_modality_dropout import RandomModalityDropout  # noqa: F401
 
 # 3) 严格校验（fail-fast）
 from .validate_pointcloud import ValidatePointCloud    # noqa: F401

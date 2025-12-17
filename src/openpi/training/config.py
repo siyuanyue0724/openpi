@@ -6,6 +6,7 @@ import dataclasses
 import difflib
 import logging
 import pathlib
+import os
 from typing import Any, Literal, Protocol
 
 import etils.epath as epath
@@ -148,6 +149,14 @@ class DataConfig:
     # Path to the data filter file for DROID dataset
     filter_dict_path: str | None = None
 
+    # --- CALVIN (native) dataset options ---
+    # Only used when repo_id == "calvin".
+    calvin_root: str | None = None
+    calvin_backend: Literal["zip", "dir"] = "zip"
+    calvin_split: Literal["training", "validation"] = "training"
+    calvin_action_key: str = "rel_actions"
+    calvin_use_wrist_rgb: bool = True
+
 
 class GroupFactory(Protocol):
     def __call__(self, model_config: _model.BaseModelConfig) -> _transforms.Group:
@@ -275,6 +284,143 @@ class SimpleDataConfig(DataConfigFactory):
             self.create_base_config(assets_dirs, model_config),
             data_transforms=self.data_transforms(model_config),
             model_transforms=self.model_transforms(model_config),
+        )
+
+
+@dataclasses.dataclass(frozen=True)
+class CalvinDataConfig(DataConfigFactory):
+    """Data config for the native CALVIN dataset (zip or extracted directory).
+
+    Required:
+      - data.calvin_root (or set env CALVIN_ZIP / CALVIN_ROOT)
+
+    The dataset yields keys like rgb_static/depth_static/robot_obs/actions/prompt.
+    We repack them into the LIBERO-style keys expected by LiberoInputs.
+    """
+
+    repo_id: str = "calvin"
+    assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
+
+    # Dataset location. Can be a .zip file or an extracted directory (task_ABCD_D/).
+    calvin_root: str | None = None
+    backend: Literal["zip", "dir"] = "zip"
+    split: Literal["training", "validation"] = "training"
+
+    # Which action stream to use from the .npz files.
+    action_key: str = "rel_actions"
+
+    # Whether to include wrist RGB (rgb_gripper) and map it to observation/wrist_image.
+    use_wrist_rgb: bool = True
+
+    # --- Point cloud transform options ---
+    cam_name: str = "static"
+    cameras_json_path: str | None = None
+    voxel_size: float = 0.01
+    use_world: bool = True
+    depth_scale: float = 1.0
+
+    # Optional overrides. If None, derived from the model config.
+    stride: int | None = None
+    max_points: int | None = None
+    min_depth: float | None = None
+    max_depth: float | None = None
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        root = self.calvin_root or os.environ.get("CALVIN_ZIP") or os.environ.get("CALVIN_ROOT")
+        if not root:
+            raise ValueError(
+                "CALVIN data path missing. Set `--data.calvin_root=/abs/path/to/task_ABCD_D.zip` "
+                "or export CALVIN_ZIP/CALVIN_ROOT."
+            )
+
+        base = self.create_base_config(assets_dirs, model_config)
+        base = dataclasses.replace(
+            base,
+            calvin_root=str(root),
+            calvin_backend=str(self.backend),
+            calvin_split=str(self.split),
+            calvin_action_key=str(self.action_key),
+            calvin_use_wrist_rgb=bool(self.use_wrist_rgb),
+        )
+
+        sonata = _get_sonata_params(model_config)
+        stride = int(self.stride) if self.stride is not None else int(sonata.stride)
+        max_points = int(self.max_points) if self.max_points is not None else int(sonata.max_points)
+        z_min = float(self.min_depth) if self.min_depth is not None else float(sonata.min_depth)
+        z_max = float(self.max_depth) if self.max_depth is not None else float(sonata.max_depth or 10.0)
+
+        cam_path = self.cameras_json_path
+        if cam_path is None:
+            # If root is a zip, the transform supports "zip path" and will fallback to the sibling directory
+            # (e.g. task_ABCD_D.zip -> task_ABCD_D/calib/cameras.json) when cameras.json is not inside the zip.
+            if str(root).endswith(".zip"):
+                cam_path = str(root)
+            else:
+                rpath = pathlib.Path(str(root))
+                task_dir = rpath / "task_ABCD_D" if (rpath / "task_ABCD_D").is_dir() else rpath
+                cam_path = str(task_dir / "calib" / "cameras.json")
+
+        repack_map: dict[str, str] = {
+            "observation/image": "rgb_static",
+            "observation/depth": "depth_static",
+            "observation/state": "robot_obs",
+            "actions": "actions",
+            "prompt": "prompt",
+        }
+        if self.use_wrist_rgb:
+            repack_map["observation/wrist_image"] = "rgb_gripper"
+
+        repack_transforms = _transforms.Group(inputs=[_transforms.RepackTransform(repack_map)])
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                _transforms.CalvinDepthToSonataPointCloud(
+                    cameras_json_path=str(cam_path),
+                    cam_name=str(self.cam_name),
+                    rgb_key="observation/image",
+                    depth_key="observation/depth",
+                    stride=stride,
+                    max_points=max_points,
+                    voxel_size=float(self.voxel_size),
+                    z_min=z_min,
+                    z_max=z_max,
+                    use_world=bool(self.use_world),
+                    out_key="pointcloud",
+                    depth_scale=float(self.depth_scale),
+                ),
+                _transforms.ValidatePointCloud(
+                    key="pointcloud",
+                    feat_dim=int(getattr(model_config, "point_feat_dim", 6)),
+                    min_points=1,
+                    allow_mask_all_false=True,
+                ),
+                _transforms.LiberoInputsKeepExtras(
+                    action_dim=model_config.action_dim,
+                    model_type=model_config.model_type,
+                ),
+            ],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        model_transforms = _transforms.Group(
+            inputs=[
+                _EnsurePointWindow(),
+                _transforms.ResizeImages(224, 224),
+                _transforms.TokenizePrompt(
+                    _tokenizer.PaligemmaTokenizer(model_config.max_token_len),
+                    discrete_state_input=getattr(model_config, "discrete_state_input", False),
+                ),
+                _transforms.PadStatesAndActions(model_config.action_dim),
+            ],
+            outputs=[],
+        )
+
+        return dataclasses.replace(
+            base,
+            repack_transforms=repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
         )
 
 
@@ -1073,6 +1219,43 @@ _CONFIGS = [
         ),
         # 其它超参走默认；需要时用命令行覆盖（--batch_size/--num_train_steps 等）
     ),
+
+
+    # --- CALVIN + Sonata (PyTorch) ---
+    TrainConfig(
+        name="pi05_calvin_sonata",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            enable_sonata=True,          
+            discrete_state_input=True,
+            max_token_len=48,
+            action_horizon=16,
+            action_dim=32,
+            point_feat_dim=6,
+            point_token_cap=1024,
+        ),
+        data=CalvinDataConfig(
+            assets=AssetsConfig(asset_id="calvin"),
+            # Prefer setting this via CLI or env:
+            #   --data.calvin_root=/abs/path/to/task_ABCD_D.zip
+            # or export CALVIN_ZIP=/abs/path/to/task_ABCD_D.zip
+            calvin_root=None,
+            backend="zip",
+            split="training",
+            action_key="rel_actions",
+            use_wrist_rgb=True,
+            cam_name="static",
+            stride=4,
+            max_points=8192,
+            min_depth=0.1,
+            max_depth=10.0,
+            voxel_size=0.01,
+        ),
+        batch_size=4,
+        num_workers=4,
+    ),
+
+
     #
     # RoboArena configs.
     #

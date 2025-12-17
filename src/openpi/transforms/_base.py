@@ -118,28 +118,10 @@ class RepackTransform(DataTransformFn):
             if alias not in flat_with_alias:
                 flat_with_alias[alias] = v
 
-        # 2) 规范“新结构”的键：把 "x/y/z": ... 展开成嵌套 dict，避免输出键名包含 '/'
-        def _normalize_new_keys(obj: Any) -> Any:
-            if isinstance(obj, dict):
-                out: dict[str, Any] = {}
-                for k, v in obj.items():
-                    if isinstance(k, str) and "/" in k:
-                        parts = k.split("/")
-                        d = out
-                        for p in parts[:-1]:
-                            d = d.setdefault(p, {})
-                        d[parts[-1]] = _normalize_new_keys(v)
-                    else:
-                        out[k] = _normalize_new_keys(v)
-                return out
-            elif isinstance(obj, (list, tuple)):
-                t = type(obj)
-                return t(_normalize_new_keys(x) for x in obj)
-            else:
-                return obj
-
-        structure_norm = _normalize_new_keys(self.structure)
-        return _repack_from_structure(structure_norm, flat_with_alias)
+        # 2) 注意：输出结构中的 key 可能本身包含 '/'（例如 "observation/image"）。
+        #    在本项目中，这类 key 应被当作普通字符串 key（后续 transforms 也按该字符串查找），
+        #    因此这里不再将其展开成嵌套 dict。
+        return _repack_from_structure(self.structure, flat_with_alias)
 
 
 @dataclasses.dataclass(frozen=True)

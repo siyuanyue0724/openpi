@@ -145,7 +145,14 @@ class PI0Pytorch(nn.Module):
         try:
             vsz = self.paligemma_with_expert.paligemma.language_model.get_input_embeddings().num_embeddings
             exp_start, exp_end = int(vsz - 2), int(vsz - 1)
-            if (self.point_start_id is not None) and (self.point_end_id is not None):
+            # If not provided, default to the last two vocab IDs (matches PaligemmaTokenizer behavior).
+            if (self.point_start_id is None) and (self.point_end_id is None):
+                self.point_start_id, self.point_end_id = exp_start, exp_end
+            elif (self.point_start_id is None) != (self.point_end_id is None):
+                raise RuntimeError(
+                    "point_start_id and point_end_id must be set together (or both left as None)."
+                )
+            else:
                 if (int(self.point_start_id) != exp_start) or (int(self.point_end_id) != exp_end):
                     raise RuntimeError(
                         f"point_start_id/point_end_id mismatch tokenizer: got ({self.point_start_id},{self.point_end_id}), "
@@ -234,13 +241,18 @@ class PI0Pytorch(nn.Module):
         if cap <= 0:
             raise RuntimeError("point_token_cap must be > 0 when Sonata is enabled.")
 
-        pt_list = []
-        mask_list = []
+        pt_list: list[torch.Tensor | None] = []
+        mask_list: list[torch.Tensor] = []
+        enc_dim: int | None = None
         # 仅对前向调用开启/关闭 grad；其余逻辑保持不变
         with torch.set_grad_enabled(bool(train)):
             for b in range(B):
+                # 允许该样本没有点云（mask=False）：不编码，后续插入时将插入 0 个点 token。
                 if not pmask[b]:
-                    raise RuntimeError("Sonata enabled but point_cloud_masks['pointcloud'][b] is False.")
+                    pt_list.append(None)
+                    mask_list.append(torch.zeros((cap,), dtype=torch.bool, device=device))
+                    continue
+
                 arr = pcs[b]
                 g = arr[:, :3].to(torch.int64)
                 f = arr[:, 3:].to(dtype=torch.float32)
@@ -248,8 +260,11 @@ class PI0Pytorch(nn.Module):
                 pad = (g == 0).all(dim=1) & (c == 0).all(dim=1) & (f == 0).all(dim=1)
                 g = g[~pad]; c = c[~pad]; f = f[~pad]
                 n = g.shape[0]
+                # 允许 padding 后为空：当作“无点云”处理。
                 if n == 0:
-                    raise RuntimeError("Empty point cloud after removing paddings.")
+                    pt_list.append(None)
+                    mask_list.append(torch.zeros((cap,), dtype=torch.bool, device=device))
+                    continue
                 sample = {
                     "coord": c,
                     "feat": f,
@@ -264,8 +279,14 @@ class PI0Pytorch(nn.Module):
                 real = int(enc.size(0))
                 if real > cap:
                     raise RuntimeError(f"[Sonata] token_len={real} exceeds point_token_cap={cap}.")
+                
+                if enc_dim is None:
+                    enc_dim = int(enc.size(1))
+                elif int(enc.size(1)) != enc_dim:
+                    raise RuntimeError(f"[Sonata] inconsistent token dim: {int(enc.size(1))} vs {enc_dim}.")
+
                 if real < cap:
-                    pad_zeros = torch.zeros(cap - real, enc.size(1), dtype=enc.dtype, device=enc.device)
+                    pad_zeros = torch.zeros(cap - real, enc_dim, dtype=enc.dtype, device=enc.device)
                     enc = torch.cat([enc, pad_zeros], dim=0)
                 elif real >= int(0.95 * cap):
                     logging.getLogger("openpi").warning("[Sonata] token_len=%d is close to cap (%d).", real, cap)
@@ -273,7 +294,22 @@ class PI0Pytorch(nn.Module):
                 m[:real] = True
                 pt_list.append(enc.to(dtype=dtype))
                 mask_list.append(m)
-        pt_feat_raw = torch.stack(pt_list, dim=0)
+
+        # 若整 batch 都没有点云（全部 mask=False 或全部为空），我们仍需要返回一个固定形状。
+        if enc_dim is None:
+            # 若整个 batch 都没有点云（全 mask=False / 空），尽量复用上一次缓存维度；否则回退到 Sonata 默认 512。
+            if self._pt_cache is not None:
+                enc_dim = int(self._pt_cache[0].shape[-1])
+            else:
+                # Sonata 默认 out dim 为 512（enc_channels[-1]）。
+                enc_dim = 512
+
+        # 用零填充所有“无点云”样本的 pt features；mask 保持全 False。
+        for i, v in enumerate(pt_list):
+            if v is None:
+                pt_list[i] = torch.zeros((cap, enc_dim), dtype=dtype, device=device)
+
+        pt_feat_raw = torch.stack([v for v in pt_list if v is not None], dim=0)
         pt_mask     = torch.stack(mask_list, dim=0)
         self._pt_cache = (pt_feat_raw, pt_mask)
         return self._pt_cache
@@ -308,8 +344,7 @@ class PI0Pytorch(nn.Module):
         for b in range(B):
             s = s_pos[b].item(); e = e_pos[b].item()
             k = int(pt_mask[b].sum().item())
-            if k == 0:
-                raise RuntimeError("Empty point token sequence for a sample with a point window.")
+            # 允许 k==0：该样本没有点云 token（例如 dropout 或 depth 全无效）。
             left_emb  = text_emb[b, :s+1, :]
             left_m    = text_mask[b, :s+1]
             mid_emb   = pt_emb[b, :k, :]

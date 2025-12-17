@@ -68,7 +68,18 @@ class LiberoInputsKeepExtras:
         # 2) Call the original LiberoInputs (LAZY import to avoid cycles)
         # ------------------------------------------------------------------ #
         from openpi.policies.libero_policy import LiberoInputs  # type: ignore
-        wrapped = LiberoInputs(action_dim=self.action_dim, model_type=self.model_type)
+        # LiberoInputs 的签名在不同版本中不一致：
+        # - 老版本：LiberoInputs(action_dim=..., model_type=...)
+        # - 新版本：LiberoInputs(model_type=...)
+        # action_dim 的 padding/对齐在后续 PadStatesAndActions 里做即可。
+        try:
+            wrapped = LiberoInputs(action_dim=self.action_dim, model_type=self.model_type)
+        except TypeError:
+            try:
+                wrapped = LiberoInputs(model_type=self.model_type)
+            except TypeError:
+                # 兼容极少数只支持位置参数的实现
+                wrapped = LiberoInputs(self.model_type)
         out = wrapped(batch)
 
         # ------------------------------------------------------------------ #
