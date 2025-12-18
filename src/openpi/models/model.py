@@ -5,7 +5,7 @@ from dataclasses import field
 import enum
 import logging
 import pathlib
-from typing import Generic, TypeVar, Any
+from typing import Any, Generic, TypeAlias, TypeVar
 
 # ---- Optional dependencies (augmax, Flax, JAX, Orbax) with safe fallbacks ---
 class _MissingModule:
@@ -318,7 +318,7 @@ class Observation(Generic[ArrayT]):
 
 # Defines the format of the actions. This field is included as "actions" inside the dictionary
 # produced by the data transforms.
-Actions = at.Float[ArrayT, "*b ah ad"]
+Actions: TypeAlias = at.Float[ArrayT, "*b ah ad"]
 
 
 def preprocess_observation(

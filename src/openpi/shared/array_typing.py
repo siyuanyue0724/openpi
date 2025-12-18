@@ -1,7 +1,7 @@
 import contextlib
 import functools as ft
 import inspect
-from typing import Any, TypeAlias, TypeVar, cast
+from typing import Any, TYPE_CHECKING, TypeAlias, TypeVar, cast
 
 import beartype
 # ---- Make JAX optional ------------------------------------------------------
@@ -40,13 +40,29 @@ from jaxtyping import jaxtyped
 import jaxtyping._decorator
 import torch
 
+# ---- Pyright/Pylance compatibility for jaxtyping shape strings -------------
+#
+# jaxtyping uses annotations like:
+#   Float[Array, "*b h w c"]
+# The second argument is a *shape string*.
+# Pyright/Pylance treats a string literal in a type expression as a forward ref
+# and tries to parse it as a type, which triggers false-positive syntax/type errors.
+if TYPE_CHECKING:
+    from typing import Annotated as Bool  # noqa: F401
+    from typing import Annotated as Float  # noqa: F401
+    from typing import Annotated as Int  # noqa: F401
+    from typing import Annotated as Key  # noqa: F401
+    from typing import Annotated as Num  # noqa: F401
+    from typing import Annotated as Real  # noqa: F401
+    from typing import Annotated as UInt8  # noqa: F401
+
 # patch jaxtyping to handle https://github.com/patrick-kidger/jaxtyping/issues/277.
 # the problem is that custom PyTree nodes are sometimes initialized with arbitrary types (e.g., `jax.ShapeDtypeStruct`,
 # `jax.Sharding`, or even <object>) due to JAX tracing operations. this patch skips typechecking when the stack trace
 # contains `jax._src.tree_util`, which should only be the case during tree unflattening.
 _original_check_dataclass_annotations = jaxtyping._decorator._check_dataclass_annotations  # noqa: SLF001
 # Redefine Array to include both JAX arrays and PyTorch tensors (JAX may be a stub)
-Array = jax.Array | torch.Tensor  # type: ignore[attr-defined]
+Array: TypeAlias = jax.Array | torch.Tensor  # type: ignore[attr-defined]
 
 
 def _check_dataclass_annotations(self, typechecker):

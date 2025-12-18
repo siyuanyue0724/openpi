@@ -13,6 +13,31 @@ class NormStats:
     q01: numpydantic.NDArray | None = None  # 1st quantile
     q99: numpydantic.NDArray | None = None  # 99th quantile
 
+    def __post_init__(self) -> None:
+        """Cast all numeric stats to float32.
+
+        Norm stats are serialized to JSON, so dtype information is lost on disk.
+        When loading, NumPy/pydantic will default to float64, which then promotes
+        downstream normalization ops to float64:
+
+            float32 (data)  op  float64 (stats)  ->  float64 (output)
+
+        This silently turns `state`/`actions` into float64 tensors in the PyTorch
+        dataloader, which is undesirable for performance and can cause subtle
+        mismatches with model expectations. We fix this by forcing all stats to
+        float32 at construction time.
+        """
+
+        def _f32(x: numpydantic.NDArray | None) -> numpydantic.NDArray | None:
+            if x is None:
+                return None
+            return np.asarray(x, dtype=np.float32)
+
+        self.mean = np.asarray(self.mean, dtype=np.float32)
+        self.std = np.asarray(self.std, dtype=np.float32)
+        self.q01 = _f32(self.q01)
+        self.q99 = _f32(self.q99)
+
 
 class RunningStats:
     """Compute running statistics of a batch of vectors."""
