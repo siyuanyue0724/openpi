@@ -78,17 +78,59 @@ class TransformedDataset(Dataset[T_co]):
     def __len__(self) -> int:
         return len(self._dataset)
 
+def _find_none_paths(x: typing.Any, prefix: str = "") -> list[str]:
+    """Collect dotted paths whose value is None (used for FakeDataset diagnostics)."""
+    paths: list[str] = []
+    if x is None:
+        paths.append(prefix or "<root>")
+        return paths
+    if isinstance(x, dict):
+        for k, v in x.items():
+            p = f"{prefix}.{k}" if prefix else str(k)
+            paths.extend(_find_none_paths(v, p))
+        return paths
+    if isinstance(x, (list, tuple)):
+        for i, v in enumerate(x):
+            p = f"{prefix}[{i}]"
+            paths.extend(_find_none_paths(v, p))
+        return paths
+    return paths
+
 
 class FakeDataset(Dataset):
     def __init__(self, model_config: _model.BaseModelConfig, num_samples: int):
         self._num_samples = num_samples
         self._observation_spec, self._action_spec = model_config.inputs_spec()
+        # inputs_spec() may include optional modalities that are disabled (represented as None).
+        # In FakeDataset we will omit those keys; warn once to reduce confusion during debugging.
+        self._none_spec_paths = _find_none_paths(self._observation_spec.to_dict())
+        self._warned_none_spec = False
+
 
     def __getitem__(self, index: SupportsIndex) -> dict:
         # NumPy RNG（无 JAX 依赖）
         rng = np.random.default_rng(seed=int(index.__index__()))
+    
+
+        if (not self._warned_none_spec) and self._none_spec_paths:
+            shown = self._none_spec_paths[:20]
+            more = ""
+            if len(self._none_spec_paths) > 20:
+                more = f" ... (+{len(self._none_spec_paths) - 20} more)"
+            logging.warning(
+                "FakeDataset: inputs_spec() contains None entries (disabled modalities). "
+                "They will be omitted from fake observations. Example paths: %s%s",
+                ", ".join(shown),
+                more,
+            )
+            self._warned_none_spec = True
+
 
         def make_from_spec(spec):
+            # Some optional fields in inputs_spec() can be None (e.g. modality not enabled).
+            # Skip those here; we'll prune them from the dict before returning.
+            if spec is None:
+                return None
             # Remove the batch dimension.
             shape = spec.shape[1:]
             # Generate values based on dtype
@@ -100,7 +142,29 @@ class FakeDataset(Dataset):
 
         # 用 dict 视图避免依赖 pytree 对自定义 dataclass 的注册
         obs_dict = tree_map(make_from_spec, self._observation_spec.to_dict())
+
+        def _drop_none(x):
+            if x is None:
+                return None
+            if isinstance(x, dict):
+                out = {}
+                for k, v in x.items():
+                    v2 = _drop_none(v)
+                    if v2 is not None:
+                        out[k] = v2
+                return out or None
+            if isinstance(x, (list, tuple)):
+                out_list = [_drop_none(v) for v in x]
+                out_list = [v for v in out_list if v is not None]
+                if not out_list:
+                    return None
+                return type(x)(out_list) if isinstance(x, tuple) else out_list
+            return x
+
+        obs_dict = _drop_none(obs_dict) or {}
         action = tree_map(make_from_spec, self._action_spec)
+        if action is None:
+            raise ValueError("FakeDataset: action spec produced None. Check model_config.inputs_spec().")
         return {**obs_dict, "actions": action}
 
     def __len__(self) -> int:
@@ -193,7 +257,7 @@ def create_rlds_dataset(
         shuffle=shuffle,
         action_chunk_size=action_horizon,
         action_space=data_config.action_space,
-        filter_dict_path=data_config.filter_dict_path,
+        datasets=data_config.datasets,
     )
 
 

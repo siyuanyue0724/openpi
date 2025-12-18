@@ -43,6 +43,7 @@ import openpi.policies.libero_policy as libero_policy
 import openpi.shared.download as _download
 import openpi.shared.normalize as _normalize
 import openpi.training.droid_rlds_dataset as droid_rlds_dataset
+import openpi.training.misc.polaris_config as polaris_config
 import openpi.training.misc.roboarena_config as roboarena_config
 import openpi.training.optimizer as _optimizer
 import openpi.training.weight_loaders as weight_loaders
@@ -148,6 +149,9 @@ class DataConfig:
     action_space: droid_rlds_dataset.DroidActionSpace | None = None
     # Path to the data filter file for DROID dataset
     filter_dict_path: str | None = None
+    # List of RLDS datasets to sample from (Multi-RLDS / cotraining).
+    # Each entry can optionally override filter_dict_path.
+    datasets: Sequence[droid_rlds_dataset.RLDSDataset] = ()
 
     # --- CALVIN (native) dataset options ---
     # Only used when repo_id == "calvin".
@@ -569,6 +573,16 @@ class RLDSDroidDataConfig(DataConfigFactory):
     # Path to the filter dictionary file.
     filter_dict_path: str | None = "gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json"
 
+    # List of datasets to sample from: name, version, weight, and optionally filter_dict_path
+    datasets: Sequence[droid_rlds_dataset.RLDSDataset] = (
+        droid_rlds_dataset.RLDSDataset(
+            name="droid",
+            version="1.0.1",
+            weight=1.0,
+            filter_dict_path="gs://openpi-assets/droid/droid_sample_ranges_v1_0_1.json",
+        ),
+    )
+
     @override
     def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
         repack_transform = _transforms.Group(
@@ -611,6 +625,7 @@ class RLDSDroidDataConfig(DataConfigFactory):
             rlds_data_dir=self.rlds_data_dir,
             action_space=self.action_space,
             filter_dict_path=self.filter_dict_path,
+            datasets=self.datasets,
         )
 
 
@@ -1257,9 +1272,10 @@ _CONFIGS = [
 
 
     #
-    # RoboArena configs.
+    # RoboArena & PolaRiS configs.
     #
     *roboarena_config.get_roboarena_configs(),
+    *polaris_config.get_polaris_configs(),
 ]
 
 if len({config.name for config in _CONFIGS}) != len(_CONFIGS):
