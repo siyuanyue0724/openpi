@@ -592,8 +592,15 @@ def train_loop(config: _config.TrainConfig):
                     if p.requires_grad and id(p) not in existing:
                         new_params.append(p)
         if new_params:
-            optimizer.add_param_group({"params": new_params})
-            logging.info("[SONATA] registered %d new parameters into optimizer", len(new_params))
+            # IMPORTANT: inherit current hyperparams (especially lr) from existing param group.
+            template = {k: v for k, v in optimizer.param_groups[0].items() if k != "params"}
+            template["params"] = new_params
+            optimizer.add_param_group(template)
+            logging.info(
+                "[SONATA] registered %d new parameters into optimizer (lr=%s)",
+                len(new_params),
+                optimizer.param_groups[-1].get("lr", None),
+            )
         return
 
     model.train()

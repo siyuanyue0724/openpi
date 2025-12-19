@@ -85,16 +85,30 @@ class _CalvinReader:
         # In dir, same relative path.
         return f"task_ABCD_D/{self.split}/episode_{step_id:07d}.npz"
 
-    def read_npz(self, step_id: int) -> Dict[str, np.ndarray]:
+    def read_npz(self, step_id: int, keys: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
         rel = self._npz_path(step_id)
         if self.backend == "zip":
             raw = self._zip().read(rel)
             with np.load(io.BytesIO(raw), allow_pickle=False) as z:
-                return {k: z[k] for k in z.files}
+                if keys is None:
+                    return {k: z[k] for k in z.files}
+                out: Dict[str, np.ndarray] = {}
+                for k in keys:
+                    if k not in z.files:
+                        raise KeyError(f"Missing key '{k}' in {rel}. Available keys: {list(z.files)}")
+                    out[k] = z[k]
+                return out
         else:
             abs_path = os.path.join(self.root, rel)
             with np.load(abs_path, allow_pickle=False) as z:
-                return {k: z[k] for k in z.files}
+                if keys is None:
+                    return {k: z[k] for k in z.files}
+                out: Dict[str, np.ndarray] = {}
+                for k in keys:
+                    if k not in z.files:
+                        raise KeyError(f"Missing key '{k}' in {abs_path}. Available keys: {list(z.files)}")
+                    out[k] = z[k]
+                return out
 
     def read_npy(self, rel_path: str) -> Any:
         # rel_path e.g. "task_ABCD_D/training/lang_annotations/auto_lang_ann.npy"
@@ -321,7 +335,12 @@ class CalvinLangSegmentDataset(Dataset):
         else:
             t = start
 
-        d0 = self.reader.read_npz(t)
+        # Read observation from step t.
+        # Performance: only load keys we actually use for the observation + the first action.
+        keys0 = ["rgb_static", "depth_static", "robot_obs", self.action_key]
+        if self.use_wrist_rgb:
+            keys0.append("rgb_gripper")
+        d0 = self.reader.read_npz(t, keys=keys0)
 
         rgb_static = d0["rgb_static"]  # (200,200,3) uint8
         depth_static = d0["depth_static"]  # (200,200) float32/float64
@@ -339,9 +358,11 @@ class CalvinLangSegmentDataset(Dataset):
             out["rgb_gripper"] = d0["rgb_gripper"]  # (84,84,3) uint8
 
         # Stack action horizon
-        acts = []
-        for j in range(t, t + self.action_horizon):
-            dj = self.reader.read_npz(j)
+        # Stack action horizon. Avoid re-loading step t (we already have it in d0).
+        # Performance: for j>t, load only the action key (avoid decompressing rgb/depth repeatedly).
+        acts = [d0[self.action_key].astype(np.float32)]
+        for j in range(t + 1, t + self.action_horizon):
+            dj = self.reader.read_npz(j, keys=[self.action_key])
             acts.append(dj[self.action_key].astype(np.float32))
         out["actions"] = np.stack(acts, axis=0)  # (H,7)
 

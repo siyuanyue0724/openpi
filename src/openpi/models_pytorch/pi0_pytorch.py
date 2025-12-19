@@ -1,5 +1,11 @@
 import logging
 import math
+import os
+from typing import Any
+import sys
+import importlib
+import importlib.util
+from pathlib import Path
 
 import torch
 from torch import Tensor
@@ -7,10 +13,48 @@ from torch import nn
 import torch.nn.functional as F  # noqa: N812
 
 import openpi.models.gemma as _gemma
-from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
-import os
 from openpi.models.sonata_encoder import Sonata
+
+_SONATA_IGNORED_KEYS: set[str] = {"embedding.mask_token"}
+
+
+def _torch_load_cpu(path: str):
+    """Load a checkpoint onto CPU (PyTorch>=2.6 safe-default compatible).
+
+    PyTorch>=2.6 changed torch.load default to weights_only=True, which can fail for many
+    training checkpoints (.pth/.pt) that contain numpy scalars and other pickled objects.
+
+    SECURITY NOTE:
+      weights_only=False can execute arbitrary code during unpickling.
+      Only use it with checkpoints from a trusted source (your own cache / official models).
+    """
+    p = str(path)
+    if p.endswith(".safetensors"):
+        from safetensors.torch import load_file  # noqa: WPS433
+        return load_file(p, device="cpu")
+    try:
+        return torch.load(p, map_location="cpu", weights_only=False)
+    except TypeError:
+        # Older PyTorch (<2.6) does not accept weights_only.
+        return torch.load(p, map_location="cpu")
+
+
+def _infer_sonata_in_channels(sd: dict[str, torch.Tensor]) -> int | None:
+    """Infer Sonata in_channels from a state_dict.
+
+    Most reliable signal: embedding.stem.linear.weight has shape [out_dim, in_dim],
+    where in_dim == in_channels.
+    """
+    for k, v in sd.items():
+        if (
+            isinstance(k, str)
+            and k.endswith("embedding.stem.linear.weight")
+            and isinstance(v, torch.Tensor)
+            and v.ndim == 2
+        ):
+            return int(v.shape[1])
+    return None
 
 
 def get_safe_dtype(target_dtype, device_type):
@@ -85,11 +129,281 @@ def make_att_2d_masks(pad_masks, att_masks):
     return att_2d_masks & pad_2d_masks
 
 
+_TRANSFORMERS_REPLACE_READY = False
+
+
+def _get_openpi_data_home() -> Path:
+    """OpenPI data/cache root.
+
+    Matches OpenPI README:
+      - default: ~/.cache/openpi
+      - override: OPENPI_DATA_HOME=/abs/path
+    """
+    env = os.environ.get("OPENPI_DATA_HOME")
+    if env:
+        return Path(env).expanduser()
+    return Path.home() / ".cache" / "openpi"
+
+
+def _resolve_ckpt_path(path: str | None, *, kind: str) -> str | None:
+    """Resolve a checkpoint path in a way consistent with OpenPI's ecosystem.
+
+    Accepts:
+      - absolute file path
+      - relative file path: resolved under OPENPI_DATA_HOME
+      - user home (~) expansion
+    """
+    if path is None:
+        return None
+    p = str(path).strip()
+    if not p:
+        return None
+
+    # expand "~"
+    p_exp = os.path.expanduser(p)
+    cand = Path(p_exp)
+    if cand.is_file():
+        return str(cand)
+
+    # If relative, try under OPENPI_DATA_HOME
+    if not cand.is_absolute():
+        dh = _get_openpi_data_home()
+        cand2 = dh / cand
+        if cand2.is_file():
+            return str(cand2)
+
+    raise FileNotFoundError(
+        f"{kind} ckpt not found: '{p}'. "
+        f"Tried: '{cand}' and '{(_get_openpi_data_home() / cand) if not cand.is_absolute() else cand}'."
+    )
+
+
+def _unwrap_state_dict(
+    obj: object,
+    *,
+    kind: str,
+    sonata_pretrain: bool | None = None,
+) -> dict[str, torch.Tensor]:
+    """Unwrap common checkpoint containers into a plain state_dict."""
+    # common wrappers
+    if isinstance(obj, dict):
+        for k in ("state_dict", "model_state_dict", "model", "net", "encoder"):
+            v = obj.get(k, None)
+            if isinstance(v, dict):
+                obj = v
+                break
+
+    if not isinstance(obj, dict):
+        raise RuntimeError(f"{kind} checkpoint must be a dict-like state_dict, got {type(obj)}")
+
+    # keep only tensor entries (drop optimizer states etc)
+    sd: dict[str, torch.Tensor] = {}
+    for k, v in obj.items():
+        if isinstance(v, torch.Tensor):
+            sd[str(k)] = v
+
+    if not sd:
+        # If we filtered everything out, it is likely not a pure state_dict.
+        raise RuntimeError(
+            f"{kind} checkpoint does not look like a state_dict of tensors. "
+            f"Top-level keys preview: {list(obj.keys())[:40] if isinstance(obj, dict) else 'N/A'}"
+        )
+
+
+    # ---- Special-case: facebook/sonata pretrain checkpoints (HF cache) ----
+    # Those often store weights under:
+    #   - teacher.backbone.*  (EMA weights, preferred for inference) and/or
+    #   - student.backbone.*  (training weights)
+    # OpenPI Sonata expects keys like `embedding.*` / `enc.*` without those prefixes.
+    #
+    # For backward-compat / debugging convenience:
+    #   If sonata_pretrain is not provided, infer it from `kind`.
+    if sonata_pretrain is None:
+        sonata_pretrain = "sonata" in str(kind).lower()
+    if sonata_pretrain:
+        # Handle both plain and DDP-prefixed variants.
+        candidates = (
+            "teacher.backbone.",
+            "module.teacher.backbone.",
+            "student.backbone.",
+            "module.student.backbone.",
+            "backbone.",
+            "module.backbone.",
+        )
+        selected = None
+        for pre in candidates:
+            if any(k.startswith(pre) for k in sd.keys()):
+                mapped = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+                if mapped:
+                    selected = mapped
+                    break
+        if selected is not None:
+            sd = selected
+        # Benign keys that exist in some pretrain ckpts but are not part of OpenPI's Sonata module.
+        for k in _SONATA_IGNORED_KEYS:
+            sd.pop(k, None)
+
+
+    # strip common prefixes (often introduced by DDP or wrapper modules)
+    prefixes = ("module.", "sonata.", "encoder.", "model.")
+    changed = True
+    while changed:
+        changed = False
+        for pre in prefixes:
+            if sd and all(k.startswith(pre) for k in sd.keys()):
+                sd = {k[len(pre):]: v for k, v in sd.items()}
+                changed = True
+    return sd
+
+
+def _ensure_transformers_replace_is_ready() -> None:
+    """Ensure OpenPI's patched transformers (transformers_replace) is active.
+
+    We avoid touching site-packages (and uv cache hardlinks) by loading patched
+    modules from the repo into sys.modules under the `transformers.*` namespace.
+
+    This approach matches README's intention ("cp overlay") but is runtime-only.
+    """
+    global _TRANSFORMERS_REPLACE_READY  # noqa: PLW0603
+    if _TRANSFORMERS_REPLACE_READY:
+        return
+
+    # 1) Hard pin version (the replace files are written against this exact version)
+    try:
+        import transformers  # noqa: WPS433
+    except Exception as e:  # pragma: no cover
+        raise ValueError("transformers is required but cannot be imported.") from e
+
+    expected_ver = "4.53.2"
+    if getattr(transformers, "__version__", None) != expected_ver:
+        raise ValueError(
+            f"transformers_replace requires transformers=={expected_ver}, but got transformers=={transformers.__version__}. "
+            "Please ensure your environment resolves the pinned version "
+            f"(e.g. `uv sync`, or `uv pip install transformers=={expected_ver}`)."
+        )
+
+    # 2) Locate replacement sources in this repo
+    patch_root = Path(__file__).resolve().parent / "transformers_replace"
+    if not patch_root.is_dir():
+        raise ValueError(
+            f"transformers_replace source directory not found: {patch_root}. "
+            "Make sure your repo has src/openpi/models_pytorch/transformers_replace/..."
+        )
+
+    def _load_override(fullname: str, file_path: Path) -> None:
+        """Load file_path as module fullname and override sys.modules."""
+        if not file_path.is_file():
+            raise ValueError(f"transformers_replace file missing: {file_path}")
+
+        # If already loaded from our patch_root, skip.
+        mod = sys.modules.get(fullname)
+        if mod is not None:
+            mfile = getattr(mod, "__file__", "") or ""
+            if str(patch_root) in str(mfile):
+                return
+
+        spec = importlib.util.spec_from_file_location(fullname, str(file_path))
+        if spec is None or spec.loader is None:
+            raise RuntimeError(f"Failed to create import spec for {fullname} from {file_path}")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[fullname] = module
+        spec.loader.exec_module(module)
+
+        # Attach to parent module for `from transformers.xxx import yyy`.
+        try:
+            parent_name, leaf = fullname.rsplit(".", 1)
+            parent = importlib.import_module(parent_name)
+            setattr(parent, leaf, module)
+        except Exception:
+            # Parent may not exist (rare). Import machinery can still find sys.modules entry.
+            pass
+
+    # Load all patched python modules under patch_root into transformers.* namespace.
+    # IMPORTANT: skip __init__.py (we do not want to replace package-level lazy import machinery).
+    patch_files = [p for p in patch_root.rglob("*.py") if p.is_file() and p.name != "__init__.py"]
+    if len(patch_files) == 0:
+        raise ValueError(f"No python files found under transformers_replace: {patch_root}")
+
+
+    def _patch_order(p: Path) -> tuple[int, int, str]:
+        """Deterministic order to avoid importing unpatched deps.
+
+        paligemma depends on gemma + siglip, so we must load siglip/gemma first.
+        Also load configuration_* before modeling_*.
+        """
+        rel = p.relative_to(patch_root).as_posix()
+
+        # Group priority (smaller loads earlier)
+        if rel.startswith("models/siglip/"):
+            grp = 20
+        elif rel.startswith("models/gemma/"):
+            grp = 30
+        elif rel.startswith("models/paligemma/"):
+            grp = 40
+        elif rel.startswith("models/"):
+            grp = 50
+        else:
+            grp = 10  # core / others first
+
+        name = p.name
+        if name.startswith("configuration_"):
+            sub = 0
+        elif name.startswith("modeling_"):
+            sub = 1
+        elif name == "check.py":
+            sub = 2
+        else:
+            sub = 1
+
+        return (grp, sub, rel)
+
+    patch_files = sorted(patch_files, key=_patch_order)
+
+
+    for file_path in patch_files:
+        rel = file_path.relative_to(patch_root)
+        fullname = "transformers." + rel.with_suffix("").as_posix().replace("/", ".")
+        _load_override(fullname, file_path)
+
+    # Minimal sanity check: `check` is a patched-only submodule; import should succeed now.
+    try:
+        from transformers.models.siglip import check as _check  # noqa: WPS433
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "transformers_replace injection failed: cannot import transformers.models.siglip.check. "
+            "This usually means the patch directory layout is unexpected."
+        ) from e
+    
+
+    try:
+        ok = bool(_check.check_whether_transformers_replace_is_installed_correctly())
+    except Exception as e:  # pragma: no cover
+        raise RuntimeError(
+            "transformers_replace sanity check raised an exception. "
+            "This usually indicates an import/layout mismatch inside transformers_replace."
+        ) from e
+    if not ok:
+        raise RuntimeError(
+            "transformers_replace sanity check returned False. "
+            "Most likely some patched modules were not loaded (wrong order) "
+            "or the directory structure under transformers_replace does not match transformers==4.53.2."
+        )
+
+
+    _TRANSFORMERS_REPLACE_READY = True
+
+
 class PI0Pytorch(nn.Module):
     def __init__(self, config):
         super().__init__()
         self.config = config
-        self.pi05 = config.pi05
+        self.pi05 = bool(getattr(config, "pi05", False))
+        
+        
+        # ---- transformers_replace must be active BEFORE importing gemma_pytorch / transformers models ----
+        _ensure_transformers_replace_is_ready()
+        from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel  # noqa: WPS433
+
 
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -133,13 +447,53 @@ class PI0Pytorch(nn.Module):
         _req = getattr(config, "require_cuda", None)
         self.require_cuda = True if _req is None else bool(_req)
         self.sonata_ckpt   = getattr(config, "sonata_ckpt_path", None)
+        self.sonata_projector_ckpt = getattr(config, "sonata_projector_ckpt_path", None)
         self.point_start_id = getattr(config, "point_start_id", None)
         self.point_end_id   = getattr(config, "point_end_id", None)
         self.point_token_cap = int(getattr(config, "point_token_cap", 0) or 0)
         self.point_feat_dim  = int(getattr(config, "point_feat_dim", 6) or 6)
+
+
+        # Sonata真正吃进去的 feature 维度（in_channels）。默认等于 point_feat_dim，
+        # 但如果加载了 sonata_ckpt，会从 ckpt 自动推断并覆盖（避免 shape mismatch）。
+        self.sonata_in_channels: int = int(self.point_feat_dim)
+
+        # 点云 feature 维度与 sonata_in_channels 不一致时的策略：
+        #   - 默认严格：直接报错（推荐，避免吞吐下降/静默质量损失）
+        #   - 显式开启 auto-pad：允许 runtime pad/truncate（调试/兼容用）
+        _ap = getattr(config, "sonata_auto_pad_feat", None)
+        if _ap is None:
+            self.sonata_auto_pad_feat = str(os.environ.get("OPENPI_SONATA_AUTO_PAD_FEAT", "0")).strip().lower() in (
+                "1", "true", "yes", "on"
+            )
+        else:
+            self.sonata_auto_pad_feat = bool(_ap)
+        self._warned_point_feat_mismatch = False
+
+
+        # Expensive point-cloud validation checks can hurt throughput on large point clouds.
+        # Keep OFF by default (OpenPI-style). Enable only for debugging data issues:
+        #   - config.sonata_validate = True
+        #   - or env OPENPI_SONATA_VALIDATE=1
+        _val = getattr(config, "sonata_validate", None)
+        if _val is None:
+            self.sonata_validate = str(os.environ.get("OPENPI_SONATA_VALIDATE", "0")).strip().lower() in ("1", "true", "yes", "on")
+        else:
+            self.sonata_validate = bool(_val)
+
+
         # 允许通过环境变量覆盖 ckpt 路径（显式 config 优先）
         if (self.sonata_ckpt is None) and (os.environ.get("OPENPI_SONATA_CKPT")):
             self.sonata_ckpt = os.environ.get("OPENPI_SONATA_CKPT")
+        if (self.sonata_projector_ckpt is None) and (os.environ.get("OPENPI_SONATA_PROJECTOR_CKPT")):
+            self.sonata_projector_ckpt = os.environ.get("OPENPI_SONATA_PROJECTOR_CKPT")
+        self._pc_projector_loaded = False
+
+        # Resolve ckpt paths (OpenPI-style: allow relative paths under OPENPI_DATA_HOME).
+        # Fail-fast here so errors are clear before training starts.
+        self.sonata_ckpt = _resolve_ckpt_path(self.sonata_ckpt, kind="Sonata encoder")
+        self.sonata_projector_ckpt = _resolve_ckpt_path(self.sonata_projector_ckpt, kind="Sonata projector")
+
 
         # 早期 fail-fast：显式设置了窗口 ID 但与 tokenizer 末两位不一致 → 立刻报错
         try:
@@ -167,33 +521,177 @@ class PI0Pytorch(nn.Module):
         # Cache for current batch (raw features, before projection)
         self._pt_cache: tuple[torch.Tensor, torch.Tensor] | None = None
 
-        msg = "transformers_replace is not installed correctly. Please install it with `uv pip install transformers==4.53.2` and `cp -r ./src/openpi/models_pytorch/transformers_replace/* .venv/lib/python3.11/site-packages/transformers/`."
-        try:
-            from transformers.models.siglip import check
+    def load_state_dict(self, state_dict: Any, strict: bool = True):
+        """Make lazy Sonata/projector modules checkpoint-friendly.
 
-            if not check.check_whether_transformers_replace_is_installed_correctly():
-                raise ValueError(msg)
-        except ImportError:
-            raise ValueError(msg) from None
+        OpenPI's training/inference code may load a full-model state_dict before the first forward.
+        Since pc_projector/sonata are created lazily in forward paths, we pre-create them if the
+        incoming state_dict contains their keys; otherwise those weights would be dropped (strict=False)
+        or raise (strict=True).
+        """
+        if not isinstance(state_dict, dict):
+            return super().load_state_dict(state_dict, strict=strict)
 
+        # Common wrapper: {"state_dict": {...}}
+        if "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
+            state_dict = state_dict["state_dict"]
 
-    def _ensure_sonata_ready(self, device, dtype):
+        # Strip a single common global prefix (DDP/DataParallel)
+        if state_dict and all(isinstance(k, str) and k.startswith("module.") for k in state_dict.keys()):
+            state_dict = {k[len("module."):]: v for k, v in state_dict.items()}
+
+        # --- Pre-create pc_projector if present in ckpt ---
+        w_key = None
+        for k in state_dict.keys():
+            if isinstance(k, str) and k.endswith("pc_projector.weight"):
+                w_key = k
+                break
+        if (w_key is not None) and (self.pc_projector is None):
+            w = state_dict[w_key]
+            if (not isinstance(w, torch.Tensor)) or (w.ndim != 2):
+                raise RuntimeError(f"{w_key} must be a 2D tensor, got type={type(w)} shape={getattr(w, 'shape', None)}")
+            in_dim = int(w.shape[1])
+            out_dim = int(w.shape[0])
+            self.pc_projector = nn.Linear(in_dim, out_dim, bias=False)
+            p = next(self.parameters())
+            self.pc_projector.to(device=p.device, dtype=p.dtype)
+            # If weights come from the main state_dict, don't override later via external projector ckpt.
+            self._pc_projector_loaded = True
+
+        # --- Pre-create Sonata if present in ckpt ---
+        has_sonata = any(isinstance(k, str) and k.startswith("sonata.") for k in state_dict.keys())
+        if has_sonata and (self.sonata is None):
+            # Infer in_channels from ckpt if possible (avoids shape mismatch like [48,9] vs [48,6])
+            sonata_sd = {k[len("sonata."):]: v for k, v in state_dict.items()
+                         if isinstance(k, str) and k.startswith("sonata.") and isinstance(v, torch.Tensor)}
+            in_ch = _infer_sonata_in_channels(sonata_sd)
+            if in_ch is None:
+                in_ch = int(self.point_feat_dim)
+            self.sonata_in_channels = int(in_ch)
+            self.sonata = Sonata(in_channels=self.sonata_in_channels)
+            p = next(self.parameters())
+            # Keep Sonata in fp32 by design
+            self.sonata.to(device=p.device, dtype=torch.float32)
+
+        return super().load_state_dict(state_dict, strict=strict)
+        
+
+    def _ensure_sonata_ready(self, device):
         if not self.enable_sonata or self.sonata_mode == "off":
             raise RuntimeError("Sonata is disabled but encoder was requested.")
         if self.require_cuda and not torch.cuda.is_available():
             raise RuntimeError("CUDA required for Sonata, but CUDA is not available.")
         if self.sonata is None:
-            self.sonata = Sonata(in_channels=self.point_feat_dim)
+            sd = None
+            in_ch = int(self.point_feat_dim)
             if self.sonata_ckpt:
-                state = torch.load(self.sonata_ckpt, map_location="cpu")
-                info = self.sonata.load_state_dict(state, strict=True)  # returns _IncompatibleKeys
-                if getattr(info, "missing_keys", []) or getattr(info, "unexpected_keys", []):
+                ckpt_path = str(self.sonata_ckpt)
+                try:
+                    raw = _torch_load_cpu(ckpt_path)
+                except Exception as e:
+                    raise RuntimeError(f"Failed to load Sonata encoder ckpt: {ckpt_path} ({e})") from e
+                sd = _unwrap_state_dict(raw, kind="Sonata encoder", sonata_pretrain=True)
+                in_ch_ckpt = _infer_sonata_in_channels(sd)
+                if in_ch_ckpt is not None:
+                    in_ch = int(in_ch_ckpt)
+                else:
+                    logging.getLogger("openpi").warning(
+                        "Could not infer Sonata in_channels from ckpt; falling back to config.point_feat_dim=%d. ckpt=%s",
+                        in_ch, ckpt_path,
+                    )
+
+            if in_ch < 3:
+                raise RuntimeError(f"Invalid Sonata in_channels={in_ch} (must be >=3; expects xyz in first 3 dims).")
+
+            self.sonata_in_channels = int(in_ch)
+            if self.sonata_in_channels != int(self.point_feat_dim):
+                logging.getLogger("openpi").warning(
+                    "Sonata ckpt expects in_channels=%d but config.point_feat_dim=%d. "
+                    "Model will build Sonata(in_channels=%d). Ensure your pointcloud feature dims match, "
+                    "or set OPENPI_SONATA_AUTO_PAD_FEAT=1 to pad/truncate at runtime (slower).",
+                    self.sonata_in_channels, int(self.point_feat_dim), self.sonata_in_channels,
+                )
+
+            self.sonata = Sonata(in_channels=self.sonata_in_channels)
+
+            if sd is not None:
+                info = self.sonata.load_state_dict(sd, strict=False)  # returns _IncompatibleKeys
+                missing = list(getattr(info, "missing_keys", []) or [])
+                unexpected_all = list(getattr(info, "unexpected_keys", []) or [])
+                unexpected = [k for k in unexpected_all if k not in _SONATA_IGNORED_KEYS]
+                if missing:
                     raise RuntimeError(
-                        f"Sonata ckpt mismatch: missing={getattr(info, 'missing_keys', [])}, "
-                        f"unexpected={getattr(info, 'unexpected_keys', [])}"
+                        "Sonata encoder ckpt is incompatible (missing keys). "
+                        f"ckpt={self.sonata_ckpt} missing[:40]={missing[:40]}"
+                    )
+                if unexpected:
+                    logging.getLogger("openpi").warning(
+                        "Sonata encoder ckpt has unexpected keys (ignored). ckpt=%s unexpected[:40]=%s",
+                        self.sonata_ckpt,
+                        unexpected[:40],
                     )
             # 始终使用 float32 运行点云编码器，避免与 bf16/fp16 主干产生 dtype 冲突
             self.sonata.to(device=device, dtype=torch.float32)  # 训练/评估态在 encode 时按 train 切换
+
+
+    def _maybe_load_pc_projector(self) -> None:
+        """Optionally load a pretrained projector (adapter) once it exists.
+
+        Supports:
+          - torch load (.pt/.pth) dicts
+          - safetensors (.safetensors) dicts
+        Accepts keys:
+          - "pc_projector.weight" (full model state_dict)
+          - "sonata_projector.weight"
+          - "weight" (projector-only checkpoint)
+          - any key that endswith("pc_projector.weight") / endswith("sonata_projector.weight")
+        """
+        if self._pc_projector_loaded:
+            return
+        if self.pc_projector is None:
+            return
+        if not self.sonata_projector_ckpt:
+            return
+
+        ckpt_path = str(self.sonata_projector_ckpt)
+        try:
+            sd = _torch_load_cpu(ckpt_path)
+        except Exception as e:
+            raise RuntimeError(f"Failed to load Sonata projector ckpt: {ckpt_path} ({e})") from e
+
+        if isinstance(sd, dict) and "state_dict" in sd and isinstance(sd["state_dict"], dict):
+            sd = sd["state_dict"]
+        if not isinstance(sd, dict):
+            raise RuntimeError(f"Projector ckpt must be a dict/state_dict, but got type={type(sd)} from {ckpt_path}")
+
+        w = None
+        for k in ("pc_projector.weight", "sonata_projector.weight", "weight"):
+            if k in sd:
+                w = sd[k]
+                break
+        if w is None:
+            for k, v in sd.items():
+                if k.endswith("pc_projector.weight") or k.endswith("sonata_projector.weight"):
+                    w = v
+                    break
+        if w is None:
+            keys_preview = list(sd.keys())[:40]
+            raise RuntimeError(
+                f"Projector ckpt {ckpt_path} does not contain projector weights. "
+                f"Expected one of: pc_projector.weight / sonata_projector.weight / weight. keys[:40]={keys_preview}"
+            )
+
+        if tuple(w.shape) != tuple(self.pc_projector.weight.shape):
+            raise RuntimeError(
+                f"Projector weight shape mismatch: ckpt={tuple(w.shape)} vs expected={tuple(self.pc_projector.weight.shape)}. "
+                "This usually means you changed the language hidden size (paligemma_variant) or Sonata enc dim."
+            )
+        with torch.no_grad():
+            self.pc_projector.weight.copy_(
+                w.to(device=self.pc_projector.weight.device, dtype=self.pc_projector.weight.dtype)
+            )
+        self._pc_projector_loaded = True
+
 
     def set_point_cache(self, pt_feat_raw: torch.Tensor, pt_mask: torch.Tensor) -> None:
         if pt_feat_raw.ndim != 3 or pt_mask.ndim != 2 or pt_feat_raw.shape[:2] != pt_mask.shape[:2]:
@@ -208,9 +706,10 @@ class PI0Pytorch(nn.Module):
         if "pointcloud" not in observation.point_clouds:
             raise RuntimeError("Sonata enabled but observation.point_clouds['pointcloud'] is missing.")
 
-        device = next(self.parameters()).device
-        dtype  = next(self.parameters()).dtype
-        self._ensure_sonata_ready(device, dtype)
+        p0 = next(self.parameters())
+        device = p0.device
+        dtype_model = p0.dtype
+        self._ensure_sonata_ready(device)
         # 与 backup 一致：按需开关训练态 + 梯度
         self.sonata.train(bool(train))
 
@@ -218,24 +717,68 @@ class PI0Pytorch(nn.Module):
         pmask = observation.point_cloud_masks.get("pointcloud", None)
         if not isinstance(pcs, torch.Tensor):
             pcs = torch.as_tensor(pcs)
-        pcs = pcs.to(device=device, dtype=dtype)
+        # IMPORTANT: keep point cloud in float32 to avoid bf16/fp16 losing integer precision
+        # for grid coordinates in the first 3 dims.
+        pcs = pcs.to(device=device, dtype=torch.float32)
         B, M, D = pcs.shape
         if D < 6:
             raise RuntimeError(f"pointcloud last dim {D} < 6; expect [3 grid | 3 xyz | extras].")
+        # NOTE:
+        # - pmask can be per-sample [B] OR per-point [B, M].
+        # - If per-point is provided, we prefer using it to filter points explicitly.
+        #   Do NOT rely on "all zeros" heuristic when per-point masks exist:
+        #   valid points may legitimately have all-zero values (e.g. origin + zero extra features).
+        per_point_mask: torch.Tensor | None = None
         if pmask is None:
             pmask = torch.ones((B,), dtype=torch.bool, device=device)
-        elif not isinstance(pmask, torch.Tensor):
-            pmask = torch.as_tensor(pmask, dtype=torch.bool, device=device)
         else:
-            pmask = pmask.to(device=device, dtype=torch.bool)
-        if torch.isnan(pcs).any() or torch.isinf(pcs).any():
-            raise RuntimeError("Point cloud contains NaN/Inf.")
+            if not isinstance(pmask, torch.Tensor):
+                pmask = torch.as_tensor(pmask, device=device)
+            else:
+                pmask = pmask.to(device=device)
+            if pmask.ndim == 2:
+                per_point_mask = pmask.to(dtype=torch.bool)
+                pmask = per_point_mask.any(dim=1)
+            elif pmask.ndim == 1:
+                pmask = pmask.to(dtype=torch.bool)
+            else:
+                raise RuntimeError(
+                    "point_cloud_masks['pointcloud'] must be shape [B] (per-sample) or [B, M] (per-point), "
+                    f"but got {tuple(pmask.shape)}."
+                )
+
         grid = pcs[..., :3]
-        if (grid < 0).any():
-            raise RuntimeError("Point grid (first 3 dims) must be non-negative.")
-        feat = pcs[..., 3:]
-        if feat.shape[-1] != self.point_feat_dim:
-            raise RuntimeError(f"feat_dim mismatch: got {feat.shape[-1]}, expect config.point_feat_dim={self.point_feat_dim}")
+        if self.sonata_validate:
+            # NOTE: full-tensor reductions; expensive for large point clouds.
+            if torch.isnan(pcs).any() or torch.isinf(pcs).any():
+                raise RuntimeError("Point cloud contains NaN/Inf.")
+            if (grid < 0).any():
+                raise RuntimeError("Point grid (first 3 dims) must be non-negative.")
+        obs_fd = int(D - 3)
+        exp_fd = int(getattr(self, "sonata_in_channels", self.point_feat_dim))
+        if obs_fd < 3:
+            raise RuntimeError(
+                f"pointcloud feature dims (after first 3 grid dims) must be >=3 (xyz), got {obs_fd}."
+            )
+        if exp_fd < 3:
+            raise RuntimeError(f"sonata_in_channels must be >=3, got {exp_fd}.")
+        if obs_fd != exp_fd:
+            if not self.sonata_auto_pad_feat:
+                raise RuntimeError(
+                    f"pointcloud feature dim mismatch: observation has {obs_fd} dims (pcs[...,3:]) "
+                    f"but Sonata expects {exp_fd} dims (from ckpt embedding.stem.linear.weight). "
+                    "Fix by providing exactly exp_fd dims (and set config.point_feat_dim accordingly), "
+                    "OR set OPENPI_SONATA_AUTO_PAD_FEAT=1 to allow runtime pad/truncate (slower, may hurt quality)."
+                )
+            if not self._warned_point_feat_mismatch:
+                logging.getLogger("openpi").warning(
+                    "pointcloud feature dim mismatch: obs=%d vs sonata_in_channels=%d; "
+                    "will %s at runtime (OPENPI_SONATA_AUTO_PAD_FEAT=1).",
+                    obs_fd, exp_fd, "pad zeros" if obs_fd < exp_fd else "truncate extras",
+                )
+                self._warned_point_feat_mismatch = True
+        do_trunc = obs_fd > exp_fd
+        do_pad   = obs_fd < exp_fd
 
         cap = int(self.point_token_cap)
         if cap <= 0:
@@ -256,15 +799,44 @@ class PI0Pytorch(nn.Module):
                 arr = pcs[b]
                 g = arr[:, :3].to(torch.int64)
                 f = arr[:, 3:].to(dtype=torch.float32)
+
+
+                # If per-point mask exists, use it to filter valid points *before* any padding heuristics.
+                # This avoids accidentally dropping valid all-zero points.
+                if per_point_mask is not None:
+                    valid = per_point_mask[b]
+                    if valid.ndim != 1 or valid.shape[0] != g.shape[0]:
+                        raise RuntimeError(
+                            "per_point_mask[b] must be shape [M] matching pcs[b]. "
+                            f"Got {tuple(valid.shape)} vs M={g.shape[0]}."
+                        )
+                    g = g[valid]
+                    f = f[valid]
+
+
+                if do_trunc:
+                    f = f[:, :exp_fd]
                 c = f[:, :3].to(dtype=torch.float32)
-                pad = (g == 0).all(dim=1) & (c == 0).all(dim=1) & (f == 0).all(dim=1)
-                g = g[~pad]; c = c[~pad]; f = f[~pad]
+                # Only apply "all zeros" padding removal when we don't have an explicit per-point mask.
+                if per_point_mask is None:
+                    pad = (g == 0).all(dim=1) & (c == 0).all(dim=1) & (f == 0).all(dim=1)
+                    g = g[~pad]
+                    c = c[~pad]
+                    f = f[~pad]
                 n = g.shape[0]
                 # 允许 padding 后为空：当作“无点云”处理。
                 if n == 0:
                     pt_list.append(None)
                     mask_list.append(torch.zeros((cap,), dtype=torch.bool, device=device))
                     continue
+                if do_pad and f.numel() != 0:
+                    # Pad missing channels with zeros AFTER removing padded points (cheaper than padding full M).
+                    pad_ch = exp_fd - f.shape[1]
+                    if pad_ch > 0:
+                        f = torch.cat(
+                            [f, torch.zeros((f.shape[0], pad_ch), dtype=f.dtype, device=f.device)],
+                            dim=1,
+                        )
                 sample = {
                     "coord": c,
                     "feat": f,
@@ -292,7 +864,7 @@ class PI0Pytorch(nn.Module):
                     logging.getLogger("openpi").warning("[Sonata] token_len=%d is close to cap (%d).", real, cap)
                 m = torch.zeros((cap,), dtype=torch.bool, device=device)
                 m[:real] = True
-                pt_list.append(enc.to(dtype=dtype))
+                pt_list.append(enc.to(dtype=dtype_model))
                 mask_list.append(m)
 
         # 若整 batch 都没有点云（全部 mask=False 或全部为空），我们仍需要返回一个固定形状。
@@ -307,9 +879,13 @@ class PI0Pytorch(nn.Module):
         # 用零填充所有“无点云”样本的 pt features；mask 保持全 False。
         for i, v in enumerate(pt_list):
             if v is None:
-                pt_list[i] = torch.zeros((cap, enc_dim), dtype=dtype, device=device)
+                pt_list[i] = torch.zeros((cap, enc_dim), dtype=dtype_model, device=device)
 
-        pt_feat_raw = torch.stack([v for v in pt_list if v is not None], dim=0)
+        # All entries should be tensors after the fill above; keep batch dimension aligned with pt_mask.
+        pt_list_t: list[torch.Tensor] = [v for v in pt_list if v is not None]
+        if len(pt_list_t) != B:
+            raise RuntimeError("Internal error: pt_list contains None after fill; batch alignment would break.")
+        pt_feat_raw = torch.stack(pt_list_t, dim=0)
         pt_mask     = torch.stack(mask_list, dim=0)
         self._pt_cache = (pt_feat_raw, pt_mask)
         return self._pt_cache
@@ -335,7 +911,13 @@ class PI0Pytorch(nn.Module):
             s_idx = starts[starts[:,0]==b][:,1]
             e_idx = ends[ends[:,0]==b][:,1]
             if s_idx.numel() != 1 or e_idx.numel() != 1:
-                raise RuntimeError("Each sample must contain exactly one pair of point window tokens.")
+                # Better diagnostics: tells you WHICH sample is bad and how.
+                raise RuntimeError(
+                    f"Point window token error in sample b={b}: "
+                    f"expected exactly one start_id={start_id} and one end_id={end_id}, "
+                    f"but got start_count={int(s_idx.numel())}, end_count={int(e_idx.numel())}. "
+                    "Check your prompt template / tokenizer special tokens insertion."
+                )
             s_pos[b] = s_idx.item()
             e_pos[b] = e_idx.item()
             if not (0 <= s_pos[b] < e_pos[b] < S):
@@ -469,6 +1051,8 @@ class PI0Pytorch(nn.Module):
                 self.pc_projector = nn.Linear(pt_feat_raw.shape[-1], lang_emb_dim, bias=False).to(
                     device=lang_emb.device, dtype=lang_emb.dtype
                 )
+            # load once (if ckpt provided) as soon as projector exists
+            self._maybe_load_pc_projector()
             pt_emb = self.pc_projector(pt_feat_raw.to(dtype=lang_emb.dtype, device=lang_emb.device))
             lang_emb, lang_masks = self._insert_points_torch(
                 lang_emb, lang_masks, lang_tokens, pt_emb, pt_mask, int(self.point_start_id), int(self.point_end_id)

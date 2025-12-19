@@ -243,21 +243,33 @@ class CalvinDepthToSonataPointCloud:
             data["point_cloud_masks"] = pms
             return data
 
-        # Deterministic fixed-size selection (no RNG -> reproducible across workers)
+        # Deterministic fixed-size output (no RNG -> reproducible across workers).
+        #
+        # IMPORTANT:
+        # - We *zero-pad* when N < max_points instead of repeating points.
+        #   Repeating makes every sample look like it has max_points valid points,
+        #   defeating downstream padding-aware filtering and wasting Sonata compute.
         if N >= self.max_points:
             idx = np.linspace(0, N - 1, self.max_points, dtype=np.int64)
+            xyz_sel = xyz[idx].astype(np.float32)
+            cols_sel = cols[idx].astype(np.float32)
+
+            # grid_coord (non-negative) computed on selected points
+            g = np.floor((xyz_sel - xyz_sel.min(axis=0, keepdims=True)) / self.voxel_size).astype(np.int32)
+            g = g - g.min(axis=0, keepdims=True)
+
+            # Pack: [grid(3), feat(6)] where feat is [xyz(3), rgb(3)]
+            pc = np.concatenate([g.astype(np.float32), xyz_sel, cols_sel], axis=1).astype(np.float32)
         else:
-            idx = np.arange(self.max_points, dtype=np.int64) % N
+            xyz_sel = xyz.astype(np.float32)
+            cols_sel = cols.astype(np.float32)
 
-        xyz = xyz[idx].astype(np.float32)
-        cols = cols[idx].astype(np.float32)
+            g = np.floor((xyz_sel - xyz_sel.min(axis=0, keepdims=True)) / self.voxel_size).astype(np.int32)
+            g = g - g.min(axis=0, keepdims=True)
+            pc_valid = np.concatenate([g.astype(np.float32), xyz_sel, cols_sel], axis=1).astype(np.float32)
 
-        # grid_coord (non-negative)
-        g = np.floor((xyz - xyz.min(axis=0, keepdims=True)) / self.voxel_size).astype(np.int32)
-        g = g - g.min(axis=0, keepdims=True)
-
-        # Pack: [grid(3), feat(6)] where feat is [xyz(3), rgb(3)]
-        pc = np.concatenate([g.astype(np.float32), xyz, cols], axis=1).astype(np.float32)  # (P,9)
+            pc = np.zeros((self.max_points, 9), dtype=np.float32)
+            pc[:N] = pc_valid
 
         pcs = dict(data.get("point_clouds", {}))
         pms = dict(data.get("point_cloud_masks", {}))

@@ -1243,7 +1243,10 @@ _CONFIGS = [
             pi05=True,
             enable_sonata=True,          
             discrete_state_input=True,
-            max_token_len=48,
+            # pi0.5 (pi05) packs discretized state into the prompt text.
+            # Setting this too small will truncate the prompt/state (and potentially the point window tokens).
+            # Keep this aligned with Pi0Config's pi05 default unless you have a specific reason.
+            max_token_len=200,
             action_horizon=16,
             action_dim=32,
             point_feat_dim=6,
@@ -1266,6 +1269,7 @@ _CONFIGS = [
             max_depth=10.0,
             voxel_size=0.01,
         ),
+        wandb_enabled=False,
         batch_size=4,
         num_workers=4,
     ),
