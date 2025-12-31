@@ -19,6 +19,49 @@ from openpi.models.sonata_encoder import Sonata
 _SONATA_IGNORED_KEYS: set[str] = {"embedding.mask_token"}
 
 
+_SONATA_VALID_ORDERS: set[str] = {"z", "z-trans", "hilbert", "hilbert-trans"}
+
+
+def _parse_bool_env(name: str) -> bool | None:
+    """Parse an optional boolean env var.
+
+    Returns:
+      - True/False if env var is set to a recognized value
+      - None if env var is not set
+    """
+    v = os.environ.get(name, None)
+    if v is None:
+        return None
+    s = str(v).strip().lower()
+    if s in ("1", "true", "yes", "on"):
+        return True
+    if s in ("0", "false", "no", "off"):
+        return False
+    raise ValueError(f"Invalid {name}={v!r} (expected 1/0 true/false yes/no on/off)")
+
+
+def _parse_sonata_order_env(*, default: tuple[str, ...] = ("z", "z-trans")) -> tuple[str, ...]:
+    """Parse OPENPI_SONATA_ORDER as comma-separated list."""
+    raw = os.environ.get("OPENPI_SONATA_ORDER", "").strip()
+    if not raw:
+        return default
+    parts = [p.strip().lower() for p in raw.replace(";", ",").split(",") if p.strip()]
+    if not parts:
+        return default
+    bad = [p for p in parts if p not in _SONATA_VALID_ORDERS]
+    if bad:
+        raise ValueError(
+            f"Invalid OPENPI_SONATA_ORDER entries: {bad}. "
+            f"Valid: {sorted(_SONATA_VALID_ORDERS)}. Example: 'z,z-trans,hilbert,hilbert-trans'"
+        )
+    return tuple(parts)
+
+
+def _infer_sonata_enable_fourier(sd: dict[str, torch.Tensor]) -> bool:
+    """Detect whether ckpt expects enable_fourier_encode=True (input_proj.* present)."""
+    return ("input_proj.weight" in sd) or ("input_proj.bias" in sd)
+
+
 def _torch_load_cpu(path: str):
     """Load a checkpoint onto CPU (PyTorch>=2.6 safe-default compatible).
 
@@ -242,6 +285,23 @@ def _unwrap_state_dict(
         # Benign keys that exist in some pretrain ckpts but are not part of OpenPI's Sonata module.
         for k in _SONATA_IGNORED_KEYS:
             sd.pop(k, None)
+
+
+    # ---- Special-case: SpatialLM / VLM checkpoints store Sonata under `point_backbone.*` ----
+    # Example: manycore-research/SpatialLM1.1-Qwen-0.5B model.safetensors
+    # We only need the point backbone weights; drop everything else.
+    pb_candidates = (
+        "point_backbone.",
+        "module.point_backbone.",
+        "model.point_backbone.",
+        "module.model.point_backbone.",
+    )
+    for pre in pb_candidates:
+        if any(k.startswith(pre) for k in sd.keys()):
+            mapped = {k[len(pre):]: v for k, v in sd.items() if k.startswith(pre)}
+            if mapped:
+                sd = mapped
+            break
 
 
     # strip common prefixes (often introduced by DDP or wrapper modules)
@@ -521,6 +581,53 @@ class PI0Pytorch(nn.Module):
         # Cache for current batch (raw features, before projection)
         self._pt_cache: tuple[torch.Tensor, torch.Tensor] | None = None
 
+        # Log once: whether Sonata encoder was loaded from ckpt or randomly initialized.
+        self._sonata_init_logged: bool = False
+        # Track whether pc_projector was materialized explicitly (useful for DDP safety diagnostics)
+        self._pc_projector_materialized: bool = False
+
+    def materialize_sonata_projector(self, *, enc_dim: int | None = None) -> None:
+        """Create pc_projector as a real parameter BEFORE any DDP/FSDP wrapping.
+
+        Why:
+          - pc_projector is otherwise created lazily in embed_prefix(), which can silently break DDP/FSDP
+            if the parameter is created after the model is wrapped.
+
+        Args:
+          enc_dim: input dim of point tokens (Sonata output dim). If None:
+            - use cached pt_feat_raw dim if available
+            - else fallback to 512 (matches existing fallback in torch_sonata_encode_batch)
+        """
+        if not (self.enable_sonata and self.sonata_mode in ("projector", "all")):
+            return
+        if self.pc_projector is not None:
+            self._pc_projector_materialized = True
+            return
+
+        # Infer language embedding dim from PaliGemma embeddings.
+        try:
+            emb = self.paligemma_with_expert.paligemma.language_model.get_input_embeddings()
+            lang_emb_dim = int(getattr(emb, "embedding_dim", emb.weight.shape[1]))
+        except Exception as e:
+            raise RuntimeError("Failed to infer language embedding dim for pc_projector materialization.") from e
+
+        if enc_dim is None:
+            if self._pt_cache is not None:
+                enc_dim = int(self._pt_cache[0].shape[-1])
+            else:
+                # Sonata 默认 out dim 为 512（enc_channels[-1]）。
+                enc_dim = 512
+
+        # Create on same device/dtype as existing model params (important for bf16 training).
+        p = next(self.parameters())
+        self.pc_projector = nn.Linear(int(enc_dim), int(lang_emb_dim), bias=False).to(
+            device=p.device, dtype=p.dtype
+        )
+
+        # If a projector ckpt is provided, load weights now (shape-checked inside).
+        self._maybe_load_pc_projector()
+        self._pc_projector_materialized = True
+
     def load_state_dict(self, state_dict: Any, strict: bool = True):
         """Make lazy Sonata/projector modules checkpoint-friendly.
 
@@ -536,9 +643,16 @@ class PI0Pytorch(nn.Module):
         if "state_dict" in state_dict and isinstance(state_dict["state_dict"], dict):
             state_dict = state_dict["state_dict"]
 
-        # Strip a single common global prefix (DDP/DataParallel)
-        if state_dict and all(isinstance(k, str) and k.startswith("module.") for k in state_dict.keys()):
-            state_dict = {k[len("module."):]: v for k, v in state_dict.items()}
+        # Strip common global prefixes (DDP/DataParallel and common wrapper "model.")
+        # Use a loop so it also handles multi-layer prefixes like "model.module."
+        prefixes = ("module.", "model.")
+        changed = True
+        while changed and state_dict:
+            changed = False
+            for pre in prefixes:
+                if all(isinstance(k, str) and k.startswith(pre) for k in state_dict.keys()):
+                    state_dict = {k[len(pre):]: v for k, v in state_dict.items()}
+                    changed = True
 
         # --- Pre-create pc_projector if present in ckpt ---
         w_key = None
@@ -555,8 +669,6 @@ class PI0Pytorch(nn.Module):
             self.pc_projector = nn.Linear(in_dim, out_dim, bias=False)
             p = next(self.parameters())
             self.pc_projector.to(device=p.device, dtype=p.dtype)
-            # If weights come from the main state_dict, don't override later via external projector ckpt.
-            self._pc_projector_loaded = True
 
         # --- Pre-create Sonata if present in ckpt ---
         has_sonata = any(isinstance(k, str) and k.startswith("sonata.") for k in state_dict.keys())
@@ -567,13 +679,33 @@ class PI0Pytorch(nn.Module):
             in_ch = _infer_sonata_in_channels(sonata_sd)
             if in_ch is None:
                 in_ch = int(self.point_feat_dim)
+            enable_fourier = _infer_sonata_enable_fourier(sonata_sd)
+            override_fourier = _parse_bool_env("OPENPI_SONATA_ENABLE_FOURIER")
+            if override_fourier is not None:
+                enable_fourier = bool(override_fourier)
+            mask_token = "embedding.mask_token" in sonata_sd
             self.sonata_in_channels = int(in_ch)
-            self.sonata = Sonata(in_channels=self.sonata_in_channels)
+            self.sonata = Sonata(
+                in_channels=self.sonata_in_channels,
+                order=_parse_sonata_order_env(default=("z", "z-trans")),
+                mask_token=mask_token,
+                enable_fourier_encode=enable_fourier,
+            )
             p = next(self.parameters())
             # Keep Sonata in fp32 by design
             self.sonata.to(device=p.device, dtype=torch.float32)
 
-        return super().load_state_dict(state_dict, strict=strict)
+        out = super().load_state_dict(state_dict, strict=strict)
+        # If weights came from the main state_dict, don't override later via external projector ckpt.
+        # Also covers the case where pc_projector was materialized BEFORE load_state_dict().
+        #
+        # IMPORTANT: decide based on actual load result to avoid false positives when ckpt keys
+        # use unexpected prefixes (e.g. "model.pc_projector.weight") and strict=False.
+        if self.pc_projector is not None:
+            missing = set(getattr(out, "missing_keys", []) or [])
+            if "pc_projector.weight" not in missing:
+                self._pc_projector_loaded = True
+        return out
         
 
     def _ensure_sonata_ready(self, device):
@@ -586,6 +718,8 @@ class PI0Pytorch(nn.Module):
             in_ch = int(self.point_feat_dim)
             if self.sonata_ckpt:
                 ckpt_path = str(self.sonata_ckpt)
+                if not self._sonata_init_logged:
+                    logging.getLogger("openpi").info("[Sonata] loading encoder ckpt: %s", ckpt_path)
                 try:
                     raw = _torch_load_cpu(ckpt_path)
                 except Exception as e:
@@ -598,6 +732,11 @@ class PI0Pytorch(nn.Module):
                     logging.getLogger("openpi").warning(
                         "Could not infer Sonata in_channels from ckpt; falling back to config.point_feat_dim=%d. ckpt=%s",
                         in_ch, ckpt_path,
+                    )
+            else:
+                if not self._sonata_init_logged:
+                    logging.getLogger("openpi").warning(
+                        "[Sonata] sonata_ckpt_path/OPENPI_SONATA_CKPT not set -> encoder will be randomly initialized."
                     )
 
             if in_ch < 3:
@@ -612,7 +751,17 @@ class PI0Pytorch(nn.Module):
                     self.sonata_in_channels, int(self.point_feat_dim), self.sonata_in_channels,
                 )
 
-            self.sonata = Sonata(in_channels=self.sonata_in_channels)
+            enable_fourier = _infer_sonata_enable_fourier(sd) if sd is not None else False
+            override_fourier = _parse_bool_env("OPENPI_SONATA_ENABLE_FOURIER")
+            if override_fourier is not None:
+                enable_fourier = bool(override_fourier)
+            mask_token = bool(sd is not None and ("embedding.mask_token" in sd))
+            self.sonata = Sonata(
+                in_channels=self.sonata_in_channels,
+                order=_parse_sonata_order_env(default=("z", "z-trans")),
+                mask_token=mask_token,
+                enable_fourier_encode=enable_fourier,
+            )
 
             if sd is not None:
                 info = self.sonata.load_state_dict(sd, strict=False)  # returns _IncompatibleKeys
@@ -632,6 +781,9 @@ class PI0Pytorch(nn.Module):
                     )
             # 始终使用 float32 运行点云编码器，避免与 bf16/fp16 主干产生 dtype 冲突
             self.sonata.to(device=device, dtype=torch.float32)  # 训练/评估态在 encode 时按 train 切换
+            if not self._sonata_init_logged:
+                self._sonata_init_logged = True
+
 
 
     def _maybe_load_pc_projector(self) -> None:
@@ -1048,6 +1200,13 @@ class PI0Pytorch(nn.Module):
             pt_feat_raw, pt_mask = self._pt_cache
             lang_emb_dim = lang_emb.shape[-1]
             if self.pc_projector is None:
+                # DDP/FSDP safety: creating parameters lazily after wrapping will silently break training.
+                if torch.distributed.is_available() and torch.distributed.is_initialized():
+                    raise RuntimeError(
+                        "pc_projector is None inside embed_prefix() under distributed training. "
+                        "This indicates the projector would be created lazily AFTER DDP/FSDP wrapping, which is unsafe. "
+                        "Call model.materialize_sonata_projector(enc_dim=...) BEFORE wrapping the model with DDP/FSDP."
+                    )
                 self.pc_projector = nn.Linear(pt_feat_raw.shape[-1], lang_emb_dim, bias=False).to(
                     device=lang_emb.device, dtype=lang_emb.dtype
                 )

@@ -1181,6 +1181,7 @@ _CONFIGS = [
             enable_sonata=True,
             point_feat_dim=6,
             point_token_cap=1024,
+            sonata_ckpt_path="openpi-assets/checkpoints/SpatialLM_Sonata_encoder.pth",
         ),
         data=SimpleDataConfig(
             base_config=DataConfig(
@@ -1251,6 +1252,7 @@ _CONFIGS = [
             action_dim=32,
             point_feat_dim=6,
             point_token_cap=1024,
+            sonata_ckpt_path="openpi-assets/checkpoints/SpatialLM_Sonata_encoder.pth",
         ),
         data=CalvinDataConfig(
             assets=AssetsConfig(asset_id="calvin"),
