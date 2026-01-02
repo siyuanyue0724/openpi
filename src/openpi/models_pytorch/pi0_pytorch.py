@@ -294,6 +294,7 @@ def _unwrap_state_dict(
         "point_backbone.",
         "module.point_backbone.",
         "model.point_backbone.",
+        "model.module.point_backbone.",
         "module.model.point_backbone.",
     )
     for pre in pb_candidates:

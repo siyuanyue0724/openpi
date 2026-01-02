@@ -503,6 +503,18 @@ def train_loop(config: _config.TrainConfig):
         # Allocator configuration was set at import-time via `setdefault` (see top of file).
         logging.info("Enabled memory optimizations for 8+ GPU training (allocator configured at import-time)")
 
+    # --- Sonata / pointcloud integration: materialize lazy modules early ---
+    # Required for DDP/FSDP correctness (avoid creating parameters after wrapping) and for safetensors.load_model().
+    if getattr(model, "enable_sonata", False) and getattr(model, "sonata_mode", "off") in ("projector", "all"):
+        # SpatialLM / Sonata encoder default output dim is 512.
+        if hasattr(model, "materialize_sonata_projector"):
+            model.materialize_sonata_projector(enc_dim=512)
+        # If we will train the encoder itself ("all") OR we are about to load a full model checkpoint
+        # into this instance, materialize the encoder before wrapping/loading so weights have a landing spot.
+        if use_ddp or getattr(model, "sonata_mode", "off") == "all" or resuming or (config.pytorch_weight_path is not None):
+            if hasattr(model, "_ensure_sonata_ready"):
+                model._ensure_sonata_ready(device=device)
+
     if use_ddp:
         # Keep prior-tested behavior: find_unused_parameters=True.
         # static_graph is incompatible with find_unused=True; leave it off unless you switch to find_unused=False.

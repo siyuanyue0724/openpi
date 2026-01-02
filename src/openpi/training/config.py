@@ -77,8 +77,14 @@ class _EnsurePointWindow:
         if isinstance(p, bytes):
             p = p.decode("utf-8")
         s, e = "<|point_start|>", "<|point_end|>"
-        if s not in p or e not in p:
-            data["prompt"] = (f"{str(p).strip()} {s}{e}").strip()
+        p_str = str(p)
+        # Ensure exactly one valid point window (start/end). If prompt is malformed (missing/half/duplicate),
+        # canonicalize by removing all markers and appending a single well-formed pair.
+        if p_str.count(s) != 1 or p_str.count(e) != 1:
+            p_str = p_str.replace(s, "").replace(e, "")
+            data["prompt"] = (f"{p_str.strip()} {s}{e}").strip()
+        else:
+            data["prompt"] = p_str
         return data
 
 # 直接在值上下文使用，不再声明 TypeAlias；避免 Pylance reportInvalidTypeForm
