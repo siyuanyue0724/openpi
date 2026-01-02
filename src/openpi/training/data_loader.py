@@ -401,8 +401,14 @@ def create_torch_data_loader(
     if framework == "pytorch":
         if torch.distributed.is_initialized():
             world_size = torch.distributed.get_world_size()
-            if batch_size // world_size < 1:
+            # Fail-fast: require global batch size to be divisible by world size.
+            # Otherwise we'd silently train with (batch_size // world_size) * world_size samples per step.
+            if batch_size < world_size:
                 raise ValueError(f"Global batch_size ({batch_size}) must be >= world_size ({world_size}).")
+            if batch_size % world_size != 0:
+                raise ValueError(
+                    f"Global batch_size ({batch_size}) must be divisible by world_size ({world_size}) under DDP."
+                )
             sampler = torch.utils.data.distributed.DistributedSampler(
                 dataset,
                 num_replicas=world_size,
