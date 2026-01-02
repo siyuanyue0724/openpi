@@ -36,7 +36,11 @@ class PaliGemmaWithExpertModel(nn.Module):
         vlm_config_hf.text_config.use_adarms = use_adarms[0]
         vlm_config_hf.text_config.adarms_cond_dim = vlm_config.width if use_adarms[0] else None
         vlm_config_hf.vision_config.intermediate_size = 4304
-        vlm_config_hf.vision_config.projection_dim = 2048
+        # IMPORTANT: Paligemma's multimodal projector output dim must match the language model hidden size.
+        # The "dummy" configs set a much smaller `width` (e.g. 64). If we keep projection_dim hardcoded
+        # to 2048, image embeddings become [*, 2048] while language embeddings are [*, width], causing
+        # a failure when concatenating the prefix tokens.
+        vlm_config_hf.vision_config.projection_dim = int(vlm_config.width)
         vlm_config_hf.vision_config.projector_hidden_act = "gelu_fast"
         vlm_config_hf.vision_config.torch_dtype = "float32"
 

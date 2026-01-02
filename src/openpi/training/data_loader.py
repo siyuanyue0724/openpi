@@ -524,6 +524,10 @@ class TorchDataLoader:
             )
         self._num_batches = num_batches
 
+        # Keep a reference to the sampler so we can propagate set_epoch() under DDP.
+        # (torch.utils.data.DistributedSampler implements set_epoch for deterministic per-epoch shuffling)
+        self._sampler = sampler
+
         mp_context = None
         if num_workers > 0:
             mp_context = multiprocessing.get_context("spawn")
@@ -566,6 +570,25 @@ class TorchDataLoader:
                     yield jax.tree.map(lambda x: jax.make_array_from_process_local_data(self._sharding, x), batch)
                 else:
                     yield tree_map(torch.as_tensor, batch)
+
+
+    def __len__(self) -> int:
+        """Number of batches per *logical* epoch.
+
+        - If `num_batches` was provided, treat that as the epoch length.
+        - Otherwise defer to the underlying torch DataLoader's length.
+        """
+        if self._num_batches is not None:
+            return self._num_batches
+        return len(self._data_loader)
+
+    def set_epoch(self, epoch: int) -> None:
+        """Propagate epoch to the (Distributed)Sampler, if supported.
+
+        DistributedSampler uses the epoch to deterministically reshuffle each epoch.
+        """
+        if self._sampler is not None and hasattr(self._sampler, "set_epoch"):
+            self._sampler.set_epoch(int(epoch))
 
 
 def _collate_fn(items):
@@ -634,6 +657,16 @@ class DataLoaderImpl(DataLoader):
 
     def data_config(self) -> _config.DataConfig:
         return self._data_config
+
+
+    def __len__(self) -> int:
+        """Length of the underlying data loader (batches per epoch)."""
+        return len(self._data_loader)
+
+    def set_epoch(self, epoch: int) -> None:
+        """If the underlying loader supports per-epoch shuffling, forward the epoch."""
+        if hasattr(self._data_loader, "set_epoch"):
+            self._data_loader.set_epoch(int(epoch))
 
     def __iter__(self):
         for batch in self._data_loader:

@@ -619,10 +619,21 @@ class PI0Pytorch(nn.Module):
                 # Sonata 默认 out dim 为 512（enc_channels[-1]）。
                 enc_dim = 512
 
-        # Create on same device/dtype as existing model params (important for bf16 training).
-        p = next(self.parameters())
+        # Create on the same device/dtype as the language embedding table.
+        # Why not `next(self.parameters())`? Because some models keep certain params in fp32
+        # (e.g. LayerNorm / embeddings policy or vision tower), and `next(self.parameters())`
+        # may pick a fp32 param even when the LM embeddings are bf16, causing
+        # bf16(lang_emb) x fp32(weight) dtype mismatches in F.linear.
+        try:
+            ref_w = emb.weight
+            ref_device = ref_w.device
+            ref_dtype = ref_w.dtype
+        except Exception:
+            p = next(self.parameters())
+            ref_device = p.device
+            ref_dtype = p.dtype
         self.pc_projector = nn.Linear(int(enc_dim), int(lang_emb_dim), bias=False).to(
-            device=p.device, dtype=p.dtype
+            device=ref_device, dtype=ref_dtype
         )
 
         # If a projector ckpt is provided, load weights now (shape-checked inside).
@@ -1213,7 +1224,11 @@ class PI0Pytorch(nn.Module):
                 )
             # load once (if ckpt provided) as soon as projector exists
             self._maybe_load_pc_projector()
-            pt_emb = self.pc_projector(pt_feat_raw.to(dtype=lang_emb.dtype, device=lang_emb.device))
+            # NOTE: torch.nn.Linear requires mat1/mat2 to have the same dtype.
+            # pt_feat_raw may be float32 (from Sonata encoder) while lang_emb may be bf16/fp16.
+            # Project in the projector's weight dtype, then cast back to lang_emb.dtype for fusion.
+            pt_in = pt_feat_raw.to(device=lang_emb.device, dtype=self.pc_projector.weight.dtype)
+            pt_emb = self.pc_projector(pt_in).to(dtype=lang_emb.dtype)
             lang_emb, lang_masks = self._insert_points_torch(
                 lang_emb, lang_masks, lang_tokens, pt_emb, pt_mask, int(self.point_start_id), int(self.point_end_id)
             )

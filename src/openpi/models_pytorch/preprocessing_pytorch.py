@@ -1,6 +1,6 @@
 from collections.abc import Sequence
 import logging
-
+import math
 import torch
 
 from openpi.shared import image_tools
@@ -37,13 +37,22 @@ def preprocess_observation_pytorch(
     for key in image_keys:
         image = observation.images[key]
 
-        # TODO: This is a hack to handle both [B, C, H, W] and [B, H, W, C] formats
-        # Handle both [B, C, H, W] and [B, H, W, C] formats
-        is_channels_first = image.shape[1] == 3  # Check if channels are in dimension 1
+        # Support both BCHW and BHWC inputs. Internally operate on BHWC for resize/augment,
+        # but ALWAYS return BCHW for PyTorch vision backbones (Conv2d expects channels-first).
+        if image.dim() != 4:
+            raise ValueError(f"Expected 4D image tensor for key={key}, got shape={tuple(image.shape)}")
 
-        if is_channels_first:
-            # Convert [B, C, H, W] to [B, H, W, C] for processing
-            image = image.permute(0, 2, 3, 1)
+        # Heuristic: if last dim looks like channels -> channels-last, else if dim1 looks like channels -> channels-first.
+        # This supports grayscale(1), RGB(3), RGBA(4).
+        if image.shape[-1] in (1, 3, 4):
+            channels_last = True
+        elif image.shape[1] in (1, 3, 4):
+            channels_last = False
+        else:
+            channels_last = True
+
+        if not channels_last:
+            image = image.permute(0, 2, 3, 1)  # BCHW -> BHWC
 
         if image.shape[1:3] != image_resolution:
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
@@ -66,9 +75,9 @@ def preprocess_observation_pytorch(
                 max_h = height - crop_height
                 max_w = width - crop_width
                 if max_h > 0 and max_w > 0:
-                    # Use tensor operations instead of .item() for torch.compile compatibility
-                    start_h = torch.randint(0, max_h + 1, (1,), device=image.device)
-                    start_w = torch.randint(0, max_w + 1, (1,), device=image.device)
+                    # Use Python ints for slicing (CUDA tensors cannot be used as slice indices).
+                    start_h = int(torch.randint(0, max_h + 1, (1,), device="cpu").item())
+                    start_w = int(torch.randint(0, max_w + 1, (1,), device="cpu").item())
                     image = image[:, start_h : start_h + crop_height, start_w : start_w + crop_width, :]
 
                 # Resize back to original size
@@ -81,14 +90,11 @@ def preprocess_observation_pytorch(
 
                 # Random rotation (small angles)
                 # Use tensor operations instead of .item() for torch.compile compatibility
-                angle = torch.rand(1, device=image.device) * 10 - 5  # Random angle between -5 and 5 degrees
-                if torch.abs(angle) > 0.1:  # Only rotate if angle is significant
-                    # Convert to radians
-                    angle_rad = angle * torch.pi / 180.0
-
-                    # Create rotation matrix
-                    cos_a = torch.cos(angle_rad)
-                    sin_a = torch.sin(angle_rad)
+                angle = float((torch.rand(1, device="cpu") * 10 - 5).item())  # degrees
+                if abs(angle) > 0.1:
+                    angle_rad = angle * math.pi / 180.0
+                    cos_a = math.cos(angle_rad)
+                    sin_a = math.sin(angle_rad)
 
                     # Apply rotation using grid_sample
                     grid_x = torch.linspace(-1, 1, width, device=image.device)
@@ -141,11 +147,8 @@ def preprocess_observation_pytorch(
             # Back to [-1, 1]
             image = image * 2.0 - 1.0
 
-        # Convert back to [B, C, H, W] format if it was originally channels-first
-        if is_channels_first:
-            image = image.permute(0, 3, 1, 2)  # [B, H, W, C] -> [B, C, H, W]
-
-        out_images[key] = image
+        # ALWAYS return BCHW for downstream vision backbone.
+        out_images[key] = image.permute(0, 3, 1, 2).contiguous()  # BHWC -> BCHW
 
     # obtain mask
     out_masks = {}

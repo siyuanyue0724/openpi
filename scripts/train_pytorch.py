@@ -31,6 +31,7 @@ import dataclasses
 import dataclasses as _dc
 import gc
 import logging
+import sys
 import platform
 import shutil
 import time
@@ -116,10 +117,25 @@ def setup_ddp():
     return use_ddp, local_rank, device
 
 
-def cleanup_ddp():
-    if torch.distributed.is_initialized():
-        torch.distributed.barrier()
-        torch.distributed.destroy_process_group()
+def cleanup_ddp(*, barrier: bool = True):
+    """Cleanup distributed process group.
+
+    Args:
+        barrier: If True, attempt a barrier before destroy. Use False during
+            exception paths to avoid potential hangs.
+    """
+    if not dist.is_initialized():
+        return
+
+    if barrier:
+        try:
+            dist.barrier()
+        except Exception:
+            pass
+    try:
+        dist.destroy_process_group()
+    except Exception:
+        pass
 
 
 def set_seed(seed: int, local_rank: int):
@@ -428,9 +444,18 @@ def train_loop(config: _config.TrainConfig):
         images_to_log = []
         first_view = next(iter(img_dict.values()))
         batch_size = first_view.shape[0]
+        def _as_hwc(x: torch.Tensor) -> torch.Tensor:
+            """Convert either CHW or HWC to HWC for logging."""
+            if not isinstance(x, torch.Tensor) or x.dim() != 3:
+                return x
+            # CHW -> HWC
+            if x.shape[0] in (1, 3, 4):
+                return x.permute(1, 2, 0)
+            return x  # already HWC
+
         for i in range(min(5, batch_size)):
-            # NCHW -> NHWC；多视角横向拼接
-            nhwcs = [img[i].permute(1, 2, 0) for img in img_dict.values()]
+            # multi-view horizontal concat in HWC
+            nhwcs = [_as_hwc(img[i]) for img in img_dict.values()]
             img_concatenated = torch.cat(nhwcs, dim=1) if len(nhwcs) > 1 else nhwcs[0]
             images_to_log.append(wandb.Image(img_concatenated.detach().cpu().numpy()))
 
@@ -642,15 +667,20 @@ def train_loop(config: _config.TrainConfig):
         else None
     )
 
+    # DDP per-epoch shuffle:
+    # Our DataLoaderImpl / TorchDataLoader is step-infinite (it restarts internally),
+    # so we must call set_epoch() at epoch boundaries (every len(loader) steps).
+    iters_per_epoch: int | None = None
+    if use_ddp and hasattr(loader, "set_epoch"):
+        if not hasattr(loader, "__len__"):
+            raise RuntimeError("Data loader must define __len__() under DDP.")
+        iters_per_epoch = len(loader)
+        if iters_per_epoch <= 0:
+            raise RuntimeError("Data loader length must be > 0 under DDP.")
+        # Align epoch with the current global_step (important when resuming).
+        loader.set_epoch(global_step // iters_per_epoch)
+
     while global_step < config.num_train_steps:
-        # Set epoch for distributed training（强契约：要求 __len__ 存在且 >0）
-        if use_ddp and hasattr(loader, "set_epoch"):
-            if not hasattr(loader, "__len__"):
-                raise RuntimeError("Data loader must define __len__() under DDP.")
-            iters = len(loader)
-            if iters <= 0:
-                raise RuntimeError("Data loader length must be > 0 under DDP.")
-            loader.set_epoch(global_step // iters)
 
         for observation, actions in loader:
             # Check if we've reached the target number of steps
@@ -815,6 +845,11 @@ def train_loop(config: _config.TrainConfig):
             # Save checkpoint using the new mechanism（以完成步数为名）
             save_checkpoint(model, optim, global_step, config, is_main, data_config, sonata_optimizer=None)
 
+            # Update DDP sampler epoch at epoch boundaries so the next internal DataLoader iterator
+            # uses a new deterministic shuffle order.
+            if use_ddp and iters_per_epoch is not None and (global_step % iters_per_epoch == 0):
+                loader.set_epoch(global_step // iters_per_epoch)
+
             # Update progress bar
             if pbar is not None:
                 pbar.update(1)
@@ -836,7 +871,11 @@ def train_loop(config: _config.TrainConfig):
 def main():
     init_logging()
     config = _config.cli()
-    train_loop(config)
+    try:
+        train_loop(config)
+    finally:
+        # Always attempt to tear down the process group; avoid hanging barrier on exception.
+        cleanup_ddp(barrier=(sys.exc_info()[0] is None))
 
 
 if __name__ == "__main__":
