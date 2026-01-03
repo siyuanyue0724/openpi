@@ -32,25 +32,43 @@ class DepthToPointCloud:
     - color_map: {cam: rgb_key}（可选），支持 CHW/HWC；自动归一化到 0..1
     - intrinsics: {cam: (fx,fy,cx,cy)}（可选），有则得到米制点云；无则相对尺度
     - stride: 下采样步长（控制点数）；max_points: 最多保留点
-    - 输出：sample["point_clouds"][out_key] = [N, 9]（3×占位0 + 3×xyz + 3×rgb）
+    - 输出：sample["point_clouds"][out_key] = [max_points, 9]（3×grid_coord + 3×xyz + 3×rgb；不足补0）
 
     过滤规则（发生在 max_points 抽样之前）：
       - 仅保留有效深度：np.isfinite(Z) 且 Z > min_depth（把 0/非正深度视为无效）
       - 如设置 max_depth，则 Z < max_depth
     """
     depth_map: Dict[str, str]
+    # If False (default): missing configured depth keys will raise (fail-fast; avoids silent sensor drop).
+    # If True: missing keys are skipped, but we will still emit an empty point cloud if none found
+    #          (prevents dataloader collation from breaking due to inconsistent dict keys).
+    allow_missing_depth: bool = False
     color_map: Optional[Dict[str, str]] = None
     intrinsics: Optional[Dict[str, Tuple[float, float, float, float]]] = None
     stride: int = 4
     max_points: int = 65536
+    voxel_size: float = 0.01
     out_key: str = "pointcloud"
     min_depth: float = 1e-6
     max_depth: Optional[float] = None
+
+    def __post_init__(self) -> None:
+        if self.stride <= 0:
+            raise ValueError(f"[DepthToPointCloud] stride must be > 0, got {self.stride}")
+        if self.max_points <= 0:
+            raise ValueError(f"[DepthToPointCloud] max_points must be > 0, got {self.max_points}")
+        if self.voxel_size <= 0:
+            raise ValueError(f"[DepthToPointCloud] voxel_size must be > 0, got {self.voxel_size}")
 
     def __call__(self, sample: dict) -> dict:
         pts_all, rgb_all = [], []
         for cam, dkey in self.depth_map.items():
             if dkey not in sample:
+                if not self.allow_missing_depth:
+                    raise KeyError(
+                        f"[DepthToPointCloud] missing depth key '{dkey}' for cam='{cam}'. "
+                        "If this is expected (optional sensor), set allow_missing_depth=True."
+                    )
                 continue
             depth = _to_numpy(sample[dkey])  # 期望 H×W
             if depth.ndim != 2:
@@ -93,19 +111,37 @@ class DepthToPointCloud:
             rgb_all.append(C)
 
         if not pts_all:
+            # Always emit a consistent key so dataloader collation does not break.
+            pc = np.zeros((self.max_points, 9), dtype=np.float32)
+            sample.setdefault("point_clouds", {})[self.out_key] = pc
+            sample.setdefault("point_cloud_masks", {})[self.out_key] = np.bool_(False)
             return sample
 
         P = np.concatenate(pts_all, axis=0)
         C = np.concatenate(rgb_all, axis=0)
-        if P.shape[0] > self.max_points:
-            idx = np.random.choice(P.shape[0], self.max_points, replace=False)
-            P, C = P[idx], C[idx]
+        n = int(P.shape[0])
+        if n == 0:
+            pc = np.zeros((self.max_points, 9), dtype=np.float32)
+            sample.setdefault("point_clouds", {})[self.out_key] = pc
+            sample.setdefault("point_cloud_masks", {})[self.out_key] = np.bool_(False)
+            return sample
 
-        grid = np.zeros_like(P, dtype=np.float32)  # 你的模型接口需要的占位 3 维
-        pc = np.concatenate([grid, P.astype(np.float32), C.astype(np.float32)], axis=1)
+        if n > self.max_points:
+            idx = np.random.choice(n, self.max_points, replace=False)
+            P, C = P[idx], C[idx]
+            n = self.max_points
+
+        # Compute Sonata grid_coord by voxelizing xyz (shifted to keep non-negative)
+        min_xyz = P.min(axis=0, keepdims=True)
+        g = np.floor((P - min_xyz) / float(self.voxel_size)).astype(np.int64)
+        g = g - g.min(axis=0, keepdims=True)
+        g = g.astype(np.float32)
+
+        pc = np.concatenate([g, P.astype(np.float32), C.astype(np.float32)], axis=1)  # [n, 9]
+        if n < self.max_points:
+            pc = np.concatenate([pc, np.zeros((self.max_points - n, 9), dtype=np.float32)], axis=0)
+ 
 
         sample.setdefault("point_clouds", {})[self.out_key] = pc
-        # 帧级掩码与过滤后的点数一致：空点云 -> False；否则 True
-        # 好处：可搭配 ValidatePointCloud(min_points=0, allow_mask_all_false=True) 表达“允许空帧但不致命”
-        sample.setdefault("point_cloud_masks", {})[self.out_key] = np.bool_(P.shape[0] > 0)
+        sample.setdefault("point_cloud_masks", {})[self.out_key] = np.bool_(True)
         return sample

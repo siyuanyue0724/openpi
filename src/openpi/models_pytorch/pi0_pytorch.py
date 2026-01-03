@@ -900,11 +900,30 @@ class PI0Pytorch(nn.Module):
                 pmask = torch.as_tensor(pmask, device=device)
             else:
                 pmask = pmask.to(device=device)
-            if pmask.ndim == 2:
+            if pmask.ndim == 0:
+                # scalar -> broadcast (common in single-sample inference)
+                pmask = pmask.to(dtype=torch.bool).expand(B)
+            elif pmask.ndim == 2:
+                if tuple(pmask.shape) != (B, M):
+                    raise RuntimeError(
+                        "point_cloud_masks['pointcloud'] per-point mask must be shape [B, M]. "
+                        f"Got {tuple(pmask.shape)} but expected {(B, M)}."
+                    )
                 per_point_mask = pmask.to(dtype=torch.bool)
                 pmask = per_point_mask.any(dim=1)
             elif pmask.ndim == 1:
-                pmask = pmask.to(dtype=torch.bool)
+                # Accept per-sample [B].
+                # Also accept per-point [M] when B==1 (common user mistake); treat it as per-point.
+                if int(pmask.shape[0]) == B:
+                    pmask = pmask.to(dtype=torch.bool)
+                elif (B == 1) and (int(pmask.shape[0]) == M):
+                    per_point_mask = pmask[None, :].to(dtype=torch.bool)
+                    pmask = per_point_mask.any(dim=1)
+                else:
+                    raise RuntimeError(
+                        "point_cloud_masks['pointcloud'] must be shape [B] (per-sample) or [B, M] (per-point). "
+                        f"Got 1D mask shape={tuple(pmask.shape)} with B={B}, M={M}."
+                    )
             else:
                 raise RuntimeError(
                     "point_cloud_masks['pointcloud'] must be shape [B] (per-sample) or [B, M] (per-point), "
@@ -993,6 +1012,21 @@ class PI0Pytorch(nn.Module):
                     pt_list.append(None)
                     mask_list.append(torch.zeros((cap,), dtype=torch.bool, device=device))
                     continue
+
+                # Fail-fast for a common silent error: degenerate/placeholder grid_coord.
+                # If xyz spans a real volume but grid_coord collapses to a single value, Sonata voxelization degenerates.
+                if n >= 256:
+                    aabb = c.max(dim=0).values - c.min(dim=0).values
+                    if (aabb > 0.1).any():
+                        g_min = g.min(dim=0).values
+                        g_max = g.max(dim=0).values
+                        if torch.equal(g_min, g_max):
+                            raise RuntimeError(
+                                "[torch_sonata_encode_batch] grid_coord appears degenerate/constant while xyz spans a volume. "
+                                "This is usually caused by DepthToPointCloud emitting placeholder zeros for grid_coord. "
+                                "Fix the transform to compute real grid_coord (voxel quantization), or omit grid_coord and let Sonata derive it."
+                            )
+
                 if do_pad and f.numel() != 0:
                     # Pad missing channels with zeros AFTER removing padded points (cheaper than padding full M).
                     pad_ch = exp_fd - f.shape[1]
