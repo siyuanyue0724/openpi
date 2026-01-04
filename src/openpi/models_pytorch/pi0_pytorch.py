@@ -793,6 +793,14 @@ class PI0Pytorch(nn.Module):
                     )
             # 始终使用 float32 运行点云编码器，避免与 bf16/fp16 主干产生 dtype 冲突
             self.sonata.to(device=device, dtype=torch.float32)  # 训练/评估态在 encode 时按 train 切换
+
+            # Projector mode semantics: freeze the encoder parameters as soon as the encoder exists.
+            # This avoids accidentally training the encoder (and accidentally including it in optimizers)
+            # when only the projector should be trained.
+            if self.sonata_mode == "projector":
+                for p in self.sonata.parameters():
+                    p.requires_grad_(False)
+
             if not self._sonata_init_logged:
                 self._sonata_init_logged = True
 

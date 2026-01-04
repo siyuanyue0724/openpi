@@ -204,38 +204,54 @@ def save_checkpoint(model, optimizer, global_step, config, is_main, data_config,
             shutil.rmtree(tmp_ckpt_dir)
         tmp_ckpt_dir.mkdir(parents=True, exist_ok=True)
 
-        # Save model state using safetensors (handle shared tensors)
-        model_to_save = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-        safetensors.torch.save_model(model_to_save, tmp_ckpt_dir / "model.safetensors")
+        try:
+            # Save model state using safetensors (handle shared tensors)
+            model_to_save = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+            safetensors.torch.save_model(model_to_save, tmp_ckpt_dir / "model.safetensors")
 
-        # Save optimizer(s)
-        torch.save(optimizer.state_dict(), tmp_ckpt_dir / "optimizer.pt")
-        if sonata_optimizer is not None:
-            torch.save(sonata_optimizer.state_dict(), tmp_ckpt_dir / "sonata_optimizer.pt")
+            # Save optimizer(s)
+            torch.save(optimizer.state_dict(), tmp_ckpt_dir / "optimizer.pt")
+            if sonata_optimizer is not None:
+                torch.save(sonata_optimizer.state_dict(), tmp_ckpt_dir / "sonata_optimizer.pt")
 
-        # Save training metadata (avoid saving full config to prevent JAX/Flax compatibility issues)
-        metadata = {
-            "global_step": int(global_step),
-            "config": dataclasses.asdict(config),
-            "timestamp": time.time(),
-            "has_sonata_optimizer": sonata_optimizer is not None,
-        }
-        torch.save(metadata, tmp_ckpt_dir / "metadata.pt")
+            # Save training metadata (avoid saving full config to prevent JAX/Flax compatibility issues)
+            metadata = {
+                "global_step": int(global_step),
+                "config": dataclasses.asdict(config),
+                "timestamp": time.time(),
+                "has_sonata_optimizer": sonata_optimizer is not None,
+            }
+            torch.save(metadata, tmp_ckpt_dir / "metadata.pt")
 
-        # save norm stats：契约加严（必须同时存在或同时缺失）
-        norm_stats = getattr(data_config, "norm_stats", None)
-        asset_id = getattr(data_config, "asset_id", None)
-        if (norm_stats is None) ^ (asset_id is None):
-            raise RuntimeError("Inconsistent norm_stats saving contract: norm_stats and asset_id must both exist or both be None.")
-        if norm_stats is not None:
-            assets_root = tmp_ckpt_dir / "assets" / asset_id
-            assets_root.mkdir(parents=True, exist_ok=True)
-            _normalize.save(assets_root, norm_stats)
+            # save norm stats：契约加严（必须同时存在或同时缺失）
+            norm_stats = getattr(data_config, "norm_stats", None)
+            asset_id = getattr(data_config, "asset_id", None)
+            if (norm_stats is None) ^ (asset_id is None):
+                raise RuntimeError("Inconsistent norm_stats saving contract: norm_stats and asset_id must both exist or both be None.")
+            if norm_stats is not None:
+                assets_root = tmp_ckpt_dir / "assets" / asset_id
+                assets_root.mkdir(parents=True, exist_ok=True)
+                _normalize.save(assets_root, norm_stats)
 
-        # Atomically move temp directory to final location
-        if final_ckpt_dir.exists():
-            shutil.rmtree(final_ckpt_dir)
-        tmp_ckpt_dir.rename(final_ckpt_dir)
+            # Atomically move temp directory to final location
+            if final_ckpt_dir.exists():
+                shutil.rmtree(final_ckpt_dir)
+            tmp_ckpt_dir.rename(final_ckpt_dir)
+        except Exception as e:
+            # IMPORTANT: avoid leaving multi-GB tmp dirs around when disk is full / IO fails.
+            logging.error(
+                "Failed to save checkpoint at step %s (final=%s, tmp=%s): %r",
+                global_step,
+                final_ckpt_dir,
+                tmp_ckpt_dir,
+                e,
+            )
+            try:
+                if tmp_ckpt_dir.exists():
+                    shutil.rmtree(tmp_ckpt_dir)
+            except Exception:
+                pass
+            raise
 
         logging.info(f"Saved checkpoint at step {global_step} -> {final_ckpt_dir}")
 
@@ -581,8 +597,22 @@ def train_loop(config: _config.TrainConfig):
     if sonata_mode not in {"off", "projector", "all"}:
         raise ValueError(f"Invalid SONATA mode: {sonata_mode!r}. Expected one of: off|projector|all")
 
+    # In projector mode, the Sonata encoder is frozen and MUST NOT be included in the optimizer.
+    # This matters especially for resume runs where the encoder is materialized before building the optimizer.
+    base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    if sonata_mode == "projector":
+        enc = getattr(base_model, "sonata", None)
+        if enc is not None:
+            for p in enc.parameters():
+                p.requires_grad_(False)
+
+    trainable_params = [p for p in get_model_parameters(model) if getattr(p, "requires_grad", False)]
+    if len(trainable_params) == 0:
+        raise RuntimeError("No trainable parameters found for optimizer; check configuration.")
+
+
     optim = torch.optim.AdamW(
-        get_model_parameters(model),
+        trainable_params,
         lr=peak_lr,
         betas=(config.optimizer.b1, config.optimizer.b2),
         eps=config.optimizer.eps,
