@@ -52,6 +52,23 @@ import openpi.training.config as _config
 import openpi.training.data_loader as _data
 
 
+def _torch_load_ckpt(path, *, map_location):
+    """torch.load wrapper compatible with PyTorch>=2.6 default behavior changes.
+
+    PyTorch 2.6+ tightened torch.load() defaults (weights_only-style restricted unpickling),
+    which can break loading optimizer/metadata checkpoints that contain non-tensor objects
+    (e.g. pathlib.Path inside dataclasses.asdict(config)).
+
+    These checkpoints are produced by this codebase and are assumed trusted, so we load
+    with weights_only=False when supported. For older PyTorch versions, fall back.
+    """
+    try:
+        return torch.load(path, map_location=map_location, weights_only=False)
+    except TypeError:
+        # Older PyTorch (<2.6) does not accept weights_only.
+        return torch.load(path, map_location=map_location)
+
+
 def init_logging():
     level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
 
@@ -301,7 +318,7 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device, *, sonata_optimize
         optimizer_path = ckpt_dir / "optimizer.pt"
 
         if optimizer_path.exists():
-            optimizer_state_dict = torch.load(optimizer_path, map_location=device)
+            optimizer_state_dict = _torch_load_ckpt(optimizer_path, map_location=device)
             logging.info("Loaded optimizer state from pt format")
         else:
             raise FileNotFoundError(f"No optimizer checkpoint found at {ckpt_dir}")
@@ -318,7 +335,7 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device, *, sonata_optimize
             s_path = ckpt_dir / "sonata_optimizer.pt"
             if s_path.exists():
                 try:
-                    s_state = torch.load(s_path, map_location=device)
+                    s_state = _torch_load_ckpt(s_path, map_location=device)
                     sonata_optimizer.load_state_dict(s_state)
                     logging.info("Loaded Sonata optimizer state from pt format")
                     del s_state
@@ -326,7 +343,7 @@ def load_checkpoint(model, optimizer, checkpoint_dir, device, *, sonata_optimize
                     logging.warning(f"Failed to load Sonata optimizer state ({e!r}); continuing with fresh.")
 
         logging.info("Loading metadata...")
-        metadata = torch.load(ckpt_dir / "metadata.pt", map_location=device)
+        metadata = _torch_load_ckpt(ckpt_dir / "metadata.pt", map_location=device)
         global_step = metadata.get("global_step", latest_step)
         del metadata
         torch.cuda.empty_cache()
