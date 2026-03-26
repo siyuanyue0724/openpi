@@ -340,7 +340,7 @@ class CalvinDataConfig(DataConfigFactory):
         root = self.calvin_root or os.environ.get("CALVIN_ZIP") or os.environ.get("CALVIN_ROOT")
         if not root:
             raise ValueError(
-                "CALVIN data path missing. Set `--data.calvin_root=/abs/path/to/task_ABCD_D.zip` "
+                "CALVIN data path missing. Set `--data.calvin_root=/abs/path/to/task_ABC_D.zip` "
                 "or export CALVIN_ZIP/CALVIN_ROOT."
             )
 
@@ -361,15 +361,32 @@ class CalvinDataConfig(DataConfigFactory):
         z_max = float(self.max_depth) if self.max_depth is not None else float(sonata.max_depth or 10.0)
 
         cam_path = self.cameras_json_path
-        if cam_path is None:
-            # If root is a zip, the transform supports "zip path" and will fallback to the sibling directory
-            # (e.g. task_ABCD_D.zip -> task_ABCD_D/calib/cameras.json) when cameras.json is not inside the zip.
+        # If root is a zip, the transform supports passing the zip path directly and
+        # will fallback to a sibling extracted directory (...zip -> .../calib/cameras.json).
+        if not cam_path:
             if str(root).endswith(".zip"):
                 cam_path = str(root)
             else:
                 rpath = pathlib.Path(str(root))
-                task_dir = rpath / "task_ABCD_D" if (rpath / "task_ABCD_D").is_dir() else rpath
-                cam_path = str(task_dir / "calib" / "cameras.json")
+                direct = rpath / "calib" / "cameras.json"
+                if direct.is_file():
+                    cam_path = str(direct)
+                else:
+                    cands = []
+                    if rpath.is_dir():
+                        cands = sorted(
+                            p / "calib" / "cameras.json"
+                            for p in rpath.iterdir()
+                            if p.is_dir() and (p / "calib" / "cameras.json").is_file()
+                        )
+                    if len(cands) == 1:
+                        cam_path = str(cands[0])
+                    else:
+                        raise FileNotFoundError(
+                            f"Could not infer CALVIN cameras.json from '{root}'. "
+                            f"Pass --data.cameras-json-path explicitly. "
+                            f"Candidates={[str(p) for p in cands]}"
+                        )
 
         repack_map: dict[str, str] = {
             "observation/image": "rgb_static",

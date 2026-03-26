@@ -9,16 +9,37 @@ from typing import Any, Dict, Literal
 
 import numpy as np
 
+def _infer_task_prefix_from_zip(zf: zipfile.ZipFile) -> str | None:
+    """Infer task prefix such as task_ABC_D / task_ABCD_D from a CALVIN zip."""
+    names = zf.namelist()
+    suffixes = (
+        "/training/lang_annotations/auto_lang_ann.npy",
+        "/validation/lang_annotations/auto_lang_ann.npy",
+        "/calib/cameras.json",
+    )
+    cands: set[str] = set()
+    for suf in suffixes:
+        for n in names:
+            if n.endswith(suf):
+                cands.add(n[:-len(suf)].rstrip("/"))
+    cands = {c for c in cands if c}
+    if len(cands) == 1:
+        return next(iter(cands))
+    tops = {n.split("/", 1)[0] for n in names if "/" in n}
+    if len(tops) == 1:
+        return next(iter(tops))
+    return None
+
 def _load_json(path: str) -> Dict[str, Any]:
     """Load JSON either from:
 
     - A normal filesystem path: /abs/or/rel/path.json
     - A zip reference: /path/data.zip::inner/path.json
-    - A zip-only path: /path/data.zip (assumes inner path task_ABCD_D/calib/cameras.json)
+    - A zip-only path: /path/data.zip (auto-detect inner calib/cameras.json)
 
     This keeps the CALVIN pipeline working for both extracted directories and zip backend.
     """
-    # Allow passing a directory (e.g., /.../task_ABCD_D) - resolve to calib/cameras.json
+    # Allow passing a directory (e.g., /.../task_ABC_D) - resolve to calib/cameras.json
     if os.path.isdir(path):
         candidate = os.path.join(path, "calib", "cameras.json")
         if os.path.exists(candidate):
@@ -30,49 +51,70 @@ def _load_json(path: str) -> Dict[str, Any]:
         inner_path = inner_path.lstrip("/").strip()
         if not os.path.exists(zip_path):
             raise FileNotFoundError(zip_path)
+
         with zipfile.ZipFile(zip_path, "r") as zf:
             try:
                 with zf.open(inner_path, "r") as f:
                     return json.load(io.TextIOWrapper(f, encoding="utf-8"))
             except KeyError:
-                # Fallback: look for extracted sibling directory (task_ABCD_D.zip -> task_ABCD_D/)
+                cands = [n for n in zf.namelist() if n.endswith("/calib/cameras.json") or n == "calib/cameras.json"]
+                if cands:
+                    with zf.open(cands[0], "r") as f:
+                        return json.load(io.TextIOWrapper(f, encoding="utf-8"))
+
                 sibling = zip_path[:-4] if zip_path.endswith(".zip") else zip_path
                 alt = os.path.join(sibling, "calib", os.path.basename(inner_path))
                 if os.path.exists(alt):
                     with open(alt, "r", encoding="utf-8") as f:
                         return json.load(f)
-                raise
 
+                raise FileNotFoundError(
+                    f"JSON '{inner_path}' not found in zip '{zip_path}', and sibling fallback '{alt}' also missing. "
+                    f"Zip cameras candidates={cands[:20]}"
+                )
 
     if path.endswith(".zip") and os.path.exists(path):
-        default_inner = "task_ABCD_D/calib/cameras.json"
-        try:
-            with zipfile.ZipFile(path, "r") as zf:
-                with zf.open(default_inner, "r") as f:
-                    return json.load(io.TextIOWrapper(f, encoding="utf-8"))
-        except KeyError:
-            # Fallback: common on some CALVIN releases where calib/ is not included in the zip.
-            # Try sibling directory with same stem (e.g., task_ABCD_D.zip -> task_ABCD_D/calib/cameras.json)
-            stem_dir = path[:-4]
-            alt = os.path.join(stem_dir, "calib", "cameras.json")
-            if os.path.exists(alt):
-                with open(alt, "r", encoding="utf-8") as f:
-                    return json.load(f)
+        stem = os.path.splitext(os.path.basename(path))[0]  # task_ABC_D
 
-            with zipfile.ZipFile(path, "r") as zf:
-                cands = [n for n in zf.namelist() if n.endswith("cameras.json")]
-            raise FileNotFoundError(
-                f"cameras.json not found in zip '{path}'. Tried inner '{default_inner}'. "
-                f"Found candidates: {cands[:20]}. "
-                "If your calib is outside the zip, pass cameras_json_path='/path/task_ABCD_D/calib/cameras.json' "
-                "or cameras_json_path='/path/task_ABCD_D'."
-            )
+        with zipfile.ZipFile(path, "r") as zf:
+            names = zf.namelist()
+            cands: list[str] = []
+
+            default_inner = f"{stem}/calib/cameras.json"
+            if default_inner in names:
+                cands.append(default_inner)
+
+            inferred = _infer_task_prefix_from_zip(zf)
+            if inferred:
+                inferred_inner = f"{inferred}/calib/cameras.json"
+                if inferred_inner in names and inferred_inner not in cands:
+                    cands.append(inferred_inner)
+
+            for n in names:
+                if (n.endswith("/calib/cameras.json") or n == "calib/cameras.json") and n not in cands:
+                    cands.append(n)
+
+            if cands:
+                with zf.open(cands[0], "r") as f:
+                    return json.load(io.TextIOWrapper(f, encoding="utf-8"))
+
+        # Fallback: common on some CALVIN releases where calib/ is outside the zip.
+        stem_dir = path[:-4]
+        alt = os.path.join(stem_dir, "calib", "cameras.json")
+        if os.path.exists(alt):
+            with open(alt, "r", encoding="utf-8") as f:
+                return json.load(f)
+
+        raise FileNotFoundError(
+            f"cameras.json not found for zip '{path}'. "
+            f"Tried inner '{stem}/calib/cameras.json' and sibling '{alt}'. "
+            "If your calib lives elsewhere, pass cameras_json_path explicitly."
+        )
 
     if not os.path.exists(path):
         raise FileNotFoundError(path)
     with open(path, "r", encoding="utf-8") as f:
         return json.load(f)
-
 
 def _as_4x4(mat: Any) -> np.ndarray:
     """Convert (4,4) or (3,4) list/array into float32 (4,4)."""

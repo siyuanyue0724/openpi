@@ -33,8 +33,9 @@ class CalvinSegment:
 
 class _CalvinReader:
     """Read npz files either from a big zip or from an extracted directory."""
+
     def __init__(self, root: str, split: str, backend: str = "zip"):
-        self.root = root  # e.g. "/path/task_ABCD_D.zip" OR "/path/task_ABCD_D"
+        self.root = root  # e.g. "/path/task_ABC_D.zip" OR "/path/task_ABC_D"
         self.split = split  # "training" or "validation"
         self.backend = backend  # "zip" or "dir"
 
@@ -51,6 +52,59 @@ class _CalvinReader:
         else:
             if not os.path.isdir(root):
                 raise FileNotFoundError(root)
+
+        self.task_prefix = self._detect_task_prefix()
+
+    def _detect_task_prefix(self) -> str:
+        """Infer CALVIN task prefix.
+
+        Examples:
+          - zip root:   /mnt/calvin_data/task_ABC_D.zip -> "task_ABC_D"
+          - dir root:   /mnt/calvin_data/task_ABC_D     -> ""
+          - parent dir: /mnt/calvin_data                -> "task_ABC_D" (if unique)
+        """
+        if self.backend == "zip":
+            with zipfile.ZipFile(self.root, "r") as zf:
+                names = zf.namelist()
+
+            suffix = f"/{self.split}/lang_annotations/auto_lang_ann.npy"
+            cands = sorted({n[:-len(suffix)].rstrip("/") for n in names if n.endswith(suffix)})
+            if len(cands) == 1:
+                return cands[0]
+
+            tops = sorted({n.split("/", 1)[0] for n in names if "/" in n})
+            if len(tops) == 1:
+                return tops[0]
+
+            raise RuntimeError(
+                f"Could not infer CALVIN task prefix from zip '{self.root}'. "
+                f"annotation candidates={cands}, top-level dirs={tops}"
+            )
+
+        root = os.path.abspath(self.root)
+
+        # root 本身就是 task_XXX_D/
+        direct_ann = os.path.join(root, self.split, "lang_annotations", "auto_lang_ann.npy")
+        if os.path.isfile(direct_ann):
+            return ""
+
+        # root 是父目录，下面有 task_ABC_D/ 之类
+        cands = sorted(
+            d for d in os.listdir(root)
+            if os.path.isfile(os.path.join(root, d, self.split, "lang_annotations", "auto_lang_ann.npy"))
+        )
+        if len(cands) == 1:
+            return cands[0]
+
+        raise RuntimeError(
+            f"Could not infer CALVIN task prefix from dir '{root}'. "
+            f"Candidates={cands}. Pass the task dir directly or use the zip backend."
+        )
+
+    def _rel(self, *parts: str) -> str:
+        if self.task_prefix:
+            return "/".join((self.task_prefix, *parts))
+        return "/".join(parts)
 
     def _zip(self) -> zipfile.ZipFile:
         if self._zf is None:
@@ -81,9 +135,8 @@ class _CalvinReader:
         self._zf = None
 
     def _npz_path(self, step_id: int) -> str:
-        # In zip, files look like: task_ABCD_D/training/episode_0538190.npz
-        # In dir, same relative path.
-        return f"task_ABCD_D/{self.split}/episode_{step_id:07d}.npz"
+        # In zip: task_ABC_D/training/episode_0538190.npz ; in dir: same relative path.
+        return self._rel(self.split, f"episode_{step_id:07d}.npz")
 
     def read_npz(self, step_id: int, keys: Optional[List[str]] = None) -> Dict[str, np.ndarray]:
         rel = self._npz_path(step_id)
@@ -111,7 +164,6 @@ class _CalvinReader:
                 return out
 
     def read_npy(self, rel_path: str) -> Any:
-        # rel_path e.g. "task_ABCD_D/training/lang_annotations/auto_lang_ann.npy"
         if self.backend == "zip":
             raw = self._zip().read(rel_path)
             return np.load(io.BytesIO(raw), allow_pickle=True)
@@ -127,7 +179,6 @@ class _CalvinReader:
             abs_path = os.path.join(self.root, rel_path)
             with open(abs_path, "r", encoding="utf-8") as f:
                 return json.load(f)
-
 
 class CalvinLangSegmentDataset(Dataset):
     """
@@ -158,7 +209,7 @@ class CalvinLangSegmentDataset(Dataset):
         self.rng = np.random.default_rng(rng_seed)
 
         # Load language segments
-        ann_path = f"task_ABCD_D/{split}/lang_annotations/auto_lang_ann.npy"
+        ann_path = self.reader._rel(split, "lang_annotations", "auto_lang_ann.npy")
         ann = self.reader.read_npy(ann_path)
     
         # --- Robustly unwrap annotations across CALVIN releases ---

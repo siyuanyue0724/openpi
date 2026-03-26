@@ -588,15 +588,56 @@ def train_loop(config: _config.TrainConfig):
 
     # Load weights from weight_loader if specified (for fine-tuning)
     if config.pytorch_weight_path is not None:
+        from pathlib import Path
+        import safetensors.torch
+    
         logging.info(f"Loading weights from: {config.pytorch_weight_path}")
-
-        model_path = os.path.join(config.pytorch_weight_path, "model.safetensors")
-        safetensors.torch.load_model(
-            (model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model),
-            model_path,
+    
+        model_to_load = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    
+        ckpt_path = Path(config.pytorch_weight_path)
+        model_path = ckpt_path / "model.safetensors" if ckpt_path.is_dir() else ckpt_path
+        if not model_path.exists():
+            raise FileNotFoundError(f"PyTorch checkpoint file not found: {model_path}")
+    
+        load_result = safetensors.torch.load_model(
+            model_to_load,
+            str(model_path),
+            strict=False,
             device=str(device),
         )
-        logging.info(f"Loaded PyTorch weights from {config.pytorch_weight_path}")
+    
+        if load_result is None:
+            missing_keys, unexpected_keys = [], []
+        else:
+            missing_keys, unexpected_keys = load_result
+            missing_keys = list(missing_keys or [])
+            unexpected_keys = list(unexpected_keys or [])
+    
+        allowed_missing_prefixes = (
+            "sonata.",
+            "pc_projector.",
+        )
+    
+        bad_missing = [k for k in missing_keys if not k.startswith(allowed_missing_prefixes)]
+    
+        if unexpected_keys:
+            raise RuntimeError(
+                "Unexpected keys when loading PyTorch base checkpoint:\n"
+                + "\n".join(unexpected_keys[:200])
+            )
+    
+        if bad_missing:
+            raise RuntimeError(
+                "Unexpected missing keys when loading PyTorch base checkpoint.\n"
+                "Only sonata.* and pc_projector.* are allowed to be missing here.\n"
+                + "\n".join(bad_missing[:200])
+            )
+    
+        logging.info(
+            f"Loaded PyTorch base checkpoint from {config.pytorch_weight_path} "
+            f"with strict=False. allowed_missing={len(missing_keys)} unexpected={len(unexpected_keys)}"
+        )
 
     # Optimizer + learning rate schedule from config
     warmup_steps = config.lr_schedule.warmup_steps

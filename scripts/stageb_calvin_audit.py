@@ -43,9 +43,24 @@ def _get_calvin_root(cli_root: str | None) -> str:
     raise RuntimeError("CALVIN root not provided. Use --calvin-root or export CALVIN_ZIP=...")
 
 
+def _apply_data_overrides(cfg, split: str | None = None, cameras_json_path: str | None = None):
+    data = cfg.data
+    changed = False
+    if split is not None:
+        data = dataclasses.replace(data, split=str(split))
+        changed = True
+    if cameras_json_path is not None:
+        data = dataclasses.replace(data, cameras_json_path=str(cameras_json_path))
+        changed = True
+    if changed:
+        cfg = dataclasses.replace(cfg, data=data)
+    return cfg
+
+
 @torch.no_grad()
-def mode_dataset(cfg_name: str, calvin_root: str, num_workers: int, iters: int) -> None:
+def mode_dataset(cfg_name: str, calvin_root: str, num_workers: int, iters: int, split: str | None) -> None:
     cfg = get_config(cfg_name)
+    cfg = _apply_data_overrides(cfg, split=split, cameras_json_path=None)
     dcfg = cfg.data  # CalvinDataConfig (factory)
 
     ds = CalvinLangSegmentDataset(
@@ -68,7 +83,7 @@ def mode_dataset(cfg_name: str, calvin_root: str, num_workers: int, iters: int) 
         persistent_workers=(num_workers > 0),
     )
 
-    print(f"[dataset] cfg={cfg_name} root={calvin_root}")
+    print(f"[dataset] cfg={cfg_name} root={calvin_root} split={getattr(dcfg, 'split', 'training')}")
     print(f"[dataset] num_workers={num_workers} iters={iters} segments={len(ds)}")
     t0 = time.time()
 
@@ -110,6 +125,8 @@ def mode_loader(
     num_batches: int,
     batch_size: int | None,
     max_token_len: int | None,
+    split: str | None,
+    cameras_json_path: str | None,
 ) -> None:
     os.environ["CALVIN_ZIP"] = calvin_root
 
@@ -120,7 +137,9 @@ def mode_loader(
         cfg = dataclasses.replace(cfg, batch_size=int(batch_size))
     if max_token_len is not None:
         cfg = dataclasses.replace(cfg, model=dataclasses.replace(cfg.model, max_token_len=int(max_token_len)))
-
+    cfg = _apply_data_overrides(cfg, split=split, cameras_json_path=cameras_json_path)
+    
+    print(f"[loader] split={getattr(cfg.data,'split',None)} cameras_json_path={getattr(cfg.data,'cameras_json_path',None)}")
     print(f"[loader] cfg={cfg_name} root={calvin_root}")
     print(f"[loader] batch_size={cfg.batch_size} num_workers={cfg.num_workers} num_batches={num_batches}")
     print(f"[loader] model.max_token_len={cfg.model.max_token_len} action_horizon={cfg.model.action_horizon}")
@@ -224,11 +243,12 @@ def mode_loader(
 
 
 @torch.no_grad()
-def mode_sonata(cfg_name: str, calvin_root: str, num_batches: int, device: str) -> None:
+def mode_sonata(cfg_name: str, calvin_root: str, num_batches: int, device: str, split: str | None, cameras_json_path: str | None) -> None:
     os.environ["CALVIN_ZIP"] = calvin_root
 
     cfg = get_config(cfg_name)
     cfg = dataclasses.replace(cfg, batch_size=1, num_workers=0)  # 先单进程，避免把问题混到 spawn
+    cfg = _apply_data_overrides(cfg, split=split, cameras_json_path=cameras_json_path)
     dl = create_data_loader(cfg, framework="pytorch", shuffle=True, num_batches=num_batches, skip_norm_stats=False)
 
     try:
@@ -302,12 +322,14 @@ def main():
     ap.add_argument("--batch-size", type=int, default=None)
     ap.add_argument("--max-token-len", type=int, default=None)
     ap.add_argument("--device", default="cuda")
+    ap.add_argument("--split", choices=["training", "validation"], default=None)
+    ap.add_argument("--cameras-json-path", default=None)
     args = ap.parse_args()
 
     root = _get_calvin_root(args.calvin_root)
 
     if args.mode == "dataset":
-        mode_dataset(args.config, root, num_workers=args.num_workers, iters=args.iters)
+        mode_dataset(args.config, root, num_workers=args.num_workers, iters=args.iters, split=args.split)
     elif args.mode == "loader":
         mode_loader(
             args.config,
@@ -316,9 +338,18 @@ def main():
             num_batches=args.num_batches,
             batch_size=args.batch_size,
             max_token_len=args.max_token_len,
+            split=args.split,
+            cameras_json_path=args.cameras_json_path,
         )
     else:
-        mode_sonata(args.config, root, num_batches=args.num_batches, device=args.device)
+        mode_sonata(
+            args.config,
+            root,
+            num_batches=args.num_batches,
+            device=args.device,
+            split=args.split,
+            cameras_json_path=args.cameras_json_path,
+        )
 
 
 if __name__ == "__main__":
