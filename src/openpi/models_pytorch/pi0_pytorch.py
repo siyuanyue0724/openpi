@@ -488,11 +488,22 @@ class PI0Pytorch(nn.Module):
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
         torch.set_float32_matmul_precision("high")
-        _raw_sample_actions = self.sample_actions  # 保留装饰后的原实现
-        def _compiled_no_grad_sample_actions(*args, **kwargs):
+
+        _raw_sample_actions = self.sample_actions  # 原始 sample_actions
+
+        def _no_grad_sample_actions(*args, **kwargs):
             with torch.no_grad():
                 return _raw_sample_actions(*args, **kwargs)
-        self.sample_actions = torch.compile(_compiled_no_grad_sample_actions, mode="max-autotune")
+
+        disable_compile = (
+            os.environ.get("TORCHDYNAMO_DISABLE", "0") == "1"
+            or os.environ.get("OPENPI_DISABLE_TORCH_COMPILE", "0") == "1"
+        )
+
+        if disable_compile:
+            self.sample_actions = _no_grad_sample_actions
+        else:
+            self.sample_actions = torch.compile(_no_grad_sample_actions, mode="max-autotune")
 
         # Initialize gradient checkpointing flag
         self.gradient_checkpointing_enabled = False
