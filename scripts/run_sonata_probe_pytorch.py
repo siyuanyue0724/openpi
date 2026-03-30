@@ -195,6 +195,28 @@ def _parse_sonata_order_env(*, default: tuple[str, ...] = ("z", "z-trans")) -> t
         )
     return tuple(parts)
 
+def _resolve_sonata_mode_from_config_and_env(model_cfg) -> str:
+    """Mirror PI0Pytorch Sonata-mode resolution exactly."""
+    env_new = os.environ.get("OPENPI_SONATA_MODE")
+    env_old = os.environ.get("OPENPI_SONATA_TRAIN_MODE")
+    if env_new and env_old and env_new.lower() != env_old.lower():
+        raise RuntimeError("Conflicting SONATA mode env vars: OPENPI_SONATA_MODE vs OPENPI_SONATA_TRAIN_MODE")
+
+    cfg_mode = getattr(model_cfg, "sonata_mode", None)
+    legacy_cfg_mode = getattr(model_cfg, "sonata_train_mode", None)
+    if cfg_mode is not None:
+        cfg_mode = str(cfg_mode).strip().lower()
+    if legacy_cfg_mode is not None:
+        legacy_cfg_mode = str(legacy_cfg_mode).strip().lower()
+    if (cfg_mode is not None) and (legacy_cfg_mode is not None) and (cfg_mode != legacy_cfg_mode):
+        raise RuntimeError(
+            f"Conflicting config Sonata modes: sonata_mode={cfg_mode!r} vs sonata_train_mode={legacy_cfg_mode!r}"
+        )
+
+    mode = str(cfg_mode or legacy_cfg_mode or env_new or env_old or "all").strip().lower()
+    if mode not in ("off", "projector", "all"):
+        raise ValueError(f"Invalid Sonata mode: {mode!r}. Expected off|projector|all")
+    return mode
 
 def _unwrap_state_dict(
     obj: object,
@@ -295,6 +317,8 @@ class SonataProbeModel(nn.Module):
         enable_sonata: bool,
         sonata_mode: str,
         require_cuda: bool = True,
+        sonata_validate: bool | None = None,
+        sonata_auto_pad_feat: bool | None = None,
         sonata_ckpt: str | None = None,
     ) -> None:
         super().__init__()
@@ -311,19 +335,27 @@ class SonataProbeModel(nn.Module):
         self.point_feat_dim = int(point_feat_dim)
         self.point_token_cap = int(point_token_cap)
 
-        # match main model toggles (env-controlled)
-        self.sonata_auto_pad_feat = str(os.environ.get("OPENPI_SONATA_AUTO_PAD_FEAT", "0")).strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
-        self.sonata_validate = str(os.environ.get("OPENPI_SONATA_VALIDATE", "0")).strip().lower() in (
-            "1",
-            "true",
-            "yes",
-            "on",
-        )
+        # match main model toggles (config first, env fallback)
+        if sonata_auto_pad_feat is None:
+            self.sonata_auto_pad_feat = str(os.environ.get("OPENPI_SONATA_AUTO_PAD_FEAT", "0")).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        else:
+            self.sonata_auto_pad_feat = bool(sonata_auto_pad_feat)
+
+        if sonata_validate is None:
+            self.sonata_validate = str(os.environ.get("OPENPI_SONATA_VALIDATE", "0")).strip().lower() in (
+                "1",
+                "true",
+                "yes",
+                "on",
+            )
+        else:
+            self.sonata_validate = bool(sonata_validate)
+
 
         # point window ids are usually set by tokenizer (not available here); probe will infer from prompt
         self.point_start_id = None
@@ -416,22 +448,26 @@ class SonataProbeModel(nn.Module):
         if D < 6:
             raise RuntimeError(f"pointcloud last dim {D} < 6; expect [3 grid | 3 xyz | extras].")
 
-        # pmask: [B] or [B,M]
-        per_point_mask: torch.Tensor | None = None
+        # point_cloud_masks is frame-level throughout the main OpenPI pipeline:
+        # shape [B] (or a scalar for a single-sample probe call).
         if pmask is None:
             pmask_b = torch.ones((B,), dtype=torch.bool, device=device)
         else:
             if not isinstance(pmask, torch.Tensor):
                 pmask = torch.as_tensor(pmask)
             pmask = pmask.to(device=device)
-            if pmask.ndim == 2:
-                per_point_mask = pmask.to(torch.bool)
-                pmask_b = per_point_mask.any(dim=1)
+            if pmask.ndim == 0:
+                pmask_b = pmask.to(torch.bool).expand(B)
             elif pmask.ndim == 1:
+                if int(pmask.shape[0]) != B:
+                    raise RuntimeError(
+                        "point_cloud_masks['pointcloud'] must be frame-level shape [B]. "
+                        f"Got 1D mask shape={tuple(pmask.shape)} with B={B}."
+                    )
                 pmask_b = pmask.to(torch.bool)
             else:
                 raise RuntimeError(
-                    "point_cloud_masks['pointcloud'] must be shape [B] or [B,M], "
+                    "point_cloud_masks['pointcloud'] must be frame-level shape [B] (or scalar for one sample), "
                     f"but got {tuple(pmask.shape)}"
                 )
 
@@ -480,26 +516,15 @@ class SonataProbeModel(nn.Module):
             g = arr[:, :3].to(torch.int64)
             f = arr[:, 3:].to(torch.float32)
 
-            if per_point_mask is not None:
-                valid = per_point_mask[b]
-                if valid.ndim != 1 or valid.shape[0] != g.shape[0]:
-                    raise RuntimeError(
-                        "per_point_mask[b] must be shape [M] matching pcs[b]. "
-                        f"Got {tuple(valid.shape)} vs M={g.shape[0]}."
-                    )
-                g = g[valid]
-                f = f[valid]
-
             if do_trunc:
                 f = f[:, :exp_fd]
 
             c = f[:, :3].to(torch.float32)
 
-            if per_point_mask is None:
-                pad = (g == 0).all(dim=1) & (c == 0).all(dim=1) & (f == 0).all(dim=1)
-                g = g[~pad]
-                c = c[~pad]
-                f = f[~pad]
+            pad = (g == 0).all(dim=1) & (c == 0).all(dim=1) & (f == 0).all(dim=1)
+            g = g[~pad]
+            c = c[~pad]
+            f = f[~pad]
 
             n = int(g.shape[0])
             if n == 0:
@@ -561,18 +586,18 @@ def main() -> None:
 
     config = _config.cli()
 
-    sonata_mode = str(os.environ.get("OPENPI_SONATA_MODE", getattr(config.model, "sonata_mode", "projector"))).lower()
-    if sonata_mode not in ("off", "projector", "all"):
-        raise ValueError(f"Invalid OPENPI_SONATA_MODE={sonata_mode!r}. Expected off|projector|all")
-
-    enable_sonata = bool(getattr(config.model, "enable_sonata", True))
+    sonata_mode = _resolve_sonata_mode_from_config_and_env(config.model)
+    _enable = getattr(config.model, "enable_sonata", None)
+    enable_sonata = True if _enable is None else bool(_enable)
+    _require_cuda = getattr(config.model, "require_cuda", None)
+    require_cuda = True if _require_cuda is None else bool(_require_cuda)
     point_feat_dim = int(getattr(config.model, "point_feat_dim", 6))
     point_token_cap = int(getattr(config.model, "point_token_cap", 1024))
 
     # Prefer explicit env override; fallback to config if present.
     sonata_ckpt = os.environ.get("OPENPI_SONATA_CKPT", None) or getattr(config.model, "sonata_ckpt_path", None)
 
-    device = pick_device(require_cuda=True)
+    device = pick_device(require_cuda=require_cuda)
     logger.info(
         "[ProbeRunner] device=%s enable_sonata=%s sonata_mode=%s point_feat_dim=%d point_token_cap=%d sonata_ckpt=%s",
         device,
@@ -594,8 +619,10 @@ def main() -> None:
         point_token_cap=point_token_cap,
         enable_sonata=enable_sonata,
         sonata_mode=sonata_mode,
-        require_cuda=True,
+        require_cuda=require_cuda,
         sonata_ckpt=sonata_ckpt,
+        sonata_validate=getattr(config.model, "sonata_validate", None),
+        sonata_auto_pad_feat=getattr(config.model, "sonata_auto_pad_feat", None),
     ).to(device)
 
     info0 = probe_sonata_integration(probe_model, observation, run_encode=False)
@@ -611,6 +638,18 @@ def main() -> None:
             raise SystemExit(
                 f"Point window token check FAILED: ok_pair_frac={ok_frac}. "
                 "Expected 1.0 (each sample must have exactly one start and one end token, start_pos < end_pos)."
+            )
+        empty_frac = info0.get("empty_window_frac", None)
+        if empty_frac is None:
+            raise SystemExit(
+                "Point window emptiness check could not run because tokenized_prompt_mask is missing "
+                "or has an unexpected shape."
+            )
+        empty_frac = float(empty_frac)
+        if empty_frac < 1.0:
+            raise SystemExit(
+                f"Point window emptiness check FAILED: empty_window_frac={empty_frac}. "
+                "Expected 1.0 (no visible tokens may appear between point_start and point_end)."
             )
 
     info1 = probe_sonata_integration(probe_model, observation, run_encode=True)

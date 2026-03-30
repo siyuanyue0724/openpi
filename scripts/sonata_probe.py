@@ -246,6 +246,30 @@ def probe_sonata_integration(
             gap_ok = gap[ok_pair]
             if gap_ok.numel() > 0:
                 info["gap_median"] = int(gap_ok.to(torch.int64).median().item())
+
+            tok_mask = getattr(observation, "tokenized_prompt_mask", None)
+            if tok_mask is not None:
+                if not isinstance(tok_mask, torch.Tensor):
+                    tok_mask = torch.as_tensor(tok_mask)
+                tok_mask = tok_mask.to(device=tok.device)
+
+                if tok_mask.ndim == 2 and tuple(tok_mask.shape) == tuple(tok_long.shape):
+                    empty_window_ok = ok_pair.clone()
+                    for b in range(B):
+                        if bool(ok_pair[b].item()):
+                            mid_visible = tok_mask[
+                                b,
+                                int(s_pos[b].item()) + 1 : int(e_pos[b].item())
+                            ].to(torch.bool)
+                            if bool(mid_visible.any().item()):
+                                empty_window_ok[b] = False
+                    info["empty_window_frac"] = float(empty_window_ok.to(torch.float32).mean().item())
+                else:
+                    info["empty_window_frac"] = None
+                    info["prompt_mask_missing_or_shape_mismatch"] = True
+            else:
+                info["empty_window_frac"] = None
+                info["prompt_mask_missing_or_shape_mismatch"] = True
         else:
             info["point_window_ids_missing"] = True
     else:

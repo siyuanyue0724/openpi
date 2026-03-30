@@ -142,6 +142,19 @@ IMAGE_KEYS = (
 IMAGE_RESOLUTION = (224, 224)
 
 
+def _observation_has_point_clouds(observation) -> bool:
+    """Return True when the observation carries point clouds.
+
+    When point clouds are present we must keep image preprocessing geometry/color
+    aligned with the upstream point cloud, so training-time image augmentations are
+    disabled and only resize/normalization remain.
+    """
+    pcs = getattr(observation, "point_clouds", None)
+    if isinstance(pcs, dict) and len(pcs) > 0:
+        return True
+    return getattr(observation, "pointcloud_data", None) is not None
+
+
 # Data format
 #
 # Data transforms produce the model input as a nested dictionary which is later converted
@@ -337,7 +350,8 @@ def preprocess_observation(
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 
     batch_shape = observation.state.shape[:-1]
-    if train and rng is None:
+    apply_image_augmentations = bool(train) and not _observation_has_point_clouds(observation)
+    if apply_image_augmentations and rng is None:
         raise ValueError("rng must be provided when `train=True` for image augmentations.")
     # JAX-only guard: state must not be a torch.Tensor
     if isinstance(observation.state, torch.Tensor):
@@ -361,7 +375,7 @@ def preprocess_observation(
             from openpi.shared import image_tools as _image_tools
             image = _image_tools.resize_with_pad(image, *image_resolution)
 
-        if train:
+        if apply_image_augmentations:
             # Convert from [-1, 1] to [0, 1] for augmax.
             image = image / 2.0 + 0.5
 

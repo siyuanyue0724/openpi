@@ -476,14 +476,14 @@ class PI0Pytorch(nn.Module):
             precision=config.dtype,
         )
 
-        self.action_in_proj = nn.Linear(32, action_expert_config.width)
-        self.action_out_proj = nn.Linear(action_expert_config.width, 32)
+        self.action_in_proj = nn.Linear(config.action_dim, action_expert_config.width)
+        self.action_out_proj = nn.Linear(action_expert_config.width, config.action_dim)
 
         if self.pi05:
             self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
             self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
         else:
-            self.state_proj = nn.Linear(32, action_expert_config.width)
+            self.state_proj = nn.Linear(config.action_dim, action_expert_config.width)
             self.action_time_mlp_in = nn.Linear(2 * action_expert_config.width, action_expert_config.width)
             self.action_time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
 
@@ -511,8 +511,22 @@ class PI0Pytorch(nn.Module):
         # Treat None as "use default(True)" to avoid bool(None)==False disabling Sonata by accident
         _enable = getattr(config, "enable_sonata", None)
         self.enable_sonata = True if _enable is None else bool(_enable)
-        default_mode = os.environ.get("OPENPI_SONATA_MODE", "all")
-        self.sonata_mode = str(getattr(config, "sonata_mode", default_mode))
+        env_new = os.environ.get("OPENPI_SONATA_MODE")
+        env_old = os.environ.get("OPENPI_SONATA_TRAIN_MODE")
+        if env_new and env_old and env_new.lower() != env_old.lower():
+            raise RuntimeError("Conflicting SONATA mode env vars: OPENPI_SONATA_MODE vs OPENPI_SONATA_TRAIN_MODE")
+        cfg_mode = getattr(config, "sonata_mode", None)
+        legacy_cfg_mode = getattr(config, "sonata_train_mode", None)
+        if cfg_mode is not None:
+            cfg_mode = str(cfg_mode).strip().lower()
+        if legacy_cfg_mode is not None:
+            legacy_cfg_mode = str(legacy_cfg_mode).strip().lower()
+        if (cfg_mode is not None) and (legacy_cfg_mode is not None) and (cfg_mode != legacy_cfg_mode):
+            raise RuntimeError(
+                f"Conflicting config Sonata modes: sonata_mode={cfg_mode!r} vs sonata_train_mode={legacy_cfg_mode!r}"
+            )
+        default_mode = env_new or env_old or "all"
+        self.sonata_mode = str(cfg_mode or legacy_cfg_mode or default_mode).strip().lower()
         if self.sonata_mode not in ("off", "projector", "all"):
             raise RuntimeError(f"Invalid sonata_mode: {self.sonata_mode}")
         # Default to True unless explicitly set to False
@@ -906,12 +920,8 @@ class PI0Pytorch(nn.Module):
         B, M, D = pcs.shape
         if D < 6:
             raise RuntimeError(f"pointcloud last dim {D} < 6; expect [3 grid | 3 xyz | extras].")
-        # NOTE:
-        # - pmask can be per-sample [B] OR per-point [B, M].
-        # - If per-point is provided, we prefer using it to filter points explicitly.
-        #   Do NOT rely on "all zeros" heuristic when per-point masks exist:
-        #   valid points may legitimately have all-zero values (e.g. origin + zero extra features).
-        per_point_mask: torch.Tensor | None = None
+        # point_cloud_masks is a frame-level availability mask throughout the
+        # OpenPI pipeline: shape [B] (or scalar for a single-sample call).
         if pmask is None:
             pmask = torch.ones((B,), dtype=torch.bool, device=device)
         else:
@@ -920,32 +930,17 @@ class PI0Pytorch(nn.Module):
             else:
                 pmask = pmask.to(device=device)
             if pmask.ndim == 0:
-                # scalar -> broadcast (common in single-sample inference)
                 pmask = pmask.to(dtype=torch.bool).expand(B)
-            elif pmask.ndim == 2:
-                if tuple(pmask.shape) != (B, M):
-                    raise RuntimeError(
-                        "point_cloud_masks['pointcloud'] per-point mask must be shape [B, M]. "
-                        f"Got {tuple(pmask.shape)} but expected {(B, M)}."
-                    )
-                per_point_mask = pmask.to(dtype=torch.bool)
-                pmask = per_point_mask.any(dim=1)
             elif pmask.ndim == 1:
-                # Accept per-sample [B].
-                # Also accept per-point [M] when B==1 (common user mistake); treat it as per-point.
-                if int(pmask.shape[0]) == B:
-                    pmask = pmask.to(dtype=torch.bool)
-                elif (B == 1) and (int(pmask.shape[0]) == M):
-                    per_point_mask = pmask[None, :].to(dtype=torch.bool)
-                    pmask = per_point_mask.any(dim=1)
-                else:
+                if int(pmask.shape[0]) != B:
                     raise RuntimeError(
-                        "point_cloud_masks['pointcloud'] must be shape [B] (per-sample) or [B, M] (per-point). "
-                        f"Got 1D mask shape={tuple(pmask.shape)} with B={B}, M={M}."
+                        "point_cloud_masks['pointcloud'] must be frame-level shape [B]. "
+                        f"Got 1D mask shape={tuple(pmask.shape)} with B={B}."
                     )
+                pmask = pmask.to(dtype=torch.bool)
             else:
                 raise RuntimeError(
-                    "point_cloud_masks['pointcloud'] must be shape [B] (per-sample) or [B, M] (per-point), "
+                    "point_cloud_masks['pointcloud'] must be frame-level shape [B] (or scalar for one sample), "
                     f"but got {tuple(pmask.shape)}."
                 )
 
@@ -1003,28 +998,14 @@ class PI0Pytorch(nn.Module):
                 f = arr[:, 3:].to(dtype=torch.float32)
 
 
-                # If per-point mask exists, use it to filter valid points *before* any padding heuristics.
-                # This avoids accidentally dropping valid all-zero points.
-                if per_point_mask is not None:
-                    valid = per_point_mask[b]
-                    if valid.ndim != 1 or valid.shape[0] != g.shape[0]:
-                        raise RuntimeError(
-                            "per_point_mask[b] must be shape [M] matching pcs[b]. "
-                            f"Got {tuple(valid.shape)} vs M={g.shape[0]}."
-                        )
-                    g = g[valid]
-                    f = f[valid]
-
-
                 if do_trunc:
                     f = f[:, :exp_fd]
                 c = f[:, :3].to(dtype=torch.float32)
-                # Only apply "all zeros" padding removal when we don't have an explicit per-point mask.
-                if per_point_mask is None:
-                    pad = (g == 0).all(dim=1) & (c == 0).all(dim=1) & (f == 0).all(dim=1)
-                    g = g[~pad]
-                    c = c[~pad]
-                    f = f[~pad]
+                # Zero-padded rows are treated as padding and removed before Sonata encoding.
+                pad = (g == 0).all(dim=1) & (c == 0).all(dim=1) & (f == 0).all(dim=1)
+                g = g[~pad]
+                c = c[~pad]
+                f = f[~pad]
                 n = g.shape[0]
                 # 允许 padding 后为空：当作“无点云”处理。
                 if n == 0:
@@ -1139,6 +1120,12 @@ class PI0Pytorch(nn.Module):
             e_pos[b] = e_idx.item()
             if not (0 <= s_pos[b] < e_pos[b] < S):
                 raise RuntimeError(f"Invalid window positions: start={s_pos[b]}, end={e_pos[b]}, S={S}")
+            mid_visible = text_mask[b, s_pos[b].item() + 1 : e_pos[b].item()]
+            if bool(mid_visible.any().item()):
+                raise RuntimeError(
+                    f"Visible tokens found between point_start_id={start_id} and point_end_id={end_id} "
+                    f"in sample b={b}. The point window must be empty."
+                )
         fused_embs, fused_masks = [], []
         for b in range(B):
             s = s_pos[b].item(); e = e_pos[b].item()

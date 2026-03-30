@@ -17,6 +17,19 @@ IMAGE_KEYS = (
 IMAGE_RESOLUTION = (224, 224)
 
 
+def _observation_has_point_clouds(observation) -> bool:
+    """Return True when the observation carries point clouds.
+
+    When point clouds are present, image-only augmentations would desynchronize the
+    RGB image tokens from the point tokens generated upstream from the original
+    RGB/depth pair. In that case we keep resize-only preprocessing.
+    """
+    pcs = getattr(observation, "point_clouds", None)
+    if isinstance(pcs, dict) and len(pcs) > 0:
+        return True
+    return getattr(observation, "pointcloud_data", None) is not None
+
+
 def preprocess_observation_pytorch(
     observation,
     *,
@@ -31,6 +44,7 @@ def preprocess_observation_pytorch(
     if not set(image_keys).issubset(observation.images):
         raise ValueError(f"images dict missing keys: expected {image_keys}, got {list(observation.images)}")
 
+    apply_image_augmentations = bool(train) and not _observation_has_point_clouds(observation)
     batch_shape = observation.state.shape[:-1]
 
     out_images = {}
@@ -58,7 +72,7 @@ def preprocess_observation_pytorch(
             logger.info(f"Resizing image {key} from {image.shape[1:3]} to {image_resolution}")
             image = image_tools.resize_with_pad_torch(image, *image_resolution)
 
-        if train:
+        if apply_image_augmentations:
             # Convert from [-1, 1] to [0, 1] for PyTorch augmentations
             image = image / 2.0 + 0.5
 

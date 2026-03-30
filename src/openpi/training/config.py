@@ -452,6 +452,75 @@ class CalvinDataConfig(DataConfigFactory):
 
 
 @dataclasses.dataclass(frozen=True)
+class CalvinNoSonataDataConfig(DataConfigFactory):
+    """Native CALVIN config for plain pi0.5 (no Sonata / no point cloud)."""
+
+    repo_id: str = "calvin"
+    assets: AssetsConfig = dataclasses.field(default_factory=AssetsConfig)
+
+    # Dataset location. Can be a .zip file or an extracted directory.
+    calvin_root: str | None = None
+    backend: Literal["zip", "dir"] = "zip"
+    split: Literal["training", "validation"] = "training"
+
+    # Which action stream to use from the .npz files.
+    action_key: str = "rel_actions"
+
+    # Whether to include wrist RGB (rgb_gripper) and map it to observation/wrist_image.
+    use_wrist_rgb: bool = True
+
+    @override
+    def create(self, assets_dirs: pathlib.Path, model_config: _model.BaseModelConfig) -> DataConfig:
+        root = self.calvin_root or os.environ.get("CALVIN_ZIP") or os.environ.get("CALVIN_ROOT")
+        if not root:
+            raise ValueError(
+                "CALVIN data path missing. Set `--data.calvin_root=/abs/path/to/task_ABC_D.zip` "
+                "or export CALVIN_ZIP/CALVIN_ROOT."
+            )
+
+        base = self.create_base_config(assets_dirs, model_config)
+        base = dataclasses.replace(
+            base,
+            calvin_root=str(root),
+            calvin_backend=str(self.backend),
+            calvin_split=str(self.split),
+            calvin_action_key=str(self.action_key),
+            calvin_use_wrist_rgb=bool(self.use_wrist_rgb),
+        )
+
+        repack_map: dict[str, str] = {
+            "observation/image": "rgb_static",
+            "observation/state": "robot_obs",
+            "actions": "actions",
+            "prompt": "prompt",
+        }
+        if self.use_wrist_rgb:
+            repack_map["observation/wrist_image"] = "rgb_gripper"
+
+        repack_transforms = _transforms.Group(
+            inputs=[
+                _transforms.RepackTransform(repack_map),
+            ]
+        )
+
+        data_transforms = _transforms.Group(
+            inputs=[
+                libero_policy.LiberoInputs(model_type=model_config.model_type),
+            ],
+            outputs=[libero_policy.LiberoOutputs()],
+        )
+
+        model_transforms = ModelTransformFactory()(model_config)
+
+        return dataclasses.replace(
+            base,
+            repack_transforms=repack_transforms,
+            data_transforms=data_transforms,
+            model_transforms=model_transforms,
+        )
+
+
+@dataclasses.dataclass(frozen=True)
 class LeRobotAlohaDataConfig(DataConfigFactory):
     # If true, will convert joint dimensions to deltas with respect to the current state before passing to the model.
     # Gripper dimensions will remain in absolute values.
@@ -1299,6 +1368,29 @@ _CONFIGS = [
         num_workers=4,
     ),
 
+    # --- CALVIN + plain PI0.5 (PyTorch, no Sonata) ---
+    TrainConfig(
+        name="pi05_calvin_nosonata",
+        model=pi0_config.Pi0Config(
+            pi05=True,
+            enable_sonata=False,
+            discrete_state_input=True,
+            max_token_len=200,
+            action_horizon=16,
+            action_dim=32,
+        ),
+        data=CalvinNoSonataDataConfig(
+            assets=AssetsConfig(asset_id="calvin"),
+            calvin_root=None,
+            backend="zip",
+            split="training",
+            action_key="rel_actions",
+            use_wrist_rgb=True,
+        ),
+        wandb_enabled=False,
+        batch_size=4,
+        num_workers=4,
+    ),
 
     #
     # RoboArena & PolaRiS configs.

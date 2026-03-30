@@ -84,6 +84,15 @@ class Pi0Config(_model.BaseModelConfig):
     #   cfg.point_start_id, cfg.point_end_id = vsz - 2, vsz - 1
     point_start_id: Optional[int] = None
     point_end_id:   Optional[int] = None
+    # Sonata runtime mode. None -> defer to environment / model default.
+    sonata_mode: Optional[str] = None
+    # Legacy alias kept for backward compatibility with older scripts.
+    sonata_train_mode: Optional[str] = None
+    # Optional projector checkpoint for point-token -> language-token projection.
+    sonata_projector_ckpt_path: str | None = None
+    # Optional runtime switches. None -> defer to environment / model defaults.
+    sonata_validate: Optional[bool] = None
+    sonata_auto_pad_feat: Optional[bool] = None
 
     # This config option is not used directly by the model, but it is read by the ModelTransformFactory.
     discrete_state_input: bool = None  # type: ignore
@@ -93,6 +102,25 @@ class Pi0Config(_model.BaseModelConfig):
             object.__setattr__(self, "max_token_len", 200 if self.pi05 else 48)
         if self.discrete_state_input is None:
             object.__setattr__(self, "discrete_state_input", self.pi05)
+
+        mode = self.sonata_mode
+        legacy_mode = self.sonata_train_mode
+        if mode is not None:
+            mode = str(mode).strip().lower()
+        if legacy_mode is not None:
+            legacy_mode = str(legacy_mode).strip().lower()
+        if (mode is not None) and (legacy_mode is not None) and (mode != legacy_mode):
+            raise ValueError(
+                f"sonata_mode={self.sonata_mode!r} conflicts with legacy sonata_train_mode={self.sonata_train_mode!r}."
+            )
+        if mode is None:
+            mode = legacy_mode
+        if mode is not None:
+            if mode not in {"off", "projector", "all"}:
+                raise ValueError(f"Invalid sonata_mode={mode!r}. Expected one of: off|projector|all")
+            object.__setattr__(self, "sonata_mode", mode)
+        if legacy_mode is not None:
+            object.__setattr__(self, "sonata_train_mode", legacy_mode)
 
     @property
     @override

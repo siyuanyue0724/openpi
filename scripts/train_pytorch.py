@@ -513,6 +513,19 @@ def train_loop(config: _config.TrainConfig):
             paligemma_variant=getattr(config.model, "paligemma_variant", "gemma_2b"),
             action_expert_variant=getattr(config.model, "action_expert_variant", "gemma_300m"),
             pi05=getattr(config.model, "pi05", False),
+            enable_sonata=getattr(config.model, "enable_sonata", True),
+            point_feat_dim=getattr(config.model, "point_feat_dim", 6),
+            point_token_cap=getattr(config.model, "point_token_cap", 1024),
+            sonata_ckpt_path=getattr(config.model, "sonata_ckpt_path", None),
+            sonata_projector_ckpt_path=getattr(config.model, "sonata_projector_ckpt_path", None),
+            sonata_mode=getattr(config.model, "sonata_mode", None),
+            sonata_train_mode=getattr(config.model, "sonata_train_mode", None),
+            sonata_validate=getattr(config.model, "sonata_validate", None),
+            sonata_auto_pad_feat=getattr(config.model, "sonata_auto_pad_feat", None),
+            require_cuda=getattr(config.model, "require_cuda", True),
+            point_start_id=getattr(config.model, "point_start_id", None),
+            point_end_id=getattr(config.model, "point_end_id", None),
+
         )
     else:
         model_cfg = config.model
@@ -646,18 +659,15 @@ def train_loop(config: _config.TrainConfig):
     end_lr = config.lr_schedule.decay_lr
 
     # -------- 优化器：单一 AdamW，惰性模块将动态注册到该优化器 --------
-    # 读取训练期 SONATA 模式（只用于“projector 冻结 encoder”的语义；其余逻辑交由模型内部驱动）
-    env_new = os.environ.get("OPENPI_SONATA_MODE")
-    env_old = os.environ.get("OPENPI_SONATA_TRAIN_MODE")
-    if env_new and env_old and env_new.lower() != env_old.lower():
-        raise RuntimeError("Conflicting SONATA mode env vars: OPENPI_SONATA_MODE vs OPENPI_SONATA_TRAIN_MODE")
-    sonata_mode = str((env_new or env_old or getattr(getattr(config, "model", object()), "sonata_train_mode", "off")) or "off").lower()
+    # Read the Sonata mode from the instantiated model so the trainer and model
+    # share one source of truth (config/env conflicts are already resolved there).
+    base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
+    sonata_mode = str(getattr(base_model, "sonata_mode", "off") or "off").lower()
     if sonata_mode not in {"off", "projector", "all"}:
         raise ValueError(f"Invalid SONATA mode: {sonata_mode!r}. Expected one of: off|projector|all")
 
     # In projector mode, the Sonata encoder is frozen and MUST NOT be included in the optimizer.
     # This matters especially for resume runs where the encoder is materialized before building the optimizer.
-    base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     if sonata_mode == "projector":
         enc = getattr(base_model, "sonata", None)
         if enc is not None:
@@ -807,9 +817,8 @@ def train_loop(config: _config.TrainConfig):
             # --- Sonata: 最小字段映射（fail-fast；只做键名对齐，不造假） ---
             try:
                 base_model = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
-                cfg = getattr(base_model, "config", None)
-                enable_sonata = True if getattr(cfg, "enable_sonata", None) is None else bool(getattr(cfg, "enable_sonata", True))
-                sonata_mode = str(getattr(cfg, "sonata_mode", os.environ.get("OPENPI_SONATA_MODE", "all")))
+                enable_sonata = bool(getattr(base_model, "enable_sonata", False))
+                sonata_mode = str(getattr(base_model, "sonata_mode", "all"))
             except Exception:
                 enable_sonata, sonata_mode = True, "all"
             need_points = enable_sonata and (sonata_mode in ("projector", "all"))
