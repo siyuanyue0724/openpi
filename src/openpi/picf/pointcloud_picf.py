@@ -4,13 +4,13 @@ from collections.abc import Mapping
 
 import numpy as np
 
+from openpi.picf.camera_io import as_3x3
+from openpi.picf.camera_io import as_4x4
+from openpi.picf.camera_io import load_json
 from openpi.picf.contracts import PicfPointCloudFrame
 from openpi.picf.geometry import normalize_vectors
 from openpi.picf.geometry import transform_normals
 from openpi.picf.geometry import transform_points
-from openpi.transforms.calvin_depth_to_sonata_pointcloud import _as_3x3
-from openpi.transforms.calvin_depth_to_sonata_pointcloud import _as_4x4
-from openpi.transforms.calvin_depth_to_sonata_pointcloud import _load_json
 
 
 def _finite_difference_normals(points_cam: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -71,21 +71,21 @@ class CalvinDepthToPicfPointCloud:
         depth_scale: float = 1.0,
         selection_mode: str = "fps",
     ):
-        cams = _load_json(cameras_json_path)
+        cams = load_json(cameras_json_path)
         cam_table = cams.get("cameras", cams)
         if cam_name not in cam_table:
             raise KeyError(f"Camera '{cam_name}' not found. Available: {list(cam_table.keys())}")
         cam = cam_table[cam_name]
         if "K" in cam:
-            self.K = _as_3x3(cam["K"])
+            self.K = as_3x3(cam["K"])
         elif "intrinsics" in cam:
-            self.K = _as_3x3(cam["intrinsics"])
+            self.K = as_3x3(cam["intrinsics"])
         else:
             raise KeyError(f"Camera '{cam_name}' missing intrinsics. Keys={list(cam.keys())}")
         if "W_T_C" in cam:
-            self.W_T_C = _as_4x4(cam["W_T_C"])
+            self.W_T_C = as_4x4(cam["W_T_C"])
         elif "viewMatrix" in cam:
-            self.W_T_C = np.linalg.inv(_as_4x4(cam["viewMatrix"])).astype(np.float32)
+            self.W_T_C = np.linalg.inv(as_4x4(cam["viewMatrix"])).astype(np.float32)
         else:
             raise KeyError(f"Camera '{cam_name}' missing extrinsics. Keys={list(cam.keys())}")
         self._fx = float(self.K[0, 0])

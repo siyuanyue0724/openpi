@@ -8,6 +8,7 @@ from openpi.picf.contracts import PicfObservation
 from openpi.picf.contracts import RuntimeMeta
 from openpi.picf.contracts import ScaffoldDebugMetrics
 from openpi.picf.contracts import SupportScaffoldState
+from openpi.picf.frame_context import build_point_frame_context
 from openpi.picf.geometry import invert_transform
 from openpi.picf.geometry import normalize_vectors
 from openpi.picf.geometry import transform_normals
@@ -82,15 +83,12 @@ class DeterministicScaffoldPipeline:
         return meta
 
     def _select_local_points(self, observation: PicfObservation) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-        assert observation.point_set is not None
-        if observation.G_t is None:
-            observation.G_t = self.local_frame.make_transform(observation.robot_obs)
-        world_to_local = invert_transform(observation.G_t)
-        points_local = transform_points(observation.point_set.xyz_world, world_to_local)
-        normals_local = transform_normals(observation.point_set.normal_world, world_to_local)
-        dists = np.linalg.norm(points_local, axis=1)
-        keep = dists <= self.config.crop_radius_m
-        return points_local[keep], normals_local[keep], observation.point_set.rgb[keep]
+        context = build_point_frame_context(
+            observation,
+            crop_radius_m=self.config.crop_radius_m,
+            local_frame=self.local_frame,
+        )
+        return context.points_local, context.normals_local, context.colors
 
     def _seed_from_points(
         self,
@@ -134,6 +132,13 @@ class DeterministicScaffoldPipeline:
                 world_to_local = invert_transform(observation.G_t)
                 carried_centers = transform_points(prev_global, world_to_local)
                 carried_normals = transform_normals(prev_normals_global, world_to_local)
+                carried_keep = np.linalg.norm(carried_centers, axis=1) <= (self.config.crop_radius_m + self.config.r_max_m)
+                carry_slots = carry_slots[carried_keep]
+                carried_centers = carried_centers[carried_keep]
+                carried_normals = carried_normals[carried_keep]
+                if carry_slots.size == 0:
+                    carried_centers = np.zeros((0, 3), dtype=np.float32)
+                    carried_normals = np.zeros((0, 3), dtype=np.float32)
                 carried_count = min(int(carry_slots.size), self.config.k_support)
                 seed_x[:carried_count] = carried_centers[:carried_count]
                 seed_n[:carried_count] = carried_normals[:carried_count]
@@ -203,8 +208,7 @@ class DeterministicScaffoldPipeline:
                 ranked = np.argsort(dists[neighbors])[: self.config.grouping_neighbors]
                 neighbors = neighbors[ranked]
             if neighbors.size == 0:
-                neighbors = np.asarray([int(np.argmin(dists))], dtype=np.int64)
-            if neighbors.size == 0:
+                seed_valid[slot] = False
                 continue
             sigma = float(np.clip(seed_r[slot], self.config.r_min_m, self.config.r_max_m))
             weights = np.exp(-(dists[neighbors] ** 2) / max(2.0 * sigma * sigma, 1e-8))
@@ -267,10 +271,7 @@ class DeterministicScaffoldPipeline:
             mask = np.zeros((self.config.k_support,), dtype=bool)
             mask[chosen] = True
             return mask
-        fallback = np.argsort(-omega)[: self.config.k_active]
-        mask = np.zeros((self.config.k_support,), dtype=bool)
-        mask[fallback] = True
-        return mask
+        return np.zeros((self.config.k_support,), dtype=bool)
 
     def _transport_only(
         self,
