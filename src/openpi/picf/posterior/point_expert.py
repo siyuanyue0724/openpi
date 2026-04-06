@@ -16,14 +16,7 @@ def _pad_geometry_block(features: np.ndarray, dim_g: int) -> np.ndarray:
     return np.concatenate([features.astype(np.float32), pad], axis=1)
 
 
-def build_point_expert(
-    *,
-    posterior_config: PosteriorConfig,
-    scaffold_config: DeterministicScaffoldConfig,
-    scaffold_state: SupportScaffoldState,
-    frame_context: PointFrameContext,
-) -> PointExpertState:
-    k_support = scaffold_state.x.shape[0]
+def empty_point_expert(*, posterior_config: PosteriorConfig, k_support: int) -> PointExpertState:
     dim_total = posterior_config.dim_total
     mu = np.zeros((k_support, dim_total), dtype=np.float32)
     var_block = np.tile(
@@ -39,9 +32,30 @@ def build_point_expert(
     gamma_pc = np.zeros((k_support,), dtype=np.float32)
     delta_pc = np.full((k_support,), np.inf, dtype=np.float32)
     delta2x = np.zeros((k_support, 3), dtype=np.float32)
+    return PointExpertState(mu, var_block, gate, anchor_count, gamma_n, gamma_pc, delta_pc, delta2x)
+
+
+def build_point_expert(
+    *,
+    posterior_config: PosteriorConfig,
+    scaffold_config: DeterministicScaffoldConfig,
+    scaffold_state: SupportScaffoldState,
+    frame_context: PointFrameContext,
+) -> PointExpertState:
+    k_support = scaffold_state.x.shape[0]
+    state = empty_point_expert(posterior_config=posterior_config, k_support=k_support)
 
     if not scaffold_state.debug.fresh_scaffold or frame_context.points_local.shape[0] == 0 or scaffold_state.pi_geom.shape[1] == 0:
-        return PointExpertState(mu, var_block, gate, anchor_count, gamma_n, gamma_pc, delta_pc, delta2x)
+        return state
+
+    mu = state.mu
+    var_block = state.var_block
+    gate = state.gate
+    anchor_count = state.anchor_count
+    gamma_n = state.gamma_n
+    gamma_pc = state.gamma_pc
+    delta_pc = state.delta_pc
+    delta2x = state.delta2x
 
     for slot in range(k_support):
         if posterior_config.force_active_gate and not bool(scaffold_state.active_mask[slot]):

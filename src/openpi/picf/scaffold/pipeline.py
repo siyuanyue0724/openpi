@@ -61,8 +61,13 @@ class DeterministicScaffoldPipeline:
 
     def _build_runtime_meta(self, observation: PicfObservation, previous: RuntimeMeta | None) -> RuntimeMeta:
         meta = dataclasses.replace(previous) if previous is not None else RuntimeMeta()
-        meta.t_v_last = float(observation.timestamp_s)
-        meta.n_vis_upd = 0 if observation.reset_scaffold else (meta.n_vis_upd + 1)
+        rgb_static = np.asarray(observation.rgb_static)
+        visual_valid = rgb_static.size > 0 and bool(np.isfinite(rgb_static).all())
+        if observation.reset_scaffold:
+            meta.n_vis_upd = 0
+        if visual_valid:
+            meta.t_v_last = float(observation.timestamp_s)
+            meta.n_vis_upd = 1 if observation.reset_scaffold else (meta.n_vis_upd + 1)
         point_frame = observation.point_set
         if point_frame is not None and point_frame.frame_valid:
             meta.t_p_last = float(observation.timestamp_s)

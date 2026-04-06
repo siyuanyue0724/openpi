@@ -15,6 +15,9 @@ class PosteriorConfig:
     point_var_h: float = 4.0
     point_var_g: float = 0.05
     point_var_c: float = 4.0
+    visual_var_h: float = 0.5
+    visual_var_g: float = 1.0
+    visual_var_c: float = 4.0
     n_min_anchors: int = 8
     delta_ref_m: float = 0.005
     epsilon_delta: float = 1e-6

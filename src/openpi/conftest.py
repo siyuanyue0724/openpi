@@ -1,10 +1,17 @@
 import os
 
-import pynvml
 import pytest
+
+try:
+    import pynvml
+except ImportError:  # pragma: no cover - exercised in CPU/offline environments.
+    pynvml = None
 
 
 def set_jax_cpu_backend_if_no_gpu() -> None:
+    if pynvml is None:
+        os.environ["JAX_PLATFORMS"] = "cpu"
+        return
     try:
         pynvml.nvmlInit()
         pynvml.nvmlShutdown()
