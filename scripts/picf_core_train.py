@@ -409,6 +409,26 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> PicfFullC
         visual_encoder=_NullVisualEncoder(),
         tactile_encoder=_NullTactileEncoder(),
     )
+
+
+def _materialize_model_parameters(
+    model: _PicfWindowTrainer,
+    *,
+    source: _CalvinTransitionSource,
+    rank: int,
+) -> None:
+    """Run one no-grad window to initialize lazy modules before DDP wrapping."""
+    warmup_index = int(rank) % max(len(source), 1)
+    warmup_window = source.window(warmup_index)
+    was_training = model.training
+    model.train()
+    with torch.no_grad():
+        _ = model(warmup_window)
+    model.zero_grad(set_to_none=True)
+    if not was_training:
+        model.eval()
+
+
 def train(args: argparse.Namespace) -> None:
     use_ddp, rank, world_size, device = _setup_distributed(args.device)
     try:
@@ -429,6 +449,7 @@ def train(args: argparse.Namespace) -> None:
 
         core = _build_model(args, device=device).to(device)
         model = _PicfWindowTrainer(core, visual_grid=args.visual_grid).to(device)
+        _materialize_model_parameters(model, source=source, rank=rank)
         if use_ddp:
             model = DistributedDataParallel(
                 model,
