@@ -423,9 +423,16 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 单卡如果也想保持旧 `batch-size=2` 的量级，应改成 `--accum-steps 2`
 - 数值精度上，新 core 当前已验证的工程配置是：
   - core 主干默认 `float32`
-  - `V-JEPA` wrapper 默认 `bfloat16`
-  - `Sonata` / `AnyTouch` wrapper 当前按 `float32`
+  - `V-JEPA` trainable 路径使用 `CUDA autocast(bfloat16)` 前向
+  - `Sonata` / `AnyTouch` / `PaliGemma` 当前都允许 cotrain，并按各自已验证的稳定 dtype 路径运行
   - 这与旧 `pi0.5` 主模型直接 `bfloat16` 的方式不同，但这是目前真实回归过的稳定配置
+- 当前两张 `A100 40GB` 上已验证的更大 batch 档位是：
+  - 双卡 DDP + `--accum-steps 2` => `effective_global_batch=4`
+  - 双卡 DDP + `--accum-steps 4` => `effective_global_batch=8`
+  - 当前推荐从 `accum_steps=2` 起跑；`accum_steps>4` 尚未做同强度回归
+- 在 `PaliGemma + DDP + accum_steps>1` 下，trainer 会自动关闭 semantic gradient checkpointing：
+  - 这是为了规避 HF PaliGemma reentrant checkpoint 在 repeated backward 下的 `mark ready twice`
+  - 不改变 PICF 数学，只是当前多卡累计训练的工程稳定性规则
 
 四点五、PICF v0.4.8 新 core 的云上长期训练命令
 说明：这条命令对应的是 `src/openpi/picf/core/` 新主线，不是旧 `scripts/train_pytorch.py`。
@@ -498,6 +505,7 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 - 2026-04-09 最终本地复核：
   - `python -m py_compile scripts/picf_core_train.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline.py src/openpi/picf/core/training.py`：通过
   - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py scripts/picf_core_train_test.py`：`43 passed`
+  - `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/vjepa/wrapper_test.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py`：`49 passed`
   - 因而当前建议是：
     - 开训前只需要确认云机已同步到与本地同一 commit
     - 训练命令保留 `--max-empty-window-retries 32`
@@ -525,7 +533,7 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
   --num-train-steps 30000 \
   --log-interval 100 \
   --save-interval 5000 \
-  --accum-steps 1 \
+  --accum-steps 2 \
   --unroll-steps 2 \
   --stride 8 \
   --max-points 512 \
@@ -542,7 +550,7 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
 说明：
 - 控制台会显示 `tqdm` 实时进度条；`--log-interval 100` 只控制 JSON 行、`metrics.jsonl` 和 wandb scalar 的刷新频率
 - 进度条里的 `loss=` 是当前最后一个 optimization step 的即时值，不是 moving average
-- 因为当前是 `effective_global_batch=2`、`unroll_steps=2`、随机 CALVIN window 采样，所以 `1.4 -> 3.4 -> 1.3 -> 3.2` 这种 step-to-step 波动是正常的
+- 因为当前推荐命令对应 `effective_global_batch=4`、`unroll_steps=2`、随机 CALVIN window 采样，所以 `1.4 -> 3.4 -> 1.3 -> 3.2` 这种 step-to-step 波动仍然是正常的
 - 真正看收敛趋势要看 `metrics.jsonl` 的区间平均值；当前已验证的双卡 `200` step run 中，`20-step` 平均 `loss_total` 从约 `2.69` 下降到约 `2.40`
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留日志文件、不显示进度条，可改成 `--no-progress`
@@ -581,7 +589,7 @@ export WANDB_SILENT=true && \
   --num-train-steps 30000 \
   --log-interval 100 \
   --save-interval 5000 \
-  --accum-steps 1 \
+  --accum-steps 2 \
   --unroll-steps 2 \
   --stride 8 \
   --max-points 512 \
@@ -620,7 +628,7 @@ export WANDB_SILENT=true && \
   --num-train-steps 30000 \
   --log-interval 100 \
   --save-interval 5000 \
-  --accum-steps 1 \
+  --accum-steps 2 \
   --unroll-steps 2 \
   --stride 8 \
   --max-points 512 \
@@ -634,11 +642,16 @@ export WANDB_SILENT=true && \
   --max-empty-window-retries 32 \
   2>&1 | tee /mnt/checkpoints/picf_core/logs/picf_core_train_ddp_run.log
 
+3.2 如果想在当前已验证范围内进一步增大 batch，可把：
+  - `--accum-steps 2` 提到 `--accum-steps 4`
+  - 这样 `effective_global_batch = 8`
+  - 这条更大 batch 档位已经做过真实 DDP 回归，但当前仍建议先从 `accum_steps=2` 起跑
+
 4. 这条新 core 长期训练入口当前的真实 contract：
   - 数据是脚本内部 `_CalvinTransitionSource` 直接从 `CalvinLangSegmentDataset(..., action_horizon=1, sample_within_segment=False)` 抽 `unroll_steps + 1` 帧 window
   - 当前 launcher 已经支持两类模式：
     - `stub`：`_rgb_visual_override + _NullVisualEncoder + _NullTactileEncoder`
-    - `foundation`：真实 `Sonata + V-JEPA 2.1 + AnyTouch2`
+    - `foundation`：真实 `Sonata + V-JEPA 2.1 + AnyTouch2 + PaliGemma`
   - 推荐云上正式训练时直接加：
     - `--use-foundation-backbones`
     - `--use-tactile`
@@ -648,6 +661,10 @@ export WANDB_SILENT=true && \
     并实例化 `AnyTouch2TactileEncoder`
   - point path 会实例化 `SonataPointFeatureExtractor`
   - visual path 会实例化真实 `Vjepa2VisualEncoder`
+  - semantic path 会实例化真实 `PaliGemmaSemanticEncoder`
+    - `semantic_source=auto` 默认优先使用本地 `pi05_base_pytorch/model.safetensors`
+    - 若本地 checkpoint 不存在，再回退到 HF PaliGemma
+    - 语义摘要每步都会和 posterior tokens / innovation / proprio 一起进入后续 head
   - `metrics.jsonl` 采用 append 模式；如果复用同一个 `exp-name` 重新起一个非 `--resume` 训练，日志里会继续追加并可能出现重复 step id
   - 如果需要干净曲线，应该换新的 `exp-name`，或先清理旧实验目录
   - 当前 foundation 路径已经在云机上真实验证过：

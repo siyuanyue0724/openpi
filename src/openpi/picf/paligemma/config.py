@@ -5,9 +5,13 @@ import dataclasses
 
 @dataclasses.dataclass(frozen=True)
 class PaliGemmaSemanticConfig:
+    source: str = "auto"
     model_name: str = "google/paligemma2-3b-pt-224"
     checkpoint_path: str | None = None
+    checkpoint_config_path: str | None = None
     revision: str | None = None
+    paligemma_variant: str = "gemma_2b"
+    action_expert_variant: str = "gemma_300m"
     device: str | None = None
     dtype: str = "bfloat16"
     trainable: bool = False

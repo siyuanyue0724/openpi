@@ -134,6 +134,8 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 - point-tactile `L_{pt}`
 - predictive-context pooling `\widetilde G_t^{pred}\rightarrow g_t^{pred}`
 - carried-prior 中的 `\alpha_{t-1,i}` 输入签名
+- trainer 侧 real `PaliGemma` language-late semantic side path
+- `Sonata / V-JEPA 2.1 / AnyTouch2 / PaliGemma` 的 lower-lr cotrain 参数组
 
 当前代码里的明确工程近似包括：
 
@@ -157,6 +159,9 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 
 - 改 `semantic_override` 不会改变 current posterior：`posterior_mu_diff = 0.0`、`posterior_sigma_diff = 0.0`
 - 训练侧 `action_future` teacher forcing 确实会改变 `g_t^{pred}`：同一帧上 `future_action_diff_teacher_vs_policy = 0.2605`
+- 多卡 DDP + gradient accumulation 时，semantic side path 仍保持 language-late；
+  当前工程实现只是在 `accum_steps>1` 时关闭 `PaliGemma` gradient checkpointing，
+  以规避 repeated backward 下的 `mark ready twice`，不改变本版数学定义
 
 ---
 

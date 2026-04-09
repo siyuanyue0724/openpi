@@ -82,6 +82,10 @@ def _resolve_dtype(config: VjepaVisualConfig, device: torch.device) -> torch.dty
     return torch.float32
 
 
+def _trainable_vjepa_uses_autocast(*, trainable: bool, device: torch.device, dtype: torch.dtype) -> bool:
+    return bool(trainable and device.type == "cuda" and dtype in (torch.float16, torch.bfloat16))
+
+
 def _clean_backbone_key(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
     cleaned: dict[str, torch.Tensor] = {}
     for key, value in state_dict.items():
@@ -155,7 +159,13 @@ class Vjepa2VisualEncoder(nn.Module):
             interpolate_rope=True,
             use_activation_checkpointing=bool(config.trainable and config.use_activation_checkpointing),
         )
-        self.encoder.to(device=self.device, dtype=self.dtype)
+        # For cotraining we keep weights in their native fp32 dtype and rely on autocast
+        # during the forward pass. The vendor V-JEPA stack is not uniformly safe to
+        # hard-cast to bf16/fp16 ahead of time.
+        if _trainable_vjepa_uses_autocast(trainable=self.trainable, device=self.device, dtype=self.dtype):
+            self.encoder.to(device=self.device)
+        else:
+            self.encoder.to(device=self.device, dtype=self.dtype)
         self.checkpoint_loaded = False
         if config.checkpoint_path is not None:
             payload = torch.load(Path(config.checkpoint_path), map_location="cpu", weights_only=False)
@@ -176,12 +186,19 @@ class Vjepa2VisualEncoder(nn.Module):
             )
         source_hw = (int(clip.shape[1]), int(clip.shape[2]))
         pixel_values = preprocess_video_clip(clip, self.config)
-        pixel_values = pixel_values.to(device=self.device, dtype=self.dtype)
+        if _trainable_vjepa_uses_autocast(trainable=bool(self.trainable and self.training), device=self.device, dtype=self.dtype):
+            pixel_values = pixel_values.to(device=self.device)
+        else:
+            pixel_values = pixel_values.to(device=self.device, dtype=self.dtype)
         video = pixel_values.permute(0, 2, 1, 3, 4).contiguous()
         use_grad = bool(self.trainable and self.training)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
-            tokens = self.encoder(video, training=use_grad)
+            if _trainable_vjepa_uses_autocast(trainable=use_grad, device=self.device, dtype=self.dtype):
+                with torch.autocast(device_type="cuda", dtype=self.dtype):
+                    tokens = self.encoder(video, training=use_grad)
+            else:
+                tokens = self.encoder(video, training=use_grad)
             token_grid = tokens.reshape(
                 1,
                 self.config.temporal_tokens,

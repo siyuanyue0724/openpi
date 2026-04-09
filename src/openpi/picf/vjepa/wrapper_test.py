@@ -6,6 +6,7 @@ from openpi.picf.vjepa.config import VjepaVisualConfig
 from openpi.picf.vjepa.wrapper import Vjepa2VisualEncoder
 from openpi.picf.vjepa.wrapper import _extract_encoder_state_dict
 from openpi.picf.vjepa.wrapper import _resolve_checkpoint_key
+from openpi.picf.vjepa.wrapper import _trainable_vjepa_uses_autocast
 from openpi.picf.vjepa.wrapper import vjepa_runtime_available
 
 
@@ -55,3 +56,31 @@ def test_rotate_queries_or_keys_preserves_input_dtype() -> None:
     output = rotate_queries_or_keys(x, pos=pos, n_registers=1, has_cls_first=True)
 
     assert output.dtype == x.dtype
+
+
+def test_trainable_vjepa_uses_autocast_only_on_cuda_mixed_precision() -> None:
+    assert _trainable_vjepa_uses_autocast(
+        trainable=True,
+        device=torch.device("cuda"),
+        dtype=torch.bfloat16,
+    )
+    assert _trainable_vjepa_uses_autocast(
+        trainable=True,
+        device=torch.device("cuda"),
+        dtype=torch.float16,
+    )
+    assert not _trainable_vjepa_uses_autocast(
+        trainable=False,
+        device=torch.device("cuda"),
+        dtype=torch.bfloat16,
+    )
+    assert not _trainable_vjepa_uses_autocast(
+        trainable=True,
+        device=torch.device("cuda"),
+        dtype=torch.float32,
+    )
+    assert not _trainable_vjepa_uses_autocast(
+        trainable=True,
+        device=torch.device("cpu"),
+        dtype=torch.bfloat16,
+    )

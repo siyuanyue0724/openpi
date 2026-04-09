@@ -129,6 +129,33 @@ def _default_paligemma_model_name() -> str:
     return "google/paligemma2-3b-pt-224"
 
 
+def _default_paligemma_checkpoint() -> str | None:
+    candidates = (
+        Path("checkpoints") / "foundation" / "pi05_base_pytorch",
+        Path("checkpoints") / "pi05_base_pytorch",
+        Path("/mnt/checkpoints/pi05_base_pytorch"),
+    )
+    for candidate in candidates:
+        if candidate.is_dir() and (candidate / "model.safetensors").is_file():
+            return str(candidate)
+        if candidate.is_file() and candidate.suffix == ".safetensors":
+            return str(candidate)
+    return None
+
+
+def _default_paligemma_config_json(checkpoint_path: str | None) -> str | None:
+    if checkpoint_path is None:
+        return None
+    candidate = Path(checkpoint_path).expanduser()
+    if candidate.is_dir():
+        config_json = candidate / "config.json"
+        return str(config_json) if config_json.is_file() else None
+    if candidate.is_file():
+        config_json = candidate.parent / "config.json"
+        return str(config_json) if config_json.is_file() else None
+    return None
+
+
 def _parse_tactile_sensor_names(raw: str) -> tuple[str, ...]:
     names = tuple(part.strip() for part in str(raw).split(",") if part.strip())
     if not names:
@@ -161,6 +188,7 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
     args.visual_mode = "encoder"
     args.tactile_mode = "encoder"
     args.semantic_mode = "paligemma"
+    args.semantic_source = "auto"
     args.use_tactile = True
     args.visual_trainable = True
     args.tactile_trainable = True
@@ -173,6 +201,17 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.warmup_steps = max(1, int(round(0.02 * float(args.num_train_steps))))
     else:
         args.warmup_steps = int(args.warmup_steps)
+    args.semantic_gradient_checkpointing_disabled_for_accum = False
+    if (
+        int(args.accum_steps) > 1
+        and bool(getattr(args, "semantic_gradient_checkpointing", False))
+        and str(getattr(args, "semantic_mode", "zero")) == "paligemma"
+    ):
+        # HF PaliGemma gradient checkpointing is reentrant and collides with DDP
+        # gradient accumulation, causing "mark ready twice" errors on repeated
+        # backwards within one optimizer step.
+        args.semantic_gradient_checkpointing = False
+        args.semantic_gradient_checkpointing_disabled_for_accum = True
 
 
 def _validate_train_args(args: argparse.Namespace) -> None:
@@ -270,8 +309,25 @@ def _validate_backbone_args(args: argparse.Namespace) -> None:
                 "point_backbone=sonata requires a Sonata checkpoint. "
                 "Pass --sonata-checkpoint-path or place SpatialLM_Sonata_encoder.pth under src/pretrain/."
             )
-    if args.semantic_mode == "paligemma" and not args.semantic_model_name:
-        raise ValueError("semantic_mode=paligemma requires --semantic-model-name or a non-empty default model id.")
+    if args.semantic_mode == "paligemma":
+        args.semantic_checkpoint_path = args.semantic_checkpoint_path or _default_paligemma_checkpoint()
+        args.semantic_checkpoint_config_path = (
+            args.semantic_checkpoint_config_path or _default_paligemma_config_json(args.semantic_checkpoint_path)
+        )
+        if args.semantic_source not in {"auto", "hf", "pi0_pytorch"}:
+            raise ValueError(
+                f"semantic_source must be one of auto|hf|pi0_pytorch, got {args.semantic_source!r}."
+            )
+        if args.semantic_source == "pi0_pytorch" and args.semantic_checkpoint_path is None:
+            raise FileNotFoundError(
+                "semantic_source=pi0_pytorch requires --semantic-checkpoint-path or a detectable local pi05_base_pytorch checkpoint."
+            )
+        if args.semantic_source == "hf" and not args.semantic_model_name:
+            raise ValueError("semantic_source=hf requires --semantic-model-name or a non-empty default model id.")
+        if args.semantic_source == "auto" and args.semantic_checkpoint_path is None and not args.semantic_model_name:
+            raise ValueError(
+                "semantic_mode=paligemma requires either a local semantic checkpoint or a non-empty --semantic-model-name."
+            )
 
 
 def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.device]:
@@ -709,12 +765,13 @@ def _save_checkpoint(
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    torch.save(module.core.state_dict(), tmp_dir / "model.pt")
+    torch.save(module.state_dict(), tmp_dir / "model.pt")
     torch.save(optimizer.state_dict(), tmp_dir / "optimizer.pt")
     metadata = {
         "step": int(step),
         "args": vars(args),
         "timestamp": time.time(),
+        "checkpoint_format": "picf_trainer_v2",
     }
     torch.save(metadata, tmp_dir / "metadata.pt")
 
@@ -742,7 +799,11 @@ def _load_checkpoint(
         model_state = torch.load(path / "model.pt", map_location=device, weights_only=False)
         optimizer_state = torch.load(path / "optimizer.pt", map_location=device, weights_only=False)
         metadata = torch.load(path / "metadata.pt", map_location=device, weights_only=False)
-        module.core.load_state_dict(model_state, strict=True)
+        try:
+            module.load_state_dict(model_state, strict=True)
+        except RuntimeError:
+            # Backward compatibility for older PICF checkpoints that only saved core.state_dict().
+            module.core.load_state_dict(model_state, strict=True)
         optimizer.load_state_dict(optimizer_state)
         return int(metadata.get("step", 0))
 
@@ -750,7 +811,10 @@ def _load_checkpoint(
     checkpoint_dir = payload.get("checkpoint_dir")
     if checkpoint_dir is not None and "model" not in payload:
         return _load_checkpoint(path=Path(checkpoint_dir), model=model, optimizer=optimizer, device=device)
-    module.core.load_state_dict(payload["model"], strict=True)
+    try:
+        module.load_state_dict(payload["model"], strict=True)
+    except RuntimeError:
+        module.core.load_state_dict(payload["model"], strict=True)
     optimizer.load_state_dict(payload["optimizer"])
     return int(payload.get("step", 0))
 
@@ -837,9 +901,13 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
     if args.semantic_mode == "paligemma":
         semantic_encoder = PaliGemmaSemanticEncoder(
             PaliGemmaSemanticConfig(
+                source=args.semantic_source,
                 model_name=args.semantic_model_name,
                 checkpoint_path=args.semantic_checkpoint_path,
+                checkpoint_config_path=args.semantic_checkpoint_config_path,
                 revision=args.semantic_revision,
+                paligemma_variant=args.semantic_paligemma_variant,
+                action_expert_variant=args.semantic_action_expert_variant,
                 device=str(device),
                 dtype=args.semantic_dtype,
                 trainable=bool(args.semantic_trainable),
@@ -1127,6 +1195,24 @@ def train(args: argparse.Namespace) -> None:
                 args.future_vote_heads,
             )
             logging.info(
+                "Backbone contract: point=%s(trainable=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(source=%s trainable=%s)",
+                args.point_backbone,
+                bool(args.point_backbone_trainable),
+                args.visual_mode,
+                bool(args.visual_trainable),
+                args.tactile_mode,
+                bool(args.tactile_trainable),
+                args.semantic_mode,
+                getattr(semantic_encoder, "source", "none") if semantic_encoder is not None else "none",
+                bool(args.semantic_trainable),
+            )
+            if bool(getattr(args, "semantic_gradient_checkpointing_disabled_for_accum", False)):
+                logging.info(
+                    "Semantic contract: disabled PaliGemma gradient checkpointing because accum_steps=%s > 1; "
+                    "this avoids DDP 'mark ready twice' failures during gradient accumulation.",
+                    args.accum_steps,
+                )
+            logging.info(
                 "LR contract: cosine decay with warmup_steps=%s (%.2f%% of total steps).",
                 args.warmup_steps,
                 warmup_fraction,
@@ -1335,9 +1421,13 @@ def main() -> None:
     parser.add_argument("--tactile-sensor-names", default="digit,gelsight_mini")
     parser.add_argument("--tactile-sensor-offsets-m", default="0.01,0,0;-0.01,0,0")
     parser.add_argument("--semantic-mode", choices=["zero", "paligemma"], default="zero")
+    parser.add_argument("--semantic-source", choices=["auto", "hf", "pi0_pytorch"], default="auto")
     parser.add_argument("--semantic-model-name", default=_default_paligemma_model_name())
     parser.add_argument("--semantic-checkpoint-path", default=None)
+    parser.add_argument("--semantic-checkpoint-config-path", default=None)
     parser.add_argument("--semantic-revision", default=None)
+    parser.add_argument("--semantic-paligemma-variant", default="gemma_2b")
+    parser.add_argument("--semantic-action-expert-variant", default="gemma_300m")
     parser.add_argument("--semantic-dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--semantic-trainable", action="store_true")
     parser.add_argument("--semantic-lr-scale", type=float, default=0.25)

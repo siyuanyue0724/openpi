@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import dataclasses
 import importlib.util
+import math
 import types
 from pathlib import Path
 import sys
@@ -70,9 +71,13 @@ def _base_args() -> argparse.Namespace:
         tactile_trainable=False,
         tactile_lr_scale=0.25,
         semantic_mode="zero",
+        semantic_source="auto",
         semantic_model_name="google/paligemma2-3b-pt-224",
         semantic_checkpoint_path=None,
+        semantic_checkpoint_config_path=None,
         semantic_revision=None,
+        semantic_paligemma_variant="gemma_2b",
+        semantic_action_expert_variant="gemma_300m",
         semantic_dtype="bfloat16",
         semantic_trainable=False,
         semantic_lr_scale=0.25,
@@ -107,11 +112,24 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     assert args.warmup_steps == 600
 
 
+def test_normalize_train_args_disables_semantic_gradient_checkpointing_for_accumulation() -> None:
+    args = _base_args()
+    args.semantic_mode = "paligemma"
+    args.semantic_gradient_checkpointing = True
+    args.accum_steps = 2
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.semantic_gradient_checkpointing is False
+    assert args.semantic_gradient_checkpointing_disabled_for_accum is True
+
+
 def test_foundation_profile_enables_semantic_and_trainable_backbones() -> None:
     args = _base_args()
     args.use_foundation_backbones = True
     _MODULE._apply_foundation_profile(args)
     assert args.semantic_mode == "paligemma"
+    assert args.semantic_source == "auto"
     assert args.visual_trainable is True
     assert args.tactile_trainable is True
     assert args.point_backbone_trainable is True
@@ -261,3 +279,84 @@ def test_first_step_window_precheck_rejects_empty_local_support() -> None:
     window = _MODULE._TransitionWindow(segment_id=0, start_step_id=0, prompt="test", frames=(obs, obs))
     with pytest.raises(RuntimeError, match="non-empty local xyzrgb support"):
         _MODULE._ensure_window_has_valid_first_step_xyzrgb_support(trainer, window)
+
+
+def test_checkpoint_roundtrip_preserves_trainable_semantic_state(tmp_path: Path) -> None:
+    class _DummyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(3, 2, bias=False)
+
+    trainer = torch.nn.Module()
+    trainer.core = _DummyCore()
+    trainer.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+
+    with torch.no_grad():
+        trainer.core.proj.weight.fill_(0.5)
+        trainer.semantic_encoder.weight.fill_(1.5)
+
+    optimizer = torch.optim.AdamW(trainer.parameters(), lr=1e-3)
+    args = argparse.Namespace(dummy=True)
+    output_dir = tmp_path / "picf_ckpt"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    _MODULE._save_checkpoint(
+        output_dir=output_dir,
+        model=trainer,
+        optimizer=optimizer,
+        step=7,
+        args=args,
+    )
+
+    reloaded = torch.nn.Module()
+    reloaded.core = _DummyCore()
+    reloaded.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        reloaded.core.proj.weight.zero_()
+        reloaded.semantic_encoder.weight.zero_()
+    reloaded_optimizer = torch.optim.AdamW(reloaded.parameters(), lr=1e-3)
+
+    step = _MODULE._load_checkpoint(
+        path=output_dir / "7",
+        model=reloaded,
+        optimizer=reloaded_optimizer,
+        device=torch.device("cpu"),
+    )
+
+    assert step == 7
+    torch.testing.assert_close(reloaded.core.proj.weight, trainer.core.proj.weight)
+    torch.testing.assert_close(reloaded.semantic_encoder.weight, trainer.semantic_encoder.weight)
+
+
+def test_checkpoint_loader_accepts_legacy_core_only_state(tmp_path: Path) -> None:
+    class _DummyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(3, 2, bias=False)
+
+    trainer = torch.nn.Module()
+    trainer.core = _DummyCore()
+    trainer.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    optimizer = torch.optim.AdamW(trainer.parameters(), lr=1e-3)
+
+    legacy_dir = tmp_path / "legacy" / "9"
+    legacy_dir.mkdir(parents=True, exist_ok=True)
+    with torch.no_grad():
+        trainer.core.proj.weight.fill_(2.0)
+    torch.save(trainer.core.state_dict(), legacy_dir / "model.pt")
+    torch.save(optimizer.state_dict(), legacy_dir / "optimizer.pt")
+    torch.save({"step": 9, "checkpoint_format": "legacy_core_only"}, legacy_dir / "metadata.pt")
+
+    reloaded = torch.nn.Module()
+    reloaded.core = _DummyCore()
+    reloaded.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    reloaded_optimizer = torch.optim.AdamW(reloaded.parameters(), lr=1e-3)
+    step = _MODULE._load_checkpoint(
+        path=legacy_dir,
+        model=reloaded,
+        optimizer=reloaded_optimizer,
+        device=torch.device("cpu"),
+    )
+
+    assert step == 9
+    torch.testing.assert_close(reloaded.core.proj.weight, trainer.core.proj.weight)

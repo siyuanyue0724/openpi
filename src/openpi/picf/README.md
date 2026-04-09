@@ -24,6 +24,8 @@
 - `python -m compileall -q src/openpi/picf/core scripts/picf_core_train_smoke.py scripts/picf_core_train.py`：通过
 - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
   - `32 passed`
+- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/vjepa/wrapper_test.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py`
+  - `49 passed`
 - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
   - `32 passed`
 - `task_ABCD_D` 的真实 `dir/zip` 原始样本一致性复核：
@@ -183,6 +185,26 @@
     - `availability_tactile = 1.0`
     - `loss_tactile_real ≈ 0.480 / 0.468`
     - `mean_loss = 2.5546`
+- 真实 semantic side path 现在也已接进长期 trainer：
+  - `--use-foundation-backbones` 会显式启用：
+    - `semantic_mode = paligemma`
+    - `semantic_source = auto`
+    - `semantic_trainable = True`
+  - 若本地存在 `pi05_base_pytorch/model.safetensors`，当前会优先走 `pi0_pytorch` 本地 checkpoint 路径
+  - 否则回退到 HF `PaliGemmaForConditionalGeneration`
+- 云机 gradient probe 已确认五条主干都真实收到梯度，不是“只把 foundation 当 frozen feature extractor”：
+  - `point_backbone: trainable_params=454, params_with_grad=452, grad_norm=6.0717`
+  - `visual_backbone: trainable_params=158, params_with_grad=155, grad_norm=1.0025`
+  - `tactile_backbone: trainable_params=201, params_with_grad=198, grad_norm=0.2661`
+  - `semantic_backbone: trainable_params=603, params_with_grad=603, grad_norm=2.2966`
+  - `picf_core: trainable_params=1131, params_with_grad=1123, grad_norm=26.8773`
+- 当前 cotrain 路径的两个关键工程修复也已经过云机回归：
+  - `V-JEPA` trainable 路径改成“参数保留原生 fp32 + CUDA autocast 前向”，避免先前 hard-cast 到 `bf16` 时的 patch-embed bias dtype 冲突
+  - `PaliGemma` trainable 路径：
+    - 已修复本地 `pi0_pytorch` checkpoint 的 tied embedding 缺口
+    - 已修复 batch=1 图像 pad 预处理 squeeze
+    - 已修复手工 checkpoint 包裹在输入不带 grad 时的静默断梯度
+    - 在 `DDP + accum_steps>1` 时会自动关闭 semantic gradient checkpointing，以避免 `mark ready twice`
 - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py --backend dir --device cuda --num-train-steps 1`：通过
   - 在 `/tmp/openpi-train-smoke/picf_core/picf_core_train_uv_min/` 落下：
     - `args.json`
@@ -833,13 +855,24 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - 双卡 DDP + `accum_steps=1` => `effective_global_batch=2`
   - 这与旧 `pi0.5` 云上命令里的 `batch-size=2` 是同一量级口径
   - 如果退回单卡、但还想保持和旧双卡命令相同的全局 batch，应该改成 `--accum-steps 2`
+- 在当前两张 `A100 40GB` 的真实回归里：
+  - 双卡 DDP + `accum_steps=2` => `effective_global_batch=4`：已验证通过，当前是推荐起跑档
+  - 双卡 DDP + `accum_steps=4` => `effective_global_batch=8`：已验证通过，是当前“已验证的更大 batch”选项
+  - `accum_steps>4` 还没有做同强度回归，不应写成“已验证”
+- 当前更推荐增 `accum_steps`，而不是改 per-rank micro-batch：
+  - 每个 rank 每个 micro-step 仍只处理一个 `_TransitionWindow`
+  - 梯度累积几乎不增加峰值激活显存
+  - 这更贴近旧 `pi0.5` “在安全范围内把全局 batch 做大”的经验
 - 当前 `PICF core` 的数值口径与旧 `pi0.5` 不完全相同：
   - 旧 `pi0.5` 训练主模型常用 `bfloat16`
   - 新 `PICF core` 目前验证稳定的配置是：
     - core 主干默认 `float32`
-    - `V-JEPA` wrapper 默认 `bfloat16`
-    - `Sonata` / `AnyTouch` wrapper 当前仍按 `float32` 跑
+    - `V-JEPA` trainable 路径使用 `CUDA autocast(bfloat16)` 前向
+    - `Sonata` / `AnyTouch` / `PaliGemma` 当前都允许 cotrain，并按各自已验证的稳定 dtype 路径运行
   - 这不是遗漏，而是当前新 core 的已验证工程配置；如果后续要压显存，再单独做 mixed-precision 回归
+- 在 `PaliGemma + DDP + accum_steps>1` 时，trainer 会自动关闭 semantic gradient checkpointing：
+  - 这是为了解掉 HF PaliGemma reentrant checkpoint 在 repeated backward 下的 `mark ready twice`
+  - 这不改变 PICF 数学，只是当前 DDP 累积训练的工程稳定性规则
 - warmup 口径也已改回 spec：
   - `--warmup-steps` 若不显式传入，则自动取 `round(0.02 * num_train_steps)`
   - 因而默认 `30000` step 训练会使用 `600` warmup steps
@@ -1014,14 +1047,34 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 
 ### 5.3 Semantic Input
 
-语言默认不直接从 core 内部拉起 PaliGemma。
+语言默认不直接从 core 内部“隐式”拉起 PaliGemma，但当前正式 trainer 已经把真实 semantic side path 接进来了。
 
-当前语义路径支持两种方式：
+当前语义路径支持三种方式：
 
 - 直接传 `semantic_override`
 - 传入真实 PaliGemma outputs，由 `PaliGemmaSemanticWrapper` 做摘要
+- 由长期训练入口 [`scripts/picf_core_train.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train.py) 显式实例化
+  [`PaliGemmaSemanticEncoder`](/home/siyuanyue/Documents/openpi/src/openpi/picf/paligemma/wrapper.py)
+  并对每个当前 observation 计算语义摘要
 
-如果两者都没有，core 会使用零语义 token。
+当前真实训练路径是：
+
+- foundation 模式下，launcher 会启用：
+  - `semantic_mode = paligemma`
+  - `semantic_source = auto`
+  - `semantic_trainable = True`
+  - `semantic_use_gripper = True`
+- `semantic_source = auto` 会优先使用本地 `pi05_base_pytorch/model.safetensors`
+- 若本地 checkpoint 不存在，则回退到 HF `PaliGemmaForConditionalGeneration`
+- 训练器每步都会对当前 observation 计算 `semantic_override`，再传入 `PicfFullCore.step(...)`
+
+这和 [`plan_readme_ray_geometry.md`](/home/siyuanyue/Documents/openpi/plan_readme_ray_geometry.md) 的 language-late 口径保持一致：
+
+- semantic summary 不进入 current posterior
+- semantic summary 只进入 posterior 之后的 predictive / control stage
+- 同一帧只改 `semantic_override` 时，`posterior_mu_diff = 0.0`、`posterior_sigma_diff = 0.0`
+
+如果以上两条显式语义路径都没有，core 才会回退到零语义 token。
 
 
 ## 6. Legacy 路径的地位
@@ -1152,7 +1205,7 @@ python scripts/picf_core_train.py \
   --num-train-steps 30000 \
   --log-interval 100 \
   --save-interval 5000 \
-  --accum-steps 1 \
+  --accum-steps 2 \
   --unroll-steps 2 \
   --stride 8 \
   --max-points 512 \
@@ -1172,7 +1225,7 @@ python scripts/picf_core_train.py \
 - 进度条里显示的 `loss=` 是**当前最后一个 optimization step 的即时值**
   - 它不是 moving average，也不是 `log_interval` 区间均值
   - 当前 trainer 是直接把最近一步的 `outputs["loss_total"]` 写到 progress postfix
-  - 在 `effective_global_batch = 2`、`unroll_steps = 2`、CALVIN window 高度异质的设定下，`1.4 -> 3.4 -> 1.3 -> 3.2` 这种来回跳动是正常现象
+  - 在 `effective_global_batch = 4`、`unroll_steps = 2`、CALVIN window 高度异质的设定下，`1.4 -> 3.4 -> 1.3 -> 3.2` 这种来回跳动仍然是正常现象
   - 判断是否在收敛，应优先看 `metrics.jsonl` 中按 `log_interval` 聚合后的均值；当前已验证的双卡 `200` step run 里，`20-step` 平均 `loss_total` 是从约 `2.69` 下降到约 `2.40`
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留文件日志、不看进度条，可改成 `--no-progress`
@@ -1232,7 +1285,7 @@ python scripts/picf_core_train.py \
   --num-train-steps 30000 \
   --log-interval 100 \
   --save-interval 5000 \
-  --accum-steps 1 \
+  --accum-steps 2 \
   --unroll-steps 2 \
   --stride 8 \
   --max-points 512 \
@@ -1259,7 +1312,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --num-train-steps 30000 \
   --log-interval 100 \
   --save-interval 5000 \
-  --accum-steps 1 \
+  --accum-steps 2 \
   --unroll-steps 2 \
   --stride 8 \
   --max-points 512 \
@@ -1279,6 +1332,14 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
 - 单卡：改成 `--accum-steps 2`
 
 这条 DDP 命令当前已经做过最小起步回归和一次 `120` step 的 post-fix 回归，但还没有做长程收敛验证；因此它适合正式试训，不应被误写成“已完成多卡配方定型”。
+
+如果想在当前已验证范围内进一步增大 batch：
+
+- 推荐起跑档：双卡 DDP + `--accum-steps 2`
+  - `effective_global_batch = 4`
+- 已验证的更大档：双卡 DDP + `--accum-steps 4`
+  - `effective_global_batch = 8`
+- 在没有补完更高档回归前，不要把 README 写成 `accum_steps=8` 也已验证
 
 关于这次 DDP 真实崩溃的根因，当前已经完成过一次逐样本重放：
 
