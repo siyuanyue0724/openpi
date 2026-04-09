@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import importlib
 from pathlib import Path
 
 import numpy as np
@@ -8,7 +9,6 @@ import torch
 
 from openpi.picf.vjepa.config import VjepaVisualConfig
 from openpi.picf.vjepa.preprocess import preprocess_video_clip
-from openpi.picf.vjepa.vendor import vision_transformer as vendor_vit
 
 _MODEL_ARCH_MAP = {
     "vjepa2_1_vit_base_384": "vit_base",
@@ -49,6 +49,14 @@ class VjepaFeatureMap:
         if use_last_two_mean and tokens.shape[0] >= 2:
             return tokens[-2:].mean(axis=0, dtype=np.float32)
         return tokens[-1]
+
+
+def vjepa_runtime_available() -> bool:
+    try:
+        importlib.import_module("openpi.picf.vjepa.vendor.vision_transformer")
+    except ModuleNotFoundError:
+        return False
+    return True
 
 
 def _resolve_device(config: VjepaVisualConfig) -> torch.device:
@@ -113,6 +121,14 @@ class Vjepa2VisualEncoder:
         arch_name = config.arch_name_override or _MODEL_ARCH_MAP.get(config.model_name)
         if arch_name is None:
             raise KeyError(f"Unsupported V-JEPA model '{config.model_name}'.")
+        try:
+            from openpi.picf.vjepa.vendor import vision_transformer as vendor_vit
+        except ModuleNotFoundError as exc:
+            raise RuntimeError(
+                "V-JEPA runtime dependencies are unavailable. "
+                "Install the V-JEPA vendor stack, including timm, on the target server."
+            ) from exc
+
         encoder_builder = getattr(vendor_vit, arch_name)
         self.encoder = encoder_builder(
             patch_size=config.patch_size,

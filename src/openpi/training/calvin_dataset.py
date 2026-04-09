@@ -35,7 +35,7 @@ class _CalvinReader:
     """Read npz files either from a big zip or from an extracted directory."""
 
     def __init__(self, root: str, split: str, backend: str = "zip"):
-        self.root = root  # e.g. "/path/task_ABC_D.zip" OR "/path/task_ABC_D"
+        self.root = root  # e.g. "/path/task_ABCD_D.zip" OR "/path/task_ABCD_D"
         self.split = split  # "training" or "validation"
         self.backend = backend  # "zip" or "dir"
 
@@ -59,9 +59,9 @@ class _CalvinReader:
         """Infer CALVIN task prefix.
 
         Examples:
-          - zip root:   /mnt/calvin_data/task_ABC_D.zip -> "task_ABC_D"
-          - dir root:   /mnt/calvin_data/task_ABC_D     -> ""
-          - parent dir: /mnt/calvin_data                -> "task_ABC_D" (if unique)
+          - zip root:   /mnt/calvin_data/task_ABCD_D.zip -> "task_ABCD_D"
+          - dir root:   /mnt/calvin_data/task_ABCD_D     -> ""
+          - parent dir: /mnt/calvin_data                 -> "task_ABCD_D" (if unique)
         """
         if self.backend == "zip":
             with zipfile.ZipFile(self.root, "r") as zf:
@@ -88,7 +88,7 @@ class _CalvinReader:
         if os.path.isfile(direct_ann):
             return ""
 
-        # root 是父目录，下面有 task_ABC_D/ 之类
+        # root 是父目录，下面有 task_ABCD_D/ 之类
         cands = sorted(
             d for d in os.listdir(root)
             if os.path.isfile(os.path.join(root, d, self.split, "lang_annotations", "auto_lang_ann.npy"))
@@ -135,7 +135,7 @@ class _CalvinReader:
         self._zf = None
 
     def _npz_path(self, step_id: int) -> str:
-        # In zip: task_ABC_D/training/episode_0538190.npz ; in dir: same relative path.
+        # In zip: task_ABCD_D/training/episode_0538190.npz ; in dir: same relative path.
         return self._rel(self.split, f"episode_{step_id:07d}.npz")
 
     def read_npz(self, step_id: int, keys: Optional[List[str]] = None) -> Dict[str, np.ndarray]:

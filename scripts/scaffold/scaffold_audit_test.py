@@ -13,14 +13,16 @@ def test_scaffold_audits_pass_on_mini_dataset(tmp_path: Path) -> None:
         split="training",
         backend="zip",
         num_segments=2,
-        max_points=128,
+        stride=1,
+        max_points=1024,
     )
     acceptance = run_acceptance_check(
         calvin_root=calvin_root,
         split="training",
         backend="zip",
         num_segments=2,
-        max_points=128,
+        stride=1,
+        max_points=1024,
     )
 
     assert invariants["all_pass"]

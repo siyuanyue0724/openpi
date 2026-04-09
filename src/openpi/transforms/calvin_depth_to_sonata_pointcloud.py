@@ -10,7 +10,7 @@ from typing import Any, Dict, Literal
 import numpy as np
 
 def _infer_task_prefix_from_zip(zf: zipfile.ZipFile) -> str | None:
-    """Infer task prefix such as task_ABC_D / task_ABCD_D from a CALVIN zip."""
+    """Infer task prefix such as task_ABCD_D from a CALVIN zip."""
     names = zf.namelist()
     suffixes = (
         "/training/lang_annotations/auto_lang_ann.npy",
@@ -39,7 +39,7 @@ def _load_json(path: str) -> Dict[str, Any]:
 
     This keeps the CALVIN pipeline working for both extracted directories and zip backend.
     """
-    # Allow passing a directory (e.g., /.../task_ABC_D) - resolve to calib/cameras.json
+    # Allow passing a directory (e.g., /.../task_ABCD_D) - resolve to calib/cameras.json
     if os.path.isdir(path):
         candidate = os.path.join(path, "calib", "cameras.json")
         if os.path.exists(candidate):
@@ -74,7 +74,7 @@ def _load_json(path: str) -> Dict[str, Any]:
                 )
 
     if path.endswith(".zip") and os.path.exists(path):
-        stem = os.path.splitext(os.path.basename(path))[0]  # task_ABC_D
+        stem = os.path.splitext(os.path.basename(path))[0]  # task_ABCD_D
 
         with zipfile.ZipFile(path, "r") as zf:
             names = zf.namelist()

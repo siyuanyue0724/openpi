@@ -4,6 +4,7 @@ from pathlib import Path
 import numpy as np
 
 from openpi.picf.contracts import PicfPointCloudFrame
+from openpi.picf.contracts import RuntimeMeta
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.pipeline_visual import PointVisualPosteriorPipeline
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
@@ -42,7 +43,7 @@ def test_point_visual_pipeline_supports_stale_visual_fallback(tmp_path: Path) ->
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
     frames = list(replay)
-    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=256)
+    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=1024)
     scaffold = DeterministicScaffoldPipeline(builder)
     posterior = PointVisualPosteriorPipeline(
         visual_config=VjepaVisualConfig(
@@ -71,3 +72,38 @@ def test_point_visual_pipeline_supports_stale_visual_fallback(tmp_path: Path) ->
     assert not scaffold_state_stale.debug.fresh_scaffold
     assert posterior_state_stale.debug.visual_precision_gain_count > 0
     assert not posterior_state_stale.debug.posterior_prior_equal_on_stale
+
+
+def test_visual_pipeline_only_pushes_runtime_accepted_frames(tmp_path: Path) -> None:
+    calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
+    replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
+    frame = next(iter(replay))
+    frame.runtime_meta = RuntimeMeta(
+        t_v_last=float(frame.timestamp_s - 0.01),
+        t_p_last=float(frame.timestamp_s),
+        t_t_last=0.0,
+        t_rgb_last=float(frame.timestamp_s),
+        b_rgb_avail=True,
+        rgb_proj_residual=0.0,
+        n_vis_upd=1,
+        v_rgb_p=True,
+        v_pc_scaf=True,
+        stale_scaffold_steps=0,
+    )
+    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=1024)
+    scaffold = DeterministicScaffoldPipeline(builder)
+    posterior = PointVisualPosteriorPipeline(
+        visual_config=VjepaVisualConfig(
+            camera_json_path=calvin_root,
+            arch_name_override="vit_tiny",
+            img_size=64,
+            num_frames=4,
+            device="cpu",
+            dtype="float32",
+        ),
+        visual_encoder=_StubVisualEncoder(),
+    )
+    scaffold_state = scaffold.step(frame)
+    posterior_state = posterior.step(frame, scaffold_state)
+    assert not posterior.clip_buffer.has_frames
+    assert posterior_state.debug.visual_gate_ratio == 0.0

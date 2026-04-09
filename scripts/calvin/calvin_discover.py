@@ -18,6 +18,20 @@ def count_episodes(d: Path) -> int:
             n += 1
     return n
 
+
+def has_auto_lang_annotations(split_dir: Path) -> bool:
+    candidates = [
+        split_dir / "auto_lang_ann.npy",
+        split_dir / "lang_annotations" / "auto_lang_ann.npy",
+    ]
+    for path in candidates:
+        if path.exists():
+            return True
+    for child in split_dir.iterdir():
+        if child.is_dir() and child.name.startswith("lang_") and (child / "auto_lang_ann.npy").exists():
+            return True
+    return False
+
 def main():
     ap = argparse.ArgumentParser(description="发现 CALVIN task/split/episode 概况")
     ap.add_argument("--root", required=True, help="CALVIN 数据集根目录，例如 ~/datasets/calvin/dataset")
@@ -53,7 +67,7 @@ def main():
             n = count_episodes(spdir)
             if n>0:
                 has_hydra = (spdir / ".hydra").exists()
-                has_ann   = (spdir / "auto_lang_ann.npy").exists()
+                has_ann   = has_auto_lang_annotations(spdir)
                 item["splits"][name] = {
                     "path": str(spdir),
                     "episodes": n,

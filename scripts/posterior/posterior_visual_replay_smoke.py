@@ -8,6 +8,8 @@ from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.pipeline_visual import PointVisualPosteriorPipeline
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
 from openpi.picf.scaffold.pipeline import DeterministicScaffoldPipeline
+from openpi.picf.sonata.config import SonataPointConfig
+from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
 from openpi.picf.vjepa.config import VjepaVisualConfig
 
 
@@ -51,6 +53,16 @@ def _make_visual_config(
     )
 
 
+def _make_point_extractor(*, sonata_ckpt_path: str | None, point_device: str | None) -> SonataPointFeatureExtractor:
+    return SonataPointFeatureExtractor(
+        SonataPointConfig(
+            checkpoint_path=sonata_ckpt_path,
+            device=point_device,
+            allow_random_init=True,
+        )
+    )
+
+
 def run_visual_smoke(
     *,
     calvin_root: str,
@@ -59,7 +71,7 @@ def run_visual_smoke(
     mode: str = "point_visual",
     num_segments: int | None = None,
     stride: int = 1,
-    max_points: int = 2048,
+    max_points: int = 1024,
     checkpoint_path: str | None = None,
     model_name: str = "vjepa2_1_vit_base_384",
     arch_name_override: str | None = None,
@@ -70,6 +82,8 @@ def run_visual_smoke(
     device: str | None = None,
     dtype: str = "bfloat16",
     use_last_two_mean: bool = False,
+    sonata_ckpt_path: str | None = None,
+    point_device: str | None = None,
 ) -> dict:
     replay = CalvinSequentialReplay(
         calvin_root,
@@ -78,7 +92,8 @@ def run_visual_smoke(
         segment_indices=None if num_segments is None else list(range(num_segments)),
     )
     builder = CalvinDepthToPicfPointCloud(calvin_root, stride=stride, max_points=max_points)
-    scaffold = DeterministicScaffoldPipeline(builder)
+    point_extractor = _make_point_extractor(sonata_ckpt_path=sonata_ckpt_path, point_device=point_device)
+    scaffold = DeterministicScaffoldPipeline(builder, point_feature_extractor=point_extractor)
     enable_point_expert, enable_visual_expert = _mode_flags(mode)
     visual_config = _make_visual_config(
         calvin_root=calvin_root,
@@ -97,6 +112,7 @@ def run_visual_smoke(
         visual_config=visual_config,
         enable_point_expert=enable_point_expert,
         enable_visual_expert=enable_visual_expert,
+        point_feature_extractor=point_extractor,
     )
 
     scaffold_state = None
@@ -116,6 +132,9 @@ def run_visual_smoke(
         "checkpoint_loaded": bool(
             posterior.visual_encoder.checkpoint_loaded if posterior.visual_encoder is not None else False
         ),
+        "point_backbone_checkpoint_loaded": bool(point_extractor.checkpoint_loaded),
+        "point_backbone_checkpoint_path": str(point_extractor.checkpoint_path) if point_extractor.checkpoint_path else None,
+        "point_backbone_cpu_fallback": bool(point_extractor.cpu_fallback),
         "mean_point_gate_ratio": sum(state.debug.point_gate_ratio for state in states) / len(states),
         "mean_visual_gate_ratio": sum(state.debug.visual_gate_ratio for state in states) / len(states),
         "mean_precision_gain_count": sum(state.debug.precision_gain_count for state in states) / len(states),
@@ -125,7 +144,9 @@ def run_visual_smoke(
         "max_abs_mu": max(state.debug.max_abs_mu for state in states),
         "min_var_block": min(state.debug.min_var_block for state in states),
         "max_var_block": max(state.debug.max_var_block for state in states),
-        "stale_equal_count": sum(1 for state in states if state.debug.posterior_prior_equal_on_stale),
+        "stale_equal_count": sum(
+            1 for state in states if (not state.debug.fresh_scaffold) and state.debug.posterior_prior_equal_on_stale
+        ),
         "nan_count_total": sum(state.debug.nan_count for state in states),
     }
 
@@ -138,7 +159,7 @@ def main() -> None:
     parser.add_argument("--mode", default="point_visual", choices=["point_only", "visual_only", "point_visual"])
     parser.add_argument("--segments", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--max-points", type=int, default=2048)
+    parser.add_argument("--max-points", type=int, default=1024)
     parser.add_argument("--checkpoint-path", default=None)
     parser.add_argument("--model-name", default="vjepa2_1_vit_base_384")
     parser.add_argument("--arch-name-override", default=None)
@@ -149,6 +170,8 @@ def main() -> None:
     parser.add_argument("--device", default=None)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--use-last-two-mean", action="store_true")
+    parser.add_argument("--sonata-ckpt-path", default=None)
+    parser.add_argument("--point-device", default=None)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
@@ -170,6 +193,8 @@ def main() -> None:
         device=args.device,
         dtype=args.dtype,
         use_last_two_mean=args.use_last_two_mean,
+        sonata_ckpt_path=args.sonata_ckpt_path,
+        point_device=args.point_device,
     )
     if args.output_json is not None:
         args.output_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")

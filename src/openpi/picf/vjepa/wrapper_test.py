@@ -1,13 +1,17 @@
 import numpy as np
+import pytest
 import torch
 
 from openpi.picf.vjepa.config import VjepaVisualConfig
 from openpi.picf.vjepa.wrapper import Vjepa2VisualEncoder
 from openpi.picf.vjepa.wrapper import _extract_encoder_state_dict
 from openpi.picf.vjepa.wrapper import _resolve_checkpoint_key
+from openpi.picf.vjepa.wrapper import vjepa_runtime_available
 
 
 def test_vjepa_wrapper_reshapes_dense_map() -> None:
+    if not vjepa_runtime_available():
+        pytest.skip("V-JEPA runtime dependencies are unavailable in this environment.")
     config = VjepaVisualConfig(
         arch_name_override="vit_tiny",
         img_size=64,
@@ -39,3 +43,15 @@ def test_vjepa_base_defaults_to_ema_encoder() -> None:
 
     assert checkpoint_key == "ema_encoder"
     assert torch.equal(state_dict["weight"], torch.tensor([2.0]))
+
+
+def test_rotate_queries_or_keys_preserves_input_dtype() -> None:
+    pytest.importorskip("timm")
+    from openpi.picf.vjepa.vendor.modules import rotate_queries_or_keys
+
+    x = torch.randn(1, 2, 6, 8, dtype=torch.bfloat16)
+    pos = torch.randn(1, 1, 4, dtype=torch.float32)
+
+    output = rotate_queries_or_keys(x, pos=pos, n_registers=1, has_cls_first=True)
+
+    assert output.dtype == x.dtype

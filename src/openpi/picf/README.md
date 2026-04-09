@@ -1,1059 +1,1250 @@
-# PICF Scaffold + Posterior README
+# PICF README
 
-本文档描述当前仓库里已经实际落地的 PICF 支线实现，并明确它与总纲的对应关系。
+这份 README 只描述当前仓库里已经实际落地的 PICF v0.4.8 core。
 
-文档目标不是重复完整方法总纲，而是回答下面这些工程问题：
+当前对应的设计总纲是 [`plan_readme_ray_geometry.md`](/home/siyuanyue/Documents/openpi/plan_readme_ray_geometry.md) 的 `v0.4.8 / MOVEON` 版本。
+这里的口径只写“当前仓库真实实现 + 本地实际核查结果”，不把未落地项混写成已完成。
 
-- 目前到底实现到了哪一阶段
-- 代码在哪里
-- 输入 / 输出契约是什么
-- scaffold、point posterior、visual posterior 现在各自做了什么
-- 哪些总纲条款已经满足，哪些还是刻意未实现
-- 应该用什么脚本做 replay / audit / acceptance
-- 当前阶段是否已经可以进入 AnyTouch 部署
+总方案基线以根目录 [`plan_readme.md`](/home/siyuanyue/Documents/openpi/plan_readme.md) 为准。
+若要看这次基于 projection/ray geometry first 的修订版设计，请看
+[`plan_readme_ray_geometry.md`](/home/siyuanyue/Documents/openpi/plan_readme_ray_geometry.md)。
+这里不重复整份方法说明，只回答三件事：
+
+- 当前代码已经实现了什么
+- 哪些地方做了明确的工程化近似
+- 哪些总纲条款当前只是“部分落地”
+- 现在应该从哪里继续接训练 / serving / deployment
+
+## 0. 2026-04-09 严格复核
+
+今天这轮重新按“代码、数学、数据链、交接文档”四条线做了复核。
+当前可确认的事实是：
+
+- `plan_readme_ray_geometry.md` 里 v0.4.8 的关键实现口径已经和 `src/openpi/picf/core/` 对齐
+- `python -m compileall -q src/openpi/picf/core scripts/picf_core_train_smoke.py scripts/picf_core_train.py`：通过
+- `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
+  - `31 passed`
+- `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
+  - `31 passed`
+- `task_ABCD_D` 的真实 `dir/zip` 原始样本一致性复核：
+  - 对训练样本索引 `0 / 1 / 10 / 100 / 1000`，
+    `prompt`、`rgb_static`、`depth_static`、`robot_obs`、`rgb_gripper`、`actions`
+    逐字段完全一致，最大绝对差均为 `0`
+- `scripts/stageb_calvin_audit.py`
+  - `--mode dataset --backend zip --split validation`：通过
+  - `--mode loader --backend zip --split validation --batch-size 4 --num-workers 0`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/stageb_calvin_audit.py --mode loader --backend zip --split validation --batch-size 4 --num-workers 0`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/stageb_calvin_audit.py --mode loader --backend dir --split training --batch-size 4 --num-workers 0`：通过
+- `scripts/picf_core_train_smoke.py`
+  - `dir + cpu + segment_index=0`：通过
+  - `zip + cpu + segment_index=0/50/100`：通过
+- `scripts/picf_core_train.py`
+  - `dir + cuda + 2-step long-run`：通过
+  - `dir + cuda + resume from latest.pt`：通过
+  - `zip + cuda + 1-step long-run`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py --backend dir --device cuda --num-train-steps 1`：通过
+  - 在 `/tmp/openpi-train-smoke/picf_core/picf_core_train_uv_min/` 落下：
+    - `args.json`
+    - `metrics.jsonl`
+    - `latest.pt`
+    - `step_1.pt`
+- `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train_smoke.py --backend dir --segment-index 0 --device cpu`：通过
+- `python scripts/picf_core_train_smoke.py --backend dir --segment-index 0 --device cuda`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train_smoke.py --backend dir --segment-index 0 --device cuda`：通过
+- `python scripts/picf_core_train_smoke.py --backend zip --segment-index 0 --device cuda`：通过
+- `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/train_pytorch.py ... --pytorch-training-precision bfloat16 --model.paligemma-variant dummy --model.action-expert-variant dummy`：通过
+  - 在 `/tmp/openpi-train-smoke/pi05_calvin_sonata/smoke_calvin_train_dummy_1step_uv_bf16/1` 落 checkpoint
+- follow-through 不变量复核：
+  - `posterior_mu_diff = 0.0`
+  - `posterior_sigma_diff = 0.0`
+  - `action_diff = 0.0296`
+  - `binding_col_err = 0.0`
+  - `ray_norm_err = 1.19e-07`
+  - `innovation_norm_t0 = 0.0`
+  - `innovation_norm_t1 = 0.9829`
+  - `projective_bias_nonzero = 230`
+  - `fusion_attention_shape = [79, 79]`
+  - `future_action_diff_teacher_vs_policy = 1.5760`
+  - `prev_policy_only_mu_diff = 0.0`
+  - `prev_executed_mu_diff = 0.0035`
+
+同时也有几条必须诚实写清的边界：
+
+- 当前 full-access shell 下重新探测，`.venv` Python 与 `uv run --no-sync python` 都给出：
+  - `torch.cuda.is_available() == True`
+  - `torch.cuda.device_count() == 1`
+  - `device_name = NVIDIA GeForce RTX 3070 Ti Laptop GPU`
+  - `nvidia-smi` 也能正常看到 `Driver 581.95 / CUDA 13.0`
+- 同一条 `dir + cpu + segment_index=0` smoke 在当前机器上仍复现了：
+  - 直接 `python scripts/picf_core_train_smoke.py ...` 会给出 `cuda_runtime_available = true`
+  - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train_smoke.py ...` 会给出 `cuda_runtime_available = false`
+  这个差异目前只影响 smoke 诊断字段，不影响 loss、梯度、数据链或 core 数学路径
+- 官方 `scripts/train_pytorch.py pi05_calvin_sonata` 这条旧训练主线在当前机器上的真实边界是：
+  - `uv + cuda + bfloat16 + dummy paligemma/action expert`：可完整跑完 `forward + backward + optim.step()` 并保存 checkpoint
+  - `uv + cuda + bfloat16 + full`：会在 Sonata encoder 进入 forward 时 OOM
+  - `uv + cuda + float32 + dummy`：会在 `optim.step()` 分配 Adam state 时 OOM
+  - `uv + cuda + float32 + full`：会在 `model.to(cuda)` 时 OOM
+  - `uv + cpu`：默认会因 `require_cuda=True` fail-fast；即便显式 `--model.no-require-cuda`，Sonata/spconv 仍会在 CUDA stream 路径报错，所以这条官方 Sonata 训练链当前本质上是 CUDA-only
+- legacy `scripts/scaffold/scaffold_replay_smoke.py` 当前真实状态是：
+  - `dir` backend 可通过
+  - `zip` backend 当前会报 `RuntimeError("No scaffold states were produced.")`
+- `scripts/picf_core_train.py` 当前虽然已经带有 `DistributedDataParallel` 包装与 `WORLD_SIZE/RANK/LOCAL_RANK` 接线，
+  但这轮真实验证仍然只覆盖了：
+  - 单进程单卡 direct python
+  - 单进程单卡 `uv run --no-sync python`
+  不能把它误写成“当前已经完成 torchrun 多卡 cloud 回归”
 
 
-## 1. 当前实现边界
+## 1. 当前主线
 
-当前 PICF 支线已经落地到三个层次：
+当前真正的主线已经切到 [`src/openpi/picf/core/pipeline.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/pipeline.py) 的 `PicfFullCore`，其前向现在对齐到：
 
-1. `deterministic scaffold`
-2. `point-only posterior-v0`
-3. `visual stage-1 posterior`：`point + V-JEPA2.1 visual`
+`xyzrgb point subset + V-JEPA visual map + AnyTouch tactile bundle + proprio/action/timing context`
+→ `unified multimodal token field`
+→ `observation anchors`
+→ `persistent posterior anchors`
+→ `global posterior self-attention`
+→ `language-late predictive heads`
+→ `explicit innovation token`
+→ `action head`
 
-当前**已经实现**：
+当前 core 输出状态定义在 [`src/openpi/picf/core/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/contracts.py)：
 
-- 连续 CALVIN segment replay
-- PICF 专用 depth -> pointcloud + normals
-- local frame / local crop / runtime metadata
-- deterministic geometry-first scaffold
-- geometry-gated support matching
-- birth / stale scaffold fallback
-- current prior
-- point-only expert constructor
-- V-JEPA 2.1 frozen visual encoder wrapper
-- support-level visual constructor 与 visual gate
-- point + visual information-form Gaussian fusion
-- point-only 与 visual-stage1 两套 replay / invariant / acceptance / spec-audit 脚本
-- V-JEPA 2.1 ckpt 下载脚本与统一 checkpoint 布局
+- `PicfTokenFieldState`
+- `PicfObservationAnchorState`
+- `PicfPosteriorAnchorState`
+- `PicfPredictiveState`
+- `PicfPredictionCache`
+- `PicfCoreState`
 
-当前**还没有实现**：
+旧的 `support / object shell / stage2` 结构不再是主线接口。
 
-- learnable support query / GRU grouping
-- AnyTouch tactile expert
-- predictive prior / JEPA prior
-- posterior-after object shell
-- semantic / context / downstream Stage 2
-- 主训练链或 serving 链接入
+当前最重要的工程判断是：
 
-因此，当前状态应理解为：
-
-`geometry-first scaffold + canonical support posterior(stage-1: point + visual)`
-
-而不是全文总纲的完整 v1 core。
+- current posterior 已经 language-free
+- innovation 已经是显式 residual token，而不是内部 gate 代理量
+- tactile / point future heads 已经是 real-signal heads
+- 训练侧的一步 `t -> t+1` teacher target 与 transition loss 现在已经闭合到 [`src/openpi/picf/core/training.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/training.py)
+- 但它还没有并进通用的 [`scripts/train_pytorch.py`](/home/siyuanyue/Documents/openpi/scripts/train_pytorch.py) 主训练入口
 
 
-## 2. 设计原则
+## 2. 已实现模块
 
-PICF 支线仍保持“独立新链路”，没有直接改写 `pi0` 主训练链。
+### 2.1 Unified Token Field
 
-原因：
+当前 `PicfFullCore` 已经把四类输入统一投影到一个共享隐空间：
 
-- scaffold / posterior 依赖跨帧状态连续性，不能直接复用随机 action 训练入口
-- tactile / object shell / JEPA prior 还未落地前，合入主链只会扩大调试面
+- point tokens
+- visual tokens
+- tactile tokens
+- compact context tokens
 
-当前阶段遵循的硬边界：
+它们经过共享 `TransformerStack` 融合后，形成当前感知 token field。
 
-- current posterior 只允许读 `current prior + point expert + visual expert`
-- posterior 不读 object / semantic / context / downstream state
-- visual 只作为 canonical expert 进入 posterior
-- visual 不得进入 support identity path
-- stale scaffold 时 point expert 关闭
-- stale scaffold 时 visual 只允许 center-patch fallback
-- 若 stale 且无 visual measurement，则 posterior 必须严格退化为 prior
+这条 token field 现在已经不是单纯的 `PE_pt + PE_img + PE_cam` 版本。
+当前代码已经把 geometry-first 的 point↔visual 几何先验接进 token builder：
 
-这与总纲中的 H1 / H2 / H3 / H4 是一致的：
+- point token 额外吃 `PE_proj`
+- visual token 额外吃 `PE_ray`
+- 无效投影点稳定走 learned null projection branch
+- token field 会显式导出 `projective_geometry`，其中包含：
+  - point visibility
+  - projected continuous patch-grid 坐标
+  - visual ray direction
+  - projective compatibility
+  - sparse candidate edge mask
 
-- H1：当前 belief state 仍然只由 prior + canonical experts 决定
-- H2：support identity 仍由 scaffold 的 geometry-gated continuity 定义
-- H3：object shell 仍未开启，因此不存在 object 反写 posterior
-- H4：semantic / context / downstream state 仍未进入 core
+这里再明确一次当前代码的坐标语义：
+
+- `point_proj_grid_index / visual_grid_index`：
+  连续 patch-grid 坐标，以 **patch** 为单位；当前 `PE_proj`、`PE_ray` 和 `projective_compatibility` 都使用这一套
+- `point_proj_grid_norm / visual_grid_norm`：
+  归一化辅助坐标；当前仅为 diagnostics / backward-compatibility 保留，不再作为主几何量
+
+### 2.2 Observation Anchors
+
+当前 observation anchors 由 point subset 的 FPS seeds 初始化，再从统一 token field 反复 cross-attend 读取。
+
+几何读出遵循 point-only 原则：
+
+- `x`
+- `S`
+- `a`
+
+只从 point token 权重回读，不让语言或 tactile 直接写当前几何。
+
+### 2.3 Persistent Posterior Anchors
+
+当前 persistent anchors 维护：
+
+- recurrent state `h, c`
+- Gaussian posterior `mu, Sigma`
+- 几何 `x, S, a`
+- 软活动度 `alpha`
+- soft binding `binding`
+- recycle gate `recycle_gate`
+
+当前 posterior 只依赖：
+
+- carried prior
+- 当前 observation anchor evidence
+
+语言不进入当前 posterior。
+
+### 2.4 Global Predictive-Innovation Module
+
+当前 posterior tokens 先做 global posterior self-attention，再生成：
+
+- visual latent prediction
+- visual real target prediction
+- tactile real target prediction
+- point real target prediction
+
+推理时会读取上一步缓存的 prediction cache，与当前真实目标做显式 residual，对应产生 innovation token。
+
+动作头读取的是：
+
+- posterior tokens
+- innovation token
+- language summary
+- proprio summary
+
+这就是当前控制路径。
+
+### 2.5 动作条件的时序语义
+
+这里单独说明，因为这是最容易写错的地方。
+
+当前代码现在遵循下面的约定：
+
+- state 现在显式缓存 `executed_action`
+- current prior 优先读上一时刻 `executed_action`
+- context token 里的 action 分支也优先读上一时刻 `executed_action`
+- 若外部没有提供已执行动作，才回退到上一时刻 policy 输出
+- future heads 在训练侧若显式提供 `action_future`，则走 teacher forcing
+- future heads 在普通推理路径里默认读当前动作头输出，而不是 `observation.action`
+
+这和总纲里的：
+
+- carried prior 由上一动作传播
+- predictive heads 推理时用当前已选动作
+
+是一致的；同时当前回归还显式验证了：
+
+- 只改 `previous.predictive.action`，不改 `previous.predictive.executed_action`，下一步 posterior 不变
+- 改 `previous.predictive.executed_action`，下一步 posterior 会改变
 
 
-## 3. 目录结构
+## 3. 十条硬约束核查
 
-### 3.1 PICF 核心代码
+这里把 [`plan_readme.md`](/home/siyuanyue/Documents/openpi/plan_readme.md) 的 H1-H10 逐条映射到当前代码。
 
-路径：[`src/openpi/picf/README.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md)
+### 3.1 H1 current posterior 是唯一物理 belief state
 
-主要文件：
+当前实现状态：已满足。
+
+对应原因：
+
+- posterior 只由 prior + observation-anchor evidence 决定
+- semantic summary 不进入 `_posterior_update(...)`
+- innovation token 不进入 current posterior
+- action head 不反写 posterior
+
+### 3.2 H2 当前感知先统一 token 化
+
+当前实现状态：已满足。
+
+point / visual / tactile / compact context 都先投到统一 hidden size，再进共享 token fusion transformer。
+其中 point↔visual 的主对齐机制现在也已经切到 geometry-first：
+
+- token-level `PE_proj`
+- token-level `PE_ray`
+- projective candidate mask
+
+而不是把强 pairwise `L_pv` 当主力。
+
+### 3.3 H3 语言只在 posterior 之后进入 predictive stage
+
+当前实现状态：已满足。
+
+`semantic_summary` 只在：
+
+- predictive state
+- control/action readout
+
+中使用，不参与 posterior construction。
+
+### 3.4 H4 tactile 与 point future heads 默认预测真实信号
+
+当前实现状态：部分满足，但主方向正确。
+
+已满足的部分：
+
+- tactile head 预测 low-res tactile summary + contact/force/pose auxiliary
+- point head 预测 coarse occupancy target
+
+尚未完全展开的部分：
+
+- 还没有上到 TSDF / range / scene-flow / resampled point set
+
+### 3.5 H5 visual head 默认 dual-head
+
+当前实现状态：已满足。
+
+当前 visual future head 包含：
+
+- latent head
+- real RGB summary head
+
+### 3.6 H6 innovation 必须显式定义
+
+当前实现状态：已满足。
+
+innovation 来自：
+
+- 上一步 prediction cache
+- 当前真实 target
+
+的显式残差；当前代码没有把任何 LSTM gate 当 innovation。
+
+### 3.7 H7 persistent anchor 生命周期默认软机制
+
+当前实现状态：已满足最小闭合版。
+
+当前已经实现：
+
+- soft binding
+- dustbin
+- support mass
+- activity
+- recycle gate
+
+当前没有引入旧式 `active/dormant/retired` 硬状态机。
+
+### 3.8 H8 除真实缺失和安全限制外不引入新 hard gates
+
+当前实现状态：基本满足。
+
+当前保留的硬规则主要是：
+
+- point contract violation
+- sensor sync invalid
+- first-step pointcloud contract check
+- action clipping
+
+其余 anchor/activity/recycle/contact 都是连续量。
+
+### 3.9 H9 默认训练范式为单阶段端到端
+
+当前实现状态：core 训练图已闭合，并且已经有独立的长期训练入口。
+
+也就是说：
+
+- 现在的 core graph 已经是单图结构
+- `PicfFullCore.extract_targets(...) + compute_transition_loss(...)` 已经提供了一步 future supervision 的最小训练闭环
+- `scripts/picf_core_train_smoke.py` 已经能在真实 CALVIN 帧上做 `forward + backward + optimizer.step()`
+- `scripts/picf_core_train.py` 已经把这条新 core 路径接成独立的长期训练入口，支持 checkpoint / resume
+- 但通用的 `scripts/train_pytorch.py` 仍然不是这条新 core 的正式训练入口
+
+所以这里可以宣称“本地可验证的一步训练闭环与长期训练 launcher 都已完成”，但不能宣称“仓库所有训练入口都已统一到新 core”。
+
+### 3.10 H10 推理时不要求显式 rollout，但要使用上一步预测形成当前 innovation
+
+当前实现状态：已满足。
+
+当前 runtime 只缓存一步 prediction cache，不做多步 imagination rollout。
+
+
+## 4. 当前工程化近似
+
+下面这些是刻意做出的实现近似，不是遗漏。
+
+### 4.1 Gaussian 使用对角协方差实现
+
+方法总纲允许 full covariance 记号，但当前工程实现为了稳定性和算力开销，内部使用 diagonal covariance 做 information-form fusion。
+
+对外导出的 `Sigma` 仍然是对角矩阵形式的 `[K, D_z, D_z]`，便于后续接口保持统一。
+
+这点需要明确：
+
+- 这是数学上的近似，不是文档疏漏
+- current fusion 仍然是 information-form，只是 precision 变成 diagonal precision
+
+### 4.2 Point Real Head 目前输出 coarse occupancy target
+
+当前 point real target 没有直接做 TSDF / range-image / scene-flow。
+目前实现是：
+
+- 以当前 ROI center 为中心
+- 对 crop 内点集做 coarse occupancy voxelization
+- 输出固定维度的 occupancy summary
+
+这是“真实点云信号优先”的最小闭合版本，后续可扩展到更强目标。
+
+### 4.3 Tactile Real Head 目前输出 low-res tactile summary
+
+当前 tactile real target 不是 latent，也不是 full tactile frame reconstruction。
+当前实现是：
+
+- 各 sensor 原始 tactile RGB 的低分辨率灰度摘要
+- contact / force / indent / pressure / pose 辅助量
+
+这仍然属于 real-signal supervision，而不是 latent-only。
+
+### 4.4 Visual Real Head 目前输出 low-res RGB summary
+
+当前 visual real target 是轻量真实视觉目标：
+
+- 对当前 RGB 做低分辨率 pooling
+
+视觉 latent target 仍然保留，用于 predictive embedding。
+
+### 4.4b Visual Latent Target 当前经过轻量 target adapter
+
+当前 visual latent branch 不是直接拿 raw pooled visual map 做 loss，
+而是先经过：
+
+- `visual_latent_target_proj(Pool(F_t^v))`
+
+来对齐到 future head 的 hidden dim。
+
+这层 target adapter 是当前实现里的工程化维度适配，
+README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
+
+### 4.5 Innovation token 当前先走 deterministic normalization
+
+当前 innovation residual 使用的是 deterministic RMS-style normalization。
+
+这符合总纲里允许的 deterministic fallback。
+
+尚未实现的是：
+
+- future-head covariance prediction
+- uncertainty-aware whitening residual
+
+### 4.6 Point↔Visual geometry-first 主链现已全部接通
+
+这轮和 `plan_readme_ray_geometry.md` 对齐后，当前代码已经实际落地：
+
+- token-level `PE_proj`
+- token-level `PE_ray`
+- visibility-aware null projection branch
+- `projective_compatibility`
+- `projective_candidate_mask`
+- relative projective attention bias `b_{t,m,u}^{proj}`
+- anchor-level `L_anc^{pv}`
+- bag-level `L_{pv}^{weak}`
+- attention-derived `L_{focus}^{pv}`
+- point-tactile `L_{pt}`
+- `\tau_{pv}` 对 `L_{pv}^{weak}` 的 softmax temperature 接线
+
+所以当前代码的真实状态是：
+
+- geometry-first token conditioning：已实现
+- patch-unit projective compatibility：已实现
+- low-support routing support gates：已实现，`R_{anc}` 现在显式乘 `\omega_{m}^{route,p}\omega_{u}^{route,v}`
+- sparse radius-neighborhood candidate mask：已实现
+- attention-level geometry bias：已实现
+- focus loss：已实现，默认从 fusion attention slice 读出
+- point-tactile alignment loss：已实现，当前通过 tactile sensor world pose 最近点近似构造正例
+- `FusionTransformer`：当前已经是 bias-capable attention stack，并能导出平均 attention map
+
+### 4.7 当前 `L_{pv}^{weak}` 是代码对齐版近似
+
+总纲里更理想的 `L_{pv}^{weak}` 会排除 projective neighborhood 高度重叠的 visual negatives。
+当前代码先用了更简单、数值稳定的近似：
+
+- 正例仍然是 ray-bag / projective neighborhood pooled point embedding
+- negatives 当前是“其余 visual patches”
+- `\tau_{pv}` 当前已经真实接入 logits temperature
+- 还没有做 overlap-aware negative exclusion
+
+这是有意保留的工程近似，不是文档漏写。
+
+另外，当前 `sigma_proj_patches` 直接作用在连续 patch-grid 坐标上，
+也就是和文档里 “`1.5 patch`” 的单位语义完全一致。
+归一化 grid 坐标现在只保留为辅助导出，不再参与主 compatibility 计算。
+
+对于 soft depth factor，当前代码还有一条显式保护：
+
+- 如果某个可见点的逐点 depth sample 本身无效，例如采样到 NaN / 缺测区域
+- 该点会回退到 `depth_factor = 1`
+- 不会因为“无效深度”被误当成强几何不一致而额外压低 compatibility
+
+当前还保留的一条工程近似是：
+
+- `projective_candidate_mask` 已经通过连续 patch-grid 上的 sparse radius neighborhood 与 `G_{t,m,u}^{proj}>\tau_{proj}` 共同构造
+- 但 `projective_compatibility` 本身仍是 dense 计算，再与 sparse neighborhood 相交
+- 也就是说，当前是“dense compatibility + sparse candidate mask”的实现，而不是完全稀疏的 compatibility builder
+
+### 4.8 Observation / Anchor read 当前用 residual cross-attention 近似实现
+
+总纲里 observation-anchor read 和 persistent-anchor evidence read 记成了显式 `GRU_obs / GRU_anc` 更新。
+当前代码实现采用的是更轻量的工程近似：
+
+- `CrossAttentionRead`
+- 残差更新
+- 后接小型 self-attention / feed-forward
+
+这两条路径当前仍满足“query 反复从当前 token / anchor 集合读证据”的主语义，
+但不是和总纲完全逐式同构的 GRU 单元。
+
+### 4.9 当前 core 在全局坐标系里裁剪，不再把 core state 写在局部坐标系
+
+当前 `PicfFullCore` 只消费 `point_set.xyz_world`，并在全局坐标系里按 `G_t[:3,3]` 附近做 subset。
+
+旧的 `frame_context` / `local_frame` 辅助结构仍然在仓库里保留，主要用于 legacy 路径和 builder 兼容，但当前 core 的 posterior state 不再定义在单独的 local frame 里。
+
+### 4.10 训练侧 `t -> t+1` targets 已经闭合到 core transition loss，但尚未接入通用训练入口
+
+这是当前 README 里必须写清楚的一条。
+
+现在已经有的是：
+
+- current-step real targets for runtime innovation construction
+- current-step future prediction heads 的张量接口
+- 对外公开的 [`PicfFullCore.extract_targets(...)`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/pipeline.py)
+- 一步训练损失 [`compute_transition_loss(...)`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/training.py)
+- 一个可直接在真实 CALVIN 数据上跑通的训练 smoke：
+  [`scripts/picf_core_train_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train_smoke.py)
+- 一个可直接做 checkpoint / resume 的长期训练脚本：
+  [`scripts/picf_core_train.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train.py)
+
+现在还没有真正接完的是：
+
+- 更完整的 multi-step / multi-loss 训练计划
+- 多卡 cloud recipe 的系统性回归
+
+所以当前代码更准确的定位是：
+
+- inference/state graph 已闭合
+- one-step training loss graph 已闭合
+- 独立长期训练入口已闭合
+- 但通用训练入口和最终多卡训练配方还不是最终版
+
+### 4.10b `scripts/picf_core_train.py` 当前真实训练 contract
+
+这条脚本现在已经是新 core 的正式长期训练入口，但它的“真实 contract”需要写清楚：
+
+- 数据源不是旧 `create_data_loader(pi05_calvin_sonata)`，而是脚本内部的 `_CalvinTransitionSource`
+- `_CalvinTransitionSource` 直接使用 `CalvinLangSegmentDataset(..., action_horizon=1, sample_within_segment=False)`
+- 每个训练 step 会随机抽一段 CALVIN segment window，窗口长度是 `unroll_steps + 1`
+- 同一个 window 内，脚本会按 `t -> t+1` 顺序重复调用 `PicfFullCore.step(...)`，并在每个 transition 上计算 `compute_transition_loss(...)`
+- 当前 visual path 不是直接在线拉起完整 V-JEPA encoder，而是：
+  - 用 `_rgb_visual_override(...)` 把当前 RGB 做 `8x8` pooled visual map
+  - 再通过 `visual_map_override` 喂给 core
+  - `visual_encoder` 在这条脚本里是 `_NullVisualEncoder()`
+- 当前 tactile path 也不是在线 AnyTouch2 真 ckpt，而是 `_NullTactileEncoder()`
+
+因此，这条长期训练脚本的真实定位是：
+
+- 它已经真实闭合了 v0.4.8 新 core 的训练图
+- 也已经支持 checkpoint / resume / 单卡云上开跑
+- 但它当前仍然是“新 core 的可执行长期训练 launcher + 轻量 visual/tactile override 配置”
+- 不能误写成“完整 V-JEPA + AnyTouch 在线训练已经接到长期 trainer”
+
+### 4.10c `scripts/picf_core_train.py` 的输出目录与恢复语义
+
+当前输出目录固定为：
+
+- `<checkpoint-base-dir>/picf_core/<exp-name>/args.json`
+- `<checkpoint-base-dir>/picf_core/<exp-name>/metrics.jsonl`
+- `<checkpoint-base-dir>/picf_core/<exp-name>/latest.pt`
+- `<checkpoint-base-dir>/picf_core/<exp-name>/step_<N>.pt`
+
+其中：
+
+- `args.json`：记录本次启动参数
+- `metrics.jsonl`：按 `log_interval` 追加 step 级 JSON 指标
+- `latest.pt`：始终覆盖到最近一次保存
+- `step_<N>.pt`：保留对应 step 的显式 checkpoint
+
+恢复语义是：
+
+- `--resume`：默认从同一实验目录下的 `latest.pt` 接着跑
+- `--resume-checkpoint <path>`：显式从指定 checkpoint 恢复
+
+这里还有一条必须写进交接文档的细节：
+
+- `metrics.jsonl` 当前是 append 模式
+- 如果复用同一个 `exp-name` 重新起一个非 `--resume` 训练，日志里会继续追加，可能出现重复 step id
+- 所以想要“干净的一条新曲线”，应当：
+  - 用新的 `exp-name`
+  - 或先清理旧实验目录
+
+### 4.11 当前训练调试接口已经有哪些
+
+当前新 core 的训练调试信息主要分三层。
+
+第一层是 step 级 debug 字段，来自
+[`PicfCoreOutput.debug`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/contracts.py) /
+[`PicfFullCore.step(...)`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/pipeline.py)：
+
+- `num_point_tokens`
+- `num_visual_tokens`
+- `num_tactile_tokens`
+- `support_mass_mean`
+- `active_alpha_sum`
+- `innovation_norm`
+- `hold_triggered`
+- `mean_point_visibility`
+- `projective_candidate_edges`
+- `projective_candidate_density`
+
+这些字段的用途是：
+
+- `num_point_tokens == 0`：
+  当前 `xyzrgb` contract / ROI subset 基本有问题；首步这是 hard failure
+- `num_visual_tokens == 0`：
+  当前视觉 clip / override / encoder 路径没进来
+- `support_mass_mean` 长期接近 `0`：
+  observation→persistent binding 没吸住，通常先查 point token、seed、dustbin
+- `active_alpha_sum` 长期塌到接近 `0`：
+  recycle / activity 失衡，posterior 会进入 hold 风险区
+- `innovation_norm` 首步应为 `0`，后续步若观测变化应大于 `0`
+- `hold_triggered == 1`：
+  当前步被 runtime supervisor 判为不安全，继续先看 `point_contract_ok / sync_valid / uncertainty / innovation`
+- `mean_point_visibility` 长期接近 `0`：
+  先查相机标定、点云坐标系、`CameraModel`、以及是否把点送到了错误 frame
+- `projective_candidate_density` 接近 `0`：
+  通常是投影错位、可见性全灭、或 `tau_proj` / `sigma_proj_patches` 设得太苛刻
+- `projective_candidate_density` 接近 `1`：
+  通常说明 visual grid 太粗、`sigma_proj_patches` 过大、或 candidate threshold 太松
+
+第二层是一步训练损失分解，来自
+[`PicfTransitionLossBreakdown`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/training.py)：
+
+- `total`
+- `action`
+- `action_pos`
+- `action_rot`
+- `action_gripper`
+- `visual_latent`
+- `visual_real`
+- `tactile_real`
+- `point_real`
+- `alignment`
+- `anchor_pv`
+- `pv_weak`
+- `focus_pv`
+- `availability`
+
+这里的调试解释应按下面看：
+
+- `availability[i] == 0`：
+  该分支当前 target 不可用，此时对应 loss 为 `0` 是正常的
+- `visual_latent` 恒为 `0` 且 `availability_visual_latent == 1`：
+  一般说明 next-step visual map override / visual encoder 路径没接对
+- `tactile_real` 恒为 `0`：
+  先区分是本机用 tactile stub，还是 replay 里当前帧本来没有有效 tactile packet
+- `point_real` 爆炸：
+  通常先查 ROI crop、occupancy grid 尺度、point subset 是否空或过 sparse
+- `action_*` 三项都为 `0`：
+  常见原因是没传 `action_target`
+- `alignment == 0` 且当前 visual / point availability 都正常：
+  先查 `projective_candidate_edges`
+- `anchor_pv` 有值但 `pv_weak` 恒为 `0`：
+  往往说明当前 candidate edge 太少，或 visual token 数不足以形成有效 negatives
+- `focus_pv == 0`：
+  当前不再是默认预期；若长期为 `0`，优先查 fusion attention map、candidate edge 是否为空，或 visual→point slice 是否被错误 mask
+- `pt == 0`：
+  先区分是当前样本 tactile token 不可用，还是 tactile contact gate 接近 `0`
+
+第三层是 smoke 脚本的 JSON 输出，来自
+[`scripts/picf_core_train_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train_smoke.py)：
+
+- `device`
+- `device_name`
+- `cuda_available`
+- `cuda_runtime_available`
+- `segment_index`
+- `current_step_id`
+- `next_step_id`
+- `loss_total`
+- `loss_action`
+- `loss_visual_latent`
+- `loss_visual_real`
+- `loss_tactile_real`
+- `loss_point_real`
+- `loss_alignment`
+- `loss_anchor_pv`
+- `loss_pv_weak`
+- `loss_focus_pv`
+- `loss_pt`
+- `availability_visual_latent`
+- `availability_visual_real`
+- `availability_tactile_real`
+- `availability_point_real`
+- `action_grad_norm`
+- `point_grad_norm`
+- `projective_candidate_edges`
+- `projective_candidate_density`
+- `mean_point_visibility`
+- `mean_point_route_gate`
+- `mean_visual_route_gate`
+- `mean_point_route_support`
+- `mean_visual_route_support`
+
+其中当前字段语义是：
+
+- `cuda_available`：本次 smoke 是否实际在 CUDA 设备上执行
+- `cuda_runtime_available`：脚本启动时、顶层 import 阶段看到的 CUDA 运行时可见性
+
+若 `cuda_runtime_available` 与独立执行的 `python -c "import torch; print(torch.cuda.is_available(), torch.cuda.device_count())"` 不一致，
+以独立探测为准；当前这个字段只作为 smoke 诊断辅助项，不参与任何核心数学或训练图逻辑。
+
+健康 smoke 的最低标准是：
+
+- `loss_total` 为有限正数
+- 至少 visual / point 分支 availability 为 `1`
+- `action_grad_norm > 0`
+- `point_grad_norm > 0`
+- `optimizer.step()` 能完成
+
+如果只想最快判断新 core 训练图是不是活的，
+优先看这四个量：
+
+- `loss_total`
+- `availability_point_real`
+- `action_grad_norm`
+- `point_grad_norm`
+
+
+## 5. 数据与接口约束
+
+### 5.1 Point Contract
+
+当前 core 明确要求 point input 满足 `xyzrgb` 契约。
+
+对应类型仍然是 [`src/openpi/picf/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/contracts.py) 里的 `PicfPointCloudFrame`：
+
+- `xyz_world` 必需
+- `rgb` 必需
+- `normal_world` 目前仍保留为 side field
+
+说明：
+
+- normals 仍然在 data contract 中保留，便于 legacy / geometry helper 复用
+- 但 Sonata backbone 主输入已经严格收紧为 `xyz+rgb`
+- 当前 core 也不再把 normals 当 formal posterior state
+
+### 5.2 Runtime Meta
+
+`RuntimeMeta` 现在在保留旧字段的同时，新增了：
+
+- `visual_available`
+- `tactile_available`
+- `point_contract_ok`
+- `sync_valid`
+
+旧脚本仍可继续读原有字段，新 core 则直接使用这些更贴近 v0.4.8 的标记。
+
+### 5.3 Semantic Input
+
+语言默认不直接从 core 内部拉起 PaliGemma。
+
+当前语义路径支持两种方式：
+
+- 直接传 `semantic_override`
+- 传入真实 PaliGemma outputs，由 `PaliGemmaSemanticWrapper` 做摘要
+
+如果两者都没有，core 会使用零语义 token。
+
+
+## 6. Legacy 路径的地位
+
+下面这些目录仍然保留，但已经不再代表当前主线：
+
+- [`src/openpi/picf/scaffold`](/home/siyuanyue/Documents/openpi/src/openpi/picf/scaffold)
+- [`src/openpi/picf/posterior`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior)
+
+它们现在的角色是：
+
+- regression reference
+- old invariant / acceptance scripts 的承载层
+- 某些低层点云 /视觉 helper 的复用来源
+
+不要再把这些模块当作 v0.4.8 的主状态接口。
+
+这里的 `legacy` 不是描述性措辞，而是当前代码引用面的事实：
+
+- `src/openpi/picf/posterior/` 与 `src/openpi/picf/scaffold/` 的直接调用者，主要只剩 `scripts/posterior/*`、`scripts/scaffold/*` 和对应单测
+- 当前主训练入口 [`scripts/train_pytorch.py`](/home/siyuanyue/Documents/openpi/scripts/train_pytorch.py) 不导入 `openpi.picf.posterior` 或 `openpi.picf.scaffold`
+- 当前新主线 [`src/openpi/picf/core/`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core) 仍然没有并进 `scripts/train_pytorch.py`
+- 但它现在已经有独立训练入口：
+  [`scripts/picf_core_train.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train.py)
+- 当前这条独立入口已经在真实 CALVIN 上完成：
+  - `dir + cuda` 起步
+  - `resume from latest.pt`
+  - `zip + cuda` 起步
+
+
+## 7. 关键文件
+
+主实现：
+
+- [`src/openpi/picf/core/config.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/config.py)
+- [`src/openpi/picf/core/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/contracts.py)
+- [`src/openpi/picf/core/pipeline.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/pipeline.py)
+- [`src/openpi/picf/core/training.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/training.py)
+
+输入封装与 backbones：
 
 - [`src/openpi/picf/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/contracts.py)
-- [`src/openpi/picf/camera_io.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/camera_io.py)
-- [`src/openpi/picf/geometry.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/geometry.py)
-- [`src/openpi/picf/frame_context.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/frame_context.py)
 - [`src/openpi/picf/pointcloud_picf.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/pointcloud_picf.py)
-- [`src/openpi/picf/replay/calvin_replay.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/replay/calvin_replay.py)
-- [`src/openpi/picf/scaffold/pipeline.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/scaffold/pipeline.py)
-- [`src/openpi/picf/scaffold/matching.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/scaffold/matching.py)
-- [`src/openpi/picf/scaffold/birth.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/scaffold/birth.py)
-- [`src/openpi/picf/scaffold/local_frame.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/scaffold/local_frame.py)
-- [`src/openpi/picf/posterior/config.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/config.py)
-- [`src/openpi/picf/posterior/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/contracts.py)
-- [`src/openpi/picf/posterior/prior.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/prior.py)
-- [`src/openpi/picf/posterior/point_expert.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/point_expert.py)
-- [`src/openpi/picf/posterior/visual_expert.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/visual_expert.py)
-- [`src/openpi/picf/posterior/fusion.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/fusion.py)
-- [`src/openpi/picf/posterior/fusion_visual.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/fusion_visual.py)
-- [`src/openpi/picf/posterior/pipeline.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/pipeline.py)
-- [`src/openpi/picf/posterior/pipeline_visual.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/pipeline_visual.py)
-
-### 3.2 V-JEPA 2.1 接入代码
-
-- [`src/openpi/picf/vjepa/config.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/vjepa/config.py)
-- [`src/openpi/picf/vjepa/history.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/vjepa/history.py)
-- [`src/openpi/picf/vjepa/preprocess.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/vjepa/preprocess.py)
+- [`src/openpi/picf/sonata/wrapper.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/sonata/wrapper.py)
 - [`src/openpi/picf/vjepa/wrapper.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/vjepa/wrapper.py)
-- [`src/openpi/picf/vjepa/vendor/ATTRIBUTION.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/vjepa/vendor/ATTRIBUTION.md)
+- [`src/openpi/picf/anytouch/wrapper.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/anytouch/wrapper.py)
 
-说明：
+回归测试：
 
-- `vendor/` 下 vendoring 了 V-JEPA 2.1 encoder 的最小官方子集
-- runtime 不依赖 hub 下载
-- `TEMP_REPO` 只是临时来源，不属于最终运行依赖
+- [`src/openpi/picf/core/pipeline_test.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/pipeline_test.py)
+- [`src/openpi/picf/core/training_test.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/training_test.py)
+- [`src/openpi/picf/pointcloud_picf_test.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/pointcloud_picf_test.py)
 
-### 3.3 Scaffold 脚本
+训练 smoke：
 
-- [`scripts/scaffold/scaffold_replay_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/scaffold/scaffold_replay_smoke.py)
-- [`scripts/scaffold/scaffold_invariant_audit.py`](/home/siyuanyue/Documents/openpi/scripts/scaffold/scaffold_invariant_audit.py)
-- [`scripts/scaffold/scaffold_stability_eval.py`](/home/siyuanyue/Documents/openpi/scripts/scaffold/scaffold_stability_eval.py)
-- [`scripts/scaffold/scaffold_acceptance_check.py`](/home/siyuanyue/Documents/openpi/scripts/scaffold/scaffold_acceptance_check.py)
+- [`scripts/picf_core_train_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train_smoke.py)
+- [`scripts/picf_core_train.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train.py)
 
-### 3.4 Posterior 脚本
 
-point-only：
+## 8. 当前核查结果
 
-- [`scripts/posterior/posterior_replay_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_replay_smoke.py)
-- [`scripts/posterior/posterior_invariant_audit.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_invariant_audit.py)
-- [`scripts/posterior/posterior_acceptance_check.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_acceptance_check.py)
-- [`scripts/posterior/posterior_spec_audit.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_spec_audit.py)
-- [`scripts/posterior/posterior_full_check.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_full_check.py)
+本次修改后，已经实际核查通过：
 
-visual stage-1：
+- `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
+- `from openpi.picf.core import ...` 顶层导入
 
-- [`scripts/posterior/posterior_visual_replay_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_visual_replay_smoke.py)
-- [`scripts/posterior/posterior_visual_invariant_audit.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_visual_invariant_audit.py)
-- [`scripts/posterior/posterior_visual_acceptance_check.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_visual_acceptance_check.py)
-- [`scripts/posterior/posterior_visual_stage1_spec_audit.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_visual_stage1_spec_audit.py)
-- [`scripts/posterior/posterior_visual_full_check.py`](/home/siyuanyue/Documents/openpi/scripts/posterior/posterior_visual_full_check.py)
+当前这一组回归结果是：
 
-### 3.5 Checkpoint 管理
+- `31 passed`
 
-- [`scripts/vjepa_ckpt_fetch.py`](/home/siyuanyue/Documents/openpi/scripts/vjepa_ckpt_fetch.py)
+当前 `pipeline_test.py` 覆盖的核心约束包括：
 
-默认 V-JEPA 2.1 ckpt 放在：
+- unified token field / observation anchors / posterior anchors 基本张量闭合
+- language-late：改语言不改 current posterior
+- previous-step prediction 形成 current innovation
+- semantic cache reuse
+- first-step `xyzrgb` contract 检查
+- point contract 失效后的 hold / zero-point-token 行为
+- projective geometry 与 legacy `_project_world_points()` / `_scale_to_grid()` 一致
+- `camera_model` 缺失时，visual override 仍稳定走 null projection branch
+- behind-camera 点不会在 `PE_proj` 路径产生 NaN / Inf
+- persistent anchor 的 `S` 更新包含 observation-center scatter 项
+- 可见点若采样到无效深度，不会被 projective compatibility 错误压成 0
 
-- [`checkpoints/foundation/vjepa2_1`](/home/siyuanyue/Documents/openpi/checkpoints)
+除此之外，这次我还额外人工核查了三件数学/工程一致性问题：
 
+- 语言路径不会改变 current posterior
+- prior/context 现在优先读取 `previous.executed_action`，而不是 `previous.policy action`
+- innovation 分支在 visual latent / visual real / tactile real / point real 四路上都走显式 residual
 
-## 4. 基础数据契约
+### 8.1 训练调试命令与本机结论
 
-### 4.1 `PicfPointCloudFrame`
-
-定义位置：
-[`src/openpi/picf/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/contracts.py)
-
-字段：
-
-- `grid_coord: [N,3] int32`
-- `xyz_world: [N,3] float32`
-- `rgb: [N,3] float32`
-- `normal_world: [N,3] float32`
-- `valid_point_mask: [N] bool`
-- `frame_valid: bool`
-
-语义：
-
-- 这是 PICF 支线使用的可变长点集
-- 坐标默认已经位于 world/base 稳定参考系
-- `rgb` 是归一化到 `[0,1]` 的颜色
-- `normal_world` 是点法向
-- `frame_valid=False` 表示本帧点云无效，scaffold 会转入 stale 逻辑
-
-### 4.2 `RuntimeMeta`
-
-定义位置：
-[`src/openpi/picf/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/contracts.py)
-
-字段：
-
-- `t_v_last`
-- `t_p_last`
-- `t_t_last`
-- `t_rgb_last`
-- `b_rgb_avail`
-- `rgb_proj_residual`
-- `n_vis_upd`
-- `v_rgb_p`
-- `v_pc_scaf`
-- `stale_scaffold_steps`
-
-当前说明：
-
-- 这里只实现了 scaffold / point posterior / visual posterior 当前需要的最小 runtime metadata
-- `v_rgb_p` 和 `v_pc_scaf` 已经在 scaffold 中真正生效
-- `t_v_last` 已从“每步直接写当前时间”修正为“最近一次被 runtime 接受的 visual update 时间”
-- tactile stale gate 的完整 runtime 使用仍未开始
-
-### 4.3 `PicfObservation`
-
-定义位置：
-[`src/openpi/picf/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/contracts.py)
-
-字段：
-
-- `rgb_static`
-- `depth_static`
-- `robot_obs`
-- `prompt`
-- `step_id`
-- `segment_id`
-- `timestamp_s`
-- `reset_scaffold`
-- `rgb_gripper`
-- `point_set`
-- `runtime_meta`
-- `G_t`
-
-语义：
-
-- 这是 PICF 支线每一步 forward 的统一输入容器
-- `reset_scaffold=True` 表示一个 segment 的首帧，必须重置 scaffold continuity
-- `G_t` 是当前 local frame 到稳定全局 frame 的变换
-- visual stage-1 当前只消费 `rgb_static`
-
-### 4.4 `SupportScaffoldState`
-
-定义位置：
-[`src/openpi/picf/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/contracts.py)
-
-字段：
-
-- `pi_geom`
-- `x`
-- `n`
-- `r`
-- `omega`
-- `active_mask`
-- `pred_idx`
-- `matched_mask`
-- `birth_mask`
-- `e_id`
-- `s_qry`
-- `G_t`
-- `step_id`
-- `segment_id`
-- `runtime_meta`
-- `debug`
-
-说明：
-
-- 这是 scaffold 输出，也是 posterior 当前阶段的直接输入
-- `pred_idx / matched_mask` 负责驱动 current prior 继承
-- `e_id` 当前只保留 scaffold identity bookkeeping 语义，不进入 posterior
-- visual expert 只读取 `pi_geom / x / n / r / G_t / runtime_meta`，不反写 scaffold
-
-### 4.5 `PosteriorState`
-
-定义位置：
-[`src/openpi/picf/posterior/contracts.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/contracts.py)
-
-字段：
-
-- `mu`
-- `var_block`
-- `mu_prop`
-- `var_prop_block`
-- `point`
-- `visual`
-- `step_id`
-- `segment_id`
-- `debug`
-
-重要边界：
-
-- 当前没有 object / semantic / context 字段
-- 当前没有 tactile measurement 字段
-- 当前 posterior 是 support-level Gaussian belief state
-- point-only 管线下 `visual=None`
-- visual stage-1 管线下 `visual: VisualExpertState`
-
-
-## 5. 点云、局部帧与视觉历史
-
-### 5.1 `CalvinDepthToPicfPointCloud`
-
-定义位置：
-[`src/openpi/picf/pointcloud_picf.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/pointcloud_picf.py)
-
-作用：
-
-- 从 CALVIN 相机标定和 `rgb_static / depth_static` 构造 PICF 点云
-- 输出 world 坐标点、法向、颜色和体素网格坐标
-
-关键实现：
-
-- 从 `cameras.json` 读取内外参
-- 用深度图反投影得到 `points_cam`
-- 用有限差分计算 organized normals
-- 对无法稳定计算的 normal，用 `-xyz_cam` 方向做 fallback
-- 默认将点和法向都变换到 world/base 稳定系
-- 点选取支持 `fps` 或 `linspace`
-
-常用参数：
-
-- `stride`
-- `max_points`
-- `voxel_size`
-- `z_min`
-- `z_max`
-- `selection_mode`
-
-### 5.2 `EndEffectorLocalFrame`
-
-定义位置：
-[`src/openpi/picf/scaffold/local_frame.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/scaffold/local_frame.py)
-
-当前默认行为：
-
-- 从 `robot_obs[0:3]` 读平移
-- 从 `robot_obs[3:6]` 读 ZYX roll-pitch-yaw
-- 生成 `G_t`
-
-这意味着当前 local frame 仍然是一个 CALVIN-friendly 默认实现，不是最终机器人无关方案。
-
-### 5.3 `PointFrameContext`
-
-定义位置：
-[`src/openpi/picf/frame_context.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/frame_context.py)
-
-作用：
-
-- 把 `point_set` 从 world/base 系变换到当前 local frame
-- 截取 `crop_radius_m` 范围内的局部点集
-- 给 scaffold、point posterior、visual posterior 共用
-
-### 5.4 `VisualClipBuffer`
-
-定义位置：
-[`src/openpi/picf/vjepa/history.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/vjepa/history.py)
-
-作用：
-
-- 在 replay / runtime 上层维护 segment-scoped visual history
-- 首帧 reset
-- 长度不足 `num_frames` 时做 deterministic left-pad
-- 不改写 `CalvinSequentialReplay`
-
-当前默认：
-
-- `num_frames = 64`
-
-
-## 6. 连续重放器
-
-### `CalvinSequentialReplay`
-
-定义位置：
-[`src/openpi/picf/replay/calvin_replay.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/replay/calvin_replay.py)
-
-设计目的：
-
-- 为 scaffold continuity 提供顺序 replay
-- 避免使用现有 action training 的单帧随机采样路径
-
-关键行为：
-
-- 使用 `CalvinLangSegmentDataset(... sample_within_segment=False, action_horizon=1)`
-- 按 segment 内顺序逐帧返回 `PicfObservation`
-- 每个 segment 首帧自动设置 `reset_scaffold=True`
-
-这条链是整个 PICF 支线成立的前提，也是 visual clip buffer 能独立挂载的基础。
-
-
-## 7. Scaffold 当前实现
-
-### 7.1 配置
-
-定义位置：
-[`src/openpi/picf/scaffold/pipeline.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/scaffold/pipeline.py)
-
-当前使用：
-
-`DeterministicScaffoldConfig`
-
-关键参数：
-
-- `k_support=96`
-- `k_birth=12`
-- `k_active=96`
-- `crop_radius_m=0.08`
-- `r_min_m=0.003`
-- `r_max_m=0.02`
-- `tau_sup=0.25`
-- `tau_p_m=0.005`
-- `tau_n=0.8`
-- `delta_pc_scaf_s=0.15`
-- `n_hold_scaf=2`
-- `v_rgb_identity=False`
-
-### 7.2 当前 scaffold 是什么
-
-当前 scaffold 不是 learnable query / attention 版本，而是 deterministic geometry-first 版本：
-
-1. 构造 local crop
-2. 从上一帧 carry-over active supports 生成 provisional seeds
-3. 从当前未覆盖点集上用 weighted FPS 生成 birth seeds
-4. 对每个 seed 做 radius-limited local grouping
-5. 读出 `x / n / r / omega / e_id`
-6. 生成 `active_mask`
-7. 做 geometry-gated matching
-8. 标出 `birth_mask`
-9. 在 stale 时进入 transport-only fallback
-
-### 7.3 已修正的关键行为
-
-- 空邻域 seed 不再强行吸附最近点
-- carried seeds 在进入新帧前先做 crop 过滤
-- `omega` 全零时允许 active set 为空
-- stale scaffold 步禁止 birth
-- stale scaffold 步强制关闭 point-RGB identity refinement
-- `t_v_last` 不再被 scaffold 误写成“当前 step 时间”
-
-
-## 8. Posterior 当前实现
-
-### 8.1 当前阶段定义
-
-当前 posterior 有两条并行管线：
-
-1. `PointOnlyPosteriorPipeline`
-2. `PointVisualPosteriorPipeline`
-
-第一条保留为 regression baseline。第二条是当前真正的 stage-1 core。
-
-### 8.2 `PosteriorConfig`
-
-定义位置：
-[`src/openpi/picf/posterior/config.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/config.py)
-
-当前默认值：
-
-- `dim_h=32`
-- `dim_g=32`
-- `dim_c=32`
-- `sigma_reset=1.0`
-- `q_motion_block=(0.01, 0.01, 0.05)`
-- `sigma_min2=1e-4`
-- `sigma_max2=10.0`
-- `point_var_h=4.0`
-- `point_var_g=0.05`
-- `point_var_c=4.0`
-- `visual_var_h=0.5`
-- `visual_var_g=1.0`
-- `visual_var_c=4.0`
-- `n_min_anchors=8`
-- `delta_ref_m=0.005`
-- `gamma_min_pc=0.05`
-- `point_radius_min_m=0.03`
-
-解释：
-
-- point expert 仍承担 geometry-primary 角色，因此 `point_var_g` 最小
-- visual expert 当前主要承担 appearance / view-conditioned support summary，因此 `visual_var_h < visual_var_g`
-- `c` block 目前仍不给 visual 强约束
-
-### 8.3 `build_current_prior`
-
-定义位置：
-[`src/openpi/picf/posterior/prior.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/prior.py)
-
-当前逻辑：
-
-- `matched_mask=True` 且 `pred_idx>=0` 的 slot：
-  - `mu_prop <- previous.mu[pred_idx]`
-  - `var_prop_block <- previous.var_block[pred_idx] + q_motion_block`
-- 其他 slot：
-  - `mu_prop <- 0`
-  - `var_prop_block <- sigma_reset^2`
-
-这与总纲里的 current prior 语义一致。
-
-### 8.4 `build_point_expert`
-
-定义位置：
-[`src/openpi/picf/posterior/point_expert.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/point_expert.py)
-
-当前 point expert 是 geometry-primary 的 deterministic v0：
-
-- 只在 fresh scaffold 时工作
-- 默认只对 active supports 计算
-- 支持域半径取：
-  - `max(r_j, seed_init_radius_m, point_radius_min_m)`
-- 构造统计量：
-  - `anchor_count`
-  - `delta2x`
-  - `gamma_n`
-  - `delta_pc`
-  - `gamma_pc`
-- gate 条件：
-  - `anchor_count >= n_min_anchors`
-  - `gamma_pc_tilde >= gamma_min_pc`
-
-当前 measurement mean 的 `g` block 由几何摘要组成并零填充到 32 维。
-
-### 8.5 `Vjepa2VisualEncoder`
-
-定义位置：
-[`src/openpi/picf/vjepa/wrapper.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/vjepa/wrapper.py)
-
-职责：
-
-- 接收 `[T,H,W,3]` clip
-- resize / normalize
-- 运行 frozen V-JEPA 2.1 encoder
-- 产出 dense token grid
-
-当前默认部署配置：
-
-- `model_name = "vjepa2_1_vit_base_384"`
-- `img_size = 384`
-- `num_frames = 64`
-- `patch_size = 16`
-- `tubelet_size = 2`
-- `camera_name = "static"`
-- 官方 checkpoint 选择语义：
-  - `vit_base_384 / vit_large_384 -> ema_encoder`
-  - `vit_giant_384 / vit_gigantic_384 -> target_encoder`
-
-张量形状：
-
-- 输入 clip：`[64,H,W,3]`
-- 预处理后：`[1,64,3,384,384]`
-- encoder token grid：`[32,24,24,768]`
-- current visual map：`[24,24,768]`
-
-### 8.6 `build_visual_expert`
-
-定义位置：
-[`src/openpi/picf/posterior/visual_expert.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/visual_expert.py)
-
-当前 visual constructor 严格分两种模式：
-
-fresh scaffold：
-
-- support-level point-pooled visual feature
-- support-center patch feature
-- visibility ratio
-- depth residual
-- depth availability bit
-
-stale scaffold：
-
-- 不重新 point-pool
-- 只对 transport 后 center 做 patch pooling
-- point field 固定为空
-- 允许 center-patch-only fallback
-
-视觉 gate 规则：
-
-- fresh 且有 depth residual：
-  - `center_in_view`
-  - `visibility > epsilon_vis`
-  - `depth_residual < tau_z_m`
-- fresh 且无 depth residual：
-  - `center_in_view`
-  - `visibility > tau_vis`
-- stale：
-  - `center_in_view`
-
-工程边界：
-
-- visual 只读 `pi_geom / x / n / r / G_t / rgb_static / depth_static`
-- visual 不回写 `e_id / s_qry / pred_idx / matched_mask`
-- 因此不进入 support identity path
-
-### 8.7 `fuse_point_only`
-
-定义位置：
-[`src/openpi/picf/posterior/fusion.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/fusion.py)
-
-当前融合逻辑：
-
-- 以 block 为单位做 scalar variance information fusion
-- 只对 `point.gate=True` 的 slot 更新
-- `point.gate=False` 时 posterior 完全保留 prior
-
-### 8.8 `fuse_point_visual`
-
-定义位置：
-[`src/openpi/picf/posterior/fusion_visual.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/fusion_visual.py)
-
-当前融合逻辑：
-
-- prior precision 先入
-- point / visual experts 分别按 gate 加入
-- 仍保持 block-diagonal Gaussian
-- 不引入 cross-covariance residual
-
-这与总纲里的 calibrated engineering approximation 是一致的。
-
-### 8.9 `PointOnlyPosteriorPipeline`
-
-定义位置：
-[`src/openpi/picf/posterior/pipeline.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/pipeline.py)
-
-这是 regression baseline，不动。
-
-### 8.10 `PointVisualPosteriorPipeline`
-
-定义位置：
-[`src/openpi/picf/posterior/pipeline_visual.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/posterior/pipeline_visual.py)
-
-接口：
-
-```python
-PointVisualPosteriorPipeline.step(
-    observation: PicfObservation,
-    scaffold_state: SupportScaffoldState,
-    previous: PosteriorState | None = None,
-) -> PosteriorState
-```
-
-内部顺序：
-
-1. fresh 时构造 `PointFrameContext`
-2. 构造 current prior
-3. point expert
-4. `VisualClipBuffer.push()`
-5. `Vjepa2VisualEncoder.encode_clip()`
-6. `build_visual_expert()`
-7. `fuse_point_visual()`
-8. 返回 `PosteriorState`
-
-
-## 9. 当前与总纲的一致性说明
-
-### 9.1 已满足的条款
-
-- H1：posterior 当前没有 object/context/semantic/downstream 混入
-- current prior 只由 transport/reset 继承
-- point 仍承担 geometry-primary 角色
-- point gate 使用 anchor count 和 local resolution-aware confidence
-- stale scaffold 时 point expert 关闭
-- visual 只作为 canonical expert 进入 posterior
-- visual 不进入 support identity path
-- stale scaffold 时 visual 仅允许 center-patch fallback
-- posterior 当前仍是 block-diagonal Gaussian
-
-### 9.2 尚未实现的条款
-
-- tactile expert 全部未开始
-- predictive prior / JEPA 全部未开始
-- object shell 全部未开始
-- semantic / context / Stage 2 全部未开始
-- learnable query / grouping 全部未开始
-
-### 9.3 当前和总纲的差异
-
-- scaffold 仍是 deterministic 版本，不是 learnable query / GRU grouping
-- point expert 仍是 geometry-summary v0，而不是最终的 SONATA learned point expert
-- visual expert 当前只落到 single-camera `rgb_static`
-- 还没有 multi-camera tempered aggregation
-
-这些都是当前阶段的刻意设计，不是遗漏。
-
-
-## 10. Checkpoint 布局
-
-V-JEPA 2.1 ckpt 当前统一放在：
-
-- [`checkpoints/foundation/vjepa2_1`](/home/siyuanyue/Documents/openpi/checkpoints)
-
-默认结构：
-
-```text
-checkpoints/foundation/vjepa2_1/
-  manifest.json
-  vjepa2_1_vit_base_384/
-    vjepa2_1_vitb_dist_vitG_384.pt
-  vjepa2_1_vit_large_384/
-    vjepa2_1_vitl_dist_vitG_384.pt
-  ...
-```
-
-下载脚本：
+新 core 的最小训练 smoke 命令是：
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/vjepa_ckpt_fetch.py \
-  --model vjepa2_1_vit_base_384
+python scripts/picf_core_train_smoke.py \
+  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
+  --backend dir \
+  --split training \
+  --segment-index 0 \
+  --stride 8 \
+  --max-points 512 \
+  --device cuda
 ```
 
-
-## 11. 运行方式
-
-PICF 支线统一推荐：
+若走仓库 `.venv` / `uv`，则建议：
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync ...
+UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train_smoke.py \
+  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
+  --backend dir \
+  --split training \
+  --segment-index 0 \
+  --stride 8 \
+  --max-points 512 \
+  --device cuda
 ```
 
-原因：
-
-- 走仓库的 `uv` 环境
-- 避免额外联网同步依赖
-- 避免写入默认 cache 位置时受限
-
-
-## 12. 脚本入口
-
-### 12.1 Scaffold
-
-smoke：
+新 core 的长期训练命令当前应改用：
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/scaffold/scaffold_replay_smoke.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> --backend zip --segments 2 --max-points 128
+python scripts/picf_core_train.py \
+  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
+  --backend dir \
+  --split training \
+  --checkpoint-base-dir /tmp/openpi-train \
+  --exp-name picf_core_train_run \
+  --num-train-steps 30000 \
+  --log-interval 100 \
+  --save-interval 1000 \
+  --accum-steps 1 \
+  --unroll-steps 2 \
+  --stride 8 \
+  --max-points 512 \
+  --device cuda \
+  --lr 2e-4 \
+  --min-lr 2e-5 \
+  --warmup-steps 500
 ```
 
-invariant audit：
+同一条长期训练入口在 `uv` 下也已经真实跑通：
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/scaffold/scaffold_invariant_audit.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> --backend zip --segments 2 --max-points 128
+UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py \
+  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
+  --backend dir \
+  --split training \
+  --checkpoint-base-dir /tmp/openpi-train-smoke \
+  --exp-name picf_core_train_uv_min \
+  --num-train-steps 1 \
+  --log-interval 1 \
+  --save-interval 1 \
+  --accum-steps 1 \
+  --unroll-steps 2 \
+  --stride 8 \
+  --max-points 512 \
+  --device cuda \
+  --lr 1e-4 \
+  --min-lr 1e-5 \
+  --warmup-steps 1
 ```
 
-stability：
+如果要从最近 checkpoint 继续：
 
 ```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/scaffold/scaffold_stability_eval.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> --backend zip --segments 2 --max-points 128
+python scripts/picf_core_train.py \
+  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
+  --backend dir \
+  --split training \
+  --checkpoint-base-dir /tmp/openpi-train \
+  --exp-name picf_core_train_run \
+  --resume \
+  --num-train-steps 30000 \
+  --log-interval 100 \
+  --save-interval 1000 \
+  --accum-steps 1 \
+  --unroll-steps 2 \
+  --stride 8 \
+  --max-points 512 \
+  --device cuda \
+  --lr 2e-4 \
+  --min-lr 2e-5 \
+  --warmup-steps 500
 ```
 
-acceptance：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/scaffold/scaffold_acceptance_check.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> --backend zip --segments 2 --max-points 128
-```
-
-### 12.2 Posterior point-only
-
-smoke：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_replay_smoke.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> --backend zip --segments 2 --max-points 256
-```
-
-invariant audit：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_invariant_audit.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> --backend zip --segments 2 --max-points 256
-```
-
-acceptance：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_acceptance_check.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> --backend zip --segments 2 --max-points 256
-```
-
-static spec audit：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_spec_audit.py \
-  --repo-root .
-```
-
-full check：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_full_check.py \
-  --repo-root . \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> \
-  --backend zip \
-  --segments 2 \
-  --max-points 256
-```
-
-### 12.3 Posterior visual stage-1
-
-smoke：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_visual_replay_smoke.py \
-  --repo-root . \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> \
-  --backend zip \
-  --segments 2 \
-  --max-points 256 \
-  --checkpoint-path /abs/path/to/vjepa2_1_vitb_dist_vitG_384.pt
-```
-
-invariant audit：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_visual_invariant_audit.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> \
-  --backend zip \
-  --segments 2 \
-  --max-points 256 \
-  --checkpoint-path /abs/path/to/vjepa2_1_vitb_dist_vitG_384.pt
-```
-
-acceptance：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_visual_acceptance_check.py \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> \
-  --backend zip \
-  --segments 2 \
-  --max-points 256 \
-  --checkpoint-path /abs/path/to/vjepa2_1_vitb_dist_vitG_384.pt
-```
-
-visual stage-1 spec audit：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_visual_stage1_spec_audit.py \
-  --repo-root .
-```
-
-full check：
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync python scripts/posterior/posterior_visual_full_check.py \
-  --repo-root . \
-  --calvin-root <CALVIN_ROOT_OR_ZIP> \
-  --backend zip \
-  --segments 2 \
-  --max-points 256 \
-  --checkpoint-path /abs/path/to/vjepa2_1_vitb_dist_vitG_384.pt
-```
-
-
-## 13. 测试入口
-
-### 13.1 核心测试
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync pytest -q \
-  src/openpi/picf/pointcloud_picf_test.py \
-  src/openpi/picf/replay/calvin_replay_test.py \
-  src/openpi/picf/scaffold/matching_test.py \
-  src/openpi/picf/scaffold/pipeline_test.py \
-  src/openpi/picf/posterior/prior_test.py \
-  src/openpi/picf/posterior/point_expert_test.py \
-  src/openpi/picf/posterior/fusion_test.py \
-  src/openpi/picf/posterior/pipeline_test.py \
-  src/openpi/picf/posterior/fusion_visual_test.py \
-  src/openpi/picf/posterior/visual_expert_test.py \
-  src/openpi/picf/posterior/pipeline_visual_test.py \
-  src/openpi/picf/vjepa/history_test.py \
-  src/openpi/picf/vjepa/wrapper_test.py \
-  scripts/scaffold/scaffold_scripts_test.py \
-  scripts/scaffold/scaffold_audit_test.py \
-  scripts/posterior/posterior_scripts_test.py \
-  scripts/posterior/posterior_visual_scripts_test.py
-```
-
-### 13.2 lint
-
-```bash
-UV_CACHE_DIR=/tmp/uvcache uv run --no-sync ruff check src/openpi/picf scripts/scaffold scripts/posterior
-```
-
-
-## 14. 已验证结果
-
-已经实际跑通的结果包括：
-
-- `ruff` 通过
-- `python -m compileall` 通过
-- scaffold + posterior + visual-stage1 相关 `pytest` 21/21 通过
-- point-only posterior full check 通过
-- point-only posterior spec audit 通过
-- visual stage-1 spec audit 通过
-- real-ckpt `point_visual` acceptance 通过
-- 真实 V-JEPA 2.1 base checkpoint 已下载、校验并与本地 wrapper 精确对齐
-
-point-only baseline 代表性结果：
-
-- `mean_point_gate_ratio = 0.20572916666666666`
-- `mean_precision_gain_count = 19.75`
-- `nan_count_total = 0`
-
-真实 V-JEPA 2.1 base checkpoint 核验结果：
-
-- 文件大小约 `1.6G`
-- `sha256 = 848a77c33cc9e6649ed2119c9bea1e2c569bcdab9539ff3e7c02ccc2959ddf4d`
-- checkpoint 顶层含 `encoder / ema_encoder / predictor`
-- `encoder` 与 `ema_encoder` 不相同；当前 wrapper 已按官方 2.1 `vitb-384` 约定优先加载 `ema_encoder`
-- 与本地 vendored encoder 对齐结果：
-  - `missing_keys = 0`
-  - `unexpected_keys = 0`
-
-真实 ckpt 单次 encoder 前向（CPU）结果：
-
-- `tokens_shape = (32, 24, 24, 768)`
-- `current_shape = (24, 24, 768)`
-- `finite = True`
-
-真实 ckpt 单步 PICF point+visual posterior 结果：
-
-- `point_gate_ratio = 0.11458333333333333`
-- `visual_gate_ratio = 0.3020833333333333`
-- `point_precision_gain_count = 11`
-- `visual_precision_gain_count = 29`
-- `nan_count = 0`
-
-这些结果说明：
-
-- point-only posterior 数值链仍然稳定
-- visual ckpt 不是只“下载成功”，而是已经真实进入 posterior 链
-- visual stage-1 的张量形状、gate 与融合数值都闭合
-- 当前代码已经过一轮提交前严格核查：
-  - unit / script tests
-  - static spec audits
-  - real checkpoint follow-through
-  - linter
-  - import / bytecode compile checks
-
-真实 ckpt 8-step mini CALVIN 回放结果：
-
-- point + visual：
-  - `mean_point_gate_ratio = 0.20572916666666663`
-  - `mean_visual_gate_ratio = 0.44791666666666663`
-  - `mean_point_precision_gain_count = 19.75`
-  - `mean_visual_precision_gain_count = 43.0`
-  - `nan_count_total = 0`
-  - `min_var_block = 0.03504962846636772`
-  - `max_var_block = 1.0`
-- visual-only：
-  - `mean_point_gate_ratio = 0.0`
-  - `mean_visual_gate_ratio = 0.44791666666666663`
-  - `mean_point_precision_gain_count = 0.0`
-  - `mean_visual_precision_gain_count = 43.0`
-  - `nan_count_total = 0`
-  - `min_var_block = 0.12100696563720703`
-  - `max_var_block = 1.0`
-- stale scaffold + visual fallback 单步检查：
-  - `fresh_scaffold = False`
-  - `point_precision_gain_count = 0`
-  - `visual_precision_gain_count = 96`
-  - `visual_gate_ratio = 1.0`
-  - `posterior_prior_equal_on_stale = False`
-  - `stale_prior_match_error = 0.3333333432674408`
-  - `nan_count = 0`
-
-这里最后一项非常重要：
-
-- 在 point-only 管线里，stale scaffold 时 `posterior == prior`
-- 在 visual stage-1 管线里，若 stale scaffold 但 visual 仍 fresh 且 center-patch fallback 可用，则 posterior **不应**等于 prior
-- 因此 visual stage-1 的正确语义不是“所有 stale 都退 prior”，而是“stale 时 point expert 关闭；若 visual 也不可用才严格退 prior”
-
-这与总纲中的 stale scaffold policy 和 visual transport-only fallback 是一致的。
-
-
-## 15. 关于 `max_points`
-
-当前 posterior 审计脚本默认使用：
-
-- `max_points=256`
-
-而 scaffold acceptance 默认仍然常用：
-
-- `max_points=128`
-
-原因不是“posterior 需要放宽阈值”，而是当前 synthetic mini CALVIN 数据在 `max_points=128` 下过稀，point expert 往往拿不到足够 `anchor_count`，无法代表 posterior 是否真实工作。
-
-因此：
-
-- scaffold 脚本继续用 128 做稳定性测试
-- posterior 脚本应使用 256 测 point gate 和 Gaussian fusion
-- visual stage-1 脚本默认也沿用 256
-
-
-## 16. 已知限制
-
-- 当前 `EndEffectorLocalFrame` 依赖 CALVIN 风格 `robot_obs[0:6]`
-- 当前 scaffold 不是 learnable query 版本
-- 当前 point expert 不是 SONATA learned point feature 版本
-- 当前 visual 只接 `rgb_static` 单相机
-- 当前没有 tactile，所以不代表完整多模态 posterior
-- 当前 acceptance 仍然基于 mini CALVIN 与局部脚本审计，不等于真实实验台闭环通过
-- 当前 CPU 下真实 V-JEPA 2.1 base 前向较慢；正式部署必须在目标 GPU 环境下重新测时延预算
-
-
-## 17. 是否可以开始 AnyTouch
-
-当前结论是：
-
-- **可以开始 AnyTouch 部署**
-- 但建议继续保持 PICF 独立支线，不要并回主训练链
-
-原因：
-
-- current prior、point expert、visual expert、fusion 的核心边界已经稳定
-- visual 已经作为 canonical expert 进入 posterior，且不污染 support identity
-- point-only baseline 仍保留为 regression anchor
-- tactile 是下一个自然扩展的 canonical expert
-
-这里的“可以开始”指的是：
-
-- V-JEPA visual stage-1 已达到可作为下一阶段稳定基座的程度
-- 架构边界已经明确，AnyTouch 不需要回头修改 visual 的接口契约
-- 但这**不等于**“当前 point + visual 已经完成真实实验台闭环验收”
-
-在进入 AnyTouch 实现前，当前 visual 阶段仍有两个保留事项：
-
-- 目标 GPU 环境下的 `p95(state_update)` 时延预算尚未正式测量
-- 真实机器人 / 真传感器 replay 尚未覆盖，仅完成 CALVIN 路径与工程级 acceptance
-
-因此更准确的结论是：
-
-- **可以开始 AnyTouch 的架构与实现工作**
-- **不应把 current visual stage-1 误记为最终实验台闭环通过**
-
-AnyTouch 阶段的新增约束应继续保持：
-
-- tactile 只作为 canonical expert 进入 posterior
-- tactile 不进入 support identity path
-- tactile gate 必须显式 contact-aware
-- tactile stale / availability 必须走 runtime metadata，不得伪造当前观测
-
-
-## 18. 下一步建议
-
-下一阶段建议按下面顺序推进：
-
-1. 保持 point-only 与 visual-stage1 两套 full check 持续可跑
-2. 引入 AnyTouch tactile wrapper，但先只做 frozen backbone + tactile constructor
-3. 加入 tactile gate 与 `point + visual + tactile` Gaussian fusion
-4. 新增 tactile stage-1 spec audit，继续阻止 object / semantic / context 越界
-5. tactile 路线稳定后，再讨论 predictive prior / JEPA
-
-当前**不建议**做的事：
-
-- 不建议现在并回 `pi0_pytorch.py` 主链
-- 不建议现在引入 object shell
-- 不建议现在把 visual 反写 identity
-- 不建议现在上 multi-camera aggregation
-
-对 AnyTouch 来说，当前 README 已经可以直接作为下一阶段的起点文档：
-
-- runtime metadata 的位置已明确
-- posterior expert 的接口风格已固定
-- visual stage-1 的 boundary 可以直接作为 tactile stage-1 的模板
+当前本机已经真实跑通过；这轮 v0.4.8 严格复核后的代表性结果是：
+
+- `python ... --device cpu --backend dir --segment_index=0`：
+  - `loss_total = 1.8263`
+  - `loss_alignment = 0.2108`
+  - `loss_anchor_pv = 1.2373`
+  - `loss_pv_weak = 4.3548`
+  - `loss_focus_pv = 1.1552`
+  - `loss_pt = 0.0`
+  - `projective_candidate_density = 0.2995`
+  - `mean_point_route_gate = 0.5869`
+  - `mean_visual_route_gate = 0.5274`
+  - `action_grad_norm = 2.9620`
+  - `point_grad_norm = 0.0640`
+- `python ... --device cpu --backend zip` 在 `segment_index = 0 / 50 / 100` 上也都通过：
+  - `loss_total` 约为 `1.8263 / 1.8296 / 1.7323`
+  - `loss_focus_pv` 约为 `1.1552 / 1.0604 / 0.8993`
+  - `loss_pt` 当前都是 `0.0`
+  - `projective_candidate_density` 分别约为 `0.2995 / 0.3073 / 0.3047`
+  - `mean_point_route_gate` 分别约为 `0.5869 / 0.6159 / 0.5845`
+  - `mean_visual_route_gate` 分别约为 `0.5274 / 0.5799 / 0.5881`
+  - 说明当前 candidate edge set 没有塌到接近 `0`，也没有退化成近似全连接
+- `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python ... --backend dir --segment_index=0 --device cpu`：
+  - `cuda_available = false`
+  - `cuda_runtime_available = false`
+  - `loss_total = 1.8263`
+  - `loss_alignment = 0.2108`
+  - `loss_focus_pv = 1.1552`
+  - `loss_pt = 0.0`
+- `python scripts/picf_core_train.py ... --backend dir --device cuda --num-train-steps 2 --unroll-steps 2`：
+  - `step=1 loss_total = 1.0894`
+  - `step=2 loss_total = 2.5853`
+  - checkpoint 已落到 `/tmp/openpi-train-smoke/picf_core/picf_core_train_min/step_2.pt`
+- 同一条 `scripts/picf_core_train.py` 已真实验证：
+  - `--resume` 能从 `latest.pt` 接着跑到 `step=3`
+  - `zip + cuda + 1-step` 能正常起步并保存 checkpoint
+  - `uv + dir + cuda + 1-step` 也能正常起步并保存：
+    - `/tmp/openpi-train-smoke/picf_core/picf_core_train_uv_min/args.json`
+    - `/tmp/openpi-train-smoke/picf_core/picf_core_train_uv_min/metrics.jsonl`
+    - `/tmp/openpi-train-smoke/picf_core/picf_core_train_uv_min/latest.pt`
+    - `/tmp/openpi-train-smoke/picf_core/picf_core_train_uv_min/step_1.pt`
+    - `loss_total = 1.0894`
+    - `loss_action = 0.5445`
+    - `loss_alignment = 0.1994`
+    - `loss_anchor_pv = 1.1742`
+    - `loss_focus_pv = 1.5972`
+    - `loss_point_real = 0.7243`
+    - `loss_visual_latent = 0.3717`
+    - `loss_visual_real = 0.5389`
+    - `loss_pt = 0.0`
+    - `projective_candidate_density = 0.3047`
+    - `grad_norm ≈ 1.0`
+
+和前一轮相比，`loss_alignment / loss_anchor_pv / loss_focus_pv` 的数值口径会有明显变化，
+这是因为 v0.4.8 现在已经真实接入了：
+
+- routing support gates
+- relative projective attention bias
+- attention-derived `L_{focus}^{pv}`
+- point-tactile `L_{pt}`
+
+这些数字本身不是收敛标准，
+但它们足以说明：
+
+- 当前一条 `t -> t+1` 训练图已经真的前向闭合
+- action head 和 point real head 都拿到了非零梯度
+- `optimizer.step()` 没有因为 in-place / graph 断裂而失败
+- geometry-first point↔visual 分支也已经真的参与了训练图，而不是挂空
+
+当前这条长期训练入口还要额外记住两个非阻塞边界：
+
+- 当前真实验证只覆盖单进程单卡；脚本虽然有 DDP scaffolding，但还没有做 `torchrun` 多卡 cloud 回归
+- 当前长期训练脚本为了保证训练图可直接执行，使用的是 `_rgb_visual_override + _NullVisualEncoder + _NullTactileEncoder` 这条部署近似；不要把它误写成“已经验证完整 V-JEPA/AnyTouch 在线训练”
+
+如果这条 smoke 失败，优先按下面顺序排：
+
+1. `task_ABCD_D` 路径是否正确
+2. `xyzrgb` point cloud builder 是否产出非空 ROI
+3. `visual_map_override` 或 visual encoder 是否给出下一帧 visual map
+4. CUDA 是否可见
+5. AnyTouch2 checkpoint 是否缺失；若只是做结构 smoke，先用脚本内 stub tactile encoder
+
+### 8.2 官方训练入口的调试口径
+
+官方训练入口仍是
+[`scripts/train_pytorch.py`](/home/siyuanyue/Documents/openpi/scripts/train_pytorch.py)，
+它当前还没有切到 `PicfFullCore` 主线，
+所以这里的调试口径要分清：
+
+- 新 core smoke：
+  用 [`scripts/picf_core_train_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train_smoke.py)
+- 官方 CALVIN 训练链 smoke：
+  用 [`scripts/train_pytorch.py`](/home/siyuanyue/Documents/openpi/scripts/train_pytorch.py)
+
+当前本机真实结论是：
+
+- conda 默认环境会卡在 `transformers==4.48.1`
+- 官方链要求 `4.53.2`
+- 因此官方链调试默认应使用 `uv run --no-sync ...`
+
+在 `uv` 环境下，官方链已经真实走到：
+
+- CALVIN loader
+- norm stats
+- Sonata checkpoint loading
+- forward
+- backward
+- `optim.step()`
+- checkpoint save
+
+当前这台机器上的真实分界是：
+
+- `uv + cuda + bfloat16 + dummy paligemma/action expert`：能完整跑完一步训练并保存 checkpoint
+- `uv + cuda + bfloat16 + full`：会在 forward 内部 materialize Sonata encoder 时 OOM
+- `uv + cuda + float32 + dummy`：会在 `optim.step()` 分配 Adam state 时 OOM
+- `uv + cuda + float32 + full`：会在 `model.to(cuda)` 时 OOM
+- `uv + cpu`：这条 Sonata 训练链默认 fail-fast；即便 `--model.no-require-cuda`，spconv 仍会在 CUDA stream 路径报错
+
+所以当前继续跑不完 clean full step 的主因是：
+
+- full model 对当前 `8GB` 显存不够友好
+- Sonata/spconv 路径本身是 CUDA-only
+- 不是 CALVIN datapath 或训练循环本身断裂
+
+所以调试上应把两类失败分开看：
+
+- 如果失败在 loader / tokenizer / ckpt / forward 前：
+  这是 wiring / environment 问题
+- 如果已经到 `forward/backward/optim.step` 才炸：
+  本机上通常先怀疑显存，而不是先怀疑 CALVIN datapath
+
+### 8.3 2026-04-08 本机 CALVIN 核查补充
+
+当前机器上，已经用真实 CALVIN 数据根：
+
+- `/home/siyuanyue/datasets/calvin/dataset/task_ABCD_D`
+- `/home/siyuanyue/datasets/calvin/dataset/task_ABCD_D.zip`
+
+做过下面这些实际验证：
+
+- `CalvinLangSegmentDataset` 在 `dir` backend 上可读，segments=`22966`
+- 同一个 dataset 在 `zip` backend 上也可读，且未解压大 zip
+- 对同一训练样本索引 `0 / 1 / 10 / 100 / 1000`，`dir` 与 `zip` backend 读出的：
+  - `prompt`
+  - `rgb_static`
+  - `depth_static`
+  - `robot_obs`
+  - `rgb_gripper`
+  - `actions`
+  都逐字段完全一致，最大绝对差均为 `0`
+- `create_data_loader(pi05_calvin_sonata)` 在 `dir` backend 上可实际产出：
+  - tokenized prompt
+  - `state (B,32)`
+  - `actions (B,16,32)`
+  - `pointcloud (B,M,9)`
+- `create_data_loader(pi05_calvin_sonata)` 在 `zip` backend 上也可实际产出 pointcloud batch
+- `scripts/calvin/calvin_discover.py` 现在能正确识别：
+  - `training/lang_annotations/auto_lang_ann.npy`
+  - `validation/lang_annotations/auto_lang_ann.npy`
+- `scripts/stageb_calvin_audit.py` 现在支持：
+  - `--calvin-root .../task_ABCD_D`
+  - `--backend dir`
+  - `--calvin-root .../task_ABCD_D.zip`
+  - `--backend zip`
+- `scripts/stageb_calvin_audit.py --mode dataset` 已在真实数据上跑通：
+  - `training + dir`
+  - `validation + dir`
+  - `training + zip`
+  - `validation + zip`
+- `scripts/stageb_calvin_audit.py --mode loader` 已在真实数据上跑通：
+  - `training + dir`
+  - `validation + dir`
+  - `training + zip`
+  - `validation + zip`
+  - `training + dir + num_workers=2`
+  - `training + zip + num_workers=2`
+- 对 `create_data_loader(pi05_calvin_sonata)` 的真实首个 batch，`dir` 与 `zip` 经过完整 transform 后仍逐字段一致：
+  - `Observation.state`
+  - `tokenized_prompt`
+  - `tokenized_prompt_mask`
+  - `images['base_0_rgb']`
+  - `images['left_wrist_0_rgb']`
+  - `image_masks`
+  - `point_clouds['pointcloud']`
+  - `point_cloud_masks['pointcloud']`
+  - `action`
+  的最大绝对差均为 `0`
+- `scripts/scaffold/scaffold_replay_smoke.py` 当前严格复核结果：
+  - `dir` backend 可通过：
+    - `frames = 64`
+    - `mean_num_active = 77.75`
+    - `mean_num_birth = 5.328125`
+    - `mean_match_ratio = 0.9403`
+    - `hold_count = 0`
+  - `zip` backend 当前失败：
+    - `RuntimeError("No scaffold states were produced.")`
+  - 因此 legacy scaffold 的 `zip` 路径不应再被写成“当前已通过”
+- `uv run` 也已经在仓库 `.venv` 上验证过：
+  - 需要 `UV_CACHE_DIR=/tmp/uv-cache`
+  - 建议搭配 `--no-sync`
+  - `uv run python scripts/stageb_calvin_audit.py --mode loader ...` 已成功通过
+  - `uv run` 环境内可导入 CUDA 版 PyTorch 与 Sonata runtime
+- 2026-04-09 full-access 复核已经再次确认：
+  - `nvidia-smi` 可见 `NVIDIA GeForce RTX 3070 Ti Laptop GPU`
+  - `.venv` Python 与 `uv run --no-sync python` 都显示 `torch.cuda.is_available() == True`
+  - 当前机器实际是 `1 x RTX 3070 Ti Laptop GPU / CUDA driver 581.95`
+- `scripts/posterior/posterior_replay_smoke.py` 已在真实 CALVIN + CUDA + Sonata ckpt 上跑通
+- 新增的一步训练 smoke [`scripts/picf_core_train_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train_smoke.py) 的 2026-04-09 当前 CUDA 记录是：
+  - `loss_total = 1.3037`
+  - `loss_action = 0.7568`
+  - `loss_visual_latent = 0.3908`
+  - `loss_visual_real = 0.5406`
+  - `loss_point_real = 0.7307`
+  - `loss_alignment = 0.1954`
+  - `loss_anchor_pv = 1.1686`
+  - `loss_pv_weak = 3.9291`
+  - `loss_focus_pv = 1.1608`
+  - `loss_pt = 0.0`
+  - `projective_candidate_density = 0.2995`
+  - `mean_point_route_gate = 0.7180`
+  - `mean_visual_route_gate = 0.4933`
+  - `action_grad_norm = 3.3148`
+  - `point_grad_norm = 0.0717`
+  - 同一脚本在 `direct python + dir/cuda`、`uv + dir/cuda`、`direct python + zip/cuda` 三条路径下都已跑通
+- 同一条训练 smoke 现在也已在真实 `zip` backend + CPU 上跑通：
+  - `loss_total = 1.8263`
+  - `loss_alignment = 0.2108`
+  - `loss_anchor_pv = 1.2373`
+  - `loss_pv_weak = 4.3548`
+  - `loss_focus_pv = 1.1552`
+  - `loss_pt = 0.0`
+  - `projective_candidate_density = 0.2995`
+  - `mean_point_route_gate = 0.5869`
+  - `mean_visual_route_gate = 0.5274`
+  - `action_grad_norm = 2.9620`
+  - `point_grad_norm = 0.0640`
+  - 这说明 zip 版不仅能读 batch，也能走完整个 `PICF core forward + one-step loss + backward + optimizer.step()`
+  - 2026-04-09 又额外复核了 `segment_index = 50 / 100`：
+    - `projective_candidate_density` 约为 `0.3073 / 0.3047`
+    - `mean_point_route_gate` 约为 `0.6159 / 0.5845`
+    - `mean_visual_route_gate` 约为 `0.5799 / 0.5881`
+- 同一条训练 smoke 也已在真实 `dir` backend + CPU 上跑通：
+  - `loss_total = 1.8263`
+  - `loss_alignment = 0.2108`
+  - `loss_anchor_pv = 1.2373`
+  - `loss_pv_weak = 4.3548`
+  - `loss_focus_pv = 1.1552`
+  - `loss_pt = 0.0`
+  - `projective_candidate_density = 0.2995`
+  - `mean_point_route_gate = 0.5869`
+  - `mean_visual_route_gate = 0.5274`
+  - `action_grad_norm = 2.9620`
+  - `point_grad_norm = 0.0640`
+- 官方 CALVIN 主训练入口 [`scripts/train_pytorch.py`](/home/siyuanyue/Documents/openpi/scripts/train_pytorch.py) 也已经做过最小 smoke：
+  - 当前默认 conda 环境卡在 `transformers==4.48.1`，而训练脚本要求 `4.53.2`
+  - 仓库 `.venv` / `uv.lock` 是正确的 `4.53.2`
+  - 在 `uv run --no-sync ...` 下，真实训练链已经走到：
+    - CALVIN loader
+    - norm stats
+    - Sonata ckpt load
+    - forward
+    - backward
+    - `optim.step()`
+    - checkpoint save
+  - 当前已真实跑通的是：
+    - `uv + cuda + bfloat16 + dummy paligemma/action expert`
+    - `step=1 loss=1.2983 grad_norm=1.22`
+    - checkpoint 目录：`/tmp/openpi-train-smoke/pi05_calvin_sonata/smoke_calvin_train_dummy_1step_uv_bf16/1`
+  - 当前没跑通的边界也已经明确：
+    - `uv + cuda + bfloat16 + full`：在 forward 内部 materialize Sonata encoder 时 OOM，`after_model_creation` 已到 `7.47GB`
+    - `uv + cuda + float32 + dummy`：在 `optim.step()` 分配 Adam state 时 OOM，`after_backward` 峰值约 `4.49GB`
+    - `uv + cuda + float32 + full`：在 `model.to(cuda)` 阶段 OOM
+    - `uv + cpu`：默认 `require_cuda=True` fail-fast；即便 `--model.no-require-cuda`，spconv 仍会在 `torch.cuda.current_stream()` 路径报 `No CUDA GPUs are available`
+  - 所以官方训练 datapath 的真实结论是：
+    - wiring / CALVIN loader / ckpt / train loop 本身是通的
+    - 当前机器限制主要是 `8GB` 显存，以及 Sonata/spconv 的 CUDA-only 运行时契约
+- `PicfFullCore` 也已经在真实 CALVIN 帧上做过一次前向闭合核查：
+  - 使用真实 point cloud builder
+  - 使用 stub tactile encoder 绕开本机缺失的 AnyTouch2 ckpt
+  - current posterior / prediction cache / innovation token / action 都能正确产出
+
+这次还做了脚本级数学核查，结果是：
+
+- `posterior_language_invariant_mu = True`
+- `posterior_language_invariant_sigma = True`
+- `binding` 每列和约等于 `1.0`
+- `Sigma` 的对角最小值为正
+- `Sigma` 的非对角绝对值最大值为 `0.0`，说明当前实现确实是对角协方差近似
+- 首步 `innovation_norm = 0.0`
+- 下一步在观测变化后 `innovation_norm > 0`
+
+需要保留的已知边界：
+
+- `MultiheadAttention` 当前没有引入复杂 OT / set-prediction matching，只是最小 cross-attention + sinkhorn dustbin 版本
+- point / tactile / visual real targets 目前都还是轻量目标，不是最终 fully structured target
+- 通用 `scripts/train_pytorch.py` 还没有接到这条新 core 训练路径
+- legacy `scripts/posterior/posterior_full_check.py` 在真 GPU 上虽然能跑完，但当前不是全绿：
+  - `smoke_has_precision_gain = false`
+  - `acceptance_pass = false`
+  - 失败点集中在旧 `src/openpi/picf/posterior/` acceptance 假设，而不是新 `src/openpi/picf/core/` 主线
+- `PicfFullCore` 默认会尝试拉起 `AnyTouch2TactileEncoder(allow_random_init=False)`；
+  在没有 AnyTouch2 checkpoint 的本机上，需要显式注入 tactile stub / tactile override 才能做纯结构 smoke
+
+
+## 9. 下一步建议
+
+如果继续往训练或部署推进，优先顺序应是：
+
+1. 把当前 coarse occupancy / low-res tactile / low-res RGB real heads 接到正式训练 loss。
+2. 把 `semantic_override` 替换成真实 PaliGemma side path。
+3. 在 dataset / replay 层显式生成 `t -> t+1` 的 real targets，而不是只靠 runtime 当前帧摘要。
+4. 如果 one-step prediction 稳定，再把 point real head 从 occupancy 扩到 TSDF 或 scene-flow。
+
+不建议再回到旧的 `object shell / stage2 / staged scaffold` 主线继续加模块。

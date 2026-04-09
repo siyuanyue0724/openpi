@@ -3,6 +3,7 @@ from pathlib import Path
 
 import numpy as np
 
+from openpi.picf.contracts import RuntimeMeta
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.pipeline import PointOnlyPosteriorPipeline
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
@@ -10,11 +11,20 @@ from openpi.picf.scaffold.pipeline import DeterministicScaffoldPipeline
 from openpi.picf.test_utils import build_mini_calvin_dataset
 
 
+class _CapturingExtractor:
+    def __init__(self) -> None:
+        self.captured_colors: np.ndarray | None = None
+
+    def encode_local_context(self, frame_context):
+        self.captured_colors = np.asarray(frame_context.colors, dtype=np.float32).copy()
+        return type("Features", (), {"features": self.captured_colors})()
+
+
 def test_posterior_pipeline_fresh_and_stale(tmp_path: Path) -> None:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
     frames = list(replay)
-    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=256)
+    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=1024)
     scaffold = DeterministicScaffoldPipeline(builder)
     posterior = PointOnlyPosteriorPipeline()
 
@@ -33,3 +43,31 @@ def test_posterior_pipeline_fresh_and_stale(tmp_path: Path) -> None:
     posterior_state_stale = posterior.step(stale_frame, scaffold_state_stale, posterior_state_1)
     assert posterior_state_stale.debug.posterior_prior_equal_on_stale
     assert np.allclose(posterior_state_stale.mu, posterior_state_stale.mu_prop)
+
+
+def test_posterior_zeroes_point_rgb_when_runtime_gate_is_off(tmp_path: Path) -> None:
+    calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
+    replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
+    frame = next(iter(replay))
+    frame.runtime_meta = RuntimeMeta(
+        t_v_last=float(frame.timestamp_s),
+        t_p_last=float(frame.timestamp_s),
+        t_t_last=0.0,
+        t_rgb_last=float(frame.timestamp_s),
+        b_rgb_avail=False,
+        rgb_proj_residual=1.0,
+        n_vis_upd=1,
+        v_rgb_p=False,
+        v_pc_scaf=True,
+        stale_scaffold_steps=0,
+    )
+    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=1024)
+    scaffold = DeterministicScaffoldPipeline(builder)
+    extractor = _CapturingExtractor()
+    posterior = PointOnlyPosteriorPipeline(point_feature_extractor=extractor)
+
+    scaffold_state = scaffold.step(frame)
+    posterior.step(frame, scaffold_state)
+
+    assert extractor.captured_colors is not None
+    assert np.allclose(extractor.captured_colors, 0.0)

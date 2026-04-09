@@ -18,9 +18,9 @@ def run_invariant_audit(
     split: str,
     backend: str,
     num_segments: int | None = None,
-    stride: int = 2,
-    max_points: int = 2048,
-    enable_rgb_identity: bool = False,
+    stride: int = 1,
+    max_points: int = 1024,
+    enable_rgb_identity: bool = True,
 ) -> dict:
     replay = CalvinSequentialReplay(
         calvin_root,
@@ -104,9 +104,9 @@ def main() -> None:
     parser.add_argument("--split", default="training", choices=["training", "validation"])
     parser.add_argument("--backend", default="zip", choices=["zip", "dir"])
     parser.add_argument("--segments", type=int, default=None)
-    parser.add_argument("--stride", type=int, default=2)
-    parser.add_argument("--max-points", type=int, default=2048)
-    parser.add_argument("--enable-rgb-identity", action="store_true")
+    parser.add_argument("--stride", type=int, default=1)
+    parser.add_argument("--max-points", type=int, default=1024)
+    parser.add_argument("--enable-rgb-identity", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 

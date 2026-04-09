@@ -16,6 +16,7 @@ def test_point_visual_fusion_combines_both_experts() -> None:
     point = PointExpertState(
         mu=point_mu,
         var_block=np.full((1, 3), 0.5, dtype=np.float32),
+        block_valid=np.array([[False, True, False]]),
         gate=np.array([True]),
         anchor_count=np.array([8], dtype=np.int32),
         gamma_n=np.array([1.0], dtype=np.float32),
@@ -28,6 +29,7 @@ def test_point_visual_fusion_combines_both_experts() -> None:
     visual = VisualExpertState(
         mu=visual_mu,
         var_block=np.full((1, 3), 0.25, dtype=np.float32),
+        block_valid=np.array([[True, True, False]]),
         gate=np.array([True]),
         in_view=np.array([True]),
         visibility=np.array([1.0], dtype=np.float32),
@@ -46,6 +48,9 @@ def test_point_visual_fusion_combines_both_experts() -> None:
     assert precision_gain_count == 2
     assert point_gain_count == 1
     assert visual_gain_count == 1
-    assert np.all(var_block < var_prop)
+    assert var_block[0, 0] < var_prop[0, 0]
+    assert var_block[0, 1] < var_prop[0, 1]
+    assert np.isclose(var_block[0, 2], var_prop[0, 2])
     assert np.max(mu[0, : config.dim_h]) > 0.0
     assert np.max(mu[0, config.dim_h : config.dim_h + config.dim_g]) > 0.0
+    assert np.allclose(mu[0, config.dim_h + config.dim_g :], 0.0)

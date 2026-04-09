@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+from typing import Any
 
 import numpy as np
 
@@ -16,7 +17,6 @@ from openpi.picf.geometry import transform_points
 from openpi.picf.posterior.config import PosteriorConfig
 from openpi.picf.posterior.contracts import VisualExpertState
 from openpi.picf.vjepa.config import VjepaVisualConfig
-from openpi.picf.vjepa.wrapper import VjepaFeatureMap
 
 
 @dataclasses.dataclass(frozen=True)
@@ -78,11 +78,12 @@ def empty_visual_expert(*, posterior_config: PosteriorConfig, k_support: int) ->
         (k_support, 1),
     )
     gate = np.zeros((k_support,), dtype=bool)
+    block_valid = np.zeros((k_support, 3), dtype=bool)
     in_view = np.zeros((k_support,), dtype=bool)
     visibility = np.zeros((k_support,), dtype=np.float32)
     depth_residual = np.zeros((k_support,), dtype=np.float32)
     depth_available = np.zeros((k_support,), dtype=bool)
-    return VisualExpertState(mu, var_block, gate, in_view, visibility, depth_residual, depth_available)
+    return VisualExpertState(mu, var_block, block_valid, gate, in_view, visibility, depth_residual, depth_available)
 
 
 def _prepare_depth_image(depth_static: np.ndarray) -> np.ndarray | None:
@@ -210,7 +211,7 @@ def build_visual_expert(
     visual_config: VjepaVisualConfig,
     observation: PicfObservation,
     scaffold_state: SupportScaffoldState,
-    visual_features: VjepaFeatureMap,
+    visual_features: Any,
     camera_model: CameraModel,
     frame_context: PointFrameContext | None,
 ) -> VisualExpertState:
@@ -338,6 +339,9 @@ def build_visual_expert(
             posterior_config.dim_g,
         )
         state.gate[slot] = bool(gate)
+        if gate:
+            state.block_valid[slot, 0] = True
+            state.block_valid[slot, 1] = True
         if not fresh_scaffold:
             state.var_block[slot, 0] *= 2.0
             state.var_block[slot, 1] *= 2.0

@@ -13,9 +13,11 @@ from openpi.picf.scaffold.pipeline import DeterministicScaffoldPipeline
 from openpi.picf.vjepa.config import VjepaVisualConfig
 
 try:
+    from .posterior_visual_replay_smoke import _make_point_extractor
     from .posterior_visual_replay_smoke import _make_visual_config
     from .posterior_visual_replay_smoke import _mode_flags
 except ImportError:
+    from posterior_visual_replay_smoke import _make_point_extractor
     from posterior_visual_replay_smoke import _make_visual_config
     from posterior_visual_replay_smoke import _mode_flags
 
@@ -28,7 +30,7 @@ def run_visual_invariant_audit(
     mode: str = "point_visual",
     num_segments: int | None = None,
     stride: int = 1,
-    max_points: int = 2048,
+    max_points: int = 1024,
     checkpoint_path: str | None = None,
     model_name: str = "vjepa2_1_vit_base_384",
     arch_name_override: str | None = None,
@@ -39,6 +41,8 @@ def run_visual_invariant_audit(
     device: str | None = None,
     dtype: str = "bfloat16",
     use_last_two_mean: bool = False,
+    sonata_ckpt_path: str | None = None,
+    point_device: str | None = None,
 ) -> dict:
     replay = CalvinSequentialReplay(
         calvin_root,
@@ -47,8 +51,9 @@ def run_visual_invariant_audit(
         segment_indices=None if num_segments is None else list(range(num_segments)),
     )
     builder = CalvinDepthToPicfPointCloud(calvin_root, stride=stride, max_points=max_points)
-    scaffold = DeterministicScaffoldPipeline(builder)
     enable_point_expert, enable_visual_expert = _mode_flags(mode)
+    point_extractor = _make_point_extractor(sonata_ckpt_path=sonata_ckpt_path, point_device=point_device)
+    scaffold = DeterministicScaffoldPipeline(builder, point_feature_extractor=point_extractor)
     visual_config: VjepaVisualConfig = _make_visual_config(
         calvin_root=calvin_root,
         checkpoint_path=checkpoint_path,
@@ -66,6 +71,7 @@ def run_visual_invariant_audit(
         visual_config=visual_config,
         enable_point_expert=enable_point_expert,
         enable_visual_expert=enable_visual_expert,
+        point_feature_extractor=point_extractor,
     )
 
     scaffold_state = None
@@ -136,7 +142,7 @@ def main() -> None:
     parser.add_argument("--mode", default="point_visual", choices=["point_only", "visual_only", "point_visual"])
     parser.add_argument("--segments", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--max-points", type=int, default=2048)
+    parser.add_argument("--max-points", type=int, default=1024)
     parser.add_argument("--checkpoint-path", default=None)
     parser.add_argument("--model-name", default="vjepa2_1_vit_base_384")
     parser.add_argument("--arch-name-override", default=None)
@@ -147,6 +153,8 @@ def main() -> None:
     parser.add_argument("--device", default=None)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--use-last-two-mean", action="store_true")
+    parser.add_argument("--sonata-ckpt-path", default=None)
+    parser.add_argument("--point-device", default=None)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
@@ -168,6 +176,8 @@ def main() -> None:
         device=args.device,
         dtype=args.dtype,
         use_last_two_mean=args.use_last_two_mean,
+        sonata_ckpt_path=args.sonata_ckpt_path,
+        point_device=args.point_device,
     )
     if args.output_json is not None:
         args.output_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")

@@ -10,6 +10,8 @@ from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.pipeline import PointOnlyPosteriorPipeline
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
 from openpi.picf.scaffold.pipeline import DeterministicScaffoldPipeline
+from openpi.picf.sonata.config import SonataPointConfig
+from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
 
 
 def run_invariant_audit(
@@ -19,7 +21,9 @@ def run_invariant_audit(
     backend: str,
     num_segments: int | None = None,
     stride: int = 1,
-    max_points: int = 2048,
+    max_points: int = 1024,
+    sonata_ckpt_path: str | None = None,
+    point_device: str | None = None,
 ) -> dict:
     replay = CalvinSequentialReplay(
         calvin_root,
@@ -28,8 +32,15 @@ def run_invariant_audit(
         segment_indices=None if num_segments is None else list(range(num_segments)),
     )
     builder = CalvinDepthToPicfPointCloud(calvin_root, stride=stride, max_points=max_points)
-    scaffold = DeterministicScaffoldPipeline(builder)
-    posterior = PointOnlyPosteriorPipeline()
+    point_extractor = SonataPointFeatureExtractor(
+        SonataPointConfig(
+            checkpoint_path=sonata_ckpt_path,
+            device=point_device,
+            allow_random_init=True,
+        )
+    )
+    scaffold = DeterministicScaffoldPipeline(builder, point_feature_extractor=point_extractor)
+    posterior = PointOnlyPosteriorPipeline(point_feature_extractor=point_extractor)
 
     scaffold_state = None
     posterior_state = None
@@ -86,7 +97,9 @@ def main() -> None:
     parser.add_argument("--backend", default="zip", choices=["zip", "dir"])
     parser.add_argument("--segments", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--max-points", type=int, default=2048)
+    parser.add_argument("--max-points", type=int, default=1024)
+    parser.add_argument("--sonata-ckpt-path", default=None)
+    parser.add_argument("--point-device", default=None)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
@@ -97,6 +110,8 @@ def main() -> None:
         num_segments=args.segments,
         stride=args.stride,
         max_points=args.max_points,
+        sonata_ckpt_path=args.sonata_ckpt_path,
+        point_device=args.point_device,
     )
     if args.output_json is not None:
         args.output_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")

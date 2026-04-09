@@ -33,3 +33,7 @@ class VisualClipBuffer:
             pad = [frames[0].copy() for _ in range(self.num_frames - len(frames))]
             frames = pad + frames
         return np.stack(frames[-self.num_frames :], axis=0)
+
+    @property
+    def has_frames(self) -> bool:
+        return bool(self._frames)

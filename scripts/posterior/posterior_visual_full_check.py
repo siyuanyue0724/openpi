@@ -26,7 +26,7 @@ def run_visual_full_check(
     backend: str,
     num_segments: int | None = None,
     stride: int = 1,
-    max_points: int = 256,
+    max_points: int = 1024,
     checkpoint_path: str | None = None,
     model_name: str = "vjepa2_1_vit_base_384",
     arch_name_override: str | None = None,
@@ -37,6 +37,8 @@ def run_visual_full_check(
     device: str | None = None,
     dtype: str = "bfloat16",
     use_last_two_mean: bool = False,
+    sonata_ckpt_path: str | None = None,
+    point_device: str | None = None,
 ) -> dict:
     point_only = run_point_only_full_check(
         repo_root=repo_root,
@@ -46,6 +48,8 @@ def run_visual_full_check(
         num_segments=num_segments,
         stride=stride,
         max_points=max_points,
+        sonata_ckpt_path=sonata_ckpt_path,
+        point_device=point_device,
     )
     spec = run_visual_stage1_spec_audit(repo_root)
     visual_only_smoke = run_visual_smoke(
@@ -66,6 +70,8 @@ def run_visual_full_check(
         device=device,
         dtype=dtype,
         use_last_two_mean=use_last_two_mean,
+        sonata_ckpt_path=sonata_ckpt_path,
+        point_device=point_device,
     )
     point_visual_smoke = run_visual_smoke(
         calvin_root=calvin_root,
@@ -85,6 +91,8 @@ def run_visual_full_check(
         device=device,
         dtype=dtype,
         use_last_two_mean=use_last_two_mean,
+        sonata_ckpt_path=sonata_ckpt_path,
+        point_device=point_device,
     )
     visual_only_invariants = run_visual_invariant_audit(
         calvin_root=calvin_root,
@@ -104,6 +112,8 @@ def run_visual_full_check(
         device=device,
         dtype=dtype,
         use_last_two_mean=use_last_two_mean,
+        sonata_ckpt_path=sonata_ckpt_path,
+        point_device=point_device,
     )
     point_visual_acceptance = run_visual_acceptance_check(
         calvin_root=calvin_root,
@@ -123,9 +133,12 @@ def run_visual_full_check(
         device=device,
         dtype=dtype,
         use_last_two_mean=use_last_two_mean,
+        sonata_ckpt_path=sonata_ckpt_path,
+        point_device=point_device,
     )
     checks = {
         "point_only_full_pass": bool(point_only["all_pass"]),
+        "point_backbone_checkpoint_loaded": bool(point_only["smoke"]["point_backbone_checkpoint_loaded"]),
         "visual_stage1_spec_pass": bool(spec["all_pass"]),
         "visual_only_smoke_has_gate": bool(visual_only_smoke["mean_visual_gate_ratio"] > 0.0),
         "visual_only_invariants_pass": bool(visual_only_invariants["all_pass"]),
@@ -155,7 +168,7 @@ def main() -> None:
     parser.add_argument("--backend", default="zip", choices=["zip", "dir"])
     parser.add_argument("--segments", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--max-points", type=int, default=256)
+    parser.add_argument("--max-points", type=int, default=1024)
     parser.add_argument("--checkpoint-path", default=None)
     parser.add_argument("--model-name", default="vjepa2_1_vit_base_384")
     parser.add_argument("--arch-name-override", default=None)
@@ -166,6 +179,8 @@ def main() -> None:
     parser.add_argument("--device", default=None)
     parser.add_argument("--dtype", default="bfloat16")
     parser.add_argument("--use-last-two-mean", action="store_true")
+    parser.add_argument("--sonata-ckpt-path", default=None)
+    parser.add_argument("--point-device", default=None)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
@@ -187,6 +202,8 @@ def main() -> None:
         device=args.device,
         dtype=args.dtype,
         use_last_two_mean=args.use_last_two_mean,
+        sonata_ckpt_path=args.sonata_ckpt_path,
+        point_device=args.point_device,
     )
     if args.output_json is not None:
         args.output_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")

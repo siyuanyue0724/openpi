@@ -54,6 +54,28 @@ def _deterministic_fps(points: np.ndarray, count: int) -> np.ndarray:
     return np.asarray(chosen, dtype=np.int64)
 
 
+def _deterministic_weighted_fps(points: np.ndarray, weights: np.ndarray, count: int) -> np.ndarray:
+    if count <= 0 or points.shape[0] == 0:
+        return np.zeros((0,), dtype=np.int64)
+    if points.shape[0] <= count:
+        return np.arange(points.shape[0], dtype=np.int64)
+    weights = np.asarray(weights, dtype=np.float32).reshape(-1)
+    weights = np.maximum(weights, 0.0)
+    chosen: list[int] = []
+    start = int(np.argmax(weights))
+    chosen.append(start)
+    min_dist = np.linalg.norm(points - points[start : start + 1], axis=1)
+    while len(chosen) < count:
+        score = min_dist * (0.5 + weights)
+        score[np.asarray(chosen, dtype=np.int64)] = -1.0
+        next_idx = int(np.argmax(score))
+        if score[next_idx] < 0:
+            break
+        chosen.append(next_idx)
+        min_dist = np.minimum(min_dist, np.linalg.norm(points - points[next_idx : next_idx + 1], axis=1))
+    return np.asarray(chosen, dtype=np.int64)
+
+
 class CalvinDepthToPicfPointCloud:
     """Deterministic CALVIN depth->pointcloud builder with normals for scaffold replay."""
 
@@ -70,6 +92,8 @@ class CalvinDepthToPicfPointCloud:
         use_world: bool = True,
         depth_scale: float = 1.0,
         selection_mode: str = "fps",
+        min_peripheral_points: int = 128,
+        focus_boost: float = 8.0,
     ):
         cams = load_json(cameras_json_path)
         cam_table = cams.get("cameras", cams)
@@ -100,15 +124,50 @@ class CalvinDepthToPicfPointCloud:
         self.use_world = bool(use_world)
         self.depth_scale = float(depth_scale)
         self.selection_mode = str(selection_mode)
+        self.min_peripheral_points = max(int(min_peripheral_points), 0)
+        self.focus_boost = float(focus_boost)
         if self.selection_mode not in {"fps", "linspace"}:
             raise ValueError(f"selection_mode must be 'fps' or 'linspace', got {self.selection_mode!r}")
 
-    def _select_indices(self, xyz: np.ndarray) -> np.ndarray:
-        if xyz.shape[0] <= self.max_points:
+    def _select_subset_indices(self, xyz: np.ndarray, count: int) -> np.ndarray:
+        if xyz.shape[0] <= count:
             return np.arange(xyz.shape[0], dtype=np.int64)
         if self.selection_mode == "linspace":
-            return np.linspace(0, xyz.shape[0] - 1, self.max_points, dtype=np.int64)
-        return _deterministic_fps(xyz, self.max_points)
+            return np.linspace(0, xyz.shape[0] - 1, count, dtype=np.int64)
+        return _deterministic_fps(xyz, count)
+
+    def _select_indices(
+        self,
+        xyz: np.ndarray,
+        focus_mask: np.ndarray | None = None,
+        focus_weights: np.ndarray | None = None,
+    ) -> np.ndarray:
+        if xyz.shape[0] <= self.max_points:
+            return np.arange(xyz.shape[0], dtype=np.int64)
+        if focus_mask is None or focus_mask.shape[0] != xyz.shape[0] or not np.any(focus_mask):
+            return self._select_subset_indices(xyz, self.max_points)
+        if self.selection_mode == "fps" and focus_weights is not None and focus_weights.shape[0] == xyz.shape[0]:
+            return _deterministic_weighted_fps(xyz, focus_weights, self.max_points)
+
+        focus_idx = np.flatnonzero(focus_mask)
+        peripheral_idx = np.flatnonzero(~focus_mask)
+        peripheral_budget = 0
+        if peripheral_idx.size > 0 and self.min_peripheral_points > 0 and self.max_points > 1:
+            peripheral_budget = min(self.min_peripheral_points, int(peripheral_idx.size), self.max_points - 1)
+        focus_budget = max(self.max_points - peripheral_budget, 1)
+
+        if focus_idx.size <= focus_budget:
+            chosen_focus = focus_idx
+            remaining = self.max_points - int(chosen_focus.size)
+        else:
+            chosen_focus = focus_idx[self._select_subset_indices(xyz[focus_idx], focus_budget)]
+            remaining = self.max_points - int(chosen_focus.size)
+
+        if remaining <= 0 or peripheral_idx.size == 0:
+            return chosen_focus
+
+        chosen_peripheral = peripheral_idx[self._select_subset_indices(xyz[peripheral_idx], remaining)]
+        return np.concatenate([chosen_focus, chosen_peripheral], axis=0)
 
     def __call__(self, sample: Mapping[str, np.ndarray]) -> PicfPointCloudFrame:
         rgb = np.asarray(sample["rgb_static"])
@@ -166,7 +225,22 @@ class CalvinDepthToPicfPointCloud:
             xyz = xyz_cam.astype(np.float32)
             normals = normalize_vectors(normals_sel)
 
-        choose = self._select_indices(xyz)
+        focus_mask = None
+        focus_weights = None
+        focus_center_world = sample.get("focus_center_world")
+        focus_radius_m = sample.get("focus_radius_m")
+        if focus_center_world is not None:
+            if not self.use_world:
+                raise ValueError("focus_center_world requires use_world=True so point selection stays in a single frame.")
+            if focus_radius_m is None:
+                raise ValueError("focus_radius_m is required when focus_center_world is provided.")
+            focus_center = np.asarray(focus_center_world, dtype=np.float32).reshape(3)
+            focus_radius = float(focus_radius_m)
+            focus_dist = np.linalg.norm(xyz - focus_center[None, :], axis=1)
+            focus_mask = focus_dist <= focus_radius
+            focus_weights = 1.0 + self.focus_boost * np.exp(-(focus_dist**2) / max(2.0 * focus_radius * focus_radius, 1e-8))
+
+        choose = self._select_indices(xyz, focus_mask=focus_mask, focus_weights=focus_weights)
         xyz = xyz[choose]
         rgb_sel = rgb_sel[choose]
         normals = normals[choose]

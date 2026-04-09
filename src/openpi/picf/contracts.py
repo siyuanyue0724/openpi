@@ -53,6 +53,55 @@ class RuntimeMeta:
     v_rgb_p: bool = False
     v_pc_scaf: bool = False
     stale_scaffold_steps: int = 0
+    visual_available: bool = False
+    tactile_available: bool = False
+    point_contract_ok: bool = True
+    sync_valid: bool = True
+
+
+@dataclasses.dataclass
+class TactileSensorFrame:
+    rgb: np.ndarray
+    sensor_name: str
+    T_sens_to_wrist: np.ndarray
+    timestamp_s: float
+    depth: np.ndarray | None = None
+    valid: bool = True
+
+    def __post_init__(self) -> None:
+        self.rgb = np.asarray(self.rgb)
+        if self.depth is not None:
+            self.depth = np.asarray(self.depth, dtype=np.float32)
+        self.T_sens_to_wrist = np.asarray(self.T_sens_to_wrist, dtype=np.float32)
+        self.timestamp_s = float(self.timestamp_s)
+        self.valid = bool(self.valid)
+        if self.rgb.ndim != 3 or self.rgb.shape[-1] != 3:
+            raise ValueError(f"tactile rgb must have shape [H,W,3], got {self.rgb.shape}")
+        if self.T_sens_to_wrist.shape != (4, 4):
+            raise ValueError(f"T_sens_to_wrist must have shape (4,4), got {self.T_sens_to_wrist.shape}")
+        if self.depth is not None and self.depth.ndim not in (2, 3):
+            raise ValueError(f"tactile depth must have shape [H,W] or [H,W,1], got {self.depth.shape}")
+
+
+@dataclasses.dataclass
+class PicfTactilePacket:
+    sensors: tuple[TactileSensorFrame, ...] | list[TactileSensorFrame]
+    background_rgb_by_sensor: dict[str, np.ndarray] | None = None
+
+    def __post_init__(self) -> None:
+        self.sensors = tuple(self.sensors)
+        if self.background_rgb_by_sensor is None:
+            self.background_rgb_by_sensor = {}
+        normalized: dict[str, np.ndarray] = {}
+        for key, value in self.background_rgb_by_sensor.items():
+            bg = np.asarray(value)
+            if bg.ndim != 3 or bg.shape[-1] != 3:
+                raise ValueError(f"background tactile rgb must have shape [H,W,3], got {bg.shape}")
+            normalized[str(key)] = bg
+        self.background_rgb_by_sensor = normalized
+
+    def background_for(self, sensor_name: str) -> np.ndarray | None:
+        return self.background_rgb_by_sensor.get(sensor_name)
 
 
 @dataclasses.dataclass
@@ -69,6 +118,13 @@ class PicfObservation:
     point_set: PicfPointCloudFrame | None = None
     runtime_meta: RuntimeMeta | None = None
     G_t: np.ndarray | None = None
+    proprio: np.ndarray | None = None
+    action: np.ndarray | None = None
+    contact_pose: np.ndarray | None = None
+    force_vec: np.ndarray | None = None
+    indent_depth_m: float | None = None
+    tactile_pressure: float | None = None
+    tactile: PicfTactilePacket | None = None
 
     def __post_init__(self) -> None:
         self.rgb_static = np.asarray(self.rgb_static)
@@ -78,6 +134,22 @@ class PicfObservation:
             self.rgb_gripper = np.asarray(self.rgb_gripper)
         if self.G_t is not None:
             self.G_t = np.asarray(self.G_t, dtype=np.float32)
+        if self.proprio is not None:
+            self.proprio = np.asarray(self.proprio, dtype=np.float32).reshape(-1)
+        if self.action is not None:
+            self.action = np.asarray(self.action, dtype=np.float32).reshape(-1)
+        if self.contact_pose is not None:
+            self.contact_pose = np.asarray(self.contact_pose, dtype=np.float32)
+            if self.contact_pose.shape != (4, 4):
+                raise ValueError(f"contact_pose must have shape (4,4), got {self.contact_pose.shape}")
+        if self.force_vec is not None:
+            self.force_vec = np.asarray(self.force_vec, dtype=np.float32).reshape(-1)
+            if self.force_vec.shape not in ((3,), (6,)):
+                raise ValueError(f"force_vec must have shape (3,) or (6,), got {self.force_vec.shape}")
+        if self.indent_depth_m is not None:
+            self.indent_depth_m = float(self.indent_depth_m)
+        if self.tactile_pressure is not None:
+            self.tactile_pressure = float(self.tactile_pressure)
 
 
 @dataclasses.dataclass

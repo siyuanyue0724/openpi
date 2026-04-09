@@ -34,11 +34,11 @@ def fuse_point_visual(
         for block_index, block_slice in enumerate(prior_slices):
             precisions = [1.0 / float(var_block[slot, block_index])]
             natural_params = [mu_prop[slot, block_slice] / float(var_block[slot, block_index])]
-            if bool(point.gate[slot]):
+            if bool(point.gate[slot]) and bool(point.block_valid[slot, block_index]):
                 meas_var = float(point.var_block[slot, block_index])
                 precisions.append(1.0 / meas_var)
                 natural_params.append(point.mu[slot, block_slice] / meas_var)
-            if bool(visual.gate[slot]):
+            if bool(visual.gate[slot]) and bool(visual.block_valid[slot, block_index]):
                 meas_var = float(visual.var_block[slot, block_index])
                 precisions.append(1.0 / meas_var)
                 natural_params.append(visual.mu[slot, block_slice] / meas_var)

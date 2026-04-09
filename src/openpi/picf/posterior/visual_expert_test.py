@@ -16,7 +16,7 @@ from openpi.picf.vjepa.wrapper import VjepaFeatureMap
 
 def test_visual_expert_gates_visible_supports_on_fresh_scaffold(tmp_path: Path) -> None:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
-    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=256)
+    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=1024)
     scaffold = DeterministicScaffoldPipeline(builder)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
     frame = next(iter(replay))

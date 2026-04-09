@@ -31,3 +31,24 @@ def test_picf_pointcloud_handles_invalid_depth(tmp_path: Path) -> None:
 
     assert not point_set.frame_valid
     assert point_set.xyz_world.shape == (0, 3)
+
+
+def test_picf_pointcloud_focus_selection_prioritizes_local_points(tmp_path: Path) -> None:
+    calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
+    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=40, min_peripheral_points=8)
+    xyz = np.concatenate(
+        [
+            np.stack([np.linspace(-0.02, 0.02, 100, dtype=np.float32), np.zeros((100,), dtype=np.float32), np.ones((100,), dtype=np.float32)], axis=-1),
+            np.stack([np.linspace(0.2, 0.6, 100, dtype=np.float32), np.zeros((100,), dtype=np.float32), np.ones((100,), dtype=np.float32)], axis=-1),
+        ],
+        axis=0,
+    )
+    focus_mask = np.linalg.norm(xyz[:, :2], axis=1) <= 0.08
+    focus_weights = 1.0 + builder.focus_boost * np.exp(-(np.linalg.norm(xyz[:, :2], axis=1) ** 2) / (2.0 * 0.08 * 0.08))
+
+    baseline = builder._select_indices(xyz)  # noqa: SLF001
+    chosen = builder._select_indices(xyz, focus_mask=focus_mask, focus_weights=focus_weights)  # noqa: SLF001
+
+    assert chosen.shape == (40,)
+    assert int(focus_mask[chosen].sum()) > int(focus_mask[baseline].sum())
+    assert int((~focus_mask[chosen]).sum()) > 0

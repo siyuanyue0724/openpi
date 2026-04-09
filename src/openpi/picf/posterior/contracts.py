@@ -9,6 +9,7 @@ import numpy as np
 class PointExpertState:
     mu: np.ndarray
     var_block: np.ndarray
+    block_valid: np.ndarray
     gate: np.ndarray
     anchor_count: np.ndarray
     gamma_n: np.ndarray
@@ -19,6 +20,7 @@ class PointExpertState:
     def __post_init__(self) -> None:
         self.mu = np.asarray(self.mu, dtype=np.float32)
         self.var_block = np.asarray(self.var_block, dtype=np.float32)
+        self.block_valid = np.asarray(self.block_valid, dtype=bool)
         self.gate = np.asarray(self.gate, dtype=bool)
         self.anchor_count = np.asarray(self.anchor_count, dtype=np.int32)
         self.gamma_n = np.asarray(self.gamma_n, dtype=np.float32)
@@ -31,6 +33,7 @@ class PointExpertState:
 class VisualExpertState:
     mu: np.ndarray
     var_block: np.ndarray
+    block_valid: np.ndarray
     gate: np.ndarray
     in_view: np.ndarray
     visibility: np.ndarray
@@ -40,6 +43,7 @@ class VisualExpertState:
     def __post_init__(self) -> None:
         self.mu = np.asarray(self.mu, dtype=np.float32)
         self.var_block = np.asarray(self.var_block, dtype=np.float32)
+        self.block_valid = np.asarray(self.block_valid, dtype=bool)
         self.gate = np.asarray(self.gate, dtype=bool)
         self.in_view = np.asarray(self.in_view, dtype=bool)
         self.visibility = np.asarray(self.visibility, dtype=np.float32)
@@ -52,6 +56,7 @@ class PosteriorDebugMetrics:
     point_gate_ratio: float
     stale_prior_match_error: float
     posterior_prior_equal_on_stale: bool
+    fresh_scaffold: bool
     matched_prior_count: int
     reset_prior_count: int
     precision_gain_count: int

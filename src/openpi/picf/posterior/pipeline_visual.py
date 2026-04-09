@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import dataclasses
+from typing import Any
+
 import numpy as np
 
 from openpi.picf.contracts import PicfObservation
@@ -17,9 +20,9 @@ from openpi.picf.posterior.visual_expert import empty_visual_expert
 from openpi.picf.posterior.visual_expert import load_camera_model
 from openpi.picf.scaffold.local_frame import EndEffectorLocalFrame
 from openpi.picf.scaffold.pipeline import DeterministicScaffoldConfig
+from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
 from openpi.picf.vjepa.config import VjepaVisualConfig
 from openpi.picf.vjepa.history import VisualClipBuffer
-from openpi.picf.vjepa.wrapper import Vjepa2VisualEncoder
 
 
 class PointVisualPosteriorPipeline:
@@ -30,9 +33,10 @@ class PointVisualPosteriorPipeline:
         posterior_config: PosteriorConfig | None = None,
         scaffold_config: DeterministicScaffoldConfig | None = None,
         local_frame: EndEffectorLocalFrame | None = None,
-        visual_encoder: Vjepa2VisualEncoder | None = None,
+        visual_encoder: Any | None = None,
         enable_point_expert: bool = True,
         enable_visual_expert: bool = True,
+        point_feature_extractor: SonataPointFeatureExtractor | None = None,
     ):
         if not enable_point_expert and not enable_visual_expert:
             raise ValueError("At least one expert must be enabled.")
@@ -42,10 +46,15 @@ class PointVisualPosteriorPipeline:
         self.local_frame = local_frame or EndEffectorLocalFrame()
         self.enable_point_expert = bool(enable_point_expert)
         self.enable_visual_expert = bool(enable_visual_expert)
+        self.point_feature_extractor = point_feature_extractor
         if self.enable_visual_expert:
             if visual_config.camera_json_path is None:
                 raise ValueError("visual_config.camera_json_path must be set when the visual expert is enabled.")
-            self.visual_encoder = visual_encoder or Vjepa2VisualEncoder(visual_config)
+            if visual_encoder is None:
+                from openpi.picf.vjepa.wrapper import Vjepa2VisualEncoder
+
+                visual_encoder = Vjepa2VisualEncoder(visual_config)
+            self.visual_encoder = visual_encoder
             self.camera_model = load_camera_model(
                 visual_config.camera_json_path,
                 camera_name=visual_config.camera_name,
@@ -55,6 +64,15 @@ class PointVisualPosteriorPipeline:
             self.visual_encoder = None
             self.camera_model = None
             self.clip_buffer = None
+
+    @staticmethod
+    def _visual_frame_valid(observation: PicfObservation) -> bool:
+        rgb = np.asarray(observation.rgb_static)
+        return bool(rgb.size > 0 and np.isfinite(rgb).all())
+
+    @staticmethod
+    def _visual_frame_accepted(observation: PicfObservation, scaffold_state: SupportScaffoldState) -> bool:
+        return abs(float(scaffold_state.runtime_meta.t_v_last) - float(observation.timestamp_s)) < 1e-6
 
     def step(
         self,
@@ -80,12 +98,19 @@ class PointVisualPosteriorPipeline:
             previous=previous,
         )
 
+        point_features = None
+        if frame_context is not None and self.point_feature_extractor is not None:
+            feature_context = frame_context
+            if not scaffold_state.runtime_meta.v_rgb_p:
+                feature_context = dataclasses.replace(frame_context, colors=np.zeros_like(frame_context.colors, dtype=np.float32))
+            point_features = self.point_feature_extractor.encode_local_context(feature_context).features
+
         if self.enable_point_expert and frame_context is not None:
             point = build_point_expert(
                 posterior_config=self.posterior_config,
-                scaffold_config=self.scaffold_config,
                 scaffold_state=scaffold_state,
                 frame_context=frame_context,
+                point_features=point_features,
             )
         else:
             point = empty_point_expert(posterior_config=self.posterior_config, k_support=scaffold_state.x.shape[0])
@@ -94,22 +119,28 @@ class PointVisualPosteriorPipeline:
             assert self.clip_buffer is not None
             assert self.camera_model is not None
             assert self.visual_encoder is not None
-            self.clip_buffer.push(
-                observation.rgb_static,
-                segment_id=int(observation.segment_id),
-                reset=bool(observation.reset_scaffold),
-            )
-            clip = self.clip_buffer.get_clip()
-            visual_features = self.visual_encoder.encode_clip(clip)
-            visual = build_visual_expert(
-                posterior_config=self.posterior_config,
-                visual_config=self.visual_config,
-                observation=observation,
-                scaffold_state=scaffold_state,
-                visual_features=visual_features,
-                camera_model=self.camera_model,
-                frame_context=frame_context,
-            )
+            runtime_meta = scaffold_state.runtime_meta
+            visual_fresh = (observation.timestamp_s - runtime_meta.t_v_last) <= self.visual_config.delta_v_max_s
+            if self._visual_frame_valid(observation) and self._visual_frame_accepted(observation, scaffold_state):
+                self.clip_buffer.push(
+                    observation.rgb_static,
+                    segment_id=int(observation.segment_id),
+                    reset=bool(observation.reset_scaffold),
+                )
+            if visual_fresh and self.clip_buffer.has_frames:
+                clip = self.clip_buffer.get_clip()
+                visual_features = self.visual_encoder.encode_clip(clip)
+                visual = build_visual_expert(
+                    posterior_config=self.posterior_config,
+                    visual_config=self.visual_config,
+                    observation=observation,
+                    scaffold_state=scaffold_state,
+                    visual_features=visual_features,
+                    camera_model=self.camera_model,
+                    frame_context=frame_context,
+                )
+            else:
+                visual = empty_visual_expert(posterior_config=self.posterior_config, k_support=scaffold_state.x.shape[0])
         else:
             visual = empty_visual_expert(posterior_config=self.posterior_config, k_support=scaffold_state.x.shape[0])
 
@@ -130,6 +161,7 @@ class PointVisualPosteriorPipeline:
             point_gate_ratio=float(point.gate.mean()) if point.gate.size > 0 else 0.0,
             stale_prior_match_error=stale_error,
             posterior_prior_equal_on_stale=posterior_equals_prior,
+            fresh_scaffold=bool(scaffold_state.debug.fresh_scaffold),
             matched_prior_count=matched_prior_count,
             reset_prior_count=reset_prior_count,
             precision_gain_count=precision_gain_count,

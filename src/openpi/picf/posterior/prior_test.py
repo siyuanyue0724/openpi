@@ -13,6 +13,7 @@ def _dummy_previous(config: PosteriorConfig) -> PosteriorState:
     point = PointExpertState(
         mu=np.zeros_like(mu),
         var_block=np.ones((2, 3), dtype=np.float32),
+        block_valid=np.zeros((2, 3), dtype=bool),
         gate=np.zeros((2,), dtype=bool),
         anchor_count=np.zeros((2,), dtype=np.int32),
         gamma_n=np.zeros((2,), dtype=np.float32),
@@ -24,6 +25,7 @@ def _dummy_previous(config: PosteriorConfig) -> PosteriorState:
         point_gate_ratio=0.0,
         stale_prior_match_error=0.0,
         posterior_prior_equal_on_stale=True,
+        fresh_scaffold=True,
         matched_prior_count=0,
         reset_prior_count=0,
         precision_gain_count=0,

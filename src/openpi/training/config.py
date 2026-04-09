@@ -340,7 +340,7 @@ class CalvinDataConfig(DataConfigFactory):
         root = self.calvin_root or os.environ.get("CALVIN_ZIP") or os.environ.get("CALVIN_ROOT")
         if not root:
             raise ValueError(
-                "CALVIN data path missing. Set `--data.calvin_root=/abs/path/to/task_ABC_D.zip` "
+                "CALVIN data path missing. Set `--data.calvin_root=/abs/path/to/task_ABCD_D.zip` "
                 "or export CALVIN_ZIP/CALVIN_ROOT."
             )
 
@@ -474,7 +474,7 @@ class CalvinNoSonataDataConfig(DataConfigFactory):
         root = self.calvin_root or os.environ.get("CALVIN_ZIP") or os.environ.get("CALVIN_ROOT")
         if not root:
             raise ValueError(
-                "CALVIN data path missing. Set `--data.calvin_root=/abs/path/to/task_ABC_D.zip` "
+                "CALVIN data path missing. Set `--data.calvin_root=/abs/path/to/task_ABCD_D.zip` "
                 "or export CALVIN_ZIP/CALVIN_ROOT."
             )
 

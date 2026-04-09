@@ -19,7 +19,9 @@ def run_acceptance_check(
     backend: str,
     num_segments: int | None = None,
     stride: int = 1,
-    max_points: int = 2048,
+    max_points: int = 1024,
+    sonata_ckpt_path: str | None = None,
+    point_device: str | None = None,
 ) -> dict:
     smoke = run_smoke(
         calvin_root=calvin_root,
@@ -28,6 +30,8 @@ def run_acceptance_check(
         num_segments=num_segments,
         stride=stride,
         max_points=max_points,
+        sonata_ckpt_path=sonata_ckpt_path,
+        point_device=point_device,
     )
     invariants = run_invariant_audit(
         calvin_root=calvin_root,
@@ -36,6 +40,8 @@ def run_acceptance_check(
         num_segments=num_segments,
         stride=stride,
         max_points=max_points,
+        sonata_ckpt_path=sonata_ckpt_path,
+        point_device=point_device,
     )
     checks = {
         "invariants_pass": bool(invariants["all_pass"]),
@@ -53,13 +59,15 @@ def run_acceptance_check(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Engineering acceptance gate for PICF posterior.")
+    parser = argparse.ArgumentParser(description="Engineering acceptance gate for the legacy point-only PICF posterior path.")
     parser.add_argument("--calvin-root", required=True)
     parser.add_argument("--split", default="training", choices=["training", "validation"])
     parser.add_argument("--backend", default="zip", choices=["zip", "dir"])
     parser.add_argument("--segments", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--max-points", type=int, default=2048)
+    parser.add_argument("--max-points", type=int, default=1024)
+    parser.add_argument("--sonata-ckpt-path", default=None)
+    parser.add_argument("--point-device", default=None)
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
@@ -70,6 +78,8 @@ def main() -> None:
         num_segments=args.segments,
         stride=args.stride,
         max_points=args.max_points,
+        sonata_ckpt_path=args.sonata_ckpt_path,
+        point_device=args.point_device,
     )
     if args.output_json is not None:
         args.output_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")

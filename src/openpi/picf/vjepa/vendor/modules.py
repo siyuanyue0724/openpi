@@ -53,7 +53,7 @@ def rotate_queries_or_keys(x, pos, n_registers, has_cls_first):
         parts.append(x_reg)
     out = torch.cat(parts, dim=-2)
 
-    return out
+    return out.to(dtype=x.dtype)
 
 
 class DropPath(nn.Module):

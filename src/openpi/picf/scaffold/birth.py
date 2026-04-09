@@ -3,15 +3,32 @@ from __future__ import annotations
 import numpy as np
 
 
-def coverage_weights(points: np.ndarray, centers: np.ndarray, *, sigma: float) -> np.ndarray:
+def coverage_weights(
+    points: np.ndarray,
+    centers: np.ndarray,
+    *,
+    sigma: float | None = None,
+    sigmas: np.ndarray | None = None,
+) -> np.ndarray:
     points = np.asarray(points, dtype=np.float32)
     centers = np.asarray(centers, dtype=np.float32)
     if points.shape[0] == 0:
         return np.zeros((0,), dtype=np.float32)
     if centers.shape[0] == 0:
         return np.ones((points.shape[0],), dtype=np.float32)
+    if sigmas is not None and sigma is not None:
+        raise ValueError("Pass either sigma or sigmas, not both.")
     dists = np.linalg.norm(points[:, None, :] - centers[None, :, :], axis=-1)
-    coverage = np.exp(-(dists**2) / max(2.0 * sigma * sigma, 1e-8)).max(axis=1)
+    if sigmas is not None:
+        sigmas = np.asarray(sigmas, dtype=np.float32).reshape(-1)
+        if sigmas.shape[0] != centers.shape[0]:
+            raise ValueError(f"sigmas must match centers count, got {sigmas.shape[0]} vs {centers.shape[0]}")
+        denom = np.maximum(2.0 * sigmas[None, :] * sigmas[None, :], 1e-8)
+        coverage = np.exp(-(dists**2) / denom).max(axis=1)
+    else:
+        if sigma is None:
+            raise ValueError("Either sigma or sigmas must be provided.")
+        coverage = np.exp(-(dists**2) / max(2.0 * sigma * sigma, 1e-8)).max(axis=1)
     return 1.0 - coverage.astype(np.float32)
 
 

@@ -23,8 +23,8 @@ class PosteriorConfig:
     epsilon_delta: float = 1e-6
     gamma_min_pc: float = 0.05
     anchor_count_norm: float = 32.0
-    force_active_gate: bool = True
-    point_radius_min_m: float = 0.03
+    force_active_gate: bool = False
+    point_radius_min_m: float = 0.0
 
     @property
     def dim_total(self) -> int:

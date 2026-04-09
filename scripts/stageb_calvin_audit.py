@@ -34,6 +34,15 @@ def _safe_minmax_np(x: Any) -> str:
         return f"<unprintable: {type(x)} err={e!r}>"
 
 
+def _configure_torch_multiprocessing(num_workers: int) -> None:
+    if num_workers <= 0:
+        return
+    try:
+        torch.multiprocessing.set_sharing_strategy("file_system")
+    except RuntimeError:
+        pass
+
+
 def _get_calvin_root(cli_root: str | None) -> str:
     if cli_root:
         return cli_root
@@ -43,9 +52,28 @@ def _get_calvin_root(cli_root: str | None) -> str:
     raise RuntimeError("CALVIN root not provided. Use --calvin-root or export CALVIN_ZIP=...")
 
 
-def _apply_data_overrides(cfg, split: str | None = None, cameras_json_path: str | None = None):
+def _infer_backend(root: str, backend: str | None) -> str:
+    if backend is not None:
+        return backend
+    return "zip" if str(root).endswith(".zip") else "dir"
+
+
+def _apply_data_overrides(
+    cfg,
+    *,
+    calvin_root: str | None = None,
+    backend: str | None = None,
+    split: str | None = None,
+    cameras_json_path: str | None = None,
+):
     data = cfg.data
     changed = False
+    if calvin_root is not None:
+        data = dataclasses.replace(data, calvin_root=str(calvin_root))
+        changed = True
+    if backend is not None:
+        data = dataclasses.replace(data, backend=str(backend))
+        changed = True
     if split is not None:
         data = dataclasses.replace(data, split=str(split))
         changed = True
@@ -59,12 +87,19 @@ def _apply_data_overrides(cfg, split: str | None = None, cameras_json_path: str 
 
 @torch.no_grad()
 def mode_dataset(cfg_name: str, calvin_root: str, num_workers: int, iters: int, split: str | None) -> None:
+    _configure_torch_multiprocessing(num_workers)
     cfg = get_config(cfg_name)
-    cfg = _apply_data_overrides(cfg, split=split, cameras_json_path=None)
+    cfg = _apply_data_overrides(
+        cfg,
+        calvin_root=calvin_root,
+        backend=_infer_backend(calvin_root, None),
+        split=split,
+        cameras_json_path=None,
+    )
     dcfg = cfg.data  # CalvinDataConfig (factory)
 
     ds = CalvinLangSegmentDataset(
-        root=calvin_root,
+        root=str(getattr(dcfg, "calvin_root", calvin_root)),
         split=str(getattr(dcfg, "split", "training")),
         backend=str(getattr(dcfg, "backend", "zip")),
         action_horizon=int(cfg.model.action_horizon),
@@ -121,6 +156,7 @@ def mode_dataset(cfg_name: str, calvin_root: str, num_workers: int, iters: int, 
 def mode_loader(
     cfg_name: str,
     calvin_root: str,
+    backend: str | None,
     num_workers: int,
     num_batches: int,
     batch_size: int | None,
@@ -128,7 +164,10 @@ def mode_loader(
     split: str | None,
     cameras_json_path: str | None,
 ) -> None:
-    os.environ["CALVIN_ZIP"] = calvin_root
+    backend = _infer_backend(calvin_root, backend)
+    _configure_torch_multiprocessing(num_workers)
+    os.environ["CALVIN_ROOT"] = calvin_root
+    os.environ["CALVIN_ZIP"] = calvin_root if backend == "zip" else ""
 
     cfg = get_config(cfg_name)
     if num_workers is not None:
@@ -137,10 +176,19 @@ def mode_loader(
         cfg = dataclasses.replace(cfg, batch_size=int(batch_size))
     if max_token_len is not None:
         cfg = dataclasses.replace(cfg, model=dataclasses.replace(cfg.model, max_token_len=int(max_token_len)))
-    cfg = _apply_data_overrides(cfg, split=split, cameras_json_path=cameras_json_path)
+    cfg = _apply_data_overrides(
+        cfg,
+        calvin_root=calvin_root,
+        backend=backend,
+        split=split,
+        cameras_json_path=cameras_json_path,
+    )
     
-    print(f"[loader] split={getattr(cfg.data,'split',None)} cameras_json_path={getattr(cfg.data,'cameras_json_path',None)}")
-    print(f"[loader] cfg={cfg_name} root={calvin_root}")
+    print(
+        f"[loader] split={getattr(cfg.data,'split',None)} backend={getattr(cfg.data,'backend',None)} "
+        f"cameras_json_path={getattr(cfg.data,'cameras_json_path',None)}"
+    )
+    print(f"[loader] cfg={cfg_name} root={getattr(cfg.data,'calvin_root',calvin_root)}")
     print(f"[loader] batch_size={cfg.batch_size} num_workers={cfg.num_workers} num_batches={num_batches}")
     print(f"[loader] model.max_token_len={cfg.model.max_token_len} action_horizon={cfg.model.action_horizon}")
     print(f"[loader] point_token_cap={getattr(cfg.model,'point_token_cap',None)} point_feat_dim={getattr(cfg.model,'point_feat_dim',None)}")
@@ -243,12 +291,28 @@ def mode_loader(
 
 
 @torch.no_grad()
-def mode_sonata(cfg_name: str, calvin_root: str, num_batches: int, device: str, split: str | None, cameras_json_path: str | None) -> None:
-    os.environ["CALVIN_ZIP"] = calvin_root
+def mode_sonata(
+    cfg_name: str,
+    calvin_root: str,
+    backend: str | None,
+    num_batches: int,
+    device: str,
+    split: str | None,
+    cameras_json_path: str | None,
+) -> None:
+    backend = _infer_backend(calvin_root, backend)
+    os.environ["CALVIN_ROOT"] = calvin_root
+    os.environ["CALVIN_ZIP"] = calvin_root if backend == "zip" else ""
 
     cfg = get_config(cfg_name)
     cfg = dataclasses.replace(cfg, batch_size=1, num_workers=0)  # 先单进程，避免把问题混到 spawn
-    cfg = _apply_data_overrides(cfg, split=split, cameras_json_path=cameras_json_path)
+    cfg = _apply_data_overrides(
+        cfg,
+        calvin_root=calvin_root,
+        backend=backend,
+        split=split,
+        cameras_json_path=cameras_json_path,
+    )
     dl = create_data_loader(cfg, framework="pytorch", shuffle=True, num_batches=num_batches, skip_norm_stats=False)
 
     try:
@@ -316,6 +380,7 @@ def main():
     ap.add_argument("--mode", choices=["dataset", "loader", "sonata"], required=True)
     ap.add_argument("--config", default="pi05_calvin_sonata")
     ap.add_argument("--calvin-root", default=None)
+    ap.add_argument("--backend", choices=["zip", "dir"], default=None)
     ap.add_argument("--num-workers", type=int, default=0)
     ap.add_argument("--iters", type=int, default=20)
     ap.add_argument("--num-batches", type=int, default=50)
@@ -334,6 +399,7 @@ def main():
         mode_loader(
             args.config,
             root,
+            backend=args.backend,
             num_workers=args.num_workers,
             num_batches=args.num_batches,
             batch_size=args.batch_size,
@@ -345,6 +411,7 @@ def main():
         mode_sonata(
             args.config,
             root,
+            backend=args.backend,
             num_batches=args.num_batches,
             device=args.device,
             split=args.split,

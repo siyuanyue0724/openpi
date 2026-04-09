@@ -24,7 +24,9 @@ def run_full_check(
     backend: str,
     num_segments: int | None = None,
     stride: int = 1,
-    max_points: int = 256,
+    max_points: int = 1024,
+    sonata_ckpt_path: str | None = None,
+    point_device: str | None = None,
 ) -> dict:
     spec = run_spec_audit(repo_root)
     smoke = run_smoke(
@@ -34,6 +36,8 @@ def run_full_check(
         num_segments=num_segments,
         stride=stride,
         max_points=max_points,
+        sonata_ckpt_path=sonata_ckpt_path,
+        point_device=point_device,
     )
     invariants = run_invariant_audit(
         calvin_root=calvin_root,
@@ -53,6 +57,7 @@ def run_full_check(
     )
     checks = {
         "spec_pass": bool(spec["all_pass"]),
+        "point_backbone_checkpoint_loaded": bool(smoke["point_backbone_checkpoint_loaded"]),
         "smoke_has_precision_gain": bool(smoke["mean_precision_gain_count"] > 0.0),
         "invariants_pass": bool(invariants["all_pass"]),
         "acceptance_pass": bool(acceptance["all_pass"]),
@@ -68,14 +73,16 @@ def run_full_check(
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Full posterior stage check for PICF.")
+    parser = argparse.ArgumentParser(description="Full validation suite for the legacy point-only PICF posterior path.")
     parser.add_argument("--repo-root", default=".")
     parser.add_argument("--calvin-root", required=True)
     parser.add_argument("--split", default="training", choices=["training", "validation"])
     parser.add_argument("--backend", default="zip", choices=["zip", "dir"])
     parser.add_argument("--segments", type=int, default=None)
     parser.add_argument("--stride", type=int, default=1)
-    parser.add_argument("--max-points", type=int, default=256)
+    parser.add_argument("--max-points", type=int, default=1024)
+    parser.add_argument("--sonata-ckpt-path", default=None)
+    parser.add_argument("--point-device", default=None, help="CUDA device only, e.g. cuda or cuda:0.")
     parser.add_argument("--output-json", type=Path, default=None)
     args = parser.parse_args()
 
@@ -87,6 +94,8 @@ def main() -> None:
         num_segments=args.segments,
         stride=args.stride,
         max_points=args.max_points,
+        sonata_ckpt_path=args.sonata_ckpt_path,
+        point_device=args.point_device,
     )
     if args.output_json is not None:
         args.output_json.write_text(json.dumps(summary, indent=2), encoding="utf-8")

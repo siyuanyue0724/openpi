@@ -8,13 +8,14 @@ from .scaffold_stability_eval import run_stability_eval
 
 def test_scaffold_scripts_run_on_mini_dataset(tmp_path: Path) -> None:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=True)
-    smoke = run_smoke(calvin_root=calvin_root, split="training", backend="zip", num_segments=2, max_points=128)
+    smoke = run_smoke(calvin_root=calvin_root, split="training", backend="zip", num_segments=2, stride=1, max_points=1024)
     stability = run_stability_eval(
         calvin_root=calvin_root,
         split="training",
         backend="zip",
         num_segments=2,
-        max_points=128,
+        stride=1,
+        max_points=1024,
     )
 
     assert smoke["frames"] == 8

@@ -1,6 +1,11 @@
 from pathlib import Path
 
+import pytest
+import torch
+
+from openpi.picf.sonata.wrapper import sonata_runtime_available
 from openpi.picf.test_utils import build_mini_calvin_dataset
+from openpi.picf.vjepa.wrapper import vjepa_runtime_available
 
 from .posterior_visual_acceptance_check import run_visual_acceptance_check
 from .posterior_visual_full_check import run_visual_full_check
@@ -10,6 +15,12 @@ from .posterior_visual_stage1_spec_audit import run_visual_stage1_spec_audit
 
 
 def test_visual_posterior_scripts_run_on_mini_dataset(tmp_path: Path) -> None:
+    if not sonata_runtime_available():
+        pytest.skip("Sonata runtime dependencies are unavailable in this environment.")
+    if not vjepa_runtime_available():
+        pytest.skip("V-JEPA runtime dependencies are unavailable in this environment.")
+    if not torch.cuda.is_available():
+        pytest.skip("Visual posterior script smoke requires GPU-backed runtimes.")
     repo_root = Path(__file__).resolve().parents[2]
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=True)
     kwargs = {
@@ -17,12 +28,13 @@ def test_visual_posterior_scripts_run_on_mini_dataset(tmp_path: Path) -> None:
         "split": "training",
         "backend": "zip",
         "num_segments": 2,
-        "max_points": 256,
+        "max_points": 1024,
         "arch_name_override": "vit_tiny",
         "img_size": 64,
         "num_frames": 4,
-        "device": "cpu",
+        "device": "cuda",
         "dtype": "float32",
+        "point_device": "cuda",
     }
     smoke_visual_only = run_visual_smoke(mode="visual_only", **kwargs)
     smoke_point_visual = run_visual_smoke(mode="point_visual", **kwargs)

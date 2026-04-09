@@ -21,6 +21,18 @@ def _make_depth(height: int, width: int, *, bias: float) -> np.ndarray:
     return depth.astype(np.float32)
 
 
+def _make_tactile_rgb(height: int, width: int, *, shift: int) -> np.ndarray:
+    left = _make_rgb(height, width, shift=shift)
+    right = _make_rgb(height, width, shift=shift + 17)
+    return np.concatenate([left, right], axis=-1)
+
+
+def _make_tactile_depth(height: int, width: int, *, bias: float) -> np.ndarray:
+    left = _make_depth(height, width, bias=bias)
+    right = _make_depth(height, width, bias=bias + 0.002)
+    return np.stack([left, right], axis=-1)
+
+
 def _make_robot_obs(step_id: int, *, still: bool) -> np.ndarray:
     robot_obs = np.zeros((15,), dtype=np.float32)
     if still:
@@ -63,6 +75,8 @@ def build_mini_calvin_dataset(base_dir: Path, *, make_zip: bool = False) -> str:
             rgb_static = _make_rgb(32, 32, shift=step_id * (3 if split == "training" else 5))
             rgb_gripper = _make_rgb(16, 16, shift=step_id * (2 if split == "training" else 4))
             depth_static = _make_depth(32, 32, bias=0.002 * step_id)
+            rgb_tactile = _make_tactile_rgb(16, 16, shift=step_id * (11 if split == "training" else 13))
+            depth_tactile = _make_tactile_depth(16, 16, bias=0.001 * step_id)
             robot_obs = _make_robot_obs(step_id, still=still)
             rel_actions = np.full((7,), 0.01 * step_id, dtype=np.float32)
             np.savez(
@@ -70,6 +84,8 @@ def build_mini_calvin_dataset(base_dir: Path, *, make_zip: bool = False) -> str:
                 rgb_static=rgb_static,
                 rgb_gripper=rgb_gripper,
                 depth_static=depth_static,
+                rgb_tactile=rgb_tactile,
+                depth_tactile=depth_tactile,
                 robot_obs=robot_obs,
                 rel_actions=rel_actions,
             )

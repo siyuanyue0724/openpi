@@ -99,7 +99,11 @@ pip install -q numpy pybullet
 - 有哪些 `task_*`
 - 每个 task 里有哪些 split（training/validation/…）
 - 每个 split 下 `episode_*.npz` 数量
-- split 下是否存在 `.hydra/` 或 `auto_lang_ann.npy`
+- split 下是否存在 `.hydra/` 或语言标注文件
+  默认会检查：
+  - `<split>/auto_lang_ann.npy`
+  - `<split>/lang_annotations/auto_lang_ann.npy`
+  - `<split>/lang_*/auto_lang_ann.npy`
 
 用于快速确认：你应该把后续脚本的 `--src` 指到哪里。
 
@@ -119,13 +123,13 @@ python scripts/calvin/calvin_discover.py --root ~/datasets/calvin/dataset
         "path": ".../task_ABCD_D/training",
         "episodes": 2307126,
         "has_.hydra": true,
-        "has_auto_lang_ann": false
+        "has_auto_lang_ann": true
       },
       "validation": {
         "path": ".../task_ABCD_D/validation",
         "episodes": 99022,
         "has_.hydra": true,
-        "has_auto_lang_ann": false
+        "has_auto_lang_ann": true
       }
     }
   }
@@ -134,6 +138,7 @@ python scripts/calvin/calvin_discover.py --root ~/datasets/calvin/dataset
 
 **常见坑**
 - 如果你只有 zip 没有展开目录，这个脚本会提示找不到 `task_*` 目录：这是预期行为。
+- 当前本机已经有解压好的 `~/datasets/calvin/dataset/task_ABCD_D/`；不要再去解压同级的 `task_ABCD_D.zip`。
 
 ---
 

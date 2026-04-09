@@ -14,12 +14,26 @@ import torch.nn.functional as F  # noqa: N812
 
 import openpi.models.gemma as _gemma
 import openpi.models_pytorch.preprocessing_pytorch as _preprocessing
-from openpi.models.sonata_encoder import Sonata
+try:
+    from openpi.models.sonata_encoder import Sonata
+    _SONATA_IMPORT_ERROR: Exception | None = None
+except ModuleNotFoundError as exc:
+    Sonata = None  # type: ignore[assignment]
+    _SONATA_IMPORT_ERROR = exc
 
 _SONATA_IGNORED_KEYS: set[str] = {"embedding.mask_token"}
 
 
 _SONATA_VALID_ORDERS: set[str] = {"z", "z-trans", "hilbert", "hilbert-trans"}
+
+
+def _require_sonata_runtime() -> type[nn.Module]:
+    if Sonata is None:
+        raise RuntimeError(
+            "Sonata runtime dependencies are unavailable. "
+            "Install the Sonata stack, including torch_scatter, to enable point-cloud encoding."
+        ) from _SONATA_IMPORT_ERROR
+    return Sonata
 
 
 def _parse_bool_env(name: str) -> bool | None:
@@ -722,7 +736,7 @@ class PI0Pytorch(nn.Module):
                 enable_fourier = bool(override_fourier)
             mask_token = "embedding.mask_token" in sonata_sd
             self.sonata_in_channels = int(in_ch)
-            self.sonata = Sonata(
+            self.sonata = _require_sonata_runtime()(
                 in_channels=self.sonata_in_channels,
                 order=_parse_sonata_order_env(default=("z", "z-trans")),
                 mask_token=mask_token,
@@ -793,7 +807,7 @@ class PI0Pytorch(nn.Module):
             if override_fourier is not None:
                 enable_fourier = bool(override_fourier)
             mask_token = bool(sd is not None and ("embedding.mask_token" in sd))
-            self.sonata = Sonata(
+            self.sonata = _require_sonata_runtime()(
                 in_channels=self.sonata_in_channels,
                 order=_parse_sonata_order_env(default=("z", "z-trans")),
                 mask_token=mask_token,

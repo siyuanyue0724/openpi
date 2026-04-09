@@ -32,6 +32,8 @@ def fuse_point_only(
             continue
         precision_gain_count += 1
         for block_index, block_slice in enumerate(prior_slices):
+            if not bool(point.block_valid[slot, block_index]):
+                continue
             prior_var = float(var_block[slot, block_index])
             meas_var = float(point.var_block[slot, block_index])
             lambda_total = 1.0 / prior_var + 1.0 / meas_var

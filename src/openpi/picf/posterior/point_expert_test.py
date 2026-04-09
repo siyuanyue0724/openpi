@@ -6,12 +6,10 @@ from openpi.picf.contracts import SupportScaffoldState
 from openpi.picf.frame_context import PointFrameContext
 from openpi.picf.posterior.config import PosteriorConfig
 from openpi.picf.posterior.point_expert import build_point_expert
-from openpi.picf.scaffold.pipeline import DeterministicScaffoldConfig
 
 
 def test_point_expert_gates_low_resolution_supports() -> None:
     posterior_config = PosteriorConfig()
-    scaffold_config = DeterministicScaffoldConfig()
     pi = np.zeros((2, 12), dtype=np.float32)
     pi[0, :8] = 1.0 / 8.0
     pi[1, 8:12] = 1.0 / 4.0
@@ -48,12 +46,21 @@ def test_point_expert_gates_low_resolution_supports() -> None:
     )
     points = np.concatenate(
         [
-            np.stack([np.array([0.0015 * i, 0.0, 0.0], dtype=np.float32) for i in range(8)], axis=0),
-            np.stack([np.array([0.08 + 0.01 * i, 0.0, 0.0], dtype=np.float32) for i in range(4)], axis=0),
+            np.stack([np.array([0.00125 * i, 0.0, 0.0], dtype=np.float32) for i in range(8)], axis=0),
+            np.array(
+                [
+                    [0.08, 0.0, 0.0],
+                    [0.084, 0.0, 0.0],
+                    [0.088, 0.0, 0.0],
+                    [0.111, 0.0, 0.0],
+                ],
+                dtype=np.float32,
+            ),
         ],
         axis=0,
     )
     frame_context = PointFrameContext(
+        grid_coord=np.stack([np.array([i, 0, 0], dtype=np.int32) for i in range(12)], axis=0),
         points_local=points,
         normals_local=np.tile(np.array([[0.0, 0.0, 1.0]], dtype=np.float32), (12, 1)),
         colors=np.zeros((12, 3), dtype=np.float32),
@@ -64,7 +71,6 @@ def test_point_expert_gates_low_resolution_supports() -> None:
 
     point = build_point_expert(
         posterior_config=posterior_config,
-        scaffold_config=scaffold_config,
         scaffold_state=state,
         frame_context=frame_context,
     )
@@ -72,3 +78,6 @@ def test_point_expert_gates_low_resolution_supports() -> None:
     assert bool(point.gate[0])
     assert not bool(point.gate[1])
     assert point.anchor_count.tolist() == [8, 3]
+    assert bool(point.block_valid[0, 1])
+    assert not bool(point.block_valid[0, 0])
+    assert not bool(point.block_valid[0, 2])

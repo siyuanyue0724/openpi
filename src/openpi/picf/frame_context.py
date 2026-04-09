@@ -13,6 +13,7 @@ from openpi.picf.scaffold.local_frame import EndEffectorLocalFrame
 
 @dataclasses.dataclass
 class PointFrameContext:
+    grid_coord: np.ndarray
     points_local: np.ndarray
     normals_local: np.ndarray
     colors: np.ndarray
@@ -38,6 +39,7 @@ def build_point_frame_context(
     dists = np.linalg.norm(points_local, axis=1)
     keep = dists <= float(crop_radius_m)
     return PointFrameContext(
+        grid_coord=observation.point_set.grid_coord[keep],
         points_local=points_local[keep],
         normals_local=normals_local[keep],
         colors=observation.point_set.rgb[keep],
