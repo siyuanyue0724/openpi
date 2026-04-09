@@ -1001,6 +1001,16 @@ python scripts/picf_core_train.py \
   --use-tactile
 ```
 
+正式开训前先确认四件事：
+
+- `nvidia-smi` 能看到目标 GPU，且显存空闲足够
+- `checkpoints/foundation/vjepa2_1/...`、`checkpoints/foundation/anytouch2/checkpoint-4frames.pth`、`src/pretrain/SpatialLM_Sonata_encoder.pth` 都存在
+- CALVIN 路径使用已经存在的 `task_ABCD_D` 目录或只读 zip，不要再次解压
+- 环境变量里显式设置：
+  - `HF_TOKEN=<your_hf_token>`
+  - `HUGGINGFACE_HUB_TOKEN=$HF_TOKEN`
+  - `HF_ENDPOINT=https://hf-mirror.com`
+
 同一条长期训练入口在 `uv` 下也已经真实跑通：
 
 ```bash
@@ -1049,6 +1059,33 @@ python scripts/picf_core_train.py \
   --use-foundation-backbones \
   --use-tactile
 ```
+
+如果要直接起双卡 DDP 正式训练，当前推荐命令是：
+
+```bash
+CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+  scripts/picf_core_train.py \
+  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
+  --backend dir \
+  --split training \
+  --checkpoint-base-dir /tmp/openpi-train \
+  --exp-name picf_core_train_ddp_run \
+  --num-train-steps 30000 \
+  --log-interval 100 \
+  --save-interval 1000 \
+  --accum-steps 1 \
+  --unroll-steps 2 \
+  --stride 8 \
+  --max-points 512 \
+  --device cuda \
+  --lr 2e-4 \
+  --min-lr 2e-5 \
+  --warmup-steps 500 \
+  --use-foundation-backbones \
+  --use-tactile
+```
+
+这条 DDP 命令当前已经做过最小起步回归，但还没有做长程收敛验证；因此它适合正式试训，不应被误写成“已完成多卡配方定型”。
 
 当前本机已经真实跑通过；这轮 v0.4.8 严格复核后的代表性结果是：
 
