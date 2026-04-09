@@ -1225,14 +1225,17 @@ class PicfFullCore(nn.Module):
             return torch.zeros((logits.shape[0] + 1, 0), device=logits.device, dtype=logits.dtype)
         dustbin = torch.zeros((1, logits.shape[1]), device=logits.device, dtype=logits.dtype)
         scores = torch.cat([logits, dustbin], dim=0)
-        P = torch.exp(scores - scores.amax(dim=0, keepdim=True))
+        scores = torch.nan_to_num(scores, nan=0.0, posinf=20.0, neginf=-20.0)
         row_target = torch.full((scores.shape[0],), 1.0 / scores.shape[0], device=logits.device, dtype=logits.dtype)
         col_target = torch.full((scores.shape[1],), 1.0 / max(scores.shape[1], 1), device=logits.device, dtype=logits.dtype)
+        log_row_target = torch.log(torch.clamp(row_target, min=self.config.epsilon_a))
+        log_col_target = torch.log(torch.clamp(col_target, min=self.config.epsilon_a))
+        log_P = scores
         for _ in range(6):
-            P = P / torch.clamp(P.sum(dim=1, keepdim=True), min=self.config.epsilon_a)
-            P = P * row_target[:, None]
-            P = P / torch.clamp(P.sum(dim=0, keepdim=True), min=self.config.epsilon_a)
-            P = P * col_target[None, :]
+            log_P = log_P - torch.logsumexp(log_P, dim=1, keepdim=True) + log_row_target[:, None]
+            log_P = log_P - torch.logsumexp(log_P, dim=0, keepdim=True) + log_col_target[None, :]
+        P = torch.exp(log_P)
+        P = torch.nan_to_num(P, nan=0.0, posinf=1.0, neginf=0.0)
         return P * float(scores.shape[1])
 
     def _binding_logits(

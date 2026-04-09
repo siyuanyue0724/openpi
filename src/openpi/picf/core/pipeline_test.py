@@ -598,3 +598,23 @@ def test_projective_candidate_mask_respects_sparse_patch_neighborhood(tmp_path: 
     distance = torch.sqrt(torch.sum(delta**2, dim=-1))
     outside = distance > (radius + 1e-5)
     assert not bool((geom.projective_candidate_mask & outside).any())
+
+
+def test_sinkhorn_dustbin_stays_finite_and_backward_stable(tmp_path: Path) -> None:
+    core, _ = _make_core(tmp_path)
+    logits = torch.tensor(
+        [
+            [120.0, -120.0, 40.0],
+            [-80.0, 90.0, -60.0],
+        ],
+        device=core.device,
+        dtype=core.dtype,
+        requires_grad=True,
+    )
+    transport = core._sinkhorn_dustbin(logits)
+    assert torch.isfinite(transport).all()
+    weights = torch.arange(1, transport.numel() + 1, device=core.device, dtype=core.dtype).reshape_as(transport)
+    loss = torch.sum(transport * weights)
+    loss.backward()
+    assert logits.grad is not None
+    assert torch.isfinite(logits.grad).all()
