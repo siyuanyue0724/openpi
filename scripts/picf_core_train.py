@@ -573,6 +573,40 @@ def _is_retryable_first_step_error(exc: RuntimeError) -> bool:
     return any(pattern in message for pattern in _RETRYABLE_FIRST_STEP_ERRORS)
 
 
+def _ensure_window_has_valid_first_step_xyzrgb_support(
+    trainer: _PicfWindowTrainer,
+    window: _TransitionWindow,
+) -> None:
+    """Validate the data-only first-step contract before entering DDP forward.
+
+    Catching retryable first-step errors *inside* a DDP-wrapped forward can leave
+    the reducer in an unfinished state on the rank that aborted early. The
+    first-step legality check depends only on the current observation and the
+    calibrated point-cloud crop, so it is safe to preflight it before
+    `model(window)` enters the distributed graph.
+    """
+
+    first = window.frames[0]
+    core = trainer.core
+    if first.G_t is None:
+        first.G_t = core.local_frame.make_transform(first.robot_obs)
+    if first.point_set is None:
+        first.point_set = core.pointcloud_builder(
+            {
+                "rgb_static": first.rgb_static,
+                "depth_static": first.depth_static,
+                "focus_center_world": np.asarray(first.G_t[:3, 3], dtype=np.float32),
+                "focus_radius_m": core.config.crop_radius_m,
+            }
+        )
+    meta = core._build_runtime_meta(first, None)
+    if not meta.point_contract_ok:
+        raise RuntimeError(_RETRYABLE_FIRST_STEP_ERRORS[0])
+    frame_context = core._point_subset(first)
+    if frame_context.points_local.shape[0] == 0:
+        raise RuntimeError(_RETRYABLE_FIRST_STEP_ERRORS[1])
+
+
 def _lr_for_step(step: int, *, base_lr: float, warmup_steps: int, min_lr: float, total_steps: int) -> float:
     if warmup_steps > 0 and step < warmup_steps:
         return base_lr * float(step + 1) / float(warmup_steps)
@@ -982,20 +1016,14 @@ def train(args: argparse.Namespace) -> None:
             )
             _set_optimizer_lr(optimizer, lr)
             optimizer.zero_grad(set_to_none=True)
+            trainer_module = model.module if isinstance(model, DistributedDataParallel) else model
             for micro_step in range(args.accum_steps):
                 retry_count = 0
                 while True:
                     flat_index = int(rng.integers(0, len(source)))
                     window = source.window(flat_index)
-                    sync_context: Any
-                    if use_ddp and micro_step < args.accum_steps - 1:
-                        sync_context = model.no_sync()
-                    else:
-                        sync_context = contextlib.nullcontext()
                     try:
-                        with sync_context:
-                            outputs = model(window)
-                            (outputs["loss_total"] / float(args.accum_steps)).backward()
+                        _ensure_window_has_valid_first_step_xyzrgb_support(trainer_module, window)
                         break
                     except RuntimeError as exc:
                         if not _is_retryable_first_step_error(exc):
@@ -1016,6 +1044,14 @@ def train(args: argparse.Namespace) -> None:
                                 args.max_empty_window_retries,
                             )
                         continue
+                sync_context: Any
+                if use_ddp and micro_step < args.accum_steps - 1:
+                    sync_context = model.no_sync()
+                else:
+                    sync_context = contextlib.nullcontext()
+                with sync_context:
+                    outputs = model(window)
+                    (outputs["loss_total"] / float(args.accum_steps)).backward()
                 metric_accum.loss_total += float(outputs["loss_total"].detach().item())
                 metric_accum.loss_action += float(outputs["loss_action"].detach().item())
                 metric_accum.loss_visual_latent += float(outputs["loss_visual_latent"].detach().item())
