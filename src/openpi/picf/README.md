@@ -42,6 +42,20 @@
   - `dir + cuda + 2-step long-run`：通过
   - `dir + cuda + resume from latest.pt`：通过
   - `zip + cuda + 1-step long-run`：通过
+- 云机 `root@px-cloud2.matpool.com:/root/openpi` 上的 foundation-weight 复核：
+  - `scripts/vjepa_ckpt_fetch.py --model vjepa2_1_vit_base_384 --out-root /root/openpi/checkpoints/foundation/vjepa2_1`：通过
+  - 真实 wrapper 加载 `/root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt`：通过
+    - `checkpoint_loaded = True`
+    - `tokens_shape = (32, 24, 24, 768)`
+  - 单独把真实 V-JEPA 权重接进 `PicfFullCore`，并在 CALVIN transition 上跑 `forward + compute_transition_loss + backward + optimizer.step()`：通过
+    - `mean_loss = 2.0242`
+    - `num_visual_tokens = 576`
+    - `loss_visual_latent ≈ 0.359 / 0.371`
+    - `loss_visual_real ≈ 0.445 / 0.450`
+- AnyTouch2 权重拉取当前在云机上未通过：
+  - 直接 `curl -I https://huggingface.co` 与 `huggingface_hub.HfApi().repo_info(...)` 都在 TLS 握手阶段报 `Connection reset by peer`
+  - 上游 `AnyTouch2` README 也明确要求先取得 Hugging Face access
+  - 因此当前结论不是“wrapper 不兼容”，而是“云机直连 HF + 访问权限前置条件尚未满足”
 - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py --backend dir --device cuda --num-train-steps 1`：通过
   - 在 `/tmp/openpi-train-smoke/picf_core/picf_core_train_uv_min/` 落下：
     - `args.json`
@@ -535,6 +549,9 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - 再通过 `visual_map_override` 喂给 core
   - `visual_encoder` 在这条脚本里是 `_NullVisualEncoder()`
 - 当前 tactile path 也不是在线 AnyTouch2 真 ckpt，而是 `_NullTactileEncoder()`
+- 当前 point path 也没有在这条脚本里实例化 `SonataPointFeatureExtractor`
+  - 仓库里已有 `src/pretrain/SpatialLM_Sonata_encoder.pth`
+  - 但 `scripts/picf_core_train.py` 当前不会主动去加载它
 
 因此，这条长期训练脚本的真实定位是：
 
@@ -542,6 +559,19 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 也已经支持 checkpoint / resume / 单卡云上开跑
 - 但它当前仍然是“新 core 的可执行长期训练 launcher + 轻量 visual/tactile override 配置”
 - 不能误写成“完整 V-JEPA + AnyTouch 在线训练已经接到长期 trainer”
+
+补充说明：
+
+- 这不等于“真实 foundation weight 完全不可用”
+- 真实 `V-JEPA 2.1` 公共权重已经在云机上完成：
+  - 下载
+  - wrapper load
+  - 接入 `PicfFullCore` 的一步训练反传
+- 但这些验证目前是通过单独的 ad-hoc core snippet 完成的，
+  不是 `scripts/picf_core_train.py` 默认路径自动完成的
+- `AnyTouch2` 当前还不能写成“已在云机上完成权重拉取”
+  - 当前阻塞是 Hugging Face 直连失败
+  - 即便网络修好，还需要先拿到上游 gated repo 的访问权限
 
 ### 4.10c `scripts/picf_core_train.py` 的输出目录与恢复语义
 
