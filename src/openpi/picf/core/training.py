@@ -132,6 +132,20 @@ def _zero_like(reference: torch.Tensor) -> torch.Tensor:
     return torch.zeros((), device=reference.device, dtype=reference.dtype)
 
 
+def _zero_weight_loss(pred: torch.Tensor | None, reference: torch.Tensor) -> torch.Tensor:
+    """Return an exact-zero scalar that still keeps `pred` in the autograd graph.
+
+    DDP requires parameters to participate in the graph on every rank. Some PICF
+    supervision branches are data-dependent (for example, tactile/point targets can
+    be temporarily unavailable). In those cases the mathematically correct behavior
+    is "zero contribution", but engineering-wise we still want the head to appear in
+    the graph with zero gradient instead of becoming entirely unused on one rank.
+    """
+    if pred is None:
+        return _zero_like(reference)
+    return pred.reshape(-1).sum() * 0.0
+
+
 def _branch_is_usable(
     *,
     pred: torch.Tensor | None,
@@ -346,9 +360,9 @@ def compute_transition_loss(
         dtype=predictive.action.dtype,
     )
     if action_target_t is None:
-        action_pos = _zero_like(predictive.action)
-        action_rot = _zero_like(predictive.action)
-        action_gripper = _zero_like(predictive.action)
+        action_pos = _zero_weight_loss(predictive.action[:3], predictive.action)
+        action_rot = _zero_weight_loss(predictive.action[3:6], predictive.action)
+        action_gripper = _zero_weight_loss(predictive.action[6:], predictive.action)
     else:
         action_pos = fn.l1_loss(predictive.action[:3], action_target_t[:3])
         action_rot = fn.l1_loss(predictive.action[3:6], action_target_t[3:6])
@@ -367,7 +381,7 @@ def compute_transition_loss(
     ):
         visual_latent = fn.mse_loss(pred_cache.visual_latent, future.visual_latent)
     else:
-        visual_latent = _zero_like(predictive.action)
+        visual_latent = _zero_weight_loss(pred_cache.visual_latent, predictive.action)
 
     if _branch_is_usable(
         pred=pred_cache.visual_real,
@@ -377,7 +391,7 @@ def compute_transition_loss(
     ):
         visual_real = fn.l1_loss(pred_cache.visual_real, future.visual_real)
     else:
-        visual_real = _zero_like(predictive.action)
+        visual_real = _zero_weight_loss(pred_cache.visual_real, predictive.action)
 
     if _branch_is_usable(
         pred=pred_cache.tactile_real,
@@ -387,7 +401,7 @@ def compute_transition_loss(
     ):
         tactile_real = fn.l1_loss(pred_cache.tactile_real, future.tactile_real)
     else:
-        tactile_real = _zero_like(predictive.action)
+        tactile_real = _zero_weight_loss(pred_cache.tactile_real, predictive.action)
 
     if _branch_is_usable(
         pred=pred_cache.point_real,
@@ -397,7 +411,7 @@ def compute_transition_loss(
     ):
         point_real = fn.binary_cross_entropy_with_logits(pred_cache.point_real, future.point_real)
     else:
-        point_real = _zero_like(predictive.action)
+        point_real = _zero_weight_loss(pred_cache.point_real, predictive.action)
 
     total = (
         action_loss

@@ -1544,26 +1544,44 @@ class PicfFullCore(nn.Module):
             return torch.zeros((self.config.hidden_dim,), device=self.device, dtype=self.dtype), torch.zeros((4,), device=self.device, dtype=self.dtype)
         cache = previous.predictive.prediction_cache
         branch_specs = (
-            ("visual_latent", cache.visual_latent, self.visual_error_encoder),
-            ("visual_real", cache.visual_real, self.visual_real_error_encoder),
-            ("tactile_real", cache.tactile_real, self.tactile_error_encoder),
-            ("point_real", cache.point_real, self.point_error_encoder),
+            ("visual_latent", cache.visual_latent, self.visual_error_encoder, self.config.hidden_dim),
+            ("visual_real", cache.visual_real, self.visual_real_error_encoder, self.config.visual_real_dim),
+            ("tactile_real", cache.tactile_real, self.tactile_error_encoder, self.config.tactile_real_dim),
+            ("point_real", cache.point_real, self.point_error_encoder, self.config.point_real_dim),
         )
         branch_feats = []
         norms = []
-        for index, (name, pred, encoder) in enumerate(branch_specs):
+        for index, (name, pred, encoder, target_dim) in enumerate(branch_specs):
             target = targets[name]
             usable = bool(availability[index].item()) and pred is not None and bool(cache.availability[index].item())
-            if not usable or target is None:
-                branch_feats.append(torch.zeros((encoder.out_features,), device=self.device, dtype=self.dtype))
-                norms.append(torch.zeros((1,), device=self.device, dtype=self.dtype))
-                continue
-            target = target.reshape(-1)
-            pred = pred.reshape(-1)
-            std = self._standardized_residual(target, pred)
-            norms.append(torch.linalg.norm(std)[None])
-            branch_input = torch.cat([target, pred, std], dim=0)[None, :]
-            branch_feats.append(fn.silu(encoder(branch_input))[0])
+            if target is not None:
+                target_vec = target.reshape(-1)
+            else:
+                target_vec = torch.zeros((target_dim,), device=self.device, dtype=self.dtype)
+            if pred is not None:
+                pred_vec = pred.reshape(-1)
+            else:
+                pred_vec = torch.zeros((target_dim,), device=self.device, dtype=self.dtype)
+            if pred_vec.numel() != target_dim:
+                if pred_vec.numel() > target_dim:
+                    pred_vec = pred_vec[:target_dim]
+                else:
+                    pred_vec = fn.pad(pred_vec, (0, target_dim - pred_vec.numel()))
+            if target_vec.numel() != target_dim:
+                if target_vec.numel() > target_dim:
+                    target_vec = target_vec[:target_dim]
+                else:
+                    target_vec = fn.pad(target_vec, (0, target_dim - target_vec.numel()))
+            if usable and target is not None:
+                std = self._standardized_residual(target_vec, pred_vec)
+                mask = torch.ones((1,), device=self.device, dtype=self.dtype)
+            else:
+                std = torch.zeros((target_dim,), device=self.device, dtype=self.dtype)
+                mask = torch.zeros((1,), device=self.device, dtype=self.dtype)
+            branch_input = torch.cat([target_vec, pred_vec, std], dim=0)[None, :]
+            feat = fn.silu(encoder(branch_input))[0] * mask[0]
+            branch_feats.append(feat)
+            norms.append(torch.linalg.norm(std)[None] * mask)
         innovation_latent = self.innovation_proj(torch.cat([*branch_feats, availability], dim=0)[None, :])[0]
         innovation = self.innovation_token_proj(innovation_latent)
         return innovation, torch.cat(norms, dim=0)

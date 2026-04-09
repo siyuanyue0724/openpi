@@ -1,9 +1,11 @@
+import dataclasses
 from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
 import torch
 
+from openpi.picf.contracts import PicfPointCloudFrame
 from openpi.picf.anytouch.contracts import AnyTouchFeatureBundle
 from openpi.picf.anytouch.contracts import AnyTouchSensorFeatures
 from openpi.picf.contracts import PicfObservation
@@ -132,6 +134,17 @@ def _visual_override(value: float) -> np.ndarray:
     return np.full((4, 4, 8), value, dtype=np.float32)
 
 
+def _empty_point_set() -> PicfPointCloudFrame:
+    return PicfPointCloudFrame(
+        grid_coord=np.zeros((0, 3), dtype=np.int32),
+        xyz_world=np.zeros((0, 3), dtype=np.float32),
+        rgb=np.zeros((0, 3), dtype=np.float32),
+        normal_world=np.zeros((0, 3), dtype=np.float32),
+        valid_point_mask=np.zeros((0,), dtype=bool),
+        frame_valid=True,
+    )
+
+
 def test_transition_loss_closes_one_step_future_supervision_and_backward(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
@@ -160,6 +173,65 @@ def test_transition_loss_closes_one_step_future_supervision_and_backward(tmp_pat
     assert core.action_head.weight.grad is not None
     assert core.point_real_head.weight.grad is not None
     assert core.visual_latent_head.weight.grad is not None
+
+
+def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_unavailable(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((16,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    pointless_future = dataclasses.replace(
+        frames[1],
+        point_set=_empty_point_set(),
+        G_t=core.local_frame.make_transform(frames[1].robot_obs),
+    )
+    core.zero_grad(set_to_none=True)
+    losses = compute_transition_loss(
+        core,
+        first,
+        pointless_future,
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+    )
+    losses.total.backward()
+    assert core.point_real_head.weight.grad is not None
+    assert torch.allclose(core.point_real_head.weight.grad, torch.zeros_like(core.point_real_head.weight.grad))
+
+
+def test_innovation_keeps_point_error_encoder_in_graph_when_current_point_target_is_unavailable(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((16,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    pointless_current = dataclasses.replace(
+        frames[1],
+        point_set=_empty_point_set(),
+        G_t=core.local_frame.make_transform(frames[1].robot_obs),
+    )
+    core.zero_grad(set_to_none=True)
+    second = core.step(
+        pointless_current,
+        previous=first.state,
+        point_features_override=np.zeros((0, 8), dtype=np.float32),
+        visual_map_override=_visual_override(2.0),
+        semantic_override=np.ones((16,), dtype=np.float32),
+        action_future=pointless_current.action,
+    )
+    second.state.predictive.action.sum().backward()
+    assert core.point_error_encoder.weight.grad is not None
+    assert torch.allclose(core.point_error_encoder.weight.grad, torch.zeros_like(core.point_error_encoder.weight.grad))
 
 
 def test_alignment_loss_uses_projective_candidates_and_is_finite(tmp_path: Path) -> None:
