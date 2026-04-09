@@ -26,6 +26,14 @@
   - `32 passed`
 - `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/vjepa/wrapper_test.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py`
   - `51 passed`
+- 2026-04-10 云机 full-token semantic smoke：
+  - 双卡 `torchrun --nproc_per_node=2`
+  - `--use-foundation-backbones --use-tactile --accum-steps 1`
+  - 真实 `PaliGemma(source=pi0_pytorch trainable=True) + V-JEPA + Sonata + AnyTouch`
+  - `step=2` 正常完成
+  - `loss_total(step1)=2.6482`
+  - `loss_total(step2)=1.7631`
+  - checkpoint 已落到 `/tmp/openpi-train-smoke/picf_core/picf_fulltoken_ddp_smoke/2`
 - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
   - `32 passed`
 - `task_ABCD_D` 的真实 `dir/zip` 原始样本一致性复核：
@@ -1069,6 +1077,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - `semantic_source = auto` 会优先使用本地 `pi05_base_pytorch/model.safetensors`
 - 若本地 checkpoint 不存在，则回退到 HF `PaliGemmaForConditionalGeneration`
 - 训练器每步都会对当前 observation 计算 `semantic_override`，再传入 `PicfFullCore.step(...)`
+- 这条语义路径当前已经在云机双卡 `torchrun` 下按 full-token 形态通过 smoke，不再只是本地结构验证
 
 这和 [`plan_readme_ray_geometry.md`](/home/siyuanyue/Documents/openpi/plan_readme_ray_geometry.md) 的 language-late 口径保持一致：
 

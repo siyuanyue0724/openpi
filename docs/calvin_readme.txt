@@ -519,6 +519,14 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py scripts/picf_core_train_test.py`：`43 passed`
   - `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/vjepa/wrapper_test.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py`：`51 passed`
   - `pytest -q src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`：`9 passed, 1 skipped`
+  - 2026-04-10 云机双卡 full-token semantic smoke：
+    - `torchrun --standalone --nnodes=1 --nproc_per_node=2 scripts/picf_core_train.py`
+    - `--use-foundation-backbones --use-tactile --accum-steps 1`
+    - `semantic=paligemma(source=pi0_pytorch trainable=True)`
+    - `step=2` 完成
+    - `loss_total(step1)=2.6482`
+    - `loss_total(step2)=1.7631`
+    - checkpoint: `/tmp/openpi-train-smoke/picf_core/picf_fulltoken_ddp_smoke/2`
   - 因而当前建议是：
     - 开训前只需要确认云机已同步到与本地同一 commit
     - 训练命令保留 `--max-empty-window-retries 32`
