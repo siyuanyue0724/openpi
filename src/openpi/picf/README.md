@@ -115,6 +115,17 @@
       - `loss_pt = 0.6914`
       - `projective_candidate_density = 0.0363`
     - `step_1.pt` 已落盘，未出现 OOM / DDP 包装错误 / checkpoint 异常
+  - 云机 `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --num-train-steps 120 --log-interval 20 --save-interval 120`：
+    - 已在加入 first-step window 重采样后完整跑通
+    - `120/120` checkpoint 目录已落盘
+    - `metrics.jsonl` 最后一条：
+      - `step = 120`
+      - `loss_total = 2.6533`
+      - `resampled_empty_first_step_windows = 1`
+    - 这次 run 明确说明：
+      - 旧的 DDP watchdog timeout 不是“多卡自己卡住”
+      - 真正的根因是某个 rank 抽到的训练窗口首帧没有局部 `xyzrgb` support，导致该 rank 抛错退出，另一个 rank 卡在 `allreduce`
+      - 现在 trainer 会对这种首步非法窗口做有限次 rejection sampling，不再把它升级成 NCCL 超时
 - 云机 `root@px-cloud2.matpool.com:/root/openpi` 上的 foundation-weight 复核：
   - `scripts/vjepa_ckpt_fetch.py --model vjepa2_1_vit_base_384 --out-root /root/openpi/checkpoints/foundation/vjepa2_1`：通过
   - 真实 wrapper 加载 `/root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt`：通过
@@ -179,6 +190,33 @@
   - `future_action_diff_teacher_vs_policy = 1.5760`
   - `prev_policy_only_mu_diff = 0.0`
   - `prev_executed_mu_diff = 0.0035`
+
+这次对 empty first-step window 的根因还做了进一步复现：
+
+- 复现实验按双卡 DDP 真实种子重放了前 `120` 次窗口采样
+  - `rank0(seed=0)`：`0` 次 empty first-step window
+  - `rank1(seed=17)`：第 `100` 次采样命中 `1` 个 empty first-step window
+- 具体坏窗口是：
+  - `segment_id = 11137`
+  - `start_step = 196437`
+  - `lang = "move the sliding door to the left"`
+  - `robot_xyz = [0.1629, -0.0897, 0.6189]`
+  - 当前最近点距离 `nearest_dist = 0.1286 m`
+  - 但当前训练 contract 的局部 crop 半径只有 `crop_radius_m = 0.08 m`
+- 更关键的是，这不是整帧 point cloud 为空，而是：
+  - `total_points = 512`
+  - 只是以当前 EE 为中心的局部 ROI 为空
+- 同一段附近逐帧重放表明：
+  - `196435 ~ 196438` 这几帧在 `0.08m` 半径下都没有局部点
+  - 到 `196439` 开始才重新出现局部点
+  - 因此这属于“窗口起点落在 free-space pre-contact 状态”而不是点云构造器坏掉
+
+从方法论上，这个修复不是“吞异常继续跑”，而是：
+
+- `PICF` 在 `previous is None` 的首个 control step 上，当前 posterior 必须由当前真实 point evidence 启动
+- 所以没有局部 `xyzrgb` support 的窗口起点，本来就不属于模型的合法首步支持集
+- 训练器现在做的是对“合法首步支持集”进行 rejection sampling
+- 对已有 `previous` 的后续控制步，局部 point support 暂时为空仍然是允许的；这和 spec 里的 carried prior / current evidence 角色分工一致
 
 同时也有几条必须诚实写清的边界：
 
@@ -1102,7 +1140,8 @@ python scripts/picf_core_train.py \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \
-  --use-tactile
+  --use-tactile \
+  --max-empty-window-retries 32
 ```
 
 说明：
@@ -1113,6 +1152,9 @@ python scripts/picf_core_train.py \
 - 如果是在云上跑长期训练，当前推荐把 wandb 设成 `offline`，这和旧 `pi0.5` 训练 README 的工程口径保持一致
 - 上面这条命令没有再显式传 `--warmup-steps`，因为长期 trainer 默认已经按 `2% * num_train_steps` 自动换算
 - `--max-points 512` 是当前验证过的工程配方，不是 PICF core 结构默认值；如果后续要提高点密度，应单独做显存与收敛回归
+- `--max-empty-window-retries 32` 是当前推荐保留的首步窗口安全阈值
+  - 它只处理“窗口首帧局部 `xyzrgb` support 为空”的情况
+  - 数学上等价于对 PICF 合法首步支持集做 rejection sampling，而不是吞掉任意异常继续训练
 
 正式开训前先确认四件事：
 
@@ -1146,7 +1188,8 @@ UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py \
   --warmup-steps 1 \
   --wandb-mode disabled \
   --use-foundation-backbones \
-  --use-tactile
+  --use-tactile \
+  --max-empty-window-retries 32
 ```
 
 如果要从最近 checkpoint 继续：
@@ -1172,7 +1215,8 @@ python scripts/picf_core_train.py \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \
-  --use-tactile
+  --use-tactile \
+  --max-empty-window-retries 32
 ```
 
 如果要直接起双卡 DDP 正式训练，当前推荐命令是：
@@ -1198,7 +1242,8 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \
-  --use-tactile
+  --use-tactile \
+  --max-empty-window-retries 32
 ```
 
 如果需要严格对齐旧 `pi0.5` 的“全局 batch=2”口径：
@@ -1206,7 +1251,26 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
 - 双卡 DDP：保持 `--accum-steps 1`
 - 单卡：改成 `--accum-steps 2`
 
-这条 DDP 命令当前已经做过最小起步回归，但还没有做长程收敛验证；因此它适合正式试训，不应被误写成“已完成多卡配方定型”。
+这条 DDP 命令当前已经做过最小起步回归和一次 `120` step 的 post-fix 回归，但还没有做长程收敛验证；因此它适合正式试训，不应被误写成“已完成多卡配方定型”。
+
+关于这次 DDP 真实崩溃的根因，当前已经完成过一次逐样本重放：
+
+- 旧 run 里真正抛错的不是 NCCL，而是 rank1 在 `sample_idx = 100` 时拿到了一个非法首步窗口
+- 具体窗口是：
+  - `segment_id = 11137`
+  - `start_step = 196437`
+  - `lang = "move the sliding door to the left"`
+  - `nearest_dist = 0.1286 m`
+  - 当前 `crop_radius_m = 0.08 m`
+- 也就是说：
+  - 整帧 point cloud 仍然有 `512` 个点
+  - 但以当前 EE 为中心的局部 `0.08m` ROI 为空
+  - 同段 `196435 ~ 196438` 连续几帧都为空，直到 `196439` 才重新出现局部 support
+- 这属于 free-space pre-contact 状态，而不是 pointcloud builder 坏掉
+- 因为 `PICF` 的首个 control step 需要用当前 point evidence 启动 posterior，所以这类窗口起点不属于模型的合法首步支持集
+- 训练器现在对它做的是 rejection sampling；post-fix 的双卡 DDP `120` step run 已完整跑通，并记录到：
+  - `resampled_empty_first_step_windows = 1`
+  - `loss_total = 2.6533`
 
 当前本机已经真实跑通过；这轮 v0.4.8 严格复核后的代表性结果是：
 

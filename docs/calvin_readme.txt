@@ -456,6 +456,33 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 - `--save-interval` 默认 `5000`
 - `--wandb-mode` 默认 `offline`
 - `--max-points 512` 是当前验证过的工程配方，不是 core 结构默认值
+- `--max-empty-window-retries` 默认 `32`
+  - 只用于“窗口首帧局部 `xyzrgb` support 为空”的首步非法样本
+  - 不会吞掉任意训练异常
+
+关于这条 first-step window contract，当前已经做过真实 root-cause 复现：
+- 旧的双卡 DDP 卡死不是随机 NCCL 问题
+- 真正原因是某个 rank 在首步抽到了局部 `xyzrgb` support 为空的窗口
+- 具体坏窗口重放结果：
+  - `rank1(seed=17)` 的第 `100` 次采样
+  - `segment_id = 11137`
+  - `start_step = 196437`
+  - `lang = move the sliding door to the left`
+  - `nearest_dist = 0.1286 m`
+  - 当前 `crop_radius_m = 0.08 m`
+- 这说明：
+  - 整帧 point cloud 并不为空，`total_points = 512`
+  - 空的是“以当前 EE 为中心的局部 ROI”
+  - 同段 `196435 ~ 196438` 连续几帧都没有局部点，直到 `196439` 才重新出现局部 support
+  - 数学上这属于 free-space pre-contact 起点，不属于 PICF 首步 posterior bootstrap 的合法支持集
+- 修复方式因此是：
+  - 对首步非法窗口做 rejection sampling
+  - 而不是把异常吞掉继续 backward
+- 修复后的云机双卡 DDP `120` step run 已完整跑通：
+  - `120/120` checkpoint 已落盘
+  - 最后一条 `metrics.jsonl` 记录：
+    - `resampled_empty_first_step_windows = 1`
+    - `loss_total = 2.6533`
 
 1. 新开长期训练：
 cd /root/openpi && \
@@ -490,6 +517,7 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
   --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile \
+  --max-empty-window-retries 32 \
   2>&1 | tee /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
 
 说明：
@@ -542,6 +570,7 @@ export WANDB_SILENT=true && \
   --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile \
+  --max-empty-window-retries 32 \
   2>&1 | tee -a /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
 
 3. 如果云上只有只读 zip，不要再解压，改用：
@@ -580,6 +609,7 @@ export WANDB_SILENT=true && \
   --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile \
+  --max-empty-window-retries 32 \
   2>&1 | tee /mnt/checkpoints/picf_core/logs/picf_core_train_ddp_run.log
 
 4. 这条新 core 长期训练入口当前的真实 contract：
