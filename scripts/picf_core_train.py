@@ -16,6 +16,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
+from torch.nn.parameter import UninitializedParameter
 
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.core import PicfCoreConfig
@@ -424,6 +425,25 @@ def _materialize_model_parameters(
     model.train()
     with torch.no_grad():
         _ = model(warmup_window)
+        core = model.core
+        if isinstance(core.tactile_token_proj.weight, UninitializedParameter):
+            # picf_core_train uses a null tactile encoder, so tactile lazy layers
+            # need an explicit placeholder init before DDP inspects parameters.
+            tactile_pooled_dim = 4 * 768
+            tactile_sensor_in = torch.zeros(
+                (1, (2 * tactile_pooled_dim) + 9),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            tactile_tokens = core.tactile_token_proj(tactile_sensor_in)
+            _ = core.tactile_align_proj(tactile_tokens)
+        if isinstance(core.tactile_error_encoder.weight, UninitializedParameter):
+            tactile_error_in = torch.zeros(
+                (1, 3 * core.config.tactile_real_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = core.tactile_error_encoder(tactile_error_in)
     model.zero_grad(set_to_none=True)
     if not was_training:
         model.eval()
