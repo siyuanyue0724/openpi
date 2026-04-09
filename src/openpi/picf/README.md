@@ -38,10 +38,37 @@
 - `scripts/picf_core_train_smoke.py`
   - `dir + cpu + segment_index=0`：通过
   - `zip + cpu + segment_index=0/50/100`：通过
+  - 云机 `dir + cuda + --use-foundation-backbones --use-tactile`：通过
+    - `visual_mode = encoder`
+    - `tactile_mode = encoder`
+    - `point_backbone = sonata`
+    - `tactile_enabled = true`
+    - `loss_total = 3.1340`
+    - `loss_tactile_real = 0.5052`
+    - `loss_pt = 0.6932`
+    - `projective_candidate_density = 0.0340`
+  - 云机 `zip + cuda + --use-foundation-backbones --use-tactile`：通过
+    - `loss_total = 3.1339`
+    - `loss_tactile_real = 0.5052`
+    - `loss_pt = 0.6932`
 - `scripts/picf_core_train.py`
   - `dir + cuda + 2-step long-run`：通过
   - `dir + cuda + resume from latest.pt`：通过
   - `zip + cuda + 1-step long-run`：通过
+  - 云机 `dir + cuda + --use-foundation-backbones --use-tactile + 1-step`：通过
+    - `loss_total = 3.0362`
+    - `loss_tactile_real = 0.5562`
+    - `loss_pt = 0.6941`
+    - `step_1.pt` 已落盘
+  - 云机同一实验 `--resume` 到 `step=2`：通过
+    - `loss_total = 2.7766`
+    - `loss_tactile_real = 0.5200`
+    - `step_2.pt` 已落盘
+  - 云机 `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --use-foundation-backbones --use-tactile --num-train-steps 1`：通过
+    - `loss_total = 2.9149`
+    - `loss_tactile_real = 0.5379`
+    - `loss_pt = 0.6930`
+    - `step_1.pt` 已落盘
 - 云机 `root@px-cloud2.matpool.com:/root/openpi` 上的 foundation-weight 复核：
   - `scripts/vjepa_ckpt_fetch.py --model vjepa2_1_vit_base_384 --out-root /root/openpi/checkpoints/foundation/vjepa2_1`：通过
   - 真实 wrapper 加载 `/root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt`：通过
@@ -127,11 +154,12 @@
 - legacy `scripts/scaffold/scaffold_replay_smoke.py` 当前真实状态是：
   - `dir` backend 可通过
   - `zip` backend 当前会报 `RuntimeError("No scaffold states were produced.")`
-- `scripts/picf_core_train.py` 当前虽然已经带有 `DistributedDataParallel` 包装与 `WORLD_SIZE/RANK/LOCAL_RANK` 接线，
-  但这轮真实验证仍然只覆盖了：
-  - 单进程单卡 direct python
-  - 单进程单卡 `uv run --no-sync python`
-  不能把它误写成“当前已经完成 torchrun 多卡 cloud 回归”
+- `scripts/picf_core_train.py` 这轮已经完成过一次真实 cloud DDP 最小回归：
+  - `torchrun --standalone --nnodes=1 --nproc_per_node=2`
+  - `dir + cuda + --use-foundation-backbones --use-tactile --num-train-steps 1`
+  - checkpoint 已落到 `/tmp/openpi-train-smoke/picf_core/picf_core_foundation_ddp_ready/step_1.pt`
+  - 这足以说明 launcher、checkpoint、DDP 包装和 foundation-weight 路径都能起步
+  - 但它仍然不等于“已经完成正式多卡长程收敛回归”
 
 
 ## 1. 当前主线
@@ -534,7 +562,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 
 旧的 `frame_context` / `local_frame` 辅助结构仍然在仓库里保留，主要用于 legacy 路径和 builder 兼容，但当前 core 的 posterior state 不再定义在单独的 local frame 里。
 
-### 4.10 训练侧 `t -> t+1` targets 已经闭合到 core transition loss，但尚未接入通用训练入口
+### 4.10 训练侧 `t -> t+1` targets 已经闭合到 core transition loss，并已有独立长期训练入口
 
 这是当前 README 里必须写清楚的一条。
 
@@ -552,63 +580,67 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 现在还没有真正接完的是：
 
 - 更完整的 multi-step / multi-loss 训练计划
-- 多卡 cloud recipe 的系统性回归
+- 正式多卡长程收敛与超参扫描
 
 所以当前代码更准确的定位是：
 
 - inference/state graph 已闭合
 - one-step training loss graph 已闭合
 - 独立长期训练入口已闭合
-- 但通用训练入口和最终多卡训练配方还不是最终版
+- foundation-weight 单卡 / resume / 最小 DDP 已闭合
+- 但通用训练入口和最终多卡长程训练配方还不是最终版
 
 ### 4.10b `scripts/picf_core_train.py` 当前真实训练 contract
 
-这条脚本现在已经是新 core 的正式长期训练入口，但它的“真实 contract”需要写清楚：
+这条脚本现在已经是新 core 的正式长期训练入口，而且当前 contract 已经同时覆盖 `stub` 与 `foundation` 两条配置：
 
 - 数据源不是旧 `create_data_loader(pi05_calvin_sonata)`，而是脚本内部的 `_CalvinTransitionSource`
 - `_CalvinTransitionSource` 直接使用 `CalvinLangSegmentDataset(..., action_horizon=1, sample_within_segment=False)`
 - 每个训练 step 会随机抽一段 CALVIN segment window，窗口长度是 `unroll_steps + 1`
 - 同一个 window 内，脚本会按 `t -> t+1` 顺序重复调用 `PicfFullCore.step(...)`，并在每个 transition 上计算 `compute_transition_loss(...)`
-- 当前 visual path 不是直接在线拉起完整 V-JEPA encoder，而是：
-  - 用 `_rgb_visual_override(...)` 把当前 RGB 做 `8x8` pooled visual map
-  - 再通过 `visual_map_override` 喂给 core
-  - `visual_encoder` 在这条脚本里是 `_NullVisualEncoder()`
-- 当前 tactile path 也不是在线 AnyTouch2 真 ckpt，而是 `_NullTactileEncoder()`
-- 当前 point path 也没有在这条脚本里实例化 `SonataPointFeatureExtractor`
-  - 仓库里已有 `src/pretrain/SpatialLM_Sonata_encoder.pth`
-  - 但 `scripts/picf_core_train.py` 当前不会主动去加载它
-- 当前数据 path 也没有把 CALVIN 自带的 `rgb_tactile/depth_tactile` 读进来
-  - 虽然数据集本身已有 `(160,120,6)` tactile RGB 与 `(160,120,2)` tactile depth
-  - 但 `scripts/picf_core_train.py` 的 `_CalvinTransitionSource` 当前只读：
-    - `rgb_static`
-    - `depth_static`
-    - `robot_obs`
-    - `rel_actions`
-    - `rgb_gripper`
+- point / visual / tactile backbone 现在都可配置：
+  - `--point-backbone rgb|sonata`
+  - `--visual-mode stub|encoder`
+  - `--tactile-mode stub|encoder`
+  - `--use-tactile` 控制是否把 CALVIN 的 tactile packet 读入训练图
+- `--use-foundation-backbones` 是推荐的 cloud 启动配置；它会把 launcher 切到：
+  - `point_backbone = sonata`
+  - `visual_mode = encoder`
+  - `tactile_mode = encoder`
+  - `use_tactile = true`
+  - 并自动优先查找默认 checkpoint：
+    - `checkpoints/foundation/vjepa2_1/...`
+    - `checkpoints/foundation/anytouch2/checkpoint-4frames.pth`
+    - `src/pretrain/SpatialLM_Sonata_encoder.pth`
+- 当前 `_CalvinTransitionSource` 已经会在 `use_tactile=True` 时读取：
+  - `rgb_tactile`
+  - `depth_tactile`
+  - 并通过 `_calvin_tactile_packet(...)` 拆成两路 `PicfTactilePacket`
+- visual path 现在分两种：
+  - `visual_mode=stub`：走 `_rgb_visual_override(...) + _NullVisualEncoder()`
+  - `visual_mode=encoder`：真实实例化 `Vjepa2VisualEncoder`
+- tactile path 现在分两种：
+  - `tactile_mode=stub`：走 `_NullTactileEncoder()`
+  - `tactile_mode=encoder`：真实实例化 `AnyTouch2TactileEncoder`
+- point path 现在分两种：
+  - `point_backbone=rgb`：轻量 RGB point feature
+  - `point_backbone=sonata`：真实实例化 `SonataPointFeatureExtractor`
+- 为了避免在真实 V-JEPA 路径里提 target 时污染视觉历史，
+  [`PicfFullCore.extract_targets(...)`](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/pipeline.py)
+  现在会在内部对 `clip_buffer` 做 `snapshot()/restore()`
 
-因此，这条长期训练脚本的真实定位是：
+因此，这条长期训练脚本当前的准确定位是：
 
 - 它已经真实闭合了 v0.4.8 新 core 的训练图
-- 也已经支持 checkpoint / resume / 单卡云上开跑
-- 但它当前仍然是“新 core 的可执行长期训练 launcher + 轻量 visual/tactile override 配置”
-- 不能误写成“完整 V-JEPA + AnyTouch 在线训练已经接到长期 trainer”
+- 它已经支持 checkpoint / resume / foundation-weight 单卡开跑
+- 它已经在云机上做过一次 `torchrun` 双卡 DDP 最小回归
+- 当 checkpoint 缺失或只想做结构 smoke 时，仍然可以退回 `stub` 模式
 
-补充说明：
+当前准确口径不再是“foundation weights 只在 ad-hoc snippet 里能用”，而是：
 
-- 这不等于“真实 foundation weight 完全不可用”
-- 真实 `V-JEPA 2.1` 公共权重已经在云机上完成：
-  - 下载
-  - wrapper load
-  - 接入 `PicfFullCore` 的一步训练反传
-- 真实 `AnyTouch2` 现在也已经在云机上完成：
-  - 镜像路径下载
-  - wrapper load
-  - 接入 `PicfFullCore` 的一步训练反传
-- 但这些验证目前仍然是通过单独的 ad-hoc core snippet 完成的，
-  不是 `scripts/picf_core_train.py` 默认路径自动完成的
-- 因此当前准确口径是：
-  - foundation weights 已经证明“能用”
-  - 但默认长期训练 launcher 还没有切到“真实 V-JEPA + 真实 AnyTouch + CALVIN tactile”这条配置
+- foundation weights 已经接进 `scripts/picf_core_train.py`
+- CALVIN tactile 也已经接进长期 trainer
+- `stub` 模式保留为本地无权重环境的回退路径
 
 ### 4.10c `scripts/picf_core_train.py` 的输出目录与恢复语义
 
@@ -953,7 +985,9 @@ python scripts/picf_core_train.py \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
-  --warmup-steps 500
+  --warmup-steps 500 \
+  --use-foundation-backbones \
+  --use-tactile
 ```
 
 同一条长期训练入口在 `uv` 下也已经真实跑通：
@@ -975,7 +1009,9 @@ UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py \
   --device cuda \
   --lr 1e-4 \
   --min-lr 1e-5 \
-  --warmup-steps 1
+  --warmup-steps 1 \
+  --use-foundation-backbones \
+  --use-tactile
 ```
 
 如果要从最近 checkpoint 继续：
@@ -998,7 +1034,9 @@ python scripts/picf_core_train.py \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
-  --warmup-steps 500
+  --warmup-steps 500 \
+  --use-foundation-backbones \
+  --use-tactile
 ```
 
 当前本机已经真实跑通过；这轮 v0.4.8 严格复核后的代表性结果是：
@@ -1072,16 +1110,23 @@ python scripts/picf_core_train.py \
 
 当前这条长期训练入口还要额外记住两个非阻塞边界：
 
-- 当前真实验证只覆盖单进程单卡；脚本虽然有 DDP scaffolding，但还没有做 `torchrun` 多卡 cloud 回归
-- 当前长期训练脚本为了保证训练图可直接执行，使用的是 `_rgb_visual_override + _NullVisualEncoder + _NullTactileEncoder` 这条部署近似；不要把它误写成“已经验证完整 V-JEPA/AnyTouch 在线训练”
+- 当前真实验证已经覆盖：
+  - 单进程单卡 direct python
+  - 单进程单卡 `uv run --no-sync python`
+  - 云机 `torchrun --standalone --nnodes=1 --nproc_per_node=2`
+- 但这仍然是“最小起步回归”，不是多卡长程收敛验证
+- 当前长期训练脚本虽然已经支持完整 foundation 模式，但 `stub` 路径仍然保留：
+  - 用于本地无权重 / 无 CUDA 环境的结构 smoke
+  - 不应把 `stub` 结果与 foundation 结果混为一谈
 
 如果这条 smoke 失败，优先按下面顺序排：
 
 1. `task_ABCD_D` 路径是否正确
-2. `xyzrgb` point cloud builder 是否产出非空 ROI
-3. `visual_map_override` 或 visual encoder 是否给出下一帧 visual map
-4. CUDA 是否可见
-5. AnyTouch2 checkpoint 是否缺失；若只是做结构 smoke，先用脚本内 stub tactile encoder
+2. Sonata / V-JEPA / AnyTouch checkpoint 是否存在，或 `--use-foundation-backbones` 是否误开
+3. `xyzrgb` point cloud builder 是否产出非空 ROI
+4. `visual_map_override` 或真实 visual encoder 是否给出下一帧 visual map
+5. `rgb_tactile/depth_tactile` 是否可读；若只是做结构 smoke，可显式退回 `tactile_mode=stub`
+6. CUDA 是否可见
 
 ### 8.2 官方训练入口的调试口径
 

@@ -21,11 +21,22 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - `dir + cuda + segment_index=0`
   - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train_smoke.py --backend dir --segment-index 0 --device cuda`
   - `zip + cuda + segment_index=0`
+  - 云机 `dir + cuda + --use-foundation-backbones --use-tactile`：通过
+    - `loss_total = 3.1340`
+    - `loss_tactile_real = 0.5052`
+    - `loss_pt = 0.6932`
+  - 云机 `zip + cuda + --use-foundation-backbones --use-tactile`：通过
+    - `loss_total = 3.1339`
+    - `loss_tactile_real = 0.5052`
+    - `loss_pt = 0.6932`
 - `scripts/picf_core_train.py` 本轮新增验证：
   - `dir + cuda + 2-step long-run`：通过
   - `dir + cuda + resume from latest.pt`：通过
   - `zip + cuda + 1-step long-run`：通过
   - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py --backend dir --device cuda --num-train-steps 1`：通过
+  - 云机 `dir + cuda + --use-foundation-backbones --use-tactile + 1-step`：通过
+  - 云机同一实验 `--resume` 到 `step=2`：通过
+  - 云机 `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --use-foundation-backbones --use-tactile --num-train-steps 1`：通过
   - `projective_candidate_density` 约为 `0.2995 / 0.3073 / 0.3047`
   - `loss_focus_pv` 约为 `1.1552 / 1.0604 / 0.8993`
   - `loss_pt` 当前均为 `0.0`
@@ -103,11 +114,11 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - `zip` backend 当前失败：
     - `RuntimeError("No scaffold states were produced.")`
   因此，旧 scaffold 的 `zip` 路径不能再写成“当前已通过”
-- `scripts/picf_core_train.py` 当前虽然已经接了 `DistributedDataParallel` 与 `WORLD_SIZE/RANK/LOCAL_RANK`，
-  但真实回归目前仍然只覆盖：
-  - 单进程单卡 direct python
-  - 单进程单卡 `uv run --no-sync python`
-  不能把它误写成“当前已经做完 torchrun 多卡云上回归”
+- `scripts/picf_core_train.py` 这轮已经做过一次真实 `torchrun` 多卡云上回归：
+  - `--use-foundation-backbones --use-tactile`
+  - `--nnodes=1 --nproc_per_node=2 --num-train-steps 1`
+  - checkpoint 已落盘
+  - 但它仍然只是“最小起步验证”，不是正式多卡长程收敛结论
 
 【2026-04-09 v0.4.8 / MOVEON 补充】
 - 当前 `PICF core` 已经把 v0.4.8 里这轮要求补齐的数学项接进代码：
@@ -361,12 +372,18 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 
 四点五、PICF v0.4.8 新 core 的云上长期训练命令
 说明：这条命令对应的是 `src/openpi/picf/core/` 新主线，不是旧 `scripts/train_pytorch.py`。
-当前真实验证通过的是单进程单卡版；它已经支持 checkpoint / resume。
+当前真实验证已经覆盖：
+- foundation-weight 单进程单卡
+- foundation-weight 单进程单卡 `--resume`
+- foundation-weight `torchrun` 双卡最小起步
 
 1. 新开长期训练：
 cd /root/openpi && \
 export CUDA_VISIBLE_DEVICES=0 && \
 export PYTHONPATH=/root/openpi/src && \
+export HF_TOKEN=<your_hf_token> && \
+export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN && \
+export HF_ENDPOINT=https://hf-mirror.com && \
 mkdir -p /mnt/checkpoints/picf_core/logs && \
 /root/openpi/.venv/bin/python /root/openpi/scripts/picf_core_train.py \
   --calvin-root /mnt/calvin_data/task_ABCD_D \
@@ -385,12 +402,17 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
   --lr 2e-4 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
+  --use-foundation-backbones \
+  --use-tactile \
   2>&1 | tee /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
 
 2. 继续训练（resume）：
 cd /root/openpi && \
 export CUDA_VISIBLE_DEVICES=0 && \
 export PYTHONPATH=/root/openpi/src && \
+export HF_TOKEN=<your_hf_token> && \
+export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN && \
+export HF_ENDPOINT=https://hf-mirror.com && \
 /root/openpi/.venv/bin/python /root/openpi/scripts/picf_core_train.py \
   --calvin-root /mnt/calvin_data/task_ABCD_D \
   --backend dir \
@@ -409,6 +431,8 @@ export PYTHONPATH=/root/openpi/src && \
   --lr 2e-4 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
+  --use-foundation-backbones \
+  --use-tactile \
   2>&1 | tee -a /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
 
 3. 如果云上只有只读 zip，不要再解压，改用：
@@ -417,13 +441,25 @@ export PYTHONPATH=/root/openpi/src && \
 
 4. 这条新 core 长期训练入口当前的真实 contract：
   - 数据是脚本内部 `_CalvinTransitionSource` 直接从 `CalvinLangSegmentDataset(..., action_horizon=1, sample_within_segment=False)` 抽 `unroll_steps + 1` 帧 window
-  - visual path 当前用 `_rgb_visual_override` 构造 pooled visual map，再经 `visual_map_override` 喂给 core；不是在线完整 V-JEPA encoder
-  - tactile path 当前用 `_NullTactileEncoder()`；不是在线 AnyTouch2 真 ckpt
-  - point path 当前也没有实例化 `SonataPointFeatureExtractor`；虽然仓库里已有 `src/pretrain/SpatialLM_Sonata_encoder.pth`
-  - 当前脚本也没有把 CALVIN 自带的 `rgb_tactile/depth_tactile` 读进来；它不是“数据集没有 tactile”，而是“launcher 还没接 tactile path”
+  - 当前 launcher 已经支持两类模式：
+    - `stub`：`_rgb_visual_override + _NullVisualEncoder + _NullTactileEncoder`
+    - `foundation`：真实 `Sonata + V-JEPA 2.1 + AnyTouch2`
+  - 推荐云上正式训练时直接加：
+    - `--use-foundation-backbones`
+    - `--use-tactile`
+  - 这样会真实读入 CALVIN 自带的：
+    - `rgb_tactile`
+    - `depth_tactile`
+    并实例化 `AnyTouch2TactileEncoder`
+  - point path 会实例化 `SonataPointFeatureExtractor`
+  - visual path 会实例化真实 `Vjepa2VisualEncoder`
   - `metrics.jsonl` 采用 append 模式；如果复用同一个 `exp-name` 重新起一个非 `--resume` 训练，日志里会继续追加并可能出现重复 step id
   - 如果需要干净曲线，应该换新的 `exp-name`，或先清理旧实验目录
-  - 真实 `V-JEPA 2.1` 与 `AnyTouch2` 权重都已经在云机上验证过“可下载、可加载、可接 core 反传”，但这仍然不是 `scripts/picf_core_train.py` 默认路径
+  - 当前 foundation 路径已经在云机上真实验证过：
+    - smoke `dir/zip`
+    - 单卡一步
+    - 单卡 `--resume`
+    - 双卡 DDP 一步
 
 五、旧 `train_pytorch.py` 训练命令（归档参考）
 说明：这一节是旧入口的归档记录，不是 `PICF v0.4.8 new core` 的当前推荐路径。只有在你明确需要维护旧 `pi05_calvin_sonata` 链路时，才看这一节。
