@@ -58,6 +58,26 @@ class _StubTactileEncoder:
         )
 
 
+class _FeatureMapFromClip:
+    def __init__(self, clip: np.ndarray):
+        value = float(np.asarray(clip)[-1].mean()) / 255.0
+        self._map = np.full((4, 4, 8), value, dtype=np.float32)
+
+    def current_map(self, *, use_last_two_mean: bool = False) -> np.ndarray:
+        del use_last_two_mean
+        return self._map
+
+
+class _ClipAwareVisualEncoder:
+    def __init__(self) -> None:
+        self.clips: list[np.ndarray] = []
+
+    def encode_clip(self, clip: np.ndarray):
+        clip_np = np.asarray(clip).copy()
+        self.clips.append(clip_np)
+        return _FeatureMapFromClip(clip_np)
+
+
 def _make_core(tmp_path: Path, **overrides) -> tuple[PicfFullCore, CalvinSequentialReplay]:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
@@ -212,6 +232,49 @@ def test_previous_prediction_becomes_current_innovation_signal(tmp_path: Path) -
     assert torch.linalg.norm(first.state.predictive.innovation_token).item() == pytest.approx(0.0)
     assert torch.linalg.norm(second.state.predictive.innovation_token).item() > 0.0
     assert second.state.predictive.innovation_norm[0].item() > 0.0
+
+
+def test_extract_targets_does_not_mutate_visual_history_when_using_real_visual_path(tmp_path: Path) -> None:
+    calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
+    replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
+    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=256)
+    encoder = _ClipAwareVisualEncoder()
+    core = PicfFullCore(
+        builder,
+        config=PicfCoreConfig(
+            persistent_anchors=8,
+            observation_anchors=10,
+            hidden_dim=64,
+            posterior_hidden_dim=64,
+            latent_dim=24,
+            innovation_dim=64,
+            control_dim=64,
+            semantic_dim=32,
+            future_hidden_dim=64,
+            future_vote_heads=3,
+            fusion_layers=2,
+            posterior_layers=1,
+            predictive_layers=1,
+            control_layers=1,
+            attention_heads=4,
+            query_rounds=2,
+            device="cpu",
+        ),
+        visual_config=VjepaVisualConfig(camera_json_path=calvin_root, arch_name_override="vit_tiny", img_size=64, num_frames=4, device="cpu", dtype="float32"),
+        visual_encoder=encoder,
+        tactile_encoder=_StubTactileEncoder(),
+    )
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        semantic_override=np.ones((16,), dtype=np.float32),
+    )
+    assert first.state.token_field.visual_tokens.shape[0] > 0
+    history_before = core.clip_buffer.get_clip().copy()
+    _ = core.extract_targets(frames[1])
+    history_after = core.clip_buffer.get_clip().copy()
+    np.testing.assert_allclose(history_after, history_before)
 
 
 def test_prior_and_context_use_previous_executed_action_not_previous_policy_output(tmp_path: Path) -> None:

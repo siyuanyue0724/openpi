@@ -18,14 +18,22 @@ import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.parameter import UninitializedParameter
 
+from openpi.picf.anytouch.config import AnyTouchConfig
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.core import PicfCoreConfig
 from openpi.picf.core import PicfFullCore
 from openpi.picf.core import PicfTransitionLossBreakdown
 from openpi.picf.core import compute_transition_loss
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
+from openpi.picf.replay.calvin_replay import _calvin_tactile_packet
+from openpi.picf.sonata.config import SonataPointConfig
+from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
 from openpi.picf.vjepa.config import VjepaVisualConfig
 from openpi.training.calvin_dataset import CalvinLangSegmentDataset
+
+
+_DEFAULT_TACTILE_SENSOR_NAMES = ("digit", "gelsight_mini")
+_DEFAULT_TACTILE_SENSOR_OFFSETS_M = ((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))
 
 
 class _NullTactileEncoder:
@@ -43,6 +51,96 @@ def _rgb_visual_override(rgb: np.ndarray, grid: int = 8) -> torch.Tensor:
     rgb_t = torch.as_tensor(np.asarray(rgb, dtype=np.float32) / 255.0, dtype=torch.float32)
     pooled = torch.nn.functional.adaptive_avg_pool2d(rgb_t.permute(2, 0, 1)[None, :], (grid, grid))[0]
     return pooled.permute(1, 2, 0).contiguous()
+
+
+def _default_vjepa_checkpoint(model_name: str) -> str | None:
+    filename_by_model = {
+        "vjepa2_1_vit_base_384": "vjepa2_1_vitb_dist_vitG_384.pt",
+        "vjepa2_1_vit_large_384": "vjepa2_1_vitl_dist_vitG_384.pt",
+        "vjepa2_1_vit_giant_384": "vjepa2_1_vitg_384.pt",
+        "vjepa2_1_vit_gigantic_384": "vjepa2_1_vitG_384.pt",
+    }
+    filename = filename_by_model.get(str(model_name))
+    if filename is None:
+        return None
+    candidate = Path("checkpoints") / "foundation" / "vjepa2_1" / str(model_name) / filename
+    return str(candidate) if candidate.is_file() else None
+
+
+def _default_anytouch_checkpoint() -> str | None:
+    candidate = Path("checkpoints") / "foundation" / "anytouch2" / "checkpoint-4frames.pth"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _default_sonata_checkpoint() -> str | None:
+    candidate = Path("src") / "pretrain" / "SpatialLM_Sonata_encoder.pth"
+    return str(candidate) if candidate.is_file() else None
+
+
+def _parse_tactile_sensor_names(raw: str) -> tuple[str, ...]:
+    names = tuple(part.strip() for part in str(raw).split(",") if part.strip())
+    if not names:
+        raise ValueError("Expected at least one tactile sensor name.")
+    return names
+
+
+def _parse_tactile_sensor_offsets(raw: str) -> tuple[tuple[float, float, float], ...]:
+    offsets: list[tuple[float, float, float]] = []
+    for block in str(raw).split(";"):
+        block = block.strip()
+        if not block:
+            continue
+        values = [float(piece.strip()) for piece in block.split(",") if piece.strip()]
+        if len(values) != 3:
+            raise ValueError(
+                "Each tactile sensor offset must have exactly three comma-separated floats; "
+                f"got {block!r}."
+            )
+        offsets.append((values[0], values[1], values[2]))
+    if not offsets:
+        raise ValueError("Expected at least one tactile sensor offset triplet.")
+    return tuple(offsets)
+
+
+def _apply_foundation_profile(args: argparse.Namespace) -> None:
+    if not bool(args.use_foundation_backbones):
+        return
+    args.point_backbone = "sonata"
+    args.visual_mode = "encoder"
+    args.tactile_mode = "encoder"
+    args.use_tactile = True
+
+
+def _validate_backbone_args(args: argparse.Namespace) -> None:
+    args.tactile_sensor_names = _parse_tactile_sensor_names(args.tactile_sensor_names)
+    args.tactile_sensor_offsets_m = _parse_tactile_sensor_offsets(args.tactile_sensor_offsets_m)
+    if len(args.tactile_sensor_names) != len(args.tactile_sensor_offsets_m):
+        raise ValueError(
+            "tactile_sensor_names and tactile_sensor_offsets_m must describe the same number of sensors. "
+            f"Got {len(args.tactile_sensor_names)} names and {len(args.tactile_sensor_offsets_m)} offsets."
+        )
+    if args.visual_mode == "encoder":
+        args.visual_checkpoint_path = args.visual_checkpoint_path or _default_vjepa_checkpoint(args.visual_model_name)
+        if args.visual_checkpoint_path is None:
+            raise FileNotFoundError(
+                "visual_mode=encoder requires a V-JEPA checkpoint. "
+                "Pass --visual-checkpoint-path or download one into checkpoints/foundation/vjepa2_1/."
+            )
+    if args.tactile_mode == "encoder":
+        args.use_tactile = True
+        args.tactile_checkpoint_path = args.tactile_checkpoint_path or _default_anytouch_checkpoint()
+        if args.tactile_checkpoint_path is None:
+            raise FileNotFoundError(
+                "tactile_mode=encoder requires an AnyTouch2 checkpoint. "
+                "Pass --tactile-checkpoint-path or download checkpoint-4frames.pth into checkpoints/foundation/anytouch2/."
+            )
+    if args.point_backbone == "sonata":
+        args.sonata_checkpoint_path = args.sonata_checkpoint_path or _default_sonata_checkpoint()
+        if args.sonata_checkpoint_path is None:
+            raise FileNotFoundError(
+                "point_backbone=sonata requires a Sonata checkpoint. "
+                "Pass --sonata-checkpoint-path or place SpatialLM_Sonata_encoder.pth under src/pretrain/."
+            )
 
 
 def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.device]:
@@ -126,6 +224,9 @@ class _CalvinTransitionSource:
         backend: str,
         unroll_steps: int,
         use_wrist_rgb: bool = True,
+        use_tactile: bool = False,
+        tactile_sensor_names: tuple[str, ...] = _DEFAULT_TACTILE_SENSOR_NAMES,
+        tactile_sensor_offsets_m: tuple[tuple[float, float, float], ...] = _DEFAULT_TACTILE_SENSOR_OFFSETS_M,
         frame_dt_s: float = 1.0 / 30.0,
     ) -> None:
         if int(unroll_steps) < 1:
@@ -144,6 +245,9 @@ class _CalvinTransitionSource:
         self.backend = backend
         self.unroll_steps = int(unroll_steps)
         self.use_wrist_rgb = bool(use_wrist_rgb)
+        self.use_tactile = bool(use_tactile)
+        self.tactile_sensor_names = tuple(tactile_sensor_names)
+        self.tactile_sensor_offsets_m = tuple(tuple(offset) for offset in tactile_sensor_offsets_m)
         self.frame_dt_s = float(frame_dt_s)
         self.window_index: list[tuple[int, int]] = []
         for segment_id, segment in enumerate(self.segments):
@@ -165,8 +269,20 @@ class _CalvinTransitionSource:
         keys = ["rgb_static", "depth_static", "robot_obs", "rel_actions"]
         if self.use_wrist_rgb:
             keys.append("rgb_gripper")
+        if self.use_tactile:
+            keys.extend(["rgb_tactile", "depth_tactile"])
         frame = self.reader.read_npz(step_id, keys=keys)
         timestamp_s = float(step_id) * self.frame_dt_s
+        tactile = (
+            _calvin_tactile_packet(
+                frame,
+                timestamp_s=timestamp_s,
+                sensor_names=self.tactile_sensor_names,
+                sensor_offsets_m=self.tactile_sensor_offsets_m,
+            )
+            if self.use_tactile
+            else None
+        )
         return PicfObservation(
             rgb_static=frame["rgb_static"],
             depth_static=frame["depth_static"],
@@ -179,6 +295,7 @@ class _CalvinTransitionSource:
             rgb_gripper=frame.get("rgb_gripper"),
             proprio=frame["robot_obs"],
             action=frame.get("rel_actions"),
+            tactile=tactile,
         )
 
     def window(self, flat_index: int) -> _TransitionWindow:
@@ -249,10 +366,11 @@ class _MetricAccumulator:
 
 
 class _PicfWindowTrainer(torch.nn.Module):
-    def __init__(self, core: PicfFullCore, *, visual_grid: int) -> None:
+    def __init__(self, core: PicfFullCore, *, visual_grid: int, use_visual_override: bool) -> None:
         super().__init__()
         self.core = core
         self.visual_grid = int(visual_grid)
+        self.use_visual_override = bool(use_visual_override)
 
     def forward(self, window: _TransitionWindow) -> dict[str, torch.Tensor]:
         previous = None
@@ -261,8 +379,8 @@ class _PicfWindowTrainer(torch.nn.Module):
         for index in range(len(window.frames) - 1):
             current = dataclasses.replace(window.frames[index], reset_scaffold=(index == 0))
             nxt = dataclasses.replace(window.frames[index + 1], reset_scaffold=False)
-            current_visual = _rgb_visual_override(current.rgb_static, grid=self.visual_grid)
-            next_visual = _rgb_visual_override(nxt.rgb_static, grid=self.visual_grid)
+            current_visual = _rgb_visual_override(current.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
+            next_visual = _rgb_visual_override(nxt.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
             output = self.core.step(
                 current,
                 previous=previous,
@@ -376,7 +494,7 @@ def _load_checkpoint(
     return int(payload.get("step", 0))
 
 
-def _build_model(args: argparse.Namespace, *, device: torch.device) -> PicfFullCore:
+def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[PicfFullCore, bool]:
     builder = CalvinDepthToPicfPointCloud(args.calvin_root, stride=args.stride, max_points=args.max_points)
     config = PicfCoreConfig(
         device=str(device),
@@ -396,20 +514,70 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> PicfFullC
         attention_heads=args.attention_heads,
         future_vote_heads=args.future_vote_heads,
     )
-    return PicfFullCore(
-        builder,
-        config=config,
-        visual_config=VjepaVisualConfig(
+    point_feature_extractor = None
+    if args.point_backbone == "sonata":
+        point_feature_extractor = SonataPointFeatureExtractor(
+            SonataPointConfig(
+                checkpoint_path=args.sonata_checkpoint_path,
+                stage_name=args.sonata_stage_name,
+                device=str(device),
+                dtype=args.sonata_dtype,
+                allow_random_init=False,
+            )
+        )
+
+    if args.visual_mode == "encoder":
+        visual_config = VjepaVisualConfig(
+            model_name=args.visual_model_name,
+            checkpoint_path=args.visual_checkpoint_path,
+            checkpoint_key=args.visual_checkpoint_key,
+            camera_json_path=args.calvin_root,
+            device=str(device),
+            dtype=args.visual_dtype,
+            img_size=args.visual_img_size,
+            num_frames=args.visual_num_frames,
+            patch_size=args.visual_patch_size,
+            tubelet_size=args.visual_tubelet_size,
+            use_last_two_mean=bool(args.visual_use_last_two_mean),
+        )
+        visual_encoder = None
+        use_visual_override = False
+    else:
+        visual_config = VjepaVisualConfig(
             camera_json_path=args.calvin_root,
             arch_name_override="vit_tiny",
             img_size=64,
             num_frames=4,
             device=str(device),
             dtype="float32",
-        ),
-        visual_encoder=_NullVisualEncoder(),
-        tactile_encoder=_NullTactileEncoder(),
+        )
+        visual_encoder = _NullVisualEncoder()
+        use_visual_override = True
+
+    tactile_config = None
+    tactile_encoder = None
+    if args.tactile_mode == "encoder":
+        tactile_config = AnyTouchConfig(
+            checkpoint_path=args.tactile_checkpoint_path,
+            device=str(device),
+            dtype=args.tactile_dtype,
+            num_frames=args.tactile_num_frames,
+            stride=args.tactile_stride,
+            allow_random_init=False,
+        )
+    else:
+        tactile_encoder = _NullTactileEncoder()
+
+    core = PicfFullCore(
+        builder,
+        config=config,
+        point_feature_extractor=point_feature_extractor,
+        visual_config=visual_config,
+        visual_encoder=visual_encoder,
+        tactile_config=tactile_config,
+        tactile_encoder=tactile_encoder,
     )
+    return core, use_visual_override
 
 
 def _materialize_model_parameters(
@@ -459,6 +627,9 @@ def train(args: argparse.Namespace) -> None:
             split=args.split,
             backend=args.backend,
             unroll_steps=args.unroll_steps,
+            use_tactile=bool(args.use_tactile),
+            tactile_sensor_names=args.tactile_sensor_names,
+            tactile_sensor_offsets_m=args.tactile_sensor_offsets_m,
         )
         output_dir = Path(args.checkpoint_base_dir) / "picf_core" / args.exp_name
         latest_path = output_dir / "latest.pt"
@@ -467,8 +638,9 @@ def train(args: argparse.Namespace) -> None:
             output_dir.mkdir(parents=True, exist_ok=True)
             (output_dir / "args.json").write_text(json.dumps(vars(args), indent=2, sort_keys=True), encoding="utf-8")
 
-        core = _build_model(args, device=device).to(device)
-        model = _PicfWindowTrainer(core, visual_grid=args.visual_grid).to(device)
+        core, use_visual_override = _build_model(args, device=device)
+        core = core.to(device)
+        model = _PicfWindowTrainer(core, visual_grid=args.visual_grid, use_visual_override=use_visual_override).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
         if use_ddp:
             model = DistributedDataParallel(
@@ -597,6 +769,29 @@ def main() -> None:
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--visual-grid", type=int, default=8)
+    parser.add_argument("--use-foundation-backbones", action="store_true")
+    parser.add_argument("--point-backbone", choices=["rgb", "sonata"], default="rgb")
+    parser.add_argument("--sonata-checkpoint-path", default=None)
+    parser.add_argument("--sonata-stage-name", default="enc4")
+    parser.add_argument("--sonata-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--visual-mode", choices=["stub", "encoder"], default="stub")
+    parser.add_argument("--visual-model-name", default="vjepa2_1_vit_base_384")
+    parser.add_argument("--visual-checkpoint-path", default=None)
+    parser.add_argument("--visual-checkpoint-key", default=None)
+    parser.add_argument("--visual-dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--visual-img-size", type=int, default=384)
+    parser.add_argument("--visual-num-frames", type=int, default=64)
+    parser.add_argument("--visual-patch-size", type=int, default=16)
+    parser.add_argument("--visual-tubelet-size", type=int, default=2)
+    parser.add_argument("--visual-use-last-two-mean", action="store_true")
+    parser.add_argument("--tactile-mode", choices=["stub", "encoder"], default="stub")
+    parser.add_argument("--tactile-checkpoint-path", default=None)
+    parser.add_argument("--tactile-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--tactile-num-frames", type=int, default=4)
+    parser.add_argument("--tactile-stride", type=int, default=2)
+    parser.add_argument("--use-tactile", action="store_true")
+    parser.add_argument("--tactile-sensor-names", default="digit,gelsight_mini")
+    parser.add_argument("--tactile-sensor-offsets-m", default="0.01,0,0;-0.01,0,0")
     parser.add_argument("--hidden-dim", type=int, default=64)
     parser.add_argument("--posterior-hidden-dim", type=int, default=64)
     parser.add_argument("--latent-dim", type=int, default=24)
@@ -613,6 +808,8 @@ def main() -> None:
     parser.add_argument("--attention-heads", type=int, default=4)
     parser.add_argument("--future-vote-heads", type=int, default=3)
     args = parser.parse_args()
+    _apply_foundation_profile(args)
+    _validate_backbone_args(args)
     train(args)
 
 

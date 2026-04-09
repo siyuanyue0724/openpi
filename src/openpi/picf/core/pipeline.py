@@ -1519,7 +1519,14 @@ class PicfFullCore(nn.Module):
             )
         meta = self._build_runtime_meta(observation, observation.runtime_meta)
         frame_context = self._point_subset(observation) if meta.point_contract_ok else None
-        visual_map = self._visual_map(observation, visual_map_override, meta)
+        clip_snapshot = None
+        if visual_map_override is None and self.clip_buffer is not None:
+            clip_snapshot = self.clip_buffer.snapshot()
+        try:
+            visual_map = self._visual_map(observation, visual_map_override, meta)
+        finally:
+            if clip_snapshot is not None and self.clip_buffer is not None:
+                self.clip_buffer.restore(clip_snapshot)
         return self._current_targets(observation, frame_context, visual_map)
 
     def _standardized_residual(self, target: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:

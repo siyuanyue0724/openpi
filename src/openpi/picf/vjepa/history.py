@@ -1,8 +1,15 @@
 from __future__ import annotations
 
 from collections import deque
+import dataclasses
 
 import numpy as np
+
+
+@dataclasses.dataclass(frozen=True)
+class VisualClipBufferState:
+    segment_id: int | None
+    frames: tuple[np.ndarray, ...]
 
 
 class VisualClipBuffer:
@@ -37,3 +44,13 @@ class VisualClipBuffer:
     @property
     def has_frames(self) -> bool:
         return bool(self._frames)
+
+    def snapshot(self) -> VisualClipBufferState:
+        return VisualClipBufferState(
+            segment_id=self._segment_id,
+            frames=tuple(np.asarray(frame).copy() for frame in self._frames),
+        )
+
+    def restore(self, state: VisualClipBufferState) -> None:
+        self._segment_id = state.segment_id
+        self._frames = deque((np.asarray(frame).copy() for frame in state.frames), maxlen=self.num_frames)
