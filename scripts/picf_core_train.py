@@ -179,9 +179,6 @@ def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.dev
     rank = int(os.environ.get("RANK", "0"))
     local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     use_ddp = world_size > 1
-    if use_ddp and not dist.is_initialized():
-        backend = "nccl" if str(requested_device).startswith("cuda") else "gloo"
-        dist.init_process_group(backend=backend)
     if str(requested_device).startswith("cuda"):
         if not torch.cuda.is_available():
             raise RuntimeError(f"Requested device={requested_device!r}, but CUDA is not available.")
@@ -196,12 +193,24 @@ def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.dev
             torch.cuda.set_device(device)
     else:
         device = torch.device("cpu")
+    if use_ddp and not dist.is_initialized():
+        backend = "nccl" if device.type == "cuda" else "gloo"
+        dist.init_process_group(backend=backend)
     return use_ddp, rank, world_size, device
 
 
 def _cleanup_distributed() -> None:
     if dist.is_initialized():
         dist.destroy_process_group()
+
+
+def _distributed_barrier(*, use_ddp: bool, device: torch.device) -> None:
+    if not use_ddp or not dist.is_initialized():
+        return
+    if device.type == "cuda" and device.index is not None:
+        dist.barrier(device_ids=[device.index])
+    else:
+        dist.barrier()
 
 
 def _is_main(rank: int) -> bool:
@@ -709,7 +718,9 @@ def _materialize_model_parameters(
         model.eval()
 
 
-def _prepare_output_dir(*, output_dir: Path, args: argparse.Namespace, is_main: bool, use_ddp: bool) -> None:
+def _prepare_output_dir(
+    *, output_dir: Path, args: argparse.Namespace, is_main: bool, use_ddp: bool, device: torch.device
+) -> None:
     if is_main:
         if args.resume and args.overwrite:
             raise ValueError("--resume and --overwrite are mutually exclusive.")
@@ -728,8 +739,7 @@ def _prepare_output_dir(*, output_dir: Path, args: argparse.Namespace, is_main: 
         else:
             if not output_dir.exists():
                 raise FileNotFoundError(f"Checkpoint directory does not exist for resume: {output_dir}")
-    if use_ddp:
-        dist.barrier()
+    _distributed_barrier(use_ddp=use_ddp, device=device)
 
 
 def _init_wandb(*, args: argparse.Namespace, output_dir: Path, resuming: bool, enabled: bool) -> bool:
@@ -768,7 +778,7 @@ def train(args: argparse.Namespace) -> None:
         output_dir = Path(args.checkpoint_base_dir) / "picf_core" / args.exp_name
         latest_path = output_dir / "latest.pt"
         metrics_path = output_dir / "metrics.jsonl"
-        _prepare_output_dir(output_dir=output_dir, args=args, is_main=is_main, use_ddp=use_ddp)
+        _prepare_output_dir(output_dir=output_dir, args=args, is_main=is_main, use_ddp=use_ddp, device=device)
         source = _CalvinTransitionSource(
             args.calvin_root,
             split=args.split,
@@ -815,8 +825,7 @@ def train(args: argparse.Namespace) -> None:
                 resuming=resume_path is not None,
                 enabled=bool(args.wandb_enabled and args.wandb_mode != "disabled"),
             )
-        if use_ddp:
-            dist.barrier()
+        _distributed_barrier(use_ddp=use_ddp, device=device)
 
         rng = np.random.default_rng(args.seed + 17 * rank)
         metric_accum = _MetricAccumulator()
@@ -930,8 +939,8 @@ def train(args: argparse.Namespace) -> None:
                     print(message, flush=True)
                 if wandb_active:
                     wandb.log({"checkpoint_step": int(step + 1)}, step=int(step + 1))
-            if use_ddp and should_save:
-                dist.barrier()
+            if should_save:
+                _distributed_barrier(use_ddp=use_ddp, device=device)
 
     finally:
         if pbar is not None:
