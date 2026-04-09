@@ -4,9 +4,11 @@ import argparse
 import contextlib
 import dataclasses
 import json
+import logging
 import math
 import os
 import random
+import shutil
 import time
 from collections.abc import Iterator
 from pathlib import Path
@@ -17,6 +19,12 @@ import torch
 import torch.distributed as dist
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.parameter import UninitializedParameter
+import tqdm.auto as tqdm
+
+try:
+    import wandb
+except Exception:  # pragma: no cover - import availability depends on env
+    wandb = None
 
 from openpi.picf.anytouch.config import AnyTouchConfig
 from openpi.picf.contracts import PicfObservation
@@ -45,6 +53,29 @@ class _NullTactileEncoder:
 class _NullVisualEncoder:
     def encode_clip(self, _clip):
         raise AssertionError("visual_map_override should bypass encoder use in picf_core_train")
+
+
+def _init_logging() -> None:
+    level_mapping = {"DEBUG": "D", "INFO": "I", "WARNING": "W", "ERROR": "E", "CRITICAL": "C"}
+
+    class _Formatter(logging.Formatter):
+        def format(self, record: logging.LogRecord) -> str:
+            record.levelname = level_mapping.get(record.levelname, record.levelname)
+            return super().format(record)
+
+    formatter = _Formatter(
+        fmt="%(asctime)s.%(msecs)03d [%(levelname)s] %(message)-80s (%(process)d:%(filename)s:%(lineno)s)",
+        datefmt="%H:%M:%S",
+    )
+    logger = logging.getLogger()
+    logger.setLevel(logging.INFO)
+    if not logger.handlers:
+        handler = logging.StreamHandler()
+        handler.setFormatter(formatter)
+        logger.addHandler(handler)
+    else:
+        for handler in logger.handlers:
+            handler.setFormatter(formatter)
 
 
 def _rgb_visual_override(rgb: np.ndarray, grid: int = 8) -> torch.Tensor:
@@ -462,22 +493,72 @@ def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
         group["lr"] = lr
 
 
+def _checkpoint_dir_for_step(output_dir: Path, step: int) -> Path:
+    return output_dir / f"{int(step)}"
+
+
+def _latest_checkpoint_step(output_dir: Path) -> int | None:
+    if not output_dir.exists():
+        return None
+    steps = [
+        int(path.name)
+        for path in output_dir.iterdir()
+        if path.is_dir() and path.name.isdigit() and not path.name.startswith("tmp_")
+    ]
+    return max(steps) if steps else None
+
+
+def _resolve_resume_path(*, output_dir: Path, latest_path: Path) -> Path | None:
+    latest_step = _latest_checkpoint_step(output_dir)
+    if latest_step is not None:
+        return _checkpoint_dir_for_step(output_dir, latest_step)
+    if not latest_path.exists():
+        return None
+    payload = torch.load(latest_path, map_location="cpu", weights_only=False)
+    checkpoint_dir = payload.get("checkpoint_dir")
+    if checkpoint_dir is not None:
+        candidate = Path(checkpoint_dir)
+        if candidate.exists():
+            return candidate
+    return latest_path
+
+
 def _save_checkpoint(
     *,
-    path: Path,
+    output_dir: Path,
     model: _PicfWindowTrainer | DistributedDataParallel,
     optimizer: torch.optim.Optimizer,
     step: int,
     args: argparse.Namespace,
 ) -> None:
     module = model.module if isinstance(model, DistributedDataParallel) else model
-    payload = {
-        "model": module.core.state_dict(),
-        "optimizer": optimizer.state_dict(),
+    final_dir = _checkpoint_dir_for_step(output_dir, step)
+    tmp_dir = output_dir / f"tmp_{int(step)}"
+    latest_path = output_dir / "latest.pt"
+
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+
+    torch.save(module.core.state_dict(), tmp_dir / "model.pt")
+    torch.save(optimizer.state_dict(), tmp_dir / "optimizer.pt")
+    metadata = {
         "step": int(step),
         "args": vars(args),
+        "timestamp": time.time(),
     }
-    torch.save(payload, path)
+    torch.save(metadata, tmp_dir / "metadata.pt")
+
+    if final_dir.exists():
+        shutil.rmtree(final_dir)
+    tmp_dir.rename(final_dir)
+    torch.save(
+        {
+            "step": int(step),
+            "checkpoint_dir": str(final_dir),
+        },
+        latest_path,
+    )
 
 
 def _load_checkpoint(
@@ -487,8 +568,19 @@ def _load_checkpoint(
     optimizer: torch.optim.Optimizer,
     device: torch.device,
 ) -> int:
-    payload = torch.load(path, map_location=device, weights_only=False)
     module = model.module if isinstance(model, DistributedDataParallel) else model
+    if path.is_dir():
+        model_state = torch.load(path / "model.pt", map_location=device, weights_only=False)
+        optimizer_state = torch.load(path / "optimizer.pt", map_location=device, weights_only=False)
+        metadata = torch.load(path / "metadata.pt", map_location=device, weights_only=False)
+        module.core.load_state_dict(model_state, strict=True)
+        optimizer.load_state_dict(optimizer_state)
+        return int(metadata.get("step", 0))
+
+    payload = torch.load(path, map_location=device, weights_only=False)
+    checkpoint_dir = payload.get("checkpoint_dir")
+    if checkpoint_dir is not None and "model" not in payload:
+        return _load_checkpoint(path=Path(checkpoint_dir), model=model, optimizer=optimizer, device=device)
     module.core.load_state_dict(payload["model"], strict=True)
     optimizer.load_state_dict(payload["optimizer"])
     return int(payload.get("step", 0))
@@ -617,11 +709,66 @@ def _materialize_model_parameters(
         model.eval()
 
 
+def _prepare_output_dir(*, output_dir: Path, args: argparse.Namespace, is_main: bool, use_ddp: bool) -> None:
+    if is_main:
+        if args.resume and args.overwrite:
+            raise ValueError("--resume and --overwrite are mutually exclusive.")
+        if not args.resume:
+            if output_dir.exists():
+                has_content = any(output_dir.iterdir())
+                if args.overwrite:
+                    shutil.rmtree(output_dir)
+                    logging.info("Overwriting checkpoint directory: %s", output_dir)
+                elif has_content:
+                    raise FileExistsError(
+                        f"Checkpoint directory {output_dir} already exists. Use --resume or --overwrite."
+                    )
+            output_dir.mkdir(parents=True, exist_ok=True)
+            (output_dir / "args.json").write_text(json.dumps(vars(args), indent=2, sort_keys=True), encoding="utf-8")
+        else:
+            if not output_dir.exists():
+                raise FileNotFoundError(f"Checkpoint directory does not exist for resume: {output_dir}")
+    if use_ddp:
+        dist.barrier()
+
+
+def _init_wandb(*, args: argparse.Namespace, output_dir: Path, resuming: bool, enabled: bool) -> bool:
+    if not enabled:
+        return False
+    if wandb is None:
+        raise RuntimeError("wandb is not installed, but wandb logging is enabled.")
+    run_name = args.wandb_run_name or args.exp_name
+    wandb_id_path = output_dir / "wandb_id.txt"
+    init_kwargs = {
+        "project": args.project_name,
+        "name": run_name,
+        "mode": args.wandb_mode,
+        "config": vars(args),
+    }
+    if resuming and wandb_id_path.exists():
+        run_id = wandb_id_path.read_text(encoding="utf-8").strip()
+        init_kwargs.update({"id": run_id, "resume": "must"})
+        wandb.init(**init_kwargs)
+        return True
+    wandb.init(**init_kwargs)
+    if getattr(wandb, "run", None) is not None:
+        wandb_id_path.write_text(str(wandb.run.id), encoding="utf-8")
+    return True
+
+
 def train(args: argparse.Namespace) -> None:
     use_ddp, rank, world_size, device = _setup_distributed(args.device)
+    wandb_active = False
+    is_main = False
+    source: _CalvinTransitionSource | None = None
+    pbar: Any = None
     try:
         _seed_everything(args.seed, rank)
         is_main = _is_main(rank)
+        output_dir = Path(args.checkpoint_base_dir) / "picf_core" / args.exp_name
+        latest_path = output_dir / "latest.pt"
+        metrics_path = output_dir / "metrics.jsonl"
+        _prepare_output_dir(output_dir=output_dir, args=args, is_main=is_main, use_ddp=use_ddp)
         source = _CalvinTransitionSource(
             args.calvin_root,
             split=args.split,
@@ -631,12 +778,6 @@ def train(args: argparse.Namespace) -> None:
             tactile_sensor_names=args.tactile_sensor_names,
             tactile_sensor_offsets_m=args.tactile_sensor_offsets_m,
         )
-        output_dir = Path(args.checkpoint_base_dir) / "picf_core" / args.exp_name
-        latest_path = output_dir / "latest.pt"
-        metrics_path = output_dir / "metrics.jsonl"
-        if is_main:
-            output_dir.mkdir(parents=True, exist_ok=True)
-            (output_dir / "args.json").write_text(json.dumps(vars(args), indent=2, sort_keys=True), encoding="utf-8")
 
         core, use_visual_override = _build_model(args, device=device)
         core = core.to(device)
@@ -660,17 +801,49 @@ def train(args: argparse.Namespace) -> None:
         if args.resume_checkpoint is not None:
             resume_path = Path(args.resume_checkpoint)
         elif args.resume:
-            resume_path = latest_path
+            resume_path = _resolve_resume_path(output_dir=output_dir, latest_path=latest_path)
         if resume_path is not None:
             if not resume_path.exists():
                 raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
             start_step = _load_checkpoint(path=resume_path, model=model, optimizer=optimizer, device=device)
-            if is_main:
-                print(f"[picf_core_train] resumed from {resume_path} at step={start_step}", flush=True)
+            logging.info("Resumed from %s at step=%s", resume_path, start_step)
+
+        if is_main:
+            wandb_active = _init_wandb(
+                args=args,
+                output_dir=output_dir,
+                resuming=resume_path is not None,
+                enabled=bool(args.wandb_enabled and args.wandb_mode != "disabled"),
+            )
+        if use_ddp:
+            dist.barrier()
 
         rng = np.random.default_rng(args.seed + 17 * rank)
         metric_accum = _MetricAccumulator()
         interval_start = time.time()
+        steps_in_interval = 0
+        pbar = (
+            tqdm.tqdm(
+                total=args.num_train_steps,
+                initial=start_step,
+                desc="PICF Training",
+                dynamic_ncols=True,
+                disable=not (is_main and args.progress),
+            )
+            if is_main
+            else None
+        )
+        if is_main:
+            logging.info(
+                "Training config: world_size=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s wandb=%s",
+                world_size,
+                args.num_train_steps,
+                args.lr,
+                args.min_lr,
+                args.warmup_steps,
+                args.save_interval,
+                bool(args.wandb_enabled and args.wandb_mode != "disabled"),
+            )
 
         for step in range(start_step, args.num_train_steps):
             lr = _lr_for_step(
@@ -710,8 +883,15 @@ def train(args: argparse.Namespace) -> None:
             if args.grad_clip_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip_norm)
             optimizer.step()
+            steps_in_interval += 1
+            current_total = float(outputs["loss_total"].detach().item())
 
-            if (step + 1) % args.log_interval == 0:
+            if pbar is not None:
+                pbar.update(1)
+                pbar.set_postfix({"loss": f"{current_total:.4f}", "lr": f"{lr:.2e}", "step": int(step + 1)})
+
+            should_log = ((step + 1) % args.log_interval == 0) or ((step + 1) == args.num_train_steps)
+            if should_log:
                 elapsed = max(time.time() - interval_start, 1e-6)
                 local_grad = _grad_norm(model.parameters())
                 averages = metric_accum.averages()
@@ -723,29 +903,48 @@ def train(args: argparse.Namespace) -> None:
                         "step": int(step + 1),
                         "lr": float(lr),
                         "grad_norm": float(local_grad),
-                        "steps_per_sec": float(metric_accum.num_windows / elapsed),
+                        "steps_per_sec": float(steps_in_interval / elapsed),
+                        "windows_per_sec": float(metric_accum.num_windows / elapsed),
                         **averages,
                     }
-                    print(json.dumps(record, sort_keys=True), flush=True)
+                    line = json.dumps(record, sort_keys=True)
+                    if pbar is not None:
+                        pbar.write(line)
+                    else:
+                        print(line, flush=True)
                     with metrics_path.open("a", encoding="utf-8") as fh:
-                        fh.write(json.dumps(record, sort_keys=True) + "\n")
+                        fh.write(line + "\n")
+                    if wandb_active:
+                        wandb.log(record, step=int(step + 1))
                 metric_accum = _MetricAccumulator()
                 interval_start = time.time()
+                steps_in_interval = 0
 
-            if is_main and ((step + 1) % args.save_interval == 0 or (step + 1) == args.num_train_steps):
-                step_path = output_dir / f"step_{step + 1}.pt"
-                _save_checkpoint(path=step_path, model=model, optimizer=optimizer, step=step + 1, args=args)
-                _save_checkpoint(path=latest_path, model=model, optimizer=optimizer, step=step + 1, args=args)
-                print(f"[picf_core_train] saved checkpoint step={step + 1} -> {step_path}", flush=True)
-            if use_ddp:
+            should_save = ((step + 1) % args.save_interval == 0) or ((step + 1) == args.num_train_steps)
+            if is_main and should_save:
+                _save_checkpoint(output_dir=output_dir, model=model, optimizer=optimizer, step=step + 1, args=args)
+                message = f"[picf_core_train] saved checkpoint step={step + 1} -> {_checkpoint_dir_for_step(output_dir, step + 1)}"
+                if pbar is not None:
+                    pbar.write(message)
+                else:
+                    print(message, flush=True)
+                if wandb_active:
+                    wandb.log({"checkpoint_step": int(step + 1)}, step=int(step + 1))
+            if use_ddp and should_save:
                 dist.barrier()
 
-        source.close()
     finally:
+        if pbar is not None:
+            pbar.close()
+        if source is not None:
+            source.close()
+        if is_main and wandb_active:
+            wandb.finish()
         _cleanup_distributed()
 
 
 def main() -> None:
+    _init_logging()
     parser = argparse.ArgumentParser(description="Long-run PICF core training on CALVIN transition windows.")
     parser.add_argument("--calvin-root", required=True)
     parser.add_argument("--split", default="training", choices=["training", "validation"])
@@ -754,9 +953,10 @@ def main() -> None:
     parser.add_argument("--exp-name", required=True)
     parser.add_argument("--resume", action="store_true")
     parser.add_argument("--resume-checkpoint", default=None)
+    parser.add_argument("--overwrite", action="store_true")
     parser.add_argument("--num-train-steps", type=int, default=30000)
     parser.add_argument("--log-interval", type=int, default=100)
-    parser.add_argument("--save-interval", type=int, default=1000)
+    parser.add_argument("--save-interval", type=int, default=5000)
     parser.add_argument("--accum-steps", type=int, default=1)
     parser.add_argument("--unroll-steps", type=int, default=2)
     parser.add_argument("--stride", type=int, default=8)
@@ -768,6 +968,13 @@ def main() -> None:
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--project-name", default="openpi")
+    parser.add_argument("--wandb-run-name", default=None)
+    parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
+    parser.add_argument("--wandb-enabled", dest="wandb_enabled", action="store_true")
+    parser.add_argument("--no-wandb", dest="wandb_enabled", action="store_false")
+    parser.add_argument("--progress", dest="progress", action="store_true")
+    parser.add_argument("--no-progress", dest="progress", action="store_false")
     parser.add_argument("--visual-grid", type=int, default=8)
     parser.add_argument("--use-foundation-backbones", action="store_true")
     parser.add_argument("--point-backbone", choices=["rgb", "sonata"], default="rgb")
@@ -807,6 +1014,7 @@ def main() -> None:
     parser.add_argument("--control-layers", type=int, default=1)
     parser.add_argument("--attention-heads", type=int, default=4)
     parser.add_argument("--future-vote-heads", type=int, default=3)
+    parser.set_defaults(wandb_enabled=True, progress=True)
     args = parser.parse_args()
     _apply_foundation_profile(args)
     _validate_backbone_args(args)

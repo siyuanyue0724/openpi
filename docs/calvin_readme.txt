@@ -398,7 +398,7 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
   --exp-name picf_core_train_run \
   --num-train-steps 30000 \
   --log-interval 100 \
-  --save-interval 1000 \
+  --save-interval 5000 \
   --accum-steps 1 \
   --unroll-steps 2 \
   --stride 8 \
@@ -407,9 +407,16 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
   --lr 2e-4 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
+  --wandb-enabled \
   --use-foundation-backbones \
   --use-tactile \
   2>&1 | tee /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
+
+说明：
+- 控制台会显示 `tqdm` 实时进度条；`--log-interval 100` 只控制 JSON 行、`metrics.jsonl` 和 wandb scalar 的刷新频率
+- 如果不想上报 wandb，可改成 `--no-wandb`
+- 如果只想保留日志文件、不显示进度条，可改成 `--no-progress`
+- 当前默认 `save_interval=5000`
 
 训练前 checklist：
 - `nvidia-smi` 能看到目标 GPU，且显存空闲足够
@@ -436,7 +443,7 @@ export HF_ENDPOINT=https://hf-mirror.com && \
   --resume \
   --num-train-steps 30000 \
   --log-interval 100 \
-  --save-interval 1000 \
+  --save-interval 5000 \
   --accum-steps 1 \
   --unroll-steps 2 \
   --stride 8 \
@@ -445,6 +452,7 @@ export HF_ENDPOINT=https://hf-mirror.com && \
   --lr 2e-4 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
+  --wandb-enabled \
   --use-foundation-backbones \
   --use-tactile \
   2>&1 | tee -a /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
@@ -468,7 +476,7 @@ export HF_ENDPOINT=https://hf-mirror.com && \
   --exp-name picf_core_train_ddp_run \
   --num-train-steps 30000 \
   --log-interval 100 \
-  --save-interval 1000 \
+  --save-interval 5000 \
   --accum-steps 1 \
   --unroll-steps 2 \
   --stride 8 \
@@ -477,6 +485,7 @@ export HF_ENDPOINT=https://hf-mirror.com && \
   --lr 2e-4 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
+  --wandb-enabled \
   --use-foundation-backbones \
   --use-tactile \
   2>&1 | tee /mnt/checkpoints/picf_core/logs/picf_core_train_ddp_run.log

@@ -653,26 +653,34 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - DDP 初始化失败
   - tactile / point 分支掉空
 
-### 4.10c `scripts/picf_core_train.py` 的输出目录与恢复语义
+### 4.10c `scripts/picf_core_train.py` 的输出目录、进度条、wandb 与恢复语义
 
 当前输出目录固定为：
 
 - `<checkpoint-base-dir>/picf_core/<exp-name>/args.json`
 - `<checkpoint-base-dir>/picf_core/<exp-name>/metrics.jsonl`
+- `<checkpoint-base-dir>/picf_core/<exp-name>/wandb_id.txt`
 - `<checkpoint-base-dir>/picf_core/<exp-name>/latest.pt`
-- `<checkpoint-base-dir>/picf_core/<exp-name>/step_<N>.pt`
+- `<checkpoint-base-dir>/picf_core/<exp-name>/<N>/model.pt`
+- `<checkpoint-base-dir>/picf_core/<exp-name>/<N>/optimizer.pt`
+- `<checkpoint-base-dir>/picf_core/<exp-name>/<N>/metadata.pt`
 
 其中：
 
 - `args.json`：记录本次启动参数
 - `metrics.jsonl`：按 `log_interval` 追加 step 级 JSON 指标
-- `latest.pt`：始终覆盖到最近一次保存
-- `step_<N>.pt`：保留对应 step 的显式 checkpoint
+- `wandb_id.txt`：记录当前实验对应的 wandb run id，供 `--resume` 时继续同一 run
+- `latest.pt`：轻量 latest 指针，记录最近一次 checkpoint 的 step 和目录
+- `<N>/...`：按完成步数编号的原子 checkpoint 目录；当前一步 checkpoint 内包含：
+  - `model.pt`
+  - `optimizer.pt`
+  - `metadata.pt`
 
 恢复语义是：
 
-- `--resume`：默认从同一实验目录下的 `latest.pt` 接着跑
+- `--resume`：默认优先从同一实验目录下最大的数字步目录恢复；若目录不存在，则回退读取 `latest.pt`
 - `--resume-checkpoint <path>`：显式从指定 checkpoint 恢复
+- `--overwrite`：清空现有实验目录并重新开始；不得与 `--resume` 同时使用
 
 这里还有一条必须写进交接文档的细节：
 
@@ -680,7 +688,22 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 如果复用同一个 `exp-name` 重新起一个非 `--resume` 训练，日志里会继续追加，可能出现重复 step id
 - 所以想要“干净的一条新曲线”，应当：
   - 用新的 `exp-name`
-  - 或先清理旧实验目录
+  - 或显式传 `--overwrite`
+
+训练器当前已经对齐到原版 `scripts/train_pytorch.py` 的几个关键交互点：
+
+- 主进程默认启用 `tqdm` 实时进度条，按 step 更新当前 `loss / lr / step / ETA`
+- `--log-interval` 只控制：
+  - `metrics.jsonl` 追加
+  - 控制台 JSON 行输出
+  - wandb scalar logging
+- `--save-interval` 默认已经调成 `5000`
+- wandb 默认开启：
+  - `--project-name` 默认 `openpi`
+  - `--wandb-run-name` 默认复用 `exp-name`
+  - `--wandb-mode` 支持 `online / offline / disabled`
+  - `--no-wandb` 可显式关闭
+- `--no-progress` 可关闭进度条，适合纯日志环境或回归脚本
 
 ### 4.11 当前训练调试接口已经有哪些
 
@@ -988,7 +1011,7 @@ python scripts/picf_core_train.py \
   --exp-name picf_core_train_run \
   --num-train-steps 30000 \
   --log-interval 100 \
-  --save-interval 1000 \
+  --save-interval 5000 \
   --accum-steps 1 \
   --unroll-steps 2 \
   --stride 8 \
@@ -997,9 +1020,16 @@ python scripts/picf_core_train.py \
   --lr 2e-4 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
+  --wandb-enabled \
   --use-foundation-backbones \
   --use-tactile
 ```
+
+说明：
+
+- 控制台会显示 `tqdm` 实时进度条；`--log-interval 100` 只控制 JSON 指标与 wandb scalar 的刷新频率，不影响进度条本身
+- 如果不想上报 wandb，可改成 `--no-wandb`
+- 如果只想保留文件日志、不看进度条，可改成 `--no-progress`
 
 正式开训前先确认四件事：
 
@@ -1031,6 +1061,7 @@ UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py \
   --lr 1e-4 \
   --min-lr 1e-5 \
   --warmup-steps 1 \
+  --wandb-mode disabled \
   --use-foundation-backbones \
   --use-tactile
 ```
@@ -1047,7 +1078,7 @@ python scripts/picf_core_train.py \
   --resume \
   --num-train-steps 30000 \
   --log-interval 100 \
-  --save-interval 1000 \
+  --save-interval 5000 \
   --accum-steps 1 \
   --unroll-steps 2 \
   --stride 8 \
@@ -1056,6 +1087,7 @@ python scripts/picf_core_train.py \
   --lr 2e-4 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
+  --wandb-enabled \
   --use-foundation-backbones \
   --use-tactile
 ```
@@ -1072,7 +1104,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --exp-name picf_core_train_ddp_run \
   --num-train-steps 30000 \
   --log-interval 100 \
-  --save-interval 1000 \
+  --save-interval 5000 \
   --accum-steps 1 \
   --unroll-steps 2 \
   --stride 8 \
@@ -1081,6 +1113,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --lr 2e-4 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
+  --wandb-enabled \
   --use-foundation-backbones \
   --use-tactile
 ```
