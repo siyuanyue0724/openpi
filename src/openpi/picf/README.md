@@ -55,6 +55,12 @@
   - `dir + cuda + 2-step long-run`：通过
   - `dir + cuda + resume from latest.pt`：通过
   - `zip + cuda + 1-step long-run`：通过
+  - 云机 `dir + cuda + --use-foundation-backbones --use-tactile + 5-step short-run`：通过
+    - `loss_total` 连续 `5` 个 step 保持有限值，并从 `3.0362 -> 2.1081`
+    - `loss_tactile_real` 保持在 `0.5562 -> 0.4673`
+    - `loss_pt` 保持非零，约 `0.6941 -> 0.7252`
+    - `projective_candidate_density` 稳定在 `0.0336 ~ 0.0361`
+    - `step_5.pt` 已落盘
   - 云机 `dir + cuda + --use-foundation-backbones --use-tactile + 1-step`：通过
     - `loss_total = 3.0362`
     - `loss_tactile_real = 0.5562`
@@ -641,6 +647,11 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - foundation weights 已经接进 `scripts/picf_core_train.py`
 - CALVIN tactile 也已经接进长期 trainer
 - `stub` 模式保留为本地无权重环境的回退路径
+- foundation-weight 短程训练已经在云机上连续跑过 `5` 个 step，未出现：
+  - NaN / Inf
+  - checkpoint 写入失败
+  - DDP 初始化失败
+  - tactile / point 分支掉空
 
 ### 4.10c `scripts/picf_core_train.py` 的输出目录与恢复语义
 

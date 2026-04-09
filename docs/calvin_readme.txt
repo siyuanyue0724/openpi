@@ -34,6 +34,11 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - `dir + cuda + resume from latest.pt`：通过
   - `zip + cuda + 1-step long-run`：通过
   - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py --backend dir --device cuda --num-train-steps 1`：通过
+  - 云机 `dir + cuda + --use-foundation-backbones --use-tactile + 5-step short-run`：通过
+    - `loss_total` 从 `3.0362 -> 2.1081`
+    - `loss_tactile_real` 从 `0.5562 -> 0.4673`
+    - `loss_pt` 始终非零
+    - `step_5.pt` 已落盘
   - 云机 `dir + cuda + --use-foundation-backbones --use-tactile + 1-step`：通过
   - 云机同一实验 `--resume` 到 `step=2`：通过
   - 云机 `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --use-foundation-backbones --use-tactile --num-train-steps 1`：通过
