@@ -89,6 +89,7 @@ class PicfPosteriorAnchorState:
 
 @dataclasses.dataclass
 class PicfPredictiveState:
+    semantic_tokens: torch.Tensor
     semantic_summary: torch.Tensor
     innovation_token: torch.Tensor
     innovation_norm: torch.Tensor

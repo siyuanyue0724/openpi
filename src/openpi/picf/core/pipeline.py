@@ -31,6 +31,7 @@ from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.frame_context import PointFrameContext
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.visual_expert import load_camera_model
+from openpi.picf.paligemma.wrapper import PaliGemmaSemanticFeatures
 from openpi.picf.scaffold.local_frame import EndEffectorLocalFrame
 from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
 from openpi.picf.vjepa.config import VjepaVisualConfig
@@ -424,6 +425,12 @@ class PaliGemmaSemanticWrapper:
         return torch.cat([txt, img], dim=-1)
 
 
+@dataclasses.dataclass(frozen=True)
+class _SemanticContext:
+    tokens: torch.Tensor
+    summary: torch.Tensor
+
+
 class PicfFullCore(nn.Module):
     def __init__(
         self,
@@ -521,7 +528,8 @@ class PicfFullCore(nn.Module):
         self.posterior_self = TransformerStack(hidden_dim, heads, self.config.posterior_layers)
         self.posterior_pool = AttentionPool(hidden_dim)
 
-        self.semantic_proj = nn.LazyLinear(hidden_dim)
+        self.semantic_token_proj = nn.LazyLinear(hidden_dim)
+        self.semantic_summary_proj = nn.LazyLinear(hidden_dim)
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
         self.predictive_self = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
@@ -635,30 +643,68 @@ class PicfFullCore(nn.Module):
             poses_by_sensor=poses,
         )
 
-    def _semantic_summary(
+    def _zero_semantic_context(self) -> _SemanticContext:
+        return _SemanticContext(
+            tokens=torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype),
+            summary=torch.zeros((1, self.config.hidden_dim), device=self.device, dtype=self.dtype),
+        )
+
+    def _project_semantic_context(
+        self,
+        *,
+        tokens_raw: torch.Tensor,
+        summary_raw: torch.Tensor,
+    ) -> _SemanticContext:
+        if tokens_raw.ndim == 1:
+            tokens_raw = tokens_raw[None, :]
+        if summary_raw.ndim == 1:
+            summary_raw = summary_raw[None, :]
+        tokens_raw = _to_tensor(tokens_raw, device=self.device, dtype=self.dtype)
+        summary_raw = _to_tensor(summary_raw, device=self.device, dtype=self.dtype)
+        semantic_tokens = (
+            self.semantic_token_proj(tokens_raw)
+            if tokens_raw.shape[0] > 0
+            else torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype)
+        )
+        semantic_summary = self.semantic_summary_proj(summary_raw)
+        return _SemanticContext(tokens=semantic_tokens, summary=semantic_summary)
+
+    def _semantic_context(
         self,
         observation: PicfObservation,
         previous: PicfCoreState | None,
         semantic_override: Any | None,
-    ) -> torch.Tensor:
+    ) -> _SemanticContext:
         if not self.config.language_enabled:
-            return torch.zeros((1, self.config.hidden_dim), device=self.device, dtype=self.dtype)
-        if semantic_override is None and previous is not None and previous.last_prompt == observation.prompt:
-            return previous.predictive.semantic_summary
+            return self._zero_semantic_context()
         if semantic_override is None:
-            raw = torch.zeros((1, self.config.semantic_dim), device=self.device, dtype=self.dtype)
-            return self.semantic_proj(raw)
+            return self._zero_semantic_context()
+        if isinstance(semantic_override, PaliGemmaSemanticFeatures):
+            return self._project_semantic_context(
+                tokens_raw=semantic_override.tokens,
+                summary_raw=semantic_override.summary,
+            )
         if isinstance(semantic_override, torch.Tensor | np.ndarray):
             raw = _to_tensor(semantic_override, device=self.device, dtype=self.dtype)
             raw = raw if raw.ndim == 2 else raw[None, :]
-            return self.semantic_proj(raw)
+            return self._project_semantic_context(
+                tokens_raw=raw,
+                summary_raw=raw.mean(dim=0, keepdim=True),
+            )
         if isinstance(semantic_override, dict):
+            if "tokens" in semantic_override:
+                tokens_raw = semantic_override["tokens"]
+                summary_raw = semantic_override.get("summary")
+                if summary_raw is None:
+                    summary_raw = _to_tensor(tokens_raw, device=self.device, dtype=self.dtype)
+                    summary_raw = summary_raw.mean(dim=0, keepdim=True) if summary_raw.ndim == 2 else summary_raw[None, :]
+                return self._project_semantic_context(tokens_raw=tokens_raw, summary_raw=summary_raw)
             raw = self.semantic_wrapper.summarize(**semantic_override)
         else:
             raw = self.semantic_wrapper.summarize(outputs=semantic_override)
         raw = _to_tensor(raw, device=self.device, dtype=self.dtype)
         raw = raw if raw.ndim == 2 else raw[None, :]
-        return self.semantic_proj(raw)
+        return self._project_semantic_context(tokens_raw=raw, summary_raw=raw)
 
     def _previous_action(self, previous: PicfCoreState | None) -> torch.Tensor:
         if previous is None:
@@ -1595,7 +1641,7 @@ class PicfFullCore(nn.Module):
         self,
         observation: PicfObservation,
         posterior: PicfPosteriorAnchorState,
-        semantic_summary: torch.Tensor,
+        semantic: _SemanticContext,
         innovation_token: torch.Tensor,
         innovation_norm: torch.Tensor,
         targets_availability: torch.Tensor,
@@ -1610,8 +1656,8 @@ class PicfFullCore(nn.Module):
         control_tokens = torch.cat(
             [
                 posterior.tokens,
+                semantic.tokens,
                 innovation_token[None, :],
-                semantic_summary,
                 proprio_token[None, :],
             ],
             dim=0,
@@ -1627,15 +1673,11 @@ class PicfFullCore(nn.Module):
             action_cond = future_action[0] if future_action.ndim > 1 else future_action
         else:
             action_cond = action
-        pred_tokens = torch.stack(
-            [
-                posterior.global_post,
-                semantic_summary[0],
-                proprio_token,
-                self.action_cond_proj(action_cond[None, :])[0],
-            ],
+        pred_tail = torch.stack(
+            [posterior.global_post, proprio_token, self.action_cond_proj(action_cond[None, :])[0]],
             dim=0,
         )
+        pred_tokens = torch.cat([posterior.tokens, semantic.tokens, pred_tail], dim=0)
         pred_tokens = self.predictive_self(pred_tokens[None, :])[0]
         global_pred = self.predictive_pool(pred_tokens[None, :])[0]
         prediction_cache = PicfPredictionCache(
@@ -1655,7 +1697,8 @@ class PicfFullCore(nn.Module):
             ),
         )
         return PicfPredictiveState(
-            semantic_summary=semantic_summary,
+            semantic_tokens=semantic.tokens,
+            semantic_summary=semantic.summary,
             innovation_token=innovation_token,
             innovation_norm=innovation_norm,
             availability=targets_availability,
@@ -1712,7 +1755,7 @@ class PicfFullCore(nn.Module):
         point_features = self._extract_point_features(frame_context, point_features_override) if frame_context is not None else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
         visual_map = self._visual_map(observation, visual_map_override, meta)
         tactile_bundle = self._tactile_features(observation, meta)
-        semantic_summary = self._semantic_summary(observation, previous, semantic_override)
+        semantic = self._semantic_context(observation, previous, semantic_override)
         token_field = self._build_token_field(observation, frame_context, point_features, visual_map, tactile_bundle, meta, previous)
         observation_anchors = self._build_observation_anchors(token_field)
         posterior = self._posterior_update(previous, observation, observation_anchors)
@@ -1721,7 +1764,7 @@ class PicfFullCore(nn.Module):
         predictive = self._predictive_state(
             observation,
             posterior,
-            semantic_summary,
+            semantic,
             innovation_token,
             innovation_norm,
             availability,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import dataclasses
 import json
 import math
 from pathlib import Path
@@ -21,6 +22,12 @@ from openpi.models_pytorch.pi0_pytorch import _ensure_transformers_replace_is_re
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 from openpi.shared import image_tools
+
+
+@dataclasses.dataclass(frozen=True)
+class PaliGemmaSemanticFeatures:
+    tokens: torch.Tensor
+    summary: torch.Tensor
 
 
 def _resolve_device(config: PaliGemmaSemanticConfig) -> torch.device:
@@ -208,10 +215,11 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
                 prepared[key] = value.to(device=self.device)
         return prepared
 
-    def encode_observation(self, observation: PicfObservation) -> torch.Tensor:
+    def encode_observation(self, observation: PicfObservation) -> PaliGemmaSemanticFeatures:
         views = self._views(observation)
         prompt = str(observation.prompt)
         summaries: list[torch.Tensor] = []
+        tokens_list: list[torch.Tensor] = []
         use_grad = bool(self.trainable and self.training)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
@@ -233,6 +241,12 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
                 prompt_mask = attention_mask
                 if prompt_mask is not None and input_ids is not None and image_token_id is not None:
                     prompt_mask = prompt_mask * (input_ids != int(image_token_id)).to(dtype=prompt_mask.dtype)
+                attention_mask = inputs.get("attention_mask")
+                if attention_mask is None:
+                    tokens_list.append(hidden_states[0])
+                else:
+                    valid = attention_mask[0].to(dtype=torch.bool)
+                    tokens_list.append(hidden_states[0][valid])
                 summaries.append(
                     _summary_from_outputs(
                         hidden_states=hidden_states,
@@ -240,9 +254,12 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
                         prompt_mask=prompt_mask,
                     )
                 )
-        if not summaries:
+        if not summaries or not tokens_list:
             raise RuntimeError("PaliGemma semantic encoder did not receive any image views.")
-        return torch.stack(summaries, dim=0).mean(dim=0)
+        return PaliGemmaSemanticFeatures(
+            tokens=torch.cat(tokens_list, dim=0),
+            summary=torch.stack(summaries, dim=0).mean(dim=0),
+        )
 
 
 class _Pi0PaliGemmaSemanticEncoder(nn.Module):
@@ -437,7 +454,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
         return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
 
-    def encode_observation(self, observation: PicfObservation) -> torch.Tensor:
+    def encode_observation(self, observation: PicfObservation) -> PaliGemmaSemanticFeatures:
         use_grad = bool(self.trainable and self.training)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
@@ -463,10 +480,14 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             prefix_output = self._apply_checkpoint(_forward_prefix, prefix_embs, attn_mask_4d, position_ids)
             image_hidden = prefix_output[:, :image_token_count, :] if image_token_count > 0 else None
             text_hidden = prefix_output[:, image_token_count:, :]
-            return _summary_from_outputs(
-                hidden_states=text_hidden,
-                image_hidden_states=image_hidden,
-                prompt_mask=lang_masks.to(dtype=text_hidden.dtype),
+            valid = prefix_pad_masks[0].to(dtype=torch.bool)
+            return PaliGemmaSemanticFeatures(
+                tokens=prefix_output[0][valid],
+                summary=_summary_from_outputs(
+                    hidden_states=text_hidden,
+                    image_hidden_states=image_hidden,
+                    prompt_mask=lang_masks.to(dtype=text_hidden.dtype),
+                ),
             )
 
 
@@ -490,5 +511,5 @@ class PaliGemmaSemanticEncoder(nn.Module):
             getattr(self.encoder, "gradient_checkpointing_non_reentrant", False)
         )
 
-    def encode_observation(self, observation: PicfObservation) -> torch.Tensor:
+    def encode_observation(self, observation: PicfObservation) -> PaliGemmaSemanticFeatures:
         return self.encoder.encode_observation(observation)

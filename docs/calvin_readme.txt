@@ -434,9 +434,17 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 这是为了避免 DDP 下同一 semantic backbone 在多次前向/反向中触发 `mark ready twice`
 - 额外地，在 `PaliGemma + DDP + accum_steps>1` 下，trainer 仍会保守地关闭 semantic gradient checkpointing
   - 这是当前多卡累计训练的工程稳定性规则，不改变 PICF 数学
-- 当前 semantic side path 仍是 **pooled semantic summary token**
-  - 不是旧 `pi0.5` 的 full-token PaliGemma prefix
-  - 因而它是“最大版物理 world model + 保守版 language-late semantic 接线”，不是最终的 full-token 语义融合形态
+- 当前 semantic side path 已升级成 **full-token PaliGemma stream**
+  - 不是单个 pooled semantic summary token
+  - trainer 会保留 `PaliGemma` 的有效文本 token 与图像 token
+  - 然后把这些 token 作为 `semantic_tokens` 送入 posterior 之后的 control / predictive attention
+- 同时仍保留一个 `semantic_summary`
+  - 它只是同一批 semantic token 的聚合记录
+  - 不是 downstream 唯一能看到的语义输入
+- 因而当前实现已经是：
+  - `language-late`
+  - `current posterior language-free`
+  - `anchor/posterior world-state tokens` 与 `PaliGemma semantic tokens` 在 downstream 平级协作
 
 四点五、PICF v0.4.8 新 core 的云上长期训练命令
 说明：这条命令对应的是 `src/openpi/picf/core/` 新主线，不是旧 `scripts/train_pytorch.py`。
@@ -509,7 +517,8 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 - 2026-04-09 最终本地复核：
   - `python -m py_compile scripts/picf_core_train.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline.py src/openpi/picf/core/training.py`：通过
   - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py scripts/picf_core_train_test.py`：`43 passed`
-  - `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/vjepa/wrapper_test.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py`：`49 passed`
+  - `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/vjepa/wrapper_test.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py`：`51 passed`
+  - `pytest -q src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`：`9 passed, 1 skipped`
   - 因而当前建议是：
     - 开训前只需要确认云机已同步到与本地同一 commit
     - 训练命令保留 `--max-empty-window-retries 32`

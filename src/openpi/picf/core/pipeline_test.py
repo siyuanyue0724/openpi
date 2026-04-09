@@ -17,6 +17,7 @@ from openpi.picf.core.pipeline import PicfFullCore
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.visual_expert import _project_world_points
 from openpi.picf.posterior.visual_expert import _scale_to_grid
+from openpi.picf.paligemma.wrapper import PaliGemmaSemanticFeatures
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
 from openpi.picf.test_utils import build_mini_calvin_dataset
 from openpi.picf.vjepa.config import VjepaVisualConfig
@@ -152,6 +153,12 @@ def _visual_override(value: float) -> np.ndarray:
     return np.full((4, 4, 8), value, dtype=np.float32)
 
 
+def _semantic_features(value: float, *, num_tokens: int = 3, width: int = 16) -> PaliGemmaSemanticFeatures:
+    tokens = torch.full((num_tokens, width), value, dtype=torch.float32)
+    summary = torch.full((1, width), value, dtype=torch.float32)
+    return PaliGemmaSemanticFeatures(tokens=tokens, summary=summary)
+
+
 def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
@@ -160,7 +167,7 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
         frame,
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=_semantic_features(1.0),
     )
     assert output.state.token_field.point_tokens.shape[1] == core.config.hidden_dim
     assert output.state.token_field.visual_tokens.shape[0] == 16
@@ -176,6 +183,7 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     assert output.state.predictive.prediction_cache.tactile_real is not None
     assert output.state.predictive.prediction_cache.point_real is not None
     assert output.state.predictive.semantic_summary.shape == (1, core.config.hidden_dim)
+    assert output.state.predictive.semantic_tokens.shape[0] == 3
     assert output.state.token_field.fusion_attention_mean is not None
 
 
@@ -187,21 +195,23 @@ def test_language_is_late_and_does_not_change_current_posterior(tmp_path: Path) 
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
     )
-    first = core.step(frame, semantic_override=np.ones((16,), dtype=np.float32), **common_kwargs)
-    second = core.step(frame, semantic_override=np.full((16,), 3.0, dtype=np.float32), **common_kwargs)
+    first = core.step(frame, semantic_override=_semantic_features(1.0), **common_kwargs)
+    second = core.step(frame, semantic_override=_semantic_features(3.0, num_tokens=5), **common_kwargs)
     assert torch.allclose(first.state.posterior.mu, second.state.posterior.mu)
     assert torch.allclose(first.state.posterior.Sigma, second.state.posterior.Sigma)
     assert torch.allclose(first.state.posterior.binding, second.state.posterior.binding)
+    assert first.state.predictive.semantic_tokens.shape[0] == 3
+    assert second.state.predictive.semantic_tokens.shape[0] == 5
 
 
-def test_semantic_cache_reuses_previous_projected_summary(tmp_path: Path) -> None:
+def test_missing_semantic_override_falls_back_to_zero_semantic_tokens(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
     first = core.step(
         frames[0],
         point_features_override=_point_override(core, frames[0]),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.full((16,), 2.0, dtype=np.float32),
+        semantic_override=_semantic_features(2.0),
     )
     second = core.step(
         frames[1],
@@ -209,7 +219,11 @@ def test_semantic_cache_reuses_previous_projected_summary(tmp_path: Path) -> Non
         point_features_override=_point_override(core, frames[1]),
         visual_map_override=_visual_override(1.0),
     )
-    assert torch.allclose(second.state.predictive.semantic_summary, first.state.predictive.semantic_summary)
+    assert second.state.predictive.semantic_tokens.shape[0] == 0
+    assert torch.allclose(
+        second.state.predictive.semantic_summary,
+        torch.zeros_like(second.state.predictive.semantic_summary),
+    )
 
 
 def test_previous_prediction_becomes_current_innovation_signal(tmp_path: Path) -> None:
@@ -221,7 +235,7 @@ def test_previous_prediction_becomes_current_innovation_signal(tmp_path: Path) -
         frames[0],
         point_features_override=_point_override(core, frames[0]),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=_semantic_features(1.0),
     )
     second = core.step(
         frames[1],
@@ -268,7 +282,7 @@ def test_extract_targets_does_not_mutate_visual_history_when_using_real_visual_p
     first = core.step(
         frames[0],
         point_features_override=_point_override(core, frames[0]),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=_semantic_features(1.0),
     )
     assert first.state.token_field.visual_tokens.shape[0] > 0
     history_before = core.clip_buffer.get_clip().copy()

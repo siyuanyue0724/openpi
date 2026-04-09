@@ -25,7 +25,7 @@
 - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
   - `32 passed`
 - `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/vjepa/wrapper_test.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py`
-  - `49 passed`
+  - `51 passed`
 - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
   - `32 passed`
 - `task_ABCD_D` 的真实 `dir/zip` 原始样本一致性复核：
@@ -142,6 +142,8 @@
   - 2026-04-09 最终复核重跑：
     - `python -m py_compile scripts/picf_core_train.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline.py src/openpi/picf/core/training.py`：通过
     - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py scripts/picf_core_train_test.py`：`43 passed`
+    - `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py scripts/picf_core_train_test.py src/openpi/picf/core/training_test.py src/openpi/picf/vjepa/wrapper_test.py`：`51 passed`
+    - `pytest -q src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`：`9 passed, 1 skipped`
     - 当前可以把结论写成：
       - 数学 contract：首步 rejection sampling 仅限制到合法首步支持集，没有改 `PICF` 的 posterior 定义
       - 工程 contract：DDP 预检已经前移到 distributed autograd 图之外，不再靠 reducer 内部异常恢复
@@ -1055,7 +1057,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 传入真实 PaliGemma outputs，由 `PaliGemmaSemanticWrapper` 做摘要
 - 由长期训练入口 [`scripts/picf_core_train.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train.py) 显式实例化
   [`PaliGemmaSemanticEncoder`](/home/siyuanyue/Documents/openpi/src/openpi/picf/paligemma/wrapper.py)
-  并对每个当前 observation 计算语义摘要
+  并对每个当前 observation 计算语义 token 流
 
 当前真实训练路径是：
 
@@ -1070,19 +1072,30 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 
 这和 [`plan_readme_ray_geometry.md`](/home/siyuanyue/Documents/openpi/plan_readme_ray_geometry.md) 的 language-late 口径保持一致：
 
-- semantic summary 不进入 current posterior
-- semantic summary 只进入 posterior 之后的 predictive / control stage
+- semantic tokens 不进入 current posterior
+- semantic tokens 只进入 posterior 之后的 predictive / control stage
 - 同一帧只改 `semantic_override` 时，`posterior_mu_diff = 0.0`、`posterior_sigma_diff = 0.0`
 
-当前这条语义侧路还有一个必须写清的工程近似：
+当前这条语义侧路的实现口径需要明确写清：
 
 - 当前 trainer 接入的是真实 `PaliGemma`，而且 backbone 可 cotrain
-- 但 downstream 现在使用的是 **pooled semantic summary token**
-  - 文本 hidden states 先做 masked mean pool
-  - 图像 hidden states 先做 mean pool
-  - 再拼接并投影成一个 `hidden_dim=256` 的 `semantic_summary`
-- 这保持了 `language-late` 和全局语义语境，但它 **不是** 旧 `pi0.5` 那种“完整图像 token + 完整语言 token 一起进入主 trunk”的 full-token prefix 路线
-- 因而，如果目标是“最大版 `pi0.5` token-level PaliGemma 能力 + PICF anchor world model”，当前实现还属于保守版语义接线，而不是最终 full-token 融合版
+- 当前 downstream 使用的是 **完整的 semantic token stream**
+  - `PaliGemma` 文本 hidden states 中所有有效 token 会被保留
+  - `PaliGemma` 图像 hidden states 中所有有效 token 也会被保留
+  - 这些 token 会一起投影到 PICF `hidden_dim=256`，作为 `semantic_tokens`
+- 同时仍保留一个 `semantic_summary`
+  - 它由同一批 semantic token 派生
+  - 主要作为预测状态记录、诊断与轻量聚合量
+  - 它不是 downstream 唯一可见的语义输入
+- 在 posterior 之后，进入 control / predictive attention 的是：
+  - `posterior.tokens`
+  - `semantic_tokens`
+  - `innovation_token`
+  - `proprio_token`
+- 这意味着当前实现更接近旧 `pi0.5` 的 full-token PaliGemma 语义能力，同时继续满足：
+  - current posterior language-free
+  - semantic side path language-late
+  - anchor / posterior tokens 与 semantic tokens 在 downstream 是平级 token 流
 
 如果以上两条显式语义路径都没有，core 才会回退到零语义 token。
 
