@@ -43,6 +43,10 @@ from openpi.training.calvin_dataset import CalvinLangSegmentDataset
 _DEFAULT_TACTILE_SENSOR_NAMES = ("digit", "gelsight_mini")
 _DEFAULT_TACTILE_SENSOR_OFFSETS_M = ((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))
 _SPEC_DEFAULTS = PicfCoreConfig()
+_RETRYABLE_FIRST_STEP_ERRORS = (
+    "PICF core requires a valid xyzrgb point cloud on the first control step.",
+    "PICF core requires non-empty local xyzrgb support on the first control step.",
+)
 
 
 class _NullTactileEncoder:
@@ -156,6 +160,7 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "log_interval",
         "save_interval",
         "accum_steps",
+        "max_empty_window_retries",
         "unroll_steps",
         "stride",
         "max_points",
@@ -300,6 +305,14 @@ def _reduce_mean(value: float, *, device: torch.device, world_size: int) -> floa
     tensor = torch.tensor([value], device=device, dtype=torch.float32)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     tensor /= float(world_size)
+    return float(tensor.item())
+
+
+def _reduce_sum(value: float, *, device: torch.device, world_size: int) -> float:
+    if world_size <= 1:
+        return float(value)
+    tensor = torch.tensor([value], device=device, dtype=torch.float32)
+    dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return float(tensor.item())
 
 
@@ -553,6 +566,11 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_pt": metrics["loss_pt"] / denom,
             "projective_candidate_density": metrics["projective_candidate_density"] / denom,
         }
+
+
+def _is_retryable_first_step_error(exc: RuntimeError) -> bool:
+    message = str(exc)
+    return any(pattern in message for pattern in _RETRYABLE_FIRST_STEP_ERRORS)
 
 
 def _lr_for_step(step: int, *, base_lr: float, warmup_steps: int, min_lr: float, total_steps: int) -> float:
@@ -899,6 +917,7 @@ def train(args: argparse.Namespace) -> None:
         metric_accum = _MetricAccumulator()
         interval_start = time.time()
         steps_in_interval = 0
+        retried_windows_interval = 0
         pbar = (
             tqdm.tqdm(
                 total=args.num_train_steps,
@@ -948,6 +967,10 @@ def train(args: argparse.Namespace) -> None:
                 args.warmup_steps,
                 warmup_fraction,
             )
+            logging.info(
+                "Window contract: first-step empty xyzrgb windows will be resampled up to %s times per micro-step.",
+                args.max_empty_window_retries,
+            )
 
         for step in range(start_step, args.num_train_steps):
             lr = _lr_for_step(
@@ -960,16 +983,39 @@ def train(args: argparse.Namespace) -> None:
             _set_optimizer_lr(optimizer, lr)
             optimizer.zero_grad(set_to_none=True)
             for micro_step in range(args.accum_steps):
-                flat_index = int(rng.integers(0, len(source)))
-                window = source.window(flat_index)
-                sync_context: Any
-                if use_ddp and micro_step < args.accum_steps - 1:
-                    sync_context = model.no_sync()
-                else:
-                    sync_context = contextlib.nullcontext()
-                with sync_context:
-                    outputs = model(window)
-                    (outputs["loss_total"] / float(args.accum_steps)).backward()
+                retry_count = 0
+                while True:
+                    flat_index = int(rng.integers(0, len(source)))
+                    window = source.window(flat_index)
+                    sync_context: Any
+                    if use_ddp and micro_step < args.accum_steps - 1:
+                        sync_context = model.no_sync()
+                    else:
+                        sync_context = contextlib.nullcontext()
+                    try:
+                        with sync_context:
+                            outputs = model(window)
+                            (outputs["loss_total"] / float(args.accum_steps)).backward()
+                        break
+                    except RuntimeError as exc:
+                        if not _is_retryable_first_step_error(exc):
+                            raise
+                        retry_count += 1
+                        retried_windows_interval += 1
+                        if retry_count > args.max_empty_window_retries:
+                            raise RuntimeError(
+                                "Exceeded max_empty_window_retries while resampling PICF first-step xyzrgb support. "
+                                f"Last failing window segment={window.segment_id} start_step={window.start_step_id}."
+                            ) from exc
+                        if is_main and (retry_count == 1 or retry_count % 8 == 0):
+                            logging.warning(
+                                "Resampling window due to empty first-step xyzrgb support: segment=%s start_step=%s retry=%s/%s",
+                                window.segment_id,
+                                window.start_step_id,
+                                retry_count,
+                                args.max_empty_window_retries,
+                            )
+                        continue
                 metric_accum.loss_total += float(outputs["loss_total"].detach().item())
                 metric_accum.loss_action += float(outputs["loss_action"].detach().item())
                 metric_accum.loss_visual_latent += float(outputs["loss_visual_latent"].detach().item())
@@ -999,9 +1045,11 @@ def train(args: argparse.Namespace) -> None:
                 elapsed = max(time.time() - interval_start, 1e-6)
                 local_grad = _grad_norm(model.parameters())
                 averages = metric_accum.averages()
+                retried_windows = float(retried_windows_interval)
                 if world_size > 1:
                     averages = {k: _reduce_mean(v, device=device, world_size=world_size) for k, v in averages.items()}
                     local_grad = _reduce_mean(local_grad, device=device, world_size=world_size)
+                    retried_windows = _reduce_sum(retried_windows, device=device, world_size=world_size)
                 if is_main:
                     record = {
                         "step": int(step + 1),
@@ -1009,6 +1057,7 @@ def train(args: argparse.Namespace) -> None:
                         "grad_norm": float(local_grad),
                         "steps_per_sec": float(steps_in_interval / elapsed),
                         "windows_per_sec": float(metric_accum.num_windows / elapsed),
+                        "resampled_empty_first_step_windows": int(retried_windows),
                         **averages,
                     }
                     line = json.dumps(record, sort_keys=True)
@@ -1023,6 +1072,7 @@ def train(args: argparse.Namespace) -> None:
                 metric_accum = _MetricAccumulator()
                 interval_start = time.time()
                 steps_in_interval = 0
+                retried_windows_interval = 0
 
             should_save = ((step + 1) % args.save_interval == 0) or ((step + 1) == args.num_train_steps)
             if is_main and should_save:
@@ -1062,6 +1112,7 @@ def main() -> None:
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--save-interval", type=int, default=5000)
     parser.add_argument("--accum-steps", type=int, default=1)
+    parser.add_argument("--max-empty-window-retries", type=int, default=32)
     parser.add_argument("--unroll-steps", type=int, default=2)
     parser.add_argument("--stride", type=int, default=8)
     parser.add_argument("--max-points", type=int, default=512)
