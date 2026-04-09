@@ -42,10 +42,26 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 单独把真实 V-JEPA 权重接进 `PicfFullCore` 后，在 CALVIN transition 上跑 `forward + loss + backward + optimizer.step()`：通过
     - `mean_loss = 2.0242`
     - `num_visual_tokens = 576`
-  - `AnyTouch2` 权重当前没有在云机上直接拉下来：
-    - 直连 `huggingface.co` 当前 TLS 握手会报 `Connection reset by peer`
-    - upstream README 也要求先有 Hugging Face 访问权限
-    - 所以当前不能写成“AnyTouch2 云上权重已完成下载验证”
+  - `AnyTouch2` 权重已通过 `HF_ENDPOINT=https://hf-mirror.com + HF_TOKEN` 完成镜像下载：
+    - `hf_hub_download(... checkpoint-4frames.pth ...)`：通过
+    - 落盘：`/root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth`
+  - 真实 `AnyTouch2TactileEncoder` 加载并跑 dummy `encode_sensor_clips(...)`：通过
+    - `checkpoint_loaded = True`
+    - `sensor_tokens_shape = (398, 768)`
+    - `pooled_dim = 3072`
+  - 当前服务器的 CALVIN `task_ABC_D` 首帧实际字段包含：
+    - `rgb_tactile`
+    - `depth_tactile`
+    - 其中
+      - `rgb_tactile = (160, 120, 6)`
+      - `depth_tactile = (160, 120, 2)`
+  - 使用 `CalvinSequentialReplay(... use_tactile=True)` 后，
+    真实 `V-JEPA + AnyTouch + CALVIN tactile replay` 已完成：
+    - `forward + loss + backward + optimizer.step()`
+    - `num_tactile_tokens = 2`
+    - `availability_tactile = 1.0`
+    - `loss_tactile_real ≈ 0.480 / 0.468`
+    - `mean_loss = 2.5546`
 - follow-through 复核结果：
   - `posterior_mu_diff = 0.0`
   - `posterior_sigma_diff = 0.0`
@@ -404,10 +420,10 @@ export PYTHONPATH=/root/openpi/src && \
   - visual path 当前用 `_rgb_visual_override` 构造 pooled visual map，再经 `visual_map_override` 喂给 core；不是在线完整 V-JEPA encoder
   - tactile path 当前用 `_NullTactileEncoder()`；不是在线 AnyTouch2 真 ckpt
   - point path 当前也没有实例化 `SonataPointFeatureExtractor`；虽然仓库里已有 `src/pretrain/SpatialLM_Sonata_encoder.pth`
+  - 当前脚本也没有把 CALVIN 自带的 `rgb_tactile/depth_tactile` 读进来；它不是“数据集没有 tactile”，而是“launcher 还没接 tactile path”
   - `metrics.jsonl` 采用 append 模式；如果复用同一个 `exp-name` 重新起一个非 `--resume` 训练，日志里会继续追加并可能出现重复 step id
   - 如果需要干净曲线，应该换新的 `exp-name`，或先清理旧实验目录
-  - 真实 `V-JEPA 2.1` 权重已经在云机上验证过“可下载、可加载、可接 core 反传”，但这仍然不是 `scripts/picf_core_train.py` 默认路径
-  - `AnyTouch2` 当前阻塞在云机直连 HF + gated access，不要把它写成“已完成云上拉取”
+  - 真实 `V-JEPA 2.1` 与 `AnyTouch2` 权重都已经在云机上验证过“可下载、可加载、可接 core 反传”，但这仍然不是 `scripts/picf_core_train.py` 默认路径
 
 五、旧 `train_pytorch.py` 训练命令（归档参考）
 说明：这一节是旧入口的归档记录，不是 `PICF v0.4.8 new core` 的当前推荐路径。只有在你明确需要维护旧 `pi05_calvin_sonata` 链路时，才看这一节。

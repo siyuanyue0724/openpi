@@ -52,10 +52,35 @@
     - `num_visual_tokens = 576`
     - `loss_visual_latent ≈ 0.359 / 0.371`
     - `loss_visual_real ≈ 0.445 / 0.450`
-- AnyTouch2 权重拉取当前在云机上未通过：
-  - 直接 `curl -I https://huggingface.co` 与 `huggingface_hub.HfApi().repo_info(...)` 都在 TLS 握手阶段报 `Connection reset by peer`
-  - 上游 `AnyTouch2` README 也明确要求先取得 Hugging Face access
-  - 因此当前结论不是“wrapper 不兼容”，而是“云机直连 HF + 访问权限前置条件尚未满足”
+- AnyTouch2 权重在云机上已通过 `HF_ENDPOINT=https://hf-mirror.com + HF_TOKEN` 这条镜像路径完成复核：
+  - 直连 `huggingface.co` 当前仍会 `ConnectTimeout` / `Connection reset by peer`
+  - 但 `hf-mirror.com` 可正常认证：
+    - `whoami-v2` 返回有效账号
+    - `api/models/xxuan01/AnyTouch2-Model` 返回 `gated = auto`
+  - `hf_hub_download(... filename='checkpoint-4frames.pth', endpoint='https://hf-mirror.com')`：通过
+    - 落盘路径：`/root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth`
+    - 文件大小约 `1.1G`
+  - 真实 `AnyTouch2TactileEncoder` 加载该 checkpoint 并跑 dummy `encode_sensor_clips(...)`：通过
+    - `checkpoint_loaded = True`
+    - `sensor_tokens_shape = (398, 768)`
+    - `pooled_dim = 3072`
+- CALVIN tactile 现已确认不是“没有数据”，而是：
+  - `episode_0000000.npz` 明确包含 `rgb_tactile` 与 `depth_tactile`
+  - 其形状分别为：
+    - `rgb_tactile = (160, 120, 6)`
+    - `depth_tactile = (160, 120, 2)`
+  - 也就是两路 tactile RGB 传感器按通道拼接后的 `3*K` 形式
+  - 现有 [`src/openpi/picf/replay/calvin_replay.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/replay/calvin_replay.py) 已能把它拆成两路 `PicfTactilePacket`
+- 在云机上，真实 `V-JEPA + AnyTouch + CALVIN tactile replay` 组合已经完成一步训练闭环：
+  - 使用 `CalvinSequentialReplay(... use_tactile=True)` 构造 observation
+  - `PicfFullCore` 同时加载真实 `V-JEPA` 与真实 `AnyTouch` checkpoint
+  - `forward + compute_transition_loss + backward + optimizer.step()`：通过
+  - 实测：
+    - `num_visual_tokens = 576`
+    - `num_tactile_tokens = 2`
+    - `availability_tactile = 1.0`
+    - `loss_tactile_real ≈ 0.480 / 0.468`
+    - `mean_loss = 2.5546`
 - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py --backend dir --device cuda --num-train-steps 1`：通过
   - 在 `/tmp/openpi-train-smoke/picf_core/picf_core_train_uv_min/` 落下：
     - `args.json`
@@ -552,6 +577,14 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 当前 point path 也没有在这条脚本里实例化 `SonataPointFeatureExtractor`
   - 仓库里已有 `src/pretrain/SpatialLM_Sonata_encoder.pth`
   - 但 `scripts/picf_core_train.py` 当前不会主动去加载它
+- 当前数据 path 也没有把 CALVIN 自带的 `rgb_tactile/depth_tactile` 读进来
+  - 虽然数据集本身已有 `(160,120,6)` tactile RGB 与 `(160,120,2)` tactile depth
+  - 但 `scripts/picf_core_train.py` 的 `_CalvinTransitionSource` 当前只读：
+    - `rgb_static`
+    - `depth_static`
+    - `robot_obs`
+    - `rel_actions`
+    - `rgb_gripper`
 
 因此，这条长期训练脚本的真实定位是：
 
@@ -567,11 +600,15 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - 下载
   - wrapper load
   - 接入 `PicfFullCore` 的一步训练反传
-- 但这些验证目前是通过单独的 ad-hoc core snippet 完成的，
+- 真实 `AnyTouch2` 现在也已经在云机上完成：
+  - 镜像路径下载
+  - wrapper load
+  - 接入 `PicfFullCore` 的一步训练反传
+- 但这些验证目前仍然是通过单独的 ad-hoc core snippet 完成的，
   不是 `scripts/picf_core_train.py` 默认路径自动完成的
-- `AnyTouch2` 当前还不能写成“已在云机上完成权重拉取”
-  - 当前阻塞是 Hugging Face 直连失败
-  - 即便网络修好，还需要先拿到上游 gated repo 的访问权限
+- 因此当前准确口径是：
+  - foundation weights 已经证明“能用”
+  - 但默认长期训练 launcher 还没有切到“真实 V-JEPA + 真实 AnyTouch + CALVIN tactile”这条配置
 
 ### 4.10c `scripts/picf_core_train.py` 的输出目录与恢复语义
 
