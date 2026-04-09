@@ -1007,7 +1007,7 @@ python scripts/picf_core_train.py \
 - `checkpoints/foundation/vjepa2_1/...`、`checkpoints/foundation/anytouch2/checkpoint-4frames.pth`、`src/pretrain/SpatialLM_Sonata_encoder.pth` 都存在
 - CALVIN 路径使用已经存在的 `task_ABCD_D` 目录或只读 zip，不要再次解压
 - 环境变量里显式设置：
-  - `HF_TOKEN=<your_hf_token>`
+  - `HF_TOKEN='YOUR_HF_TOKEN'`
   - `HUGGINGFACE_HUB_TOKEN=$HF_TOKEN`
   - `HF_ENDPOINT=https://hf-mirror.com`
 

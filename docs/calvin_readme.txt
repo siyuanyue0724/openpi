@@ -386,12 +386,12 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 cd /root/openpi && \
 export CUDA_VISIBLE_DEVICES=0 && \
 export PYTHONPATH=/root/openpi/src && \
-export HF_TOKEN=<your_hf_token> && \
+export HF_TOKEN='YOUR_HF_TOKEN' && \
 export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN && \
 export HF_ENDPOINT=https://hf-mirror.com && \
 mkdir -p /mnt/checkpoints/picf_core/logs && \
 /root/openpi/.venv/bin/python /root/openpi/scripts/picf_core_train.py \
-  --calvin-root /mnt/calvin_data/task_ABCD_D \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
   --backend dir \
   --split training \
   --checkpoint-base-dir /mnt/checkpoints \
@@ -414,9 +414,9 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
 训练前 checklist：
 - `nvidia-smi` 能看到目标 GPU，且显存空闲足够
 - `/root/openpi/checkpoints/foundation/vjepa2_1/...`、`/root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth`、`/root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth` 都存在
-- 数据路径使用 `/mnt/calvin_data/task_ABCD_D` 或 `/mnt/calvin_data/task_ABCD_D.zip`，不要再次解压
+- 数据路径使用 `/mnt/calvin_data/task_ABC_D` 或 `/mnt/calvin_data/task_ABC_D.zip`，不要再次解压
 - 环境变量里显式设置：
-  - `HF_TOKEN=<your_hf_token>`
+  - `HF_TOKEN='YOUR_HF_TOKEN'`
   - `HUGGINGFACE_HUB_TOKEN=$HF_TOKEN`
   - `HF_ENDPOINT=https://hf-mirror.com`
 
@@ -424,11 +424,11 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
 cd /root/openpi && \
 export CUDA_VISIBLE_DEVICES=0 && \
 export PYTHONPATH=/root/openpi/src && \
-export HF_TOKEN=<your_hf_token> && \
+export HF_TOKEN='YOUR_HF_TOKEN' && \
 export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN && \
 export HF_ENDPOINT=https://hf-mirror.com && \
 /root/openpi/.venv/bin/python /root/openpi/scripts/picf_core_train.py \
-  --calvin-root /mnt/calvin_data/task_ABCD_D \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
   --backend dir \
   --split training \
   --checkpoint-base-dir /mnt/checkpoints \
@@ -450,18 +450,18 @@ export HF_ENDPOINT=https://hf-mirror.com && \
   2>&1 | tee -a /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
 
 3. 如果云上只有只读 zip，不要再解压，改用：
-  --calvin-root /mnt/calvin_data/task_ABCD_D.zip
+  --calvin-root /mnt/calvin_data/task_ABC_D.zip
   --backend zip
 
 3.1 如果要直接起双卡 DDP 正式训练，当前推荐命令是：
 cd /root/openpi && \
 export CUDA_VISIBLE_DEVICES=0,1 && \
 export PYTHONPATH=/root/openpi/src && \
-export HF_TOKEN=<your_hf_token> && \
+export HF_TOKEN='YOUR_HF_TOKEN' && \
 export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN && \
 export HF_ENDPOINT=https://hf-mirror.com && \
 /root/openpi/.venv/bin/torchrun --standalone --nnodes=1 --nproc_per_node=2 /root/openpi/scripts/picf_core_train.py \
-  --calvin-root /mnt/calvin_data/task_ABCD_D \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
   --backend dir \
   --split training \
   --checkpoint-base-dir /mnt/checkpoints \
