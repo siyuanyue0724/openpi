@@ -548,6 +548,21 @@ def test_projective_compatibility_uses_patch_grid_units(tmp_path: Path) -> None:
     )
 
 
+def test_projective_compatibility_stays_in_probability_range(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+    )
+    geom = output.state.token_field.projective_geometry
+    assert geom is not None
+    assert torch.isfinite(geom.projective_compatibility).all()
+    assert bool((geom.projective_compatibility >= 0.0).all().item())
+    assert bool((geom.projective_compatibility <= 1.0).all().item())
+
+
 def test_projective_attention_bias_is_sparse_on_candidate_edges(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))

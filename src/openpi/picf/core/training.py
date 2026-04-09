@@ -146,6 +146,26 @@ def _zero_weight_loss(pred: torch.Tensor | None, reference: torch.Tensor) -> tor
     return pred.reshape(-1).sum() * 0.0
 
 
+def _zero_weight_sum(reference: torch.Tensor, *preds: torch.Tensor | None) -> torch.Tensor:
+    loss = _zero_like(reference)
+    used = False
+    for pred in preds:
+        if pred is None:
+            continue
+        loss = loss + (pred.reshape(-1).sum() * 0.0)
+        used = True
+    return loss if used else _zero_like(reference)
+
+
+def _sanitize_probability_tensor(x: torch.Tensor, *, eps: float, interior: bool) -> torch.Tensor:
+    if x.numel() == 0:
+        return x
+    finite = torch.nan_to_num(x, nan=0.0, posinf=1.0, neginf=0.0)
+    lo = eps if interior else 0.0
+    hi = (1.0 - eps) if interior else 1.0
+    return torch.clamp(finite, min=lo, max=hi)
+
+
 def _branch_is_usable(
     *,
     pred: torch.Tensor | None,
@@ -170,6 +190,8 @@ def _action_target_tensor(action_target: torch.Tensor | np.ndarray | None, *, de
 def _routing_responsibilities(mass: torch.Tensor, *, eps: float) -> torch.Tensor:
     if mass.numel() == 0:
         return mass
+    mass = torch.nan_to_num(mass, nan=0.0, posinf=0.0, neginf=0.0)
+    mass = torch.clamp(mass, min=0.0)
     denom = torch.clamp(mass.sum(dim=0, keepdim=True), min=eps)
     return mass / denom
 
@@ -182,6 +204,8 @@ def _routing_support_gate(
 ) -> torch.Tensor:
     if support_mass.numel() == 0:
         return support_mass
+    support_mass = torch.nan_to_num(support_mass, nan=0.0, posinf=0.0, neginf=0.0)
+    support_mass = torch.clamp(support_mass, min=0.0)
     return support_mass / torch.clamp(support_mass + tau, min=eps)
 
 
@@ -222,7 +246,7 @@ def _point_tactile_alignment(
     tactile_gate = token_field.tactile_contact_gate
     zero = token_field.fused_tokens.new_zeros(())
     if point_embed.shape[0] == 0 or tactile_embed.shape[0] == 0 or point_positions.shape[0] == 0 or tactile_positions.shape[0] == 0:
-        return zero
+        return _zero_weight_sum(zero, point_embed, tactile_embed)
     tau_pt = max(float(config.tau_pt), eps)
     distances = torch.cdist(tactile_positions, point_positions)
     nearest_point = torch.argmin(distances, dim=1)
@@ -240,7 +264,7 @@ def _point_tactile_alignment(
         losses.append(weight * fn.cross_entropy(logits[None, :], target))
         weights.append(weight)
     if not losses:
-        return zero
+        return _zero_weight_sum(zero, point_embed, tactile_embed)
     return torch.stack(losses).sum() / torch.clamp(torch.stack(weights).sum(), min=eps)
 
 
@@ -255,19 +279,31 @@ def compute_alignment_loss(
     pt = _point_tactile_alignment(state, config=cfg, eps=1e-6)
     geometry = token_field.projective_geometry
     if geometry is None or geometry.projective_candidate_mask.numel() == 0:
-        total = cfg.lambda_pt * pt
-        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero, pv_weak=zero, focus_pv=zero, pt=pt, candidate_edges=0, candidate_density=0.0)
+        zero_align = _zero_weight_sum(
+            zero,
+            token_field.point_align_embeddings,
+            token_field.visual_align_embeddings,
+            token_field.fusion_attention_mean,
+        )
+        total = zero_align + (cfg.lambda_pt * pt)
+        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero_align, pv_weak=zero_align, focus_pv=zero_align, pt=pt, candidate_edges=0, candidate_density=0.0)
 
     candidate_mask = geometry.projective_candidate_mask
-    projective = geometry.projective_compatibility
+    projective = _sanitize_probability_tensor(geometry.projective_compatibility, eps=1e-6, interior=False)
     candidate_edges = int(candidate_mask.sum().item())
     candidate_density = float(candidate_edges / max(candidate_mask.numel(), 1))
     if candidate_edges == 0:
-        total = cfg.lambda_pt * pt
-        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero, pv_weak=zero, focus_pv=zero, pt=pt, candidate_edges=0, candidate_density=candidate_density)
+        zero_align = _zero_weight_sum(
+            zero,
+            token_field.point_align_embeddings,
+            token_field.visual_align_embeddings,
+            token_field.fusion_attention_mean,
+        )
+        total = zero_align + (cfg.lambda_pt * pt)
+        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero_align, pv_weak=zero_align, focus_pv=zero_align, pt=pt, candidate_edges=0, candidate_density=candidate_density)
 
     routing, _, _, _, _ = _routing_consistency(state, config=cfg, eps=1e-6)
-    routing = torch.clamp(routing, min=1e-6, max=1.0 - 1e-6)
+    routing = _sanitize_probability_tensor(routing, eps=1e-6, interior=True)
     anchor_pv = fn.binary_cross_entropy(
         routing[candidate_mask],
         projective[candidate_mask],
@@ -292,6 +328,10 @@ def compute_alignment_loss(
             losses.append(fn.cross_entropy(logits[None, :], target))
         if losses:
             pv_weak = torch.stack(losses).mean()
+        else:
+            pv_weak = _zero_weight_sum(zero, point_embed, visual_embed)
+    else:
+        pv_weak = _zero_weight_sum(zero, point_embed, visual_embed)
 
     focus_pv = zero
     fusion_attention = token_field.fusion_attention_mean
@@ -309,6 +349,10 @@ def compute_alignment_loss(
             focus_losses.append(-torch.log(torch.clamp(numerator / denominator, min=1e-6)))
         if focus_losses:
             focus_pv = torch.stack(focus_losses).mean()
+        else:
+            focus_pv = _zero_weight_sum(zero, fusion_attention)
+    else:
+        focus_pv = _zero_weight_sum(zero, fusion_attention)
 
     total = (
         (cfg.lambda_anchor_pv * anchor_pv)

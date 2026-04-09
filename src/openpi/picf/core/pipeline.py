@@ -888,6 +888,8 @@ class PicfFullCore(nn.Module):
                 -(depth_residual**2) / (2.0 * (self.config.tau_proj_depth_m**2))
             )
         projective_compatibility = proj_score * depth_factor * visibility[:, None].to(dtype=self.dtype)
+        projective_compatibility = torch.nan_to_num(projective_compatibility, nan=0.0, posinf=1.0, neginf=0.0)
+        projective_compatibility = torch.clamp(projective_compatibility, min=0.0, max=1.0)
         sparse_neighborhood = _sparse_projective_neighborhood_mask(
             point_proj_grid_index,
             visibility,
@@ -995,7 +997,7 @@ class PicfFullCore(nn.Module):
             point_positions=_to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype) if frame_context is not None else point_positions,
             visual_hw=visual_hw,
         )
-        if frame_context is not None and point_features.shape[0] > 0:
+        if frame_context is not None:
             point_positions = _to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype)
             proj_features = self._point_projection_features(
                 projective_geometry,

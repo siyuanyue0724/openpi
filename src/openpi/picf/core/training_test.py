@@ -252,6 +252,87 @@ def test_alignment_loss_uses_projective_candidates_and_is_finite(tmp_path: Path)
     assert 0.0 < alignment.candidate_density < 1.0
 
 
+def test_alignment_loss_sanitizes_probability_contract_before_bce() -> None:
+    dtype = torch.float32
+    geometry = PicfProjectiveGeometryState(
+        point_proj_grid_norm=torch.zeros((1, 2), dtype=dtype),
+        point_proj_grid_index=torch.zeros((1, 2), dtype=dtype),
+        point_visibility=torch.ones((1,), dtype=dtype),
+        point_depth=torch.ones((1,), dtype=dtype),
+        point_depth_sample=torch.ones((1,), dtype=dtype),
+        point_depth_valid=torch.ones((1,), dtype=torch.bool),
+        visual_grid_norm=torch.zeros((1, 2), dtype=dtype),
+        visual_grid_index=torch.zeros((1, 2), dtype=dtype),
+        visual_pixel_centers=torch.zeros((1, 2), dtype=dtype),
+        visual_ray_world=torch.zeros((1, 3), dtype=dtype),
+        camera_origin_world=torch.zeros((3,), dtype=dtype),
+        projective_compatibility=torch.tensor([[float("nan")]], dtype=dtype),
+        projective_candidate_mask=torch.ones((1, 1), dtype=torch.bool),
+        projective_attention_bias=torch.zeros((1, 1), dtype=dtype),
+    )
+    token_field = PicfTokenFieldState(
+        point_tokens=torch.zeros((1, 4), dtype=dtype),
+        visual_tokens=torch.zeros((1, 4), dtype=dtype),
+        tactile_tokens=torch.zeros((0, 4), dtype=dtype),
+        context_tokens=torch.zeros((0, 4), dtype=dtype),
+        fused_tokens=torch.zeros((2, 4), dtype=dtype),
+        point_positions=torch.zeros((1, 3), dtype=dtype),
+        modality_ids=torch.tensor([0, 1], dtype=torch.long),
+        point_align_embeddings=torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=dtype),
+        visual_align_embeddings=torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=dtype),
+        tactile_align_embeddings=torch.zeros((0, 4), dtype=dtype),
+        tactile_positions_world=torch.zeros((0, 3), dtype=dtype),
+        tactile_contact_gate=torch.zeros((0,), dtype=dtype),
+        fusion_attention_mean=torch.tensor([[0.5, 0.5], [0.5, 0.5]], dtype=dtype),
+        projective_geometry=geometry,
+    )
+    obs = PicfObservationAnchorState(
+        seed_indices=torch.tensor([0], dtype=torch.long),
+        tokens=torch.zeros((1, 4), dtype=dtype),
+        point_weights=torch.ones((1, 1), dtype=dtype),
+        routing_mass_point=torch.tensor([[float("nan")]], dtype=dtype),
+        routing_mass_visual=torch.tensor([[2.0]], dtype=dtype),
+        routing_support_point=torch.zeros((1,), dtype=dtype),
+        routing_support_visual=torch.zeros((1,), dtype=dtype),
+        routing_gate_point=torch.zeros((1,), dtype=dtype),
+        routing_gate_visual=torch.zeros((1,), dtype=dtype),
+        x=torch.zeros((1, 3), dtype=dtype),
+        S=torch.eye(3, dtype=dtype)[None, :, :],
+        a=torch.ones((1, 3), dtype=dtype),
+    )
+    state = SimpleNamespace(token_field=token_field, observation_anchors=obs)
+    alignment = compute_alignment_loss(state)
+    assert torch.isfinite(alignment.total)
+    assert torch.isfinite(alignment.anchor_pv)
+
+
+def test_alignment_loss_keeps_align_heads_in_graph_when_no_projective_candidates(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((16,), dtype=np.float32),
+    )
+    geom = output.state.token_field.projective_geometry
+    assert geom is not None
+    empty_geom = dataclasses.replace(
+        geom,
+        projective_compatibility=torch.zeros_like(geom.projective_compatibility),
+        projective_candidate_mask=torch.zeros_like(geom.projective_candidate_mask),
+    )
+    empty_token_field = dataclasses.replace(output.state.token_field, projective_geometry=empty_geom)
+    empty_state = dataclasses.replace(output.state, token_field=empty_token_field)
+    core.zero_grad(set_to_none=True)
+    alignment = compute_alignment_loss(empty_state)
+    alignment.total.backward()
+    assert core.point_align_proj.weight.grad is not None
+    assert core.visual_align_proj.weight.grad is not None
+    assert torch.allclose(core.point_align_proj.weight.grad, torch.zeros_like(core.point_align_proj.weight.grad))
+    assert torch.allclose(core.visual_align_proj.weight.grad, torch.zeros_like(core.visual_align_proj.weight.grad))
+
+
 def test_alignment_loss_tau_pv_changes_bag_contrastive_temperature(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
