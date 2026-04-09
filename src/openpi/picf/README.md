@@ -126,6 +126,17 @@
       - 旧的 DDP watchdog timeout 不是“多卡自己卡住”
       - 真正的根因是某个 rank 抽到的训练窗口首帧没有局部 `xyzrgb` support，导致该 rank 抛错退出，另一个 rank 卡在 `allreduce`
       - 现在 trainer 会对这种首步非法窗口做有限次 rejection sampling，不再把它升级成 NCCL 超时
+  - 云机 `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --num-train-steps 200 --log-interval 20 --save-interval 200`：
+    - 已跨过旧故障区间 `step≈151` 并完整跑通到 `200/200`
+    - `200/200` checkpoint 目录已落盘：`/tmp/openpi-train-preflight-ddp200/picf_core/picf_ddp_preflight_200/200`
+    - `metrics.jsonl` 最后一条：
+      - `step = 200`
+      - `loss_total = 2.4001`
+      - `resampled_empty_first_step_windows = 0`
+    - 这次 run 说明：
+      - 旧的 reducer / NCCL 卡死不是“point_error_encoder 仍然随机掉梯度”
+      - 更准确的根因是：训练器之前在 DDP 包裹的 `forward` 内部捕获首步非法窗口异常并重试；一旦某个 rank 的 `forward` 在 reducer 已建图后中途抛错，就可能把该 rank 留在 unfinished reduction 状态
+      - 当前修复已把首步 `xyzrgb` 合法性检查前移到进入 DDP `forward` 之前；重采样现在只发生在纯数据预检阶段，不再污染 DDP reducer 状态
 - 云机 `root@px-cloud2.matpool.com:/root/openpi` 上的 foundation-weight 复核：
   - `scripts/vjepa_ckpt_fetch.py --model vjepa2_1_vit_base_384 --out-root /root/openpi/checkpoints/foundation/vjepa2_1`：通过
   - 真实 wrapper 加载 `/root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt`：通过
@@ -217,6 +228,10 @@
 - 所以没有局部 `xyzrgb` support 的窗口起点，本来就不属于模型的合法首步支持集
 - 训练器现在做的是对“合法首步支持集”进行 rejection sampling
 - 对已有 `previous` 的后续控制步，局部 point support 暂时为空仍然是允许的；这和 spec 里的 carried prior / current evidence 角色分工一致
+- 另外，当前实现还把这一步 rejection sampling 严格放在 DDP `forward` 之前：
+  - 合法性检查只依赖当前 observation、标定和 point crop，本质是数据域判定
+  - 因而它应该发生在进入 distributed autograd 图之前
+  - 这也是当前双卡 `200` step 已完整跑通的直接原因
 
 同时也有几条必须诚实写清的边界：
 

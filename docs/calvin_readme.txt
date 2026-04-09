@@ -478,11 +478,23 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 - 修复方式因此是：
   - 对首步非法窗口做 rejection sampling
   - 而不是把异常吞掉继续 backward
+  - 并且这一步现在发生在进入 DDP `forward` 之前，而不是在 DDP 图里捕获异常后重试
+  - 原因是：如果某个 rank 在 reducer 已进入一次 `forward` 后中途抛错，哪怕异常被 Python 侧捕获，DDP reducer 仍可能残留 unfinished reduction 状态，最终表现成下一轮 `Expected to have finished reduction...` 或 NCCL watchdog timeout
 - 修复后的云机双卡 DDP `120` step run 已完整跑通：
   - `120/120` checkpoint 已落盘
   - 最后一条 `metrics.jsonl` 记录：
     - `resampled_empty_first_step_windows = 1`
     - `loss_total = 2.6533`
+- 修复后的云机双卡 DDP `200` step run 也已完整跑通，并明确跨过旧故障区间 `step≈151`：
+  - 输出目录：`/tmp/openpi-train-preflight-ddp200/picf_core/picf_ddp_preflight_200/200`
+  - 最后一条 `metrics.jsonl` 记录：
+    - `step = 200`
+    - `loss_total = 2.4001`
+    - `resampled_empty_first_step_windows = 0`
+  - 因此当前结论应更新为：
+    - 首步非法窗口 rejection sampling 的数学含义不变
+    - 工程实现则必须放在 DDP `forward` 前做数据预检
+    - 这样才不会把 reducer / NCCL 状态带脏
 
 1. 新开长期训练：
 cd /root/openpi && \
