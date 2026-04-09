@@ -1074,6 +1074,16 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - semantic summary 只进入 posterior 之后的 predictive / control stage
 - 同一帧只改 `semantic_override` 时，`posterior_mu_diff = 0.0`、`posterior_sigma_diff = 0.0`
 
+当前这条语义侧路还有一个必须写清的工程近似：
+
+- 当前 trainer 接入的是真实 `PaliGemma`，而且 backbone 可 cotrain
+- 但 downstream 现在使用的是 **pooled semantic summary token**
+  - 文本 hidden states 先做 masked mean pool
+  - 图像 hidden states 先做 mean pool
+  - 再拼接并投影成一个 `hidden_dim=256` 的 `semantic_summary`
+- 这保持了 `language-late` 和全局语义语境，但它 **不是** 旧 `pi0.5` 那种“完整图像 token + 完整语言 token 一起进入主 trunk”的 full-token prefix 路线
+- 因而，如果目标是“最大版 `pi0.5` token-level PaliGemma 能力 + PICF anchor world model”，当前实现还属于保守版语义接线，而不是最终 full-token 融合版
+
 如果以上两条显式语义路径都没有，core 才会回退到零语义 token。
 
 

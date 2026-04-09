@@ -129,6 +129,24 @@ def _checkpoint_inputs_require_grad(*args: object) -> bool:
     return False
 
 
+def _enable_gradient_checkpointing_non_reentrant(module: nn.Module) -> tuple[bool, bool]:
+    """Enable gradient checkpointing, preferring non-reentrant mode when available.
+
+    Returns:
+      enabled: whether gradient checkpointing was enabled at all
+      non_reentrant: whether `use_reentrant=False` was successfully requested
+    """
+    fn = getattr(module, "gradient_checkpointing_enable", None)
+    if fn is None:
+        return False, False
+    try:
+        fn(gradient_checkpointing_kwargs={"use_reentrant": False})
+        return True, True
+    except TypeError:
+        fn()
+        return True, False
+
+
 class _HFPaliGemmaSemanticEncoder(nn.Module):
     def __init__(self, config: PaliGemmaSemanticConfig):
         super().__init__()
@@ -137,6 +155,8 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
         self.dtype = _resolve_dtype(config, self.device)
         self.trainable = bool(config.trainable)
         self.source = "hf"
+        self.gradient_checkpointing_enabled = False
+        self.gradient_checkpointing_non_reentrant = False
         model_id = config.checkpoint_path or config.model_name
         local_only = Path(model_id).expanduser().exists()
         self.processor = AutoProcessor.from_pretrained(
@@ -153,7 +173,9 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
         self.model.to(device=self.device, dtype=self.dtype)
         if self.trainable:
             if hasattr(self.model, "gradient_checkpointing_enable") and config.gradient_checkpointing:
-                self.model.gradient_checkpointing_enable()
+                enabled, non_reentrant = _enable_gradient_checkpointing_non_reentrant(self.model)
+                self.gradient_checkpointing_enabled = enabled
+                self.gradient_checkpointing_non_reentrant = non_reentrant
             if hasattr(self.model.config, "use_cache"):
                 self.model.config.use_cache = False
         else:
@@ -232,6 +254,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         self.trainable = bool(config.trainable)
         self.source = "pi0_pytorch"
         self.gradient_checkpointing_enabled = False
+        self.gradient_checkpointing_non_reentrant = False
 
         metadata = _read_pi0_checkpoint_metadata(config)
         paligemma_variant = str(metadata.get("paligemma_variant", config.paligemma_variant))
@@ -252,8 +275,9 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             if hasattr(self.model, "gradient_checkpointing_disable"):
                 self.model.gradient_checkpointing_disable()
             if config.gradient_checkpointing and hasattr(self.model, "gradient_checkpointing_enable"):
-                self.model.gradient_checkpointing_enable()
-                self.gradient_checkpointing_enabled = True
+                enabled, non_reentrant = _enable_gradient_checkpointing_non_reentrant(self.model)
+                self.gradient_checkpointing_enabled = enabled
+                self.gradient_checkpointing_non_reentrant = non_reentrant
             if hasattr(self.model.config, "use_cache"):
                 self.model.config.use_cache = False
             self.model.train()
@@ -461,6 +485,10 @@ class PaliGemmaSemanticEncoder(nn.Module):
         self.device = self.encoder.device
         self.dtype = self.encoder.dtype
         self.trainable = self.encoder.trainable
+        self.gradient_checkpointing_enabled = bool(getattr(self.encoder, "gradient_checkpointing_enabled", False))
+        self.gradient_checkpointing_non_reentrant = bool(
+            getattr(self.encoder, "gradient_checkpointing_non_reentrant", False)
+        )
 
     def encode_observation(self, observation: PicfObservation) -> torch.Tensor:
         return self.encoder.encode_observation(observation)

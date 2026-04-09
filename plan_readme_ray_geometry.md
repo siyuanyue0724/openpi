@@ -160,8 +160,12 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 - 改 `semantic_override` 不会改变 current posterior：`posterior_mu_diff = 0.0`、`posterior_sigma_diff = 0.0`
 - 训练侧 `action_future` teacher forcing 确实会改变 `g_t^{pred}`：同一帧上 `future_action_diff_teacher_vs_policy = 0.2605`
 - 多卡 DDP + gradient accumulation 时，semantic side path 仍保持 language-late；
-  当前工程实现只是在 `accum_steps>1` 时关闭 `PaliGemma` gradient checkpointing，
+  当前工程实现会优先把 trainable `PaliGemma` 切到 non-reentrant gradient checkpointing，
+  并在 `accum_steps>1` 时进一步保守地关闭 semantic gradient checkpointing，
   以规避 repeated backward 下的 `mark ready twice`，不改变本版数学定义
+- 当前 trainer 里的 `PaliGemma` 侧路仍是 pooled semantic summary token，
+  不是旧 `pi0.5` 的 full-token prefix；这保持了 language-late global context，
+  但属于当前实现的明确工程近似
 
 ---
 

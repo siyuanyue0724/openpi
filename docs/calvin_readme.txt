@@ -430,9 +430,13 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 双卡 DDP + `--accum-steps 2` => `effective_global_batch=4`
   - 双卡 DDP + `--accum-steps 4` => `effective_global_batch=8`
   - 当前推荐从 `accum_steps=2` 起跑；`accum_steps>4` 尚未做同强度回归
-- 在 `PaliGemma + DDP + accum_steps>1` 下，trainer 会自动关闭 semantic gradient checkpointing：
-  - 这是为了规避 HF PaliGemma reentrant checkpoint 在 repeated backward 下的 `mark ready twice`
-  - 不改变 PICF 数学，只是当前多卡累计训练的工程稳定性规则
+- 当前 trainable `PaliGemma` 路径会优先请求 **non-reentrant gradient checkpointing**
+  - 这是为了避免 DDP 下同一 semantic backbone 在多次前向/反向中触发 `mark ready twice`
+- 额外地，在 `PaliGemma + DDP + accum_steps>1` 下，trainer 仍会保守地关闭 semantic gradient checkpointing
+  - 这是当前多卡累计训练的工程稳定性规则，不改变 PICF 数学
+- 当前 semantic side path 仍是 **pooled semantic summary token**
+  - 不是旧 `pi0.5` 的 full-token PaliGemma prefix
+  - 因而它是“最大版物理 world model + 保守版 language-late semantic 接线”，不是最终的 full-token 语义融合形态
 
 四点五、PICF v0.4.8 新 core 的云上长期训练命令
 说明：这条命令对应的是 `src/openpi/picf/core/` 新主线，不是旧 `scripts/train_pytorch.py`。

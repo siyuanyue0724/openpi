@@ -4,6 +4,7 @@ import pytest
 import torch
 
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
+from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
 from openpi.picf.paligemma.wrapper import _repair_missing_tied_embeddings
 from openpi.picf.paligemma.wrapper import _Pi0PaliGemmaSemanticEncoder
 
@@ -80,6 +81,38 @@ def test_checkpoint_inputs_require_grad_detects_tensor_inputs() -> None:
 
     assert _checkpoint_inputs_require_grad(no_grad) is False
     assert _checkpoint_inputs_require_grad(no_grad, requires_grad) is True
+
+
+def test_enable_gradient_checkpointing_prefers_non_reentrant() -> None:
+    class _DummyModule:
+        def __init__(self) -> None:
+            self.kwargs = None
+
+        def gradient_checkpointing_enable(self, gradient_checkpointing_kwargs=None):
+            self.kwargs = gradient_checkpointing_kwargs
+
+    module = _DummyModule()
+    enabled, non_reentrant = _enable_gradient_checkpointing_non_reentrant(module)
+
+    assert enabled is True
+    assert non_reentrant is True
+    assert module.kwargs == {"use_reentrant": False}
+
+
+def test_enable_gradient_checkpointing_falls_back_when_kwargs_unsupported() -> None:
+    class _LegacyModule:
+        def __init__(self) -> None:
+            self.calls = 0
+
+        def gradient_checkpointing_enable(self):
+            self.calls += 1
+
+    module = _LegacyModule()
+    enabled, non_reentrant = _enable_gradient_checkpointing_non_reentrant(module)
+
+    assert enabled is True
+    assert non_reentrant is False
+    assert module.calls == 1
 
 
 def test_apply_checkpoint_skips_checkpoint_when_inputs_have_no_grad(

@@ -1206,6 +1206,13 @@ def train(args: argparse.Namespace) -> None:
                 getattr(semantic_encoder, "source", "none") if semantic_encoder is not None else "none",
                 bool(args.semantic_trainable),
             )
+            if semantic_encoder is not None:
+                logging.info(
+                    "Semantic checkpointing: enabled=%s non_reentrant=%s requested=%s",
+                    bool(getattr(semantic_encoder, "gradient_checkpointing_enabled", False)),
+                    bool(getattr(semantic_encoder, "gradient_checkpointing_non_reentrant", False)),
+                    bool(args.semantic_gradient_checkpointing),
+                )
             if bool(getattr(args, "semantic_gradient_checkpointing_disabled_for_accum", False)):
                 logging.info(
                     "Semantic contract: disabled PaliGemma gradient checkpointing because accum_steps=%s > 1; "
