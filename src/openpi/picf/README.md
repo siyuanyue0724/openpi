@@ -23,9 +23,9 @@
 - `plan_readme_ray_geometry.md` 里 v0.4.8 的关键实现口径已经和 `src/openpi/picf/core/` 对齐
 - `python -m compileall -q src/openpi/picf/core scripts/picf_core_train_smoke.py scripts/picf_core_train.py`：通过
 - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
-  - `31 passed`
+  - `32 passed`
 - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
-  - `31 passed`
+  - `32 passed`
 - `task_ABCD_D` 的真实 `dir/zip` 原始样本一致性复核：
   - 对训练样本索引 `0 / 1 / 10 / 100 / 1000`，
     `prompt`、`rgb_static`、`depth_static`、`robot_obs`、`rgb_gripper`、`actions`
@@ -75,6 +75,46 @@
     - `loss_tactile_real = 0.5379`
     - `loss_pt = 0.6930`
     - `step_1.pt` 已落盘
+  - 云机默认正式配置（不再显式缩小 core 维度）：
+    - 单卡 `dir + cuda + --use-foundation-backbones --use-tactile --num-train-steps 30000 --log-interval 1 --save-interval 1`
+    - 运行时通过 `timeout` 提前截断，但已真实跑到 `step=57`
+    - `args.json` 明确记录：
+      - `hidden_dim=256`
+      - `posterior_hidden_dim=256`
+      - `latent_dim=112`
+      - `innovation_dim=256`
+      - `control_dim=256`
+      - `semantic_dim=256`
+      - `future_hidden_dim=256`
+      - `persistent_anchors=16`
+      - `observation_anchors=24`
+      - `attention_heads=8`
+      - `future_vote_heads=4`
+      - `warmup_steps=600`
+    - `metrics.jsonl` 真实首步：
+      - `loss_total = 2.8504`
+      - `lr = 3.33e-07`
+      - `loss_pt = 0.6939`
+      - `projective_candidate_density = 0.0361`
+    - 截断前最后一步 `step=57`：
+      - `loss_total = 2.0958`
+      - `lr = 1.90e-05`
+      - `latest.pt` 与 `57/` checkpoint 目录都存在
+  - 云机默认正式配置双卡 DDP：
+    - `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --num-train-steps 1`
+    - `args.json` 同样记录 spec 默认结构：
+      - `hidden_dim=256`
+      - `latent_dim=112`
+      - `persistent_anchors=16`
+      - `observation_anchors=24`
+      - `attention_heads=8`
+      - `future_vote_heads=4`
+    - `metrics.jsonl` 首步：
+      - `loss_total = 2.9831`
+      - `loss_tactile_real = 0.5139`
+      - `loss_pt = 0.6914`
+      - `projective_candidate_density = 0.0363`
+    - `step_1.pt` 已落盘，未出现 OOM / DDP 包装错误 / checkpoint 异常
 - 云机 `root@px-cloud2.matpool.com:/root/openpi` 上的 foundation-weight 复核：
   - `scripts/vjepa_ckpt_fetch.py --model vjepa2_1_vit_base_384 --out-root /root/openpi/checkpoints/foundation/vjepa2_1`：通过
   - 真实 wrapper 加载 `/root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt`：通过

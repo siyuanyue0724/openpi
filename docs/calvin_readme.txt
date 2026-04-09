@@ -5,9 +5,9 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 - 当前 `.venv` Python 下重新执行：
   - `python -m compileall -q src/openpi/picf/core scripts/picf_core_train_smoke.py scripts/picf_core_train.py`：通过
   - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
-    - `31 passed`
+    - `32 passed`
   - `UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
-    - `31 passed`
+    - `32 passed`
 - 真实 `task_ABCD_D` 数据链本轮重新确认：
   - `scripts/stageb_calvin_audit.py --mode dataset --backend zip --split validation`：通过
   - `scripts/stageb_calvin_audit.py --mode loader --backend zip --split validation --batch-size 4 --num-workers 0`：通过
@@ -42,6 +42,44 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 云机 `dir + cuda + --use-foundation-backbones --use-tactile + 1-step`：通过
   - 云机同一实验 `--resume` 到 `step=2`：通过
   - 云机 `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --use-foundation-backbones --use-tactile --num-train-steps 1`：通过
+  - 云机默认正式配置单卡：
+    - `dir + cuda + --use-foundation-backbones --use-tactile --num-train-steps 30000 --log-interval 1 --save-interval 1`
+    - 用 `timeout` 提前截断，但已真实跑到 `step=57`
+    - `args.json` 明确记录 spec 默认结构：
+      - `hidden_dim=256`
+      - `posterior_hidden_dim=256`
+      - `latent_dim=112`
+      - `innovation_dim=256`
+      - `control_dim=256`
+      - `semantic_dim=256`
+      - `future_hidden_dim=256`
+      - `persistent_anchors=16`
+      - `observation_anchors=24`
+      - `attention_heads=8`
+      - `future_vote_heads=4`
+      - `warmup_steps=600`
+    - `metrics.jsonl` 首步：
+      - `loss_total = 2.8504`
+      - `lr = 3.33e-07`
+      - `loss_pt = 0.6939`
+      - `projective_candidate_density = 0.0361`
+    - 截断前最后一步 `step=57`
+    - `latest.pt` 与 `57/` checkpoint 目录都存在
+  - 云机默认正式配置双卡 DDP：
+    - `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --num-train-steps 1`
+    - `args.json` 同样记录：
+      - `hidden_dim=256`
+      - `latent_dim=112`
+      - `persistent_anchors=16`
+      - `observation_anchors=24`
+      - `attention_heads=8`
+      - `future_vote_heads=4`
+    - `metrics.jsonl` 首步：
+      - `loss_total = 2.9831`
+      - `loss_tactile_real = 0.5139`
+      - `loss_pt = 0.6914`
+      - `projective_candidate_density = 0.0363`
+    - `step_1.pt` 已落盘，未出现 OOM / DDP 包装错误 / checkpoint 异常
   - `projective_candidate_density` 约为 `0.2995 / 0.3073 / 0.3047`
   - `loss_focus_pv` 约为 `1.1552 / 1.0604 / 0.8993`
   - `loss_pt` 当前均为 `0.0`
