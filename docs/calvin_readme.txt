@@ -375,6 +375,20 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
    - num-workers=0
    - OPENPI_SONATA_MODE=projector
 
+把这套旧口径映射到 `PICF v0.4.8` 新 trainer，需要按下面理解：
+- 新 trainer 没有显式 `--batch-size` 参数
+- 它的全局 batch 定义是：
+  - `effective_global_batch = world_size * accum_steps`
+  - 每个 rank 每个 micro-step 处理一个 `_TransitionWindow`
+- 所以：
+  - 双卡 DDP + `--accum-steps 1` => `effective_global_batch=2`
+  - 单卡如果也想保持旧 `batch-size=2` 的量级，应改成 `--accum-steps 2`
+- 数值精度上，新 core 当前已验证的工程配置是：
+  - core 主干默认 `float32`
+  - `V-JEPA` wrapper 默认 `bfloat16`
+  - `Sonata` / `AnyTouch` wrapper 当前按 `float32`
+  - 这与旧 `pi0.5` 主模型直接 `bfloat16` 的方式不同，但这是目前真实回归过的稳定配置
+
 四点五、PICF v0.4.8 新 core 的云上长期训练命令
 说明：这条命令对应的是 `src/openpi/picf/core/` 新主线，不是旧 `scripts/train_pytorch.py`。
 当前真实验证已经覆盖：
@@ -389,6 +403,11 @@ export PYTHONPATH=/root/openpi/src && \
 export HF_TOKEN='YOUR_HF_TOKEN' && \
 export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN && \
 export HF_ENDPOINT=https://hf-mirror.com && \
+export WANDB_MODE=offline && \
+export WANDB_DIR=/mnt/checkpoints/wandb && \
+export WANDB_DISABLE_CODE=true && \
+export WANDB_DISABLE_GIT=true && \
+export WANDB_SILENT=true && \
 mkdir -p /mnt/checkpoints/picf_core/logs && \
 /root/openpi/.venv/bin/python /root/openpi/scripts/picf_core_train.py \
   --calvin-root /mnt/calvin_data/task_ABC_D \
@@ -408,6 +427,7 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
   --min-lr 2e-5 \
   --warmup-steps 500 \
   --wandb-enabled \
+  --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile \
   2>&1 | tee /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
@@ -417,6 +437,7 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留日志文件、不显示进度条，可改成 `--no-progress`
 - 当前默认 `save_interval=5000`
+- 云上当前推荐 `wandb offline`，这和旧 `pi0.5` 正式训练命令保持一致
 
 训练前 checklist：
 - `nvidia-smi` 能看到目标 GPU，且显存空闲足够
@@ -434,6 +455,11 @@ export PYTHONPATH=/root/openpi/src && \
 export HF_TOKEN='YOUR_HF_TOKEN' && \
 export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN && \
 export HF_ENDPOINT=https://hf-mirror.com && \
+export WANDB_MODE=offline && \
+export WANDB_DIR=/mnt/checkpoints/wandb && \
+export WANDB_DISABLE_CODE=true && \
+export WANDB_DISABLE_GIT=true && \
+export WANDB_SILENT=true && \
 /root/openpi/.venv/bin/python /root/openpi/scripts/picf_core_train.py \
   --calvin-root /mnt/calvin_data/task_ABC_D \
   --backend dir \
@@ -453,6 +479,7 @@ export HF_ENDPOINT=https://hf-mirror.com && \
   --min-lr 2e-5 \
   --warmup-steps 500 \
   --wandb-enabled \
+  --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile \
   2>&1 | tee -a /mnt/checkpoints/picf_core/logs/picf_core_train_run.log
@@ -468,6 +495,11 @@ export PYTHONPATH=/root/openpi/src && \
 export HF_TOKEN='YOUR_HF_TOKEN' && \
 export HUGGINGFACE_HUB_TOKEN=$HF_TOKEN && \
 export HF_ENDPOINT=https://hf-mirror.com && \
+export WANDB_MODE=offline && \
+export WANDB_DIR=/mnt/checkpoints/wandb && \
+export WANDB_DISABLE_CODE=true && \
+export WANDB_DISABLE_GIT=true && \
+export WANDB_SILENT=true && \
 /root/openpi/.venv/bin/torchrun --standalone --nnodes=1 --nproc_per_node=2 /root/openpi/scripts/picf_core_train.py \
   --calvin-root /mnt/calvin_data/task_ABC_D \
   --backend dir \
@@ -486,6 +518,7 @@ export HF_ENDPOINT=https://hf-mirror.com && \
   --min-lr 2e-5 \
   --warmup-steps 500 \
   --wandb-enabled \
+  --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile \
   2>&1 | tee /mnt/checkpoints/picf_core/logs/picf_core_train_ddp_run.log

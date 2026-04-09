@@ -705,6 +705,23 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - `--no-wandb` 可显式关闭
 - `--no-progress` 可关闭进度条，适合纯日志环境或回归脚本
 
+和旧 `pi0.5 / train_pytorch.py` 训练口径对照后，这里还需要明确三条参数约束：
+
+- 新 trainer 的“全局 batch”定义是：
+  - `effective_global_batch = world_size * accum_steps`
+  - 每个 rank 每个 micro-step 处理一个 `_TransitionWindow`
+- 因此：
+  - 双卡 DDP + `accum_steps=1` => `effective_global_batch=2`
+  - 这与旧 `pi0.5` 云上命令里的 `batch-size=2` 是同一量级口径
+  - 如果退回单卡、但还想保持和旧双卡命令相同的全局 batch，应该改成 `--accum-steps 2`
+- 当前 `PICF core` 的数值口径与旧 `pi0.5` 不完全相同：
+  - 旧 `pi0.5` 训练主模型常用 `bfloat16`
+  - 新 `PICF core` 目前验证稳定的配置是：
+    - core 主干默认 `float32`
+    - `V-JEPA` wrapper 默认 `bfloat16`
+    - `Sonata` / `AnyTouch` wrapper 当前仍按 `float32` 跑
+  - 这不是遗漏，而是当前新 core 的已验证工程配置；如果后续要压显存，再单独做 mixed-precision 回归
+
 ### 4.11 当前训练调试接口已经有哪些
 
 当前新 core 的训练调试信息主要分三层。
@@ -1021,6 +1038,7 @@ python scripts/picf_core_train.py \
   --min-lr 2e-5 \
   --warmup-steps 500 \
   --wandb-enabled \
+  --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile
 ```
@@ -1030,6 +1048,7 @@ python scripts/picf_core_train.py \
 - 控制台会显示 `tqdm` 实时进度条；`--log-interval 100` 只控制 JSON 指标与 wandb scalar 的刷新频率，不影响进度条本身
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留文件日志、不看进度条，可改成 `--no-progress`
+- 如果是在云上跑长期训练，当前推荐把 wandb 设成 `offline`，这和旧 `pi0.5` 训练 README 的工程口径保持一致
 
 正式开训前先确认四件事：
 
@@ -1088,6 +1107,7 @@ python scripts/picf_core_train.py \
   --min-lr 2e-5 \
   --warmup-steps 500 \
   --wandb-enabled \
+  --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile
 ```
@@ -1114,9 +1134,15 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --min-lr 2e-5 \
   --warmup-steps 500 \
   --wandb-enabled \
+  --wandb-mode offline \
   --use-foundation-backbones \
   --use-tactile
 ```
+
+如果需要严格对齐旧 `pi0.5` 的“全局 batch=2”口径：
+
+- 双卡 DDP：保持 `--accum-steps 1`
+- 单卡：改成 `--accum-steps 2`
 
 这条 DDP 命令当前已经做过最小起步回归，但还没有做长程收敛验证；因此它适合正式试训，不应被误写成“已完成多卡配方定型”。
 

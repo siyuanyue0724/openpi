@@ -843,9 +843,12 @@ def train(args: argparse.Namespace) -> None:
             else None
         )
         if is_main:
+            effective_global_batch = int(world_size * args.accum_steps)
             logging.info(
-                "Training config: world_size=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s wandb=%s",
+                "Training config: world_size=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s wandb=%s",
                 world_size,
+                args.accum_steps,
+                effective_global_batch,
                 args.num_train_steps,
                 args.lr,
                 args.min_lr,
