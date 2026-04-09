@@ -137,6 +137,13 @@
       - 旧的 reducer / NCCL 卡死不是“point_error_encoder 仍然随机掉梯度”
       - 更准确的根因是：训练器之前在 DDP 包裹的 `forward` 内部捕获首步非法窗口异常并重试；一旦某个 rank 的 `forward` 在 reducer 已建图后中途抛错，就可能把该 rank 留在 unfinished reduction 状态
       - 当前修复已把首步 `xyzrgb` 合法性检查前移到进入 DDP `forward` 之前；重采样现在只发生在纯数据预检阶段，不再污染 DDP reducer 状态
+  - 2026-04-09 最终复核重跑：
+    - `python -m py_compile scripts/picf_core_train.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline.py src/openpi/picf/core/training.py`：通过
+    - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py scripts/picf_core_train_test.py`：`43 passed`
+    - 当前可以把结论写成：
+      - 数学 contract：首步 rejection sampling 仅限制到合法首步支持集，没有改 `PICF` 的 posterior 定义
+      - 工程 contract：DDP 预检已经前移到 distributed autograd 图之外，不再靠 reducer 内部异常恢复
+      - 部署 contract：本地、GitHub、云机应保持同一 commit 后再开训
 - 云机 `root@px-cloud2.matpool.com:/root/openpi` 上的 foundation-weight 复核：
   - `scripts/vjepa_ckpt_fetch.py --model vjepa2_1_vit_base_384 --out-root /root/openpi/checkpoints/foundation/vjepa2_1`：通过
   - 真实 wrapper 加载 `/root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt`：通过

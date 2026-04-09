@@ -495,6 +495,13 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
     - 首步非法窗口 rejection sampling 的数学含义不变
     - 工程实现则必须放在 DDP `forward` 前做数据预检
     - 这样才不会把 reducer / NCCL 状态带脏
+- 2026-04-09 最终本地复核：
+  - `python -m py_compile scripts/picf_core_train.py scripts/picf_core_train_test.py src/openpi/picf/core/pipeline.py src/openpi/picf/core/training.py`：通过
+  - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py scripts/picf_core_train_test.py`：`43 passed`
+  - 因而当前建议是：
+    - 开训前只需要确认云机已同步到与本地同一 commit
+    - 训练命令保留 `--max-empty-window-retries 32`
+    - 不要再把首步非法窗口重试放回 DDP `forward` 内部
 
 1. 新开长期训练：
 cd /root/openpi && \
