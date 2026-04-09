@@ -42,6 +42,7 @@ from openpi.training.calvin_dataset import CalvinLangSegmentDataset
 
 _DEFAULT_TACTILE_SENSOR_NAMES = ("digit", "gelsight_mini")
 _DEFAULT_TACTILE_SENSOR_OFFSETS_M = ((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))
+_SPEC_DEFAULTS = PicfCoreConfig()
 
 
 class _NullTactileEncoder:
@@ -140,6 +141,73 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
     args.visual_mode = "encoder"
     args.tactile_mode = "encoder"
     args.use_tactile = True
+
+
+def _normalize_train_args(args: argparse.Namespace) -> None:
+    if args.warmup_steps is None:
+        args.warmup_steps = max(1, int(round(0.02 * float(args.num_train_steps))))
+    else:
+        args.warmup_steps = int(args.warmup_steps)
+
+
+def _validate_train_args(args: argparse.Namespace) -> None:
+    positive_int_fields = (
+        "num_train_steps",
+        "log_interval",
+        "save_interval",
+        "accum_steps",
+        "unroll_steps",
+        "stride",
+        "max_points",
+        "visual_grid",
+        "visual_num_frames",
+        "visual_img_size",
+        "visual_patch_size",
+        "visual_tubelet_size",
+        "tactile_num_frames",
+        "tactile_stride",
+        "hidden_dim",
+        "posterior_hidden_dim",
+        "latent_dim",
+        "innovation_dim",
+        "control_dim",
+        "semantic_dim",
+        "future_hidden_dim",
+        "persistent_anchors",
+        "observation_anchors",
+        "fusion_layers",
+        "posterior_layers",
+        "predictive_layers",
+        "control_layers",
+        "attention_heads",
+        "future_vote_heads",
+    )
+    for name in positive_int_fields:
+        value = int(getattr(args, name))
+        if value < 1:
+            raise ValueError(f"{name} must be >= 1, got {value}.")
+    if int(args.warmup_steps) < 0:
+        raise ValueError(f"warmup_steps must be >= 0, got {args.warmup_steps}.")
+    if float(args.lr) <= 0.0:
+        raise ValueError(f"lr must be > 0, got {args.lr}.")
+    if float(args.min_lr) < 0.0:
+        raise ValueError(f"min_lr must be >= 0, got {args.min_lr}.")
+    if float(args.min_lr) > float(args.lr):
+        raise ValueError(f"min_lr must be <= lr, got min_lr={args.min_lr} lr={args.lr}.")
+    if float(args.weight_decay) < 0.0:
+        raise ValueError(f"weight_decay must be >= 0, got {args.weight_decay}.")
+    if float(args.grad_clip_norm) < 0.0:
+        raise ValueError(f"grad_clip_norm must be >= 0, got {args.grad_clip_norm}.")
+    if int(args.hidden_dim) % int(args.attention_heads) != 0:
+        raise ValueError(
+            "hidden_dim must be divisible by attention_heads; "
+            f"got hidden_dim={args.hidden_dim} attention_heads={args.attention_heads}."
+        )
+    if str(args.device).startswith("cpu") and args.point_backbone == "sonata":
+        raise RuntimeError(
+            "point_backbone=sonata currently requires CUDA. "
+            "Use --device cuda or switch to --point-backbone rgb."
+        )
 
 
 def _validate_backbone_args(args: argparse.Namespace) -> None:
@@ -844,6 +912,7 @@ def train(args: argparse.Namespace) -> None:
         )
         if is_main:
             effective_global_batch = int(world_size * args.accum_steps)
+            warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
                 "Training config: world_size=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s wandb=%s",
                 world_size,
@@ -855,6 +924,29 @@ def train(args: argparse.Namespace) -> None:
                 args.warmup_steps,
                 args.save_interval,
                 bool(args.wandb_enabled and args.wandb_mode != "disabled"),
+            )
+            logging.info(
+                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s attention_heads=%s future_vote_heads=%s",
+                args.hidden_dim,
+                args.posterior_hidden_dim,
+                args.latent_dim,
+                args.innovation_dim,
+                args.control_dim,
+                args.semantic_dim,
+                args.future_hidden_dim,
+                args.persistent_anchors,
+                args.observation_anchors,
+                args.fusion_layers,
+                args.posterior_layers,
+                args.predictive_layers,
+                args.control_layers,
+                args.attention_heads,
+                args.future_vote_heads,
+            )
+            logging.info(
+                "LR contract: cosine decay with warmup_steps=%s (%.2f%% of total steps).",
+                args.warmup_steps,
+                warmup_fraction,
             )
 
         for step in range(start_step, args.num_train_steps):
@@ -976,13 +1068,13 @@ def main() -> None:
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--min-lr", type=float, default=2e-5)
-    parser.add_argument("--warmup-steps", type=int, default=500)
+    parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--project-name", default="openpi")
     parser.add_argument("--wandb-run-name", default=None)
-    parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="online")
+    parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="offline")
     parser.add_argument("--wandb-enabled", dest="wandb_enabled", action="store_true")
     parser.add_argument("--no-wandb", dest="wandb_enabled", action="store_false")
     parser.add_argument("--progress", dest="progress", action="store_true")
@@ -1011,24 +1103,26 @@ def main() -> None:
     parser.add_argument("--use-tactile", action="store_true")
     parser.add_argument("--tactile-sensor-names", default="digit,gelsight_mini")
     parser.add_argument("--tactile-sensor-offsets-m", default="0.01,0,0;-0.01,0,0")
-    parser.add_argument("--hidden-dim", type=int, default=64)
-    parser.add_argument("--posterior-hidden-dim", type=int, default=64)
-    parser.add_argument("--latent-dim", type=int, default=24)
-    parser.add_argument("--innovation-dim", type=int, default=64)
-    parser.add_argument("--control-dim", type=int, default=64)
-    parser.add_argument("--semantic-dim", type=int, default=32)
-    parser.add_argument("--future-hidden-dim", type=int, default=64)
-    parser.add_argument("--persistent-anchors", type=int, default=8)
-    parser.add_argument("--observation-anchors", type=int, default=10)
-    parser.add_argument("--fusion-layers", type=int, default=2)
-    parser.add_argument("--posterior-layers", type=int, default=1)
-    parser.add_argument("--predictive-layers", type=int, default=1)
-    parser.add_argument("--control-layers", type=int, default=1)
-    parser.add_argument("--attention-heads", type=int, default=4)
-    parser.add_argument("--future-vote-heads", type=int, default=3)
+    parser.add_argument("--hidden-dim", type=int, default=_SPEC_DEFAULTS.hidden_dim)
+    parser.add_argument("--posterior-hidden-dim", type=int, default=_SPEC_DEFAULTS.posterior_hidden_dim)
+    parser.add_argument("--latent-dim", type=int, default=_SPEC_DEFAULTS.latent_dim)
+    parser.add_argument("--innovation-dim", type=int, default=_SPEC_DEFAULTS.innovation_dim)
+    parser.add_argument("--control-dim", type=int, default=_SPEC_DEFAULTS.control_dim)
+    parser.add_argument("--semantic-dim", type=int, default=_SPEC_DEFAULTS.semantic_dim)
+    parser.add_argument("--future-hidden-dim", type=int, default=_SPEC_DEFAULTS.future_hidden_dim)
+    parser.add_argument("--persistent-anchors", type=int, default=_SPEC_DEFAULTS.persistent_anchors)
+    parser.add_argument("--observation-anchors", type=int, default=_SPEC_DEFAULTS.observation_anchors)
+    parser.add_argument("--fusion-layers", type=int, default=_SPEC_DEFAULTS.fusion_layers)
+    parser.add_argument("--posterior-layers", type=int, default=_SPEC_DEFAULTS.posterior_layers)
+    parser.add_argument("--predictive-layers", type=int, default=_SPEC_DEFAULTS.predictive_layers)
+    parser.add_argument("--control-layers", type=int, default=_SPEC_DEFAULTS.control_layers)
+    parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)
+    parser.add_argument("--future-vote-heads", type=int, default=_SPEC_DEFAULTS.future_vote_heads)
     parser.set_defaults(wandb_enabled=True, progress=True)
     args = parser.parse_args()
     _apply_foundation_profile(args)
+    _normalize_train_args(args)
+    _validate_train_args(args)
     _validate_backbone_args(args)
     train(args)
 

@@ -701,9 +701,28 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - wandb 默认开启：
   - `--project-name` 默认 `openpi`
   - `--wandb-run-name` 默认复用 `exp-name`
-  - `--wandb-mode` 支持 `online / offline / disabled`
+  - `--wandb-mode` 支持 `online / offline / disabled`，当前长期 trainer 默认 `offline`
   - `--no-wandb` 可显式关闭
 - `--no-progress` 可关闭进度条，适合纯日志环境或回归脚本
+- 长期 trainer 的 core 结构默认值现在直接对齐 `PicfCoreConfig` / v0.4.8 spec：
+  - `persistent_anchors=16`
+  - `observation_anchors=24`
+  - `hidden_dim=256`
+  - `posterior_hidden_dim=256`
+  - `latent_dim=112`
+  - `innovation_dim=256`
+  - `control_dim=256`
+  - `semantic_dim=256`
+  - `future_hidden_dim=256`
+  - `fusion_layers=4`
+  - `posterior_layers=2`
+  - `predictive_layers=2`
+  - `control_layers=2`
+  - `attention_heads=8`
+  - `future_vote_heads=4`
+- 也就是说：
+  - 现在默认值就是正式训练值
+  - 任何更小的 `hidden_dim / anchor / layer` 组合都应视为显式 smoke 覆盖，而不是正式训练默认
 
 和旧 `pi0.5 / train_pytorch.py` 训练口径对照后，这里还需要明确三条参数约束：
 
@@ -721,6 +740,10 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
     - `V-JEPA` wrapper 默认 `bfloat16`
     - `Sonata` / `AnyTouch` wrapper 当前仍按 `float32` 跑
   - 这不是遗漏，而是当前新 core 的已验证工程配置；如果后续要压显存，再单独做 mixed-precision 回归
+- warmup 口径也已改回 spec：
+  - `--warmup-steps` 若不显式传入，则自动取 `round(0.02 * num_train_steps)`
+  - 因而默认 `30000` step 训练会使用 `600` warmup steps
+  - 只有在做对照实验时才建议显式覆盖这个默认值
 
 ### 4.11 当前训练调试接口已经有哪些
 
@@ -1036,7 +1059,6 @@ python scripts/picf_core_train.py \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
-  --warmup-steps 500 \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \
@@ -1049,6 +1071,8 @@ python scripts/picf_core_train.py \
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留文件日志、不看进度条，可改成 `--no-progress`
 - 如果是在云上跑长期训练，当前推荐把 wandb 设成 `offline`，这和旧 `pi0.5` 训练 README 的工程口径保持一致
+- 上面这条命令没有再显式传 `--warmup-steps`，因为长期 trainer 默认已经按 `2% * num_train_steps` 自动换算
+- `--max-points 512` 是当前验证过的工程配方，不是 PICF core 结构默认值；如果后续要提高点密度，应单独做显存与收敛回归
 
 正式开训前先确认四件事：
 
@@ -1105,7 +1129,6 @@ python scripts/picf_core_train.py \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
-  --warmup-steps 500 \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \
@@ -1132,7 +1155,6 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
-  --warmup-steps 500 \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \

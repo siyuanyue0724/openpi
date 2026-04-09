@@ -396,6 +396,29 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 - foundation-weight 单进程单卡 `--resume`
 - foundation-weight `torchrun` 双卡最小起步
 
+当前长期 trainer 的默认训练 contract 已经收口为：
+- core 结构默认值直接对齐 `PicfCoreConfig` / v0.4.8 spec
+  - `persistent_anchors=16`
+  - `observation_anchors=24`
+  - `hidden_dim=256`
+  - `posterior_hidden_dim=256`
+  - `latent_dim=112`
+  - `innovation_dim=256`
+  - `control_dim=256`
+  - `semantic_dim=256`
+  - `future_hidden_dim=256`
+  - `fusion_layers=4`
+  - `posterior_layers=2`
+  - `predictive_layers=2`
+  - `control_layers=2`
+  - `attention_heads=8`
+  - `future_vote_heads=4`
+- `--warmup-steps` 若不显式传入，则自动取 `round(0.02 * num_train_steps)`
+  - 默认 `30000` step 对应 `600` warmup steps
+- `--save-interval` 默认 `5000`
+- `--wandb-mode` 默认 `offline`
+- `--max-points 512` 是当前验证过的工程配方，不是 core 结构默认值
+
 1. 新开长期训练：
 cd /root/openpi && \
 export CUDA_VISIBLE_DEVICES=0 && \
@@ -425,7 +448,6 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
-  --warmup-steps 500 \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \
@@ -438,6 +460,7 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
 - 如果只想保留日志文件、不显示进度条，可改成 `--no-progress`
 - 当前默认 `save_interval=5000`
 - 云上当前推荐 `wandb offline`，这和旧 `pi0.5` 正式训练命令保持一致
+- 上面这条命令不再显式传 `--warmup-steps`，因为默认已经按总步数自动取 `2%`
 
 训练前 checklist：
 - `nvidia-smi` 能看到目标 GPU，且显存空闲足够
@@ -477,7 +500,6 @@ export WANDB_SILENT=true && \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
-  --warmup-steps 500 \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \
@@ -516,7 +538,6 @@ export WANDB_SILENT=true && \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
-  --warmup-steps 500 \
   --wandb-enabled \
   --wandb-mode offline \
   --use-foundation-backbones \
