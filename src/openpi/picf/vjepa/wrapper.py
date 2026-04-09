@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import dataclasses
 import importlib
+import contextlib
 from pathlib import Path
 
 import numpy as np
 import torch
+from torch import nn
 
 from openpi.picf.vjepa.config import VjepaVisualConfig
 from openpi.picf.vjepa.preprocess import preprocess_video_clip
@@ -36,19 +38,26 @@ _MODEL_CHECKPOINT_KEY_PREFERENCE = {
 
 @dataclasses.dataclass(frozen=True)
 class VjepaFeatureMap:
-    tokens_thwc: np.ndarray
+    tokens_thwc: torch.Tensor | np.ndarray
     source_hw: tuple[int, int]
     resized_hw: tuple[int, int]
     checkpoint_loaded: bool
     model_name: str
 
-    def current_map(self, *, use_last_two_mean: bool = False) -> np.ndarray:
-        tokens = np.asarray(self.tokens_thwc, dtype=np.float32)
-        if tokens.shape[0] == 0:
+    def current_map(self, *, use_last_two_mean: bool = False) -> torch.Tensor | np.ndarray:
+        tokens = self.tokens_thwc
+        if isinstance(tokens, torch.Tensor):
+            if tokens.shape[0] == 0:
+                raise RuntimeError("V-JEPA feature map has no temporal slices.")
+            if use_last_two_mean and tokens.shape[0] >= 2:
+                return tokens[-2:].mean(dim=0)
+            return tokens[-1]
+        tokens_np = np.asarray(tokens, dtype=np.float32)
+        if tokens_np.shape[0] == 0:
             raise RuntimeError("V-JEPA feature map has no temporal slices.")
-        if use_last_two_mean and tokens.shape[0] >= 2:
-            return tokens[-2:].mean(axis=0, dtype=np.float32)
-        return tokens[-1]
+        if use_last_two_mean and tokens_np.shape[0] >= 2:
+            return tokens_np[-2:].mean(axis=0, dtype=np.float32)
+        return tokens_np[-1]
 
 
 def vjepa_runtime_available() -> bool:
@@ -111,13 +120,15 @@ def _resolve_checkpoint_key(config: VjepaVisualConfig, payload: object) -> str |
     return None
 
 
-class Vjepa2VisualEncoder:
-    """Frozen V-JEPA 2.1 encoder wrapper returning dense temporal feature maps."""
+class Vjepa2VisualEncoder(nn.Module):
+    """V-JEPA 2.1 encoder wrapper returning dense temporal feature maps."""
 
     def __init__(self, config: VjepaVisualConfig):
+        super().__init__()
         self.config = config
         self.device = _resolve_device(config)
         self.dtype = _resolve_dtype(config, self.device)
+        self.trainable = bool(config.trainable)
         arch_name = config.arch_name_override or _MODEL_ARCH_MAP.get(config.model_name)
         if arch_name is None:
             raise KeyError(f"Unsupported V-JEPA model '{config.model_name}'.")
@@ -142,8 +153,8 @@ class Vjepa2VisualEncoder:
             use_rope=True,
             img_temporal_dim_size=1,
             interpolate_rope=True,
+            use_activation_checkpointing=bool(config.trainable and config.use_activation_checkpointing),
         )
-        self.encoder.eval()
         self.encoder.to(device=self.device, dtype=self.dtype)
         self.checkpoint_loaded = False
         if config.checkpoint_path is not None:
@@ -152,8 +163,11 @@ class Vjepa2VisualEncoder:
             state_dict = _extract_encoder_state_dict(payload, checkpoint_key)
             self.encoder.load_state_dict(state_dict, strict=True)
             self.checkpoint_loaded = True
+        if not self.trainable:
+            self.encoder.eval()
+            for parameter in self.encoder.parameters():
+                parameter.requires_grad_(False)
 
-    @torch.inference_mode()
     def encode_clip(self, clip: np.ndarray) -> VjepaFeatureMap:
         clip = np.asarray(clip)
         if clip.ndim != 4 or clip.shape[0] != self.config.num_frames:
@@ -164,16 +178,23 @@ class Vjepa2VisualEncoder:
         pixel_values = preprocess_video_clip(clip, self.config)
         pixel_values = pixel_values.to(device=self.device, dtype=self.dtype)
         video = pixel_values.permute(0, 2, 1, 3, 4).contiguous()
-        tokens = self.encoder(video, training=False)
-        token_grid = tokens.reshape(
-            1,
-            self.config.temporal_tokens,
-            self.config.spatial_tokens,
-            self.config.spatial_tokens,
-            -1,
-        )
+        use_grad = bool(self.trainable and self.training)
+        context = contextlib.nullcontext() if use_grad else torch.inference_mode()
+        with context:
+            tokens = self.encoder(video, training=use_grad)
+            token_grid = tokens.reshape(
+                1,
+                self.config.temporal_tokens,
+                self.config.spatial_tokens,
+                self.config.spatial_tokens,
+                -1,
+            )
+            if use_grad:
+                token_payload = token_grid[0].to(dtype=torch.float32)
+            else:
+                token_payload = token_grid[0].detach().to(dtype=torch.float32, device="cpu")
         return VjepaFeatureMap(
-            tokens_thwc=token_grid[0].to(dtype=torch.float32, device="cpu").numpy(),
+            tokens_thwc=token_payload,
             source_hw=source_hw,
             resized_hw=(self.config.img_size, self.config.img_size),
             checkpoint_loaded=self.checkpoint_loaded,

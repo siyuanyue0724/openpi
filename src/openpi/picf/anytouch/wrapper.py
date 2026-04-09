@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import contextlib
 
 import torch
 import torch.nn.functional as fn
+from torch import nn
 from transformers import AutoConfig
 
 from openpi.picf.anytouch.config import AnyTouchConfig
@@ -58,11 +60,13 @@ def _touch_mae_state_dict(raw_state: dict[str, torch.Tensor], model: torch.nn.Mo
     return new_state
 
 
-class AnyTouch2TactileEncoder:
+class AnyTouch2TactileEncoder(nn.Module):
     def __init__(self, config: AnyTouchConfig | None = None):
+        super().__init__()
         self.config = config or AnyTouchConfig()
         self.device = _resolve_device(self.config)
         self.dtype = _resolve_dtype(self.config)
+        self.trainable = bool(self.config.trainable)
         if self.config.model_size != "base":
             raise NotImplementedError(f"Unsupported AnyTouch model size '{self.config.model_size}'.")
         from openpi.picf.anytouch.vendor.tactile_mae import TactileVideoMAE
@@ -82,10 +86,12 @@ class AnyTouch2TactileEncoder:
             self.checkpoint_loaded = True
         elif not self.config.allow_random_init:
             raise RuntimeError("No AnyTouch2 checkpoint found and allow_random_init=False.")
-        self.model.eval()
         self.model.to(device=self.device, dtype=self.dtype)
+        if not self.trainable:
+            self.model.eval()
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(False)
 
-    @torch.inference_mode()
     def encode_sensor_clips(
         self,
         *,
@@ -106,7 +112,10 @@ class AnyTouch2TactileEncoder:
             pose_tensors[sensor_name] = torch.as_tensor(poses_by_sensor[sensor_name], device=self.device, dtype=self.dtype)
         inputs = torch.stack(batch, dim=0).to(device=self.device, dtype=self.dtype)
         sensor_id_tensor = torch.as_tensor(sensor_ids, device=self.device, dtype=torch.long)
-        tokens = self.model(inputs, sensor_id_tensor, probe=True)
+        use_grad = bool(self.trainable and self.training)
+        context = contextlib.nullcontext() if use_grad else torch.inference_mode()
+        with context:
+            tokens = self.model(inputs, sensor_id_tensor, probe=True)
         hidden_dim = int(tokens.shape[-1])
         sensors: dict[str, AnyTouchSensorFeatures] = {}
         pooled_list = []

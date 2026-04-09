@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import dataclasses
 import importlib.util
 import types
 from pathlib import Path
@@ -8,6 +9,7 @@ import sys
 
 import pytest
 import numpy as np
+import torch
 
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.contracts import PicfPointCloudFrame
@@ -60,6 +62,35 @@ def _base_args() -> argparse.Namespace:
         grad_clip_norm=1.0,
         device="cuda",
         point_backbone="sonata",
+        point_backbone_trainable=False,
+        point_backbone_lr_scale=0.25,
+        visual_trainable=False,
+        visual_lr_scale=0.25,
+        visual_activation_checkpointing=True,
+        tactile_trainable=False,
+        tactile_lr_scale=0.25,
+        semantic_mode="zero",
+        semantic_model_name="google/paligemma2-3b-pt-224",
+        semantic_checkpoint_path=None,
+        semantic_revision=None,
+        semantic_dtype="bfloat16",
+        semantic_trainable=False,
+        semantic_lr_scale=0.25,
+        semantic_gradient_checkpointing=True,
+        semantic_use_gripper=True,
+        semantic_max_length=256,
+        visual_mode="stub",
+        tactile_mode="stub",
+        use_tactile=False,
+        visual_model_name="vjepa2_1_vit_base_384",
+        visual_checkpoint_path=None,
+        visual_checkpoint_key=None,
+        visual_dtype="bfloat16",
+        tactile_checkpoint_path=None,
+        tactile_dtype="float32",
+        tactile_sensor_names="digit,gelsight_mini",
+        tactile_sensor_offsets_m="0.01,0,0;-0.01,0,0",
+        use_foundation_backbones=False,
     )
 
 
@@ -76,6 +107,17 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     assert args.warmup_steps == 600
 
 
+def test_foundation_profile_enables_semantic_and_trainable_backbones() -> None:
+    args = _base_args()
+    args.use_foundation_backbones = True
+    _MODULE._apply_foundation_profile(args)
+    assert args.semantic_mode == "paligemma"
+    assert args.visual_trainable is True
+    assert args.tactile_trainable is True
+    assert args.point_backbone_trainable is True
+    assert args.semantic_trainable is True
+
+
 def test_validate_train_args_rejects_incompatible_attention_shape() -> None:
     args = _base_args()
     args.hidden_dim = 250
@@ -90,6 +132,91 @@ def test_validate_train_args_rejects_cpu_sonata() -> None:
     _MODULE._normalize_train_args(args)
     with pytest.raises(RuntimeError, match="point_backbone=sonata currently requires CUDA"):
         _MODULE._validate_train_args(args)
+
+
+def test_build_optimizer_preserves_foundation_lr_scales() -> None:
+    core = types.SimpleNamespace(
+        point_feature_extractor=torch.nn.Linear(3, 4, bias=False),
+        visual_encoder=torch.nn.Linear(5, 6, bias=False),
+        tactile_encoder=torch.nn.Linear(7, 8, bias=False),
+    )
+    trainer = torch.nn.Module()
+    trainer.core = core
+    trainer.semantic_encoder = torch.nn.Linear(9, 10, bias=False)
+    trainer.head = torch.nn.Linear(11, 12, bias=False)
+    args = _base_args()
+    optimizer, group_info = _MODULE._build_optimizer(trainer, args=args)
+    del optimizer
+    name_to_scale = {item["name"]: item["lr_scale"] for item in group_info}
+    assert name_to_scale["point_backbone"] == pytest.approx(0.25)
+    assert name_to_scale["visual_backbone"] == pytest.approx(0.25)
+    assert name_to_scale["tactile_backbone"] == pytest.approx(0.25)
+    assert name_to_scale["semantic_backbone"] == pytest.approx(0.25)
+    assert name_to_scale["picf_core"] == pytest.approx(1.0)
+
+
+def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
+    class _DummyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.device = torch.device("cpu")
+            self.dtype = torch.float32
+            self.calls: list[torch.Tensor | None] = []
+
+        def step(self, _current, *, previous=None, visual_map_override=None, semantic_override=None, action_future=None):
+            del previous, visual_map_override, action_future
+            self.calls.append(semantic_override)
+            state = types.SimpleNamespace()
+            return types.SimpleNamespace(
+                state=state,
+                debug={"projective_candidate_density": 0.0},
+            )
+
+    dummy_losses = types.SimpleNamespace(
+        total=torch.tensor(1.0),
+        action=torch.tensor(0.1),
+        visual_latent=torch.tensor(0.1),
+        visual_real=torch.tensor(0.1),
+        tactile_real=torch.tensor(0.1),
+        point_real=torch.tensor(0.1),
+        alignment=torch.tensor(0.1),
+        anchor_pv=torch.tensor(0.1),
+        pv_weak=torch.tensor(0.1),
+        focus_pv=torch.tensor(0.1),
+        pt=torch.tensor(0.1),
+    )
+
+    class _SemanticStub(torch.nn.Module):
+        def encode_observation(self, observation):
+            return torch.full((1, 4), float(observation.step_id))
+
+    trainer = _MODULE._PicfWindowTrainer(
+        _DummyCore(),
+        semantic_encoder=_SemanticStub(),
+        visual_grid=8,
+        use_visual_override=False,
+    )
+    frame0 = PicfObservation(
+        rgb_static=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth_static=np.zeros((8, 8), dtype=np.float32),
+        robot_obs=np.zeros((15,), dtype=np.float32),
+        prompt="test",
+        step_id=1,
+        segment_id=0,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+        action=np.zeros((7,), dtype=np.float32),
+    )
+    frame1 = dataclasses.replace(frame0, step_id=2, reset_scaffold=False)
+    window = _MODULE._TransitionWindow(segment_id=0, start_step_id=0, prompt="test", frames=(frame0, frame1))
+    original_loss = _MODULE.compute_transition_loss
+    try:
+        _MODULE.compute_transition_loss = lambda *args, **kwargs: dummy_losses
+        _ = trainer(window)
+    finally:
+        _MODULE.compute_transition_loss = original_loss
+    assert trainer.core.calls
+    torch.testing.assert_close(trainer.core.calls[0], torch.full((1, 4), 1.0))
 
 
 def test_first_step_window_precheck_rejects_empty_local_support() -> None:

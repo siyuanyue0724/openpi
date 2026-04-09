@@ -32,6 +32,8 @@ from openpi.picf.core import PicfCoreConfig
 from openpi.picf.core import PicfFullCore
 from openpi.picf.core import PicfTransitionLossBreakdown
 from openpi.picf.core import compute_transition_loss
+from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
+from openpi.picf.paligemma.wrapper import PaliGemmaSemanticEncoder
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.replay.calvin_replay import _calvin_tactile_packet
 from openpi.picf.sonata.config import SonataPointConfig
@@ -58,6 +60,16 @@ class _NullTactileEncoder:
 class _NullVisualEncoder:
     def encode_clip(self, _clip):
         raise AssertionError("visual_map_override should bypass encoder use in picf_core_train")
+
+
+class _ZeroSemanticEncoder(torch.nn.Module):
+    def __init__(self, dim: int) -> None:
+        super().__init__()
+        self.dim = int(dim)
+
+    def encode_observation(self, observation: PicfObservation) -> torch.Tensor:
+        del observation
+        return torch.zeros((1, self.dim), dtype=torch.float32)
 
 
 def _init_logging() -> None:
@@ -113,6 +125,10 @@ def _default_sonata_checkpoint() -> str | None:
     return str(candidate) if candidate.is_file() else None
 
 
+def _default_paligemma_model_name() -> str:
+    return "google/paligemma2-3b-pt-224"
+
+
 def _parse_tactile_sensor_names(raw: str) -> tuple[str, ...]:
     names = tuple(part.strip() for part in str(raw).split(",") if part.strip())
     if not names:
@@ -144,7 +160,12 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
     args.point_backbone = "sonata"
     args.visual_mode = "encoder"
     args.tactile_mode = "encoder"
+    args.semantic_mode = "paligemma"
     args.use_tactile = True
+    args.visual_trainable = True
+    args.tactile_trainable = True
+    args.point_backbone_trainable = True
+    args.semantic_trainable = True
 
 
 def _normalize_train_args(args: argparse.Namespace) -> None:
@@ -203,6 +224,10 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(f"weight_decay must be >= 0, got {args.weight_decay}.")
     if float(args.grad_clip_norm) < 0.0:
         raise ValueError(f"grad_clip_norm must be >= 0, got {args.grad_clip_norm}.")
+    for name in ("point_backbone_lr_scale", "visual_lr_scale", "tactile_lr_scale", "semantic_lr_scale"):
+        value = float(getattr(args, name))
+        if value <= 0.0:
+            raise ValueError(f"{name} must be > 0, got {value}.")
     if int(args.hidden_dim) % int(args.attention_heads) != 0:
         raise ValueError(
             "hidden_dim must be divisible by attention_heads; "
@@ -245,6 +270,8 @@ def _validate_backbone_args(args: argparse.Namespace) -> None:
                 "point_backbone=sonata requires a Sonata checkpoint. "
                 "Pass --sonata-checkpoint-path or place SpatialLM_Sonata_encoder.pth under src/pretrain/."
             )
+    if args.semantic_mode == "paligemma" and not args.semantic_model_name:
+        raise ValueError("semantic_mode=paligemma requires --semantic-model-name or a non-empty default model id.")
 
 
 def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.device]:
@@ -487,9 +514,17 @@ class _MetricAccumulator:
 
 
 class _PicfWindowTrainer(torch.nn.Module):
-    def __init__(self, core: PicfFullCore, *, visual_grid: int, use_visual_override: bool) -> None:
+    def __init__(
+        self,
+        core: PicfFullCore,
+        *,
+        semantic_encoder: torch.nn.Module | None,
+        visual_grid: int,
+        use_visual_override: bool,
+    ) -> None:
         super().__init__()
         self.core = core
+        self.semantic_encoder = semantic_encoder
         self.visual_grid = int(visual_grid)
         self.use_visual_override = bool(use_visual_override)
 
@@ -502,10 +537,14 @@ class _PicfWindowTrainer(torch.nn.Module):
             nxt = dataclasses.replace(window.frames[index + 1], reset_scaffold=False)
             current_visual = _rgb_visual_override(current.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
             next_visual = _rgb_visual_override(nxt.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
+            semantic_override = None
+            if self.semantic_encoder is not None:
+                semantic_override = self.semantic_encoder.encode_observation(current)
             output = self.core.step(
                 current,
                 previous=previous,
                 visual_map_override=current_visual,
+                semantic_override=semantic_override,
                 action_future=current.action,
             )
             losses = compute_transition_loss(
@@ -619,7 +658,8 @@ def _lr_for_step(step: int, *, base_lr: float, warmup_steps: int, min_lr: float,
 
 def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
     for group in optimizer.param_groups:
-        group["lr"] = lr
+        scale = float(group.get("lr_scale", 1.0))
+        group["lr"] = lr * scale
 
 
 def _checkpoint_dir_for_step(output_dir: Path, step: int) -> Path:
@@ -715,7 +755,7 @@ def _load_checkpoint(
     return int(payload.get("step", 0))
 
 
-def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[PicfFullCore, bool]:
+def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[PicfFullCore, torch.nn.Module | None, bool]:
     builder = CalvinDepthToPicfPointCloud(args.calvin_root, stride=args.stride, max_points=args.max_points)
     config = PicfCoreConfig(
         device=str(device),
@@ -743,6 +783,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 stage_name=args.sonata_stage_name,
                 device=str(device),
                 dtype=args.sonata_dtype,
+                trainable=bool(args.point_backbone_trainable),
                 allow_random_init=False,
             )
         )
@@ -755,6 +796,8 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             camera_json_path=args.calvin_root,
             device=str(device),
             dtype=args.visual_dtype,
+            trainable=bool(args.visual_trainable),
+            use_activation_checkpointing=bool(args.visual_activation_checkpointing),
             img_size=args.visual_img_size,
             num_frames=args.visual_num_frames,
             patch_size=args.visual_patch_size,
@@ -782,12 +825,31 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             checkpoint_path=args.tactile_checkpoint_path,
             device=str(device),
             dtype=args.tactile_dtype,
+            trainable=bool(args.tactile_trainable),
             num_frames=args.tactile_num_frames,
             stride=args.tactile_stride,
             allow_random_init=False,
         )
     else:
         tactile_encoder = _NullTactileEncoder()
+
+    semantic_encoder: torch.nn.Module | None
+    if args.semantic_mode == "paligemma":
+        semantic_encoder = PaliGemmaSemanticEncoder(
+            PaliGemmaSemanticConfig(
+                model_name=args.semantic_model_name,
+                checkpoint_path=args.semantic_checkpoint_path,
+                revision=args.semantic_revision,
+                device=str(device),
+                dtype=args.semantic_dtype,
+                trainable=bool(args.semantic_trainable),
+                gradient_checkpointing=bool(args.semantic_gradient_checkpointing),
+                include_gripper_image=bool(args.semantic_use_gripper),
+                max_length=args.semantic_max_length,
+            )
+        )
+    else:
+        semantic_encoder = None
 
     core = PicfFullCore(
         builder,
@@ -798,7 +860,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         tactile_config=tactile_config,
         tactile_encoder=tactile_encoder,
     )
-    return core, use_visual_override
+    return core, semantic_encoder, use_visual_override
 
 
 def _materialize_model_parameters(
@@ -862,6 +924,72 @@ def _prepare_output_dir(
     _distributed_barrier(use_ddp=use_ddp, device=device)
 
 
+def _collect_trainable_params(module: torch.nn.Module | None) -> list[torch.nn.Parameter]:
+    if module is None:
+        return []
+    return [param for param in module.parameters() if getattr(param, "requires_grad", False)]
+
+
+def _build_optimizer(
+    model: _PicfWindowTrainer,
+    *,
+    args: argparse.Namespace,
+) -> tuple[torch.optim.Optimizer, list[dict[str, Any]]]:
+    groups: list[dict[str, Any]] = []
+    used_ids: set[int] = set()
+
+    def _append_group(name: str, params: list[torch.nn.Parameter], lr_scale: float) -> None:
+        if not params:
+            return
+        unique = [param for param in params if id(param) not in used_ids]
+        if not unique:
+            return
+        used_ids.update(id(param) for param in unique)
+        groups.append(
+            {
+                "name": name,
+                "params": unique,
+                "lr": float(args.lr) * float(lr_scale),
+                "lr_scale": float(lr_scale),
+            }
+        )
+
+    point_params = _collect_trainable_params(model.core.point_feature_extractor if isinstance(model.core.point_feature_extractor, torch.nn.Module) else None)
+    visual_params = _collect_trainable_params(model.core.visual_encoder if isinstance(model.core.visual_encoder, torch.nn.Module) else None)
+    tactile_params = _collect_trainable_params(model.core.tactile_encoder if isinstance(model.core.tactile_encoder, torch.nn.Module) else None)
+    semantic_params = _collect_trainable_params(model.semantic_encoder)
+
+    _append_group("point_backbone", point_params, args.point_backbone_lr_scale)
+    _append_group("visual_backbone", visual_params, args.visual_lr_scale)
+    _append_group("tactile_backbone", tactile_params, args.tactile_lr_scale)
+    _append_group("semantic_backbone", semantic_params, args.semantic_lr_scale)
+
+    core_params = [
+        param
+        for param in model.parameters()
+        if getattr(param, "requires_grad", False) and id(param) not in used_ids
+    ]
+    _append_group("picf_core", core_params, 1.0)
+    if not groups:
+        raise RuntimeError("No trainable parameters found for optimizer; check backbone and semantic trainability settings.")
+    optimizer = torch.optim.AdamW(
+        groups,
+        lr=args.lr,
+        betas=(0.9, 0.95),
+        weight_decay=args.weight_decay,
+    )
+    group_info = [
+        {
+            "name": group.get("name", f"group_{idx}"),
+            "lr": float(group["lr"]),
+            "lr_scale": float(group.get("lr_scale", 1.0)),
+            "num_params": int(sum(param.numel() for param in group["params"])),
+        }
+        for idx, group in enumerate(groups)
+    ]
+    return optimizer, group_info
+
+
 def _init_wandb(*, args: argparse.Namespace, output_dir: Path, resuming: bool, enabled: bool) -> bool:
     if not enabled:
         return False
@@ -909,22 +1037,24 @@ def train(args: argparse.Namespace) -> None:
             tactile_sensor_offsets_m=args.tactile_sensor_offsets_m,
         )
 
-        core, use_visual_override = _build_model(args, device=device)
+        core, semantic_encoder, use_visual_override = _build_model(args, device=device)
         core = core.to(device)
-        model = _PicfWindowTrainer(core, visual_grid=args.visual_grid, use_visual_override=use_visual_override).to(device)
+        model = _PicfWindowTrainer(
+            core,
+            semantic_encoder=semantic_encoder,
+            visual_grid=args.visual_grid,
+            use_visual_override=use_visual_override,
+        ).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
+        optimizer, optimizer_group_info = _build_optimizer(model, args=args)
         if use_ddp:
             model = DistributedDataParallel(
                 model,
                 device_ids=[device.index] if device.type == "cuda" else None,
-                find_unused_parameters=False,
+                find_unused_parameters=True,
+                gradient_as_bucket_view=True,
+                static_graph=False,
             )
-        optimizer = torch.optim.AdamW(
-            model.parameters(),
-            lr=args.lr,
-            betas=(0.9, 0.95),
-            weight_decay=args.weight_decay,
-        )
 
         start_step = 0
         resume_path: Path | None = None
@@ -1005,6 +1135,13 @@ def train(args: argparse.Namespace) -> None:
                 "Window contract: first-step empty xyzrgb windows will be resampled up to %s times per micro-step.",
                 args.max_empty_window_retries,
             )
+            for group in optimizer_group_info:
+                logging.info(
+                    "Optimizer group: name=%s lr=%s num_params=%s",
+                    group["name"],
+                    group["lr"],
+                    group["num_params"],
+                )
 
         for step in range(start_step, args.num_train_steps):
             lr = _lr_for_step(
@@ -1169,27 +1306,44 @@ def main() -> None:
     parser.add_argument("--visual-grid", type=int, default=8)
     parser.add_argument("--use-foundation-backbones", action="store_true")
     parser.add_argument("--point-backbone", choices=["rgb", "sonata"], default="rgb")
+    parser.add_argument("--point-backbone-trainable", action="store_true")
     parser.add_argument("--sonata-checkpoint-path", default=None)
     parser.add_argument("--sonata-stage-name", default="enc4")
     parser.add_argument("--sonata-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--point-backbone-lr-scale", type=float, default=0.25)
     parser.add_argument("--visual-mode", choices=["stub", "encoder"], default="stub")
+    parser.add_argument("--visual-trainable", action="store_true")
     parser.add_argument("--visual-model-name", default="vjepa2_1_vit_base_384")
     parser.add_argument("--visual-checkpoint-path", default=None)
     parser.add_argument("--visual-checkpoint-key", default=None)
     parser.add_argument("--visual-dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--visual-lr-scale", type=float, default=0.25)
+    parser.add_argument("--visual-activation-checkpointing", action="store_true")
     parser.add_argument("--visual-img-size", type=int, default=384)
     parser.add_argument("--visual-num-frames", type=int, default=64)
     parser.add_argument("--visual-patch-size", type=int, default=16)
     parser.add_argument("--visual-tubelet-size", type=int, default=2)
     parser.add_argument("--visual-use-last-two-mean", action="store_true")
     parser.add_argument("--tactile-mode", choices=["stub", "encoder"], default="stub")
+    parser.add_argument("--tactile-trainable", action="store_true")
     parser.add_argument("--tactile-checkpoint-path", default=None)
     parser.add_argument("--tactile-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--tactile-lr-scale", type=float, default=0.25)
     parser.add_argument("--tactile-num-frames", type=int, default=4)
     parser.add_argument("--tactile-stride", type=int, default=2)
     parser.add_argument("--use-tactile", action="store_true")
     parser.add_argument("--tactile-sensor-names", default="digit,gelsight_mini")
     parser.add_argument("--tactile-sensor-offsets-m", default="0.01,0,0;-0.01,0,0")
+    parser.add_argument("--semantic-mode", choices=["zero", "paligemma"], default="zero")
+    parser.add_argument("--semantic-model-name", default=_default_paligemma_model_name())
+    parser.add_argument("--semantic-checkpoint-path", default=None)
+    parser.add_argument("--semantic-revision", default=None)
+    parser.add_argument("--semantic-dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--semantic-trainable", action="store_true")
+    parser.add_argument("--semantic-lr-scale", type=float, default=0.25)
+    parser.add_argument("--semantic-gradient-checkpointing", action="store_true")
+    parser.add_argument("--semantic-use-gripper", action="store_true")
+    parser.add_argument("--semantic-max-length", type=int, default=256)
     parser.add_argument("--hidden-dim", type=int, default=_SPEC_DEFAULTS.hidden_dim)
     parser.add_argument("--posterior-hidden-dim", type=int, default=_SPEC_DEFAULTS.posterior_hidden_dim)
     parser.add_argument("--latent-dim", type=int, default=_SPEC_DEFAULTS.latent_dim)
@@ -1205,7 +1359,13 @@ def main() -> None:
     parser.add_argument("--control-layers", type=int, default=_SPEC_DEFAULTS.control_layers)
     parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)
     parser.add_argument("--future-vote-heads", type=int, default=_SPEC_DEFAULTS.future_vote_heads)
-    parser.set_defaults(wandb_enabled=True, progress=True)
+    parser.set_defaults(
+        wandb_enabled=True,
+        progress=True,
+        visual_activation_checkpointing=True,
+        semantic_gradient_checkpointing=True,
+        semantic_use_gripper=True,
+    )
     args = parser.parse_args()
     _apply_foundation_profile(args)
     _normalize_train_args(args)

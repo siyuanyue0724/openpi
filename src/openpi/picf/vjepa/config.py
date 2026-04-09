@@ -18,6 +18,8 @@ class VjepaVisualConfig:
     use_last_two_mean: bool = False
     device: str | None = None
     dtype: str = "bfloat16"
+    trainable: bool = False
+    use_activation_checkpointing: bool = False
     normalize_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
     normalize_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
     delta_v_max_s: float = 0.15

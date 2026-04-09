@@ -9,6 +9,7 @@ class AnyTouchConfig:
     checkpoint_path: str | None = None
     device: str | None = None
     dtype: str = "float32"
+    trainable: bool = False
     model_size: str = "base"
     num_frames: int = 4
     stride: int = 2

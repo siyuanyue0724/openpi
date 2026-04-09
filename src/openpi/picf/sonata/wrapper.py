@@ -3,11 +3,13 @@ from __future__ import annotations
 import dataclasses
 import importlib
 import os
+import contextlib
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+from torch import nn
 
 from openpi.picf.frame_context import PointFrameContext
 from openpi.picf.sonata.config import SonataPointConfig
@@ -128,7 +130,7 @@ def _normalize_colors(colors: np.ndarray) -> np.ndarray:
 
 @dataclasses.dataclass(frozen=True)
 class SonataPointFeatures:
-    features: np.ndarray
+    features: np.ndarray | torch.Tensor
     checkpoint_loaded: bool
     checkpoint_path: str | None
     feature_dim: int
@@ -155,8 +157,9 @@ def _load_sonata_runtime() -> tuple[type[Any], type[Any], Any]:
     return module.Point, module.Sonata, getattr(module, "flash_attn", None)
 
 
-class SonataPointFeatureExtractor:
+class SonataPointFeatureExtractor(nn.Module):
     def __init__(self, config: SonataPointConfig | None = None):
+        super().__init__()
         self.config = config or SonataPointConfig()
         self.device = _select_device(self.config.device)
         if self.device.type != "cuda":
@@ -165,6 +168,7 @@ class SonataPointFeatureExtractor:
                 "CPU fallback has been removed; run this path on a GPU-equipped server."
             )
         self.output_dtype = _select_output_dtype(self.config.dtype)
+        self.trainable = bool(self.config.trainable)
         self.checkpoint_path = _resolve_checkpoint_path(self.config)
         self.checkpoint_loaded = False
         point_cls, sonata_cls, flash_attn = _load_sonata_runtime()
@@ -202,8 +206,11 @@ class SonataPointFeatureExtractor:
         elif not self.config.allow_random_init:
             raise RuntimeError("No Sonata checkpoint found and allow_random_init=False.")
 
-        self.model.eval()
         self.model.to(device=self.device, dtype=torch.float32)
+        if not self.trainable:
+            self.model.eval()
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(False)
         self.stage_name = _resolve_stage_name(self.model, self.config.stage_name)
         self.feature_dim = _infer_stage_dim(self.model, self.stage_name)
         self.cpu_fallback = False
@@ -266,14 +273,16 @@ class SonataPointFeatureExtractor:
                 cpu_fallback_used=self.cpu_fallback,
             )
         sample = self._build_sample(frame_context)
-        with torch.inference_mode():
+        use_grad = bool(self.trainable and self.training)
+        context = contextlib.nullcontext() if use_grad else torch.inference_mode()
+        with context:
             feat = self._encode_stage(sample)
-        feat_np = feat.detach().to(dtype=self.output_dtype).cpu().numpy().astype(np.float32)
+        feat_out = feat.to(dtype=self.output_dtype) if use_grad else feat.detach().to(dtype=self.output_dtype)
         return SonataPointFeatures(
-            features=feat_np,
+            features=feat_out,
             checkpoint_loaded=self.checkpoint_loaded,
             checkpoint_path=str(self.checkpoint_path) if self.checkpoint_path is not None else None,
-            feature_dim=int(feat_np.shape[1]),
+            feature_dim=int(feat_out.shape[1]),
             stage_name=self.stage_name,
             cpu_fallback_used=self.cpu_fallback,
         )

@@ -12,6 +12,7 @@ class SonataPointConfig:
     return_full_resolution: bool = True
     device: str | None = None
     dtype: str = "float32"
+    trainable: bool = False
     shuffle_orders: bool = False
     allow_random_init: bool = True
 
