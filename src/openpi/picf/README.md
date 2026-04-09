@@ -1169,6 +1169,11 @@ python scripts/picf_core_train.py \
 说明：
 
 - 控制台会显示 `tqdm` 实时进度条；`--log-interval 100` 只控制 JSON 指标与 wandb scalar 的刷新频率，不影响进度条本身
+- 进度条里显示的 `loss=` 是**当前最后一个 optimization step 的即时值**
+  - 它不是 moving average，也不是 `log_interval` 区间均值
+  - 当前 trainer 是直接把最近一步的 `outputs["loss_total"]` 写到 progress postfix
+  - 在 `effective_global_batch = 2`、`unroll_steps = 2`、CALVIN window 高度异质的设定下，`1.4 -> 3.4 -> 1.3 -> 3.2` 这种来回跳动是正常现象
+  - 判断是否在收敛，应优先看 `metrics.jsonl` 中按 `log_interval` 聚合后的均值；当前已验证的双卡 `200` step run 里，`20-step` 平均 `loss_total` 是从约 `2.69` 下降到约 `2.40`
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留文件日志、不看进度条，可改成 `--no-progress`
 - 如果是在云上跑长期训练，当前推荐把 wandb 设成 `offline`，这和旧 `pi0.5` 训练 README 的工程口径保持一致

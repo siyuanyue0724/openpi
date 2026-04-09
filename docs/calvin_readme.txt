@@ -541,6 +541,9 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
 
 说明：
 - 控制台会显示 `tqdm` 实时进度条；`--log-interval 100` 只控制 JSON 行、`metrics.jsonl` 和 wandb scalar 的刷新频率
+- 进度条里的 `loss=` 是当前最后一个 optimization step 的即时值，不是 moving average
+- 因为当前是 `effective_global_batch=2`、`unroll_steps=2`、随机 CALVIN window 采样，所以 `1.4 -> 3.4 -> 1.3 -> 3.2` 这种 step-to-step 波动是正常的
+- 真正看收敛趋势要看 `metrics.jsonl` 的区间平均值；当前已验证的双卡 `200` step run 中，`20-step` 平均 `loss_total` 从约 `2.69` 下降到约 `2.40`
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留日志文件、不显示进度条，可改成 `--no-progress`
 - 当前默认 `save_interval=5000`
