@@ -148,8 +148,6 @@ def main() -> None:
     debug_tensor_index_guards = os.environ.get("OPENPI_DEBUG_TENSOR_INDEX_GUARDS", "").strip() not in {"", "0", "false", "False"}
     if debug_autograd_anomaly:
         torch.autograd.set_detect_anomaly(True)
-    if debug_tensor_index_guards:
-        _install_debug_tensor_index_guards()
 
     override_context = contextlib.nullcontext() if args.point_grid_mode == "default" else _override_build_sample(str(args.point_grid_mode))
     with override_context:
@@ -176,6 +174,8 @@ def main() -> None:
             if args.checkpoint:
                 _load_checkpoint(path=Path(args.checkpoint), model=trainer, optimizer=optimizer, device=device)
             trainer.train()
+            if debug_tensor_index_guards:
+                _install_debug_tensor_index_guards()
 
             if args.rng_num_windows is not None:
                 rng_rank = int(args.rng_rank if args.rng_rank is not None else effective_rank_seed)
