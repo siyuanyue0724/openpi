@@ -4,10 +4,14 @@ import argparse
 import contextlib
 import json
 from pathlib import Path
+import sys
 from typing import Callable
 
 import numpy as np
 import torch
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.picf_core_train import _CalvinTransitionSource
 from scripts.picf_core_train import _coerce_bool
