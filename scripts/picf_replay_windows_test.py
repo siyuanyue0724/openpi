@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import numpy as np
+import pytest
 
+from scripts.picf_replay_windows import _coerce_optional_bool
 from scripts.picf_replay_windows import _generate_rng_flat_indices
 from scripts.picf_replay_windows import _resolve_rank_seed
 
@@ -43,3 +45,14 @@ def test_resolve_rank_seed_falls_back_to_rng_rank() -> None:
 
 def test_resolve_rank_seed_defaults_to_one_without_rng_rank() -> None:
     assert _resolve_rank_seed(rank_seed=None, rng_rank=None) == 1
+
+
+def test_coerce_optional_bool_handles_none_and_boolean_strings() -> None:
+    assert _coerce_optional_bool(None) is None
+    assert _coerce_optional_bool("true") is True
+    assert _coerce_optional_bool("False") is False
+
+
+def test_coerce_optional_bool_rejects_invalid_values() -> None:
+    with pytest.raises(ValueError):
+        _coerce_optional_bool("maybe")

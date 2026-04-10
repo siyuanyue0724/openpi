@@ -25,6 +25,7 @@ from scripts.picf_core_train import _load_checkpoint
 from scripts.picf_core_train import _materialize_model_parameters
 from scripts.picf_core_train import _normalize_train_args
 from scripts.picf_core_train import _PicfWindowTrainer
+from scripts.picf_core_train import _save_checkpoint
 from scripts.picf_core_train import _install_debug_tensor_index_guards
 from scripts.picf_core_train import _seed_everything
 from scripts.picf_core_train import _validate_train_args
@@ -94,6 +95,77 @@ def _resolve_rank_seed(*, rank_seed: int | None, rng_rank: int | None) -> int:
     return 1
 
 
+def _coerce_optional_bool(value: str | None) -> bool | None:
+    if value is None:
+        return None
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Expected an optional boolean-like value, got {value!r}.")
+
+
+def _synchronize_if_cuda(device: torch.device) -> None:
+    if device.type == "cuda":
+        torch.cuda.synchronize(device=device)
+
+
+def _backward_loss_components(
+    *,
+    outputs: dict[str, torch.Tensor],
+    device: torch.device,
+    split_backward: bool,
+    replay_step: int,
+) -> None:
+    if not split_backward:
+        _synchronize_if_cuda(device)
+        outputs["loss_total"].backward()
+        _synchronize_if_cuda(device)
+        return
+
+    ordered_keys = [
+        "loss_action",
+        "loss_visual_latent",
+        "loss_visual_real",
+        "loss_tactile_real",
+        "loss_point_real",
+        "loss_semantic_future_aux",
+        "loss_alignment",
+    ]
+    active = [key for key in ordered_keys if key in outputs and outputs[key] is not None]
+    if not active:
+        raise RuntimeError("No backward components found in replay outputs.")
+    for index, key in enumerate(active):
+        retain_graph = index < (len(active) - 1)
+        print(
+            json.dumps(
+                {
+                    "stage": "component_backward_start",
+                    "replay_step": int(replay_step),
+                    "component": str(key),
+                    "retain_graph": bool(retain_graph),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+        _synchronize_if_cuda(device)
+        outputs[key].backward(retain_graph=retain_graph)
+        _synchronize_if_cuda(device)
+        print(
+            json.dumps(
+                {
+                    "stage": "component_backward_ok",
+                    "replay_step": int(replay_step),
+                    "component": str(key),
+                },
+                sort_keys=True,
+            ),
+            flush=True,
+        )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Replay specific PICF CALVIN transition windows through the current training graph.")
     parser.add_argument("--args-json", required=True, help="Path to args.json from a PICF training run.")
@@ -137,14 +209,56 @@ def main() -> None:
         default="default",
         help="Override Sonata local-grid preprocessing during replay for debugging.",
     )
+    parser.add_argument(
+        "--override-sonata-disable-flash",
+        default=None,
+        help="Override args_json sonata_disable_flash with true/false for controlled replay.",
+    )
+    parser.add_argument(
+        "--split-backward-from-step",
+        type=int,
+        default=None,
+        help="From this replay step onward, backward individual loss components with synchronization.",
+    )
+    parser.add_argument(
+        "--stop-after-step",
+        type=int,
+        default=None,
+        help="Stop replay after this many steps even if more flat indices remain.",
+    )
+    parser.add_argument(
+        "--save-checkpoint-every",
+        type=int,
+        default=0,
+        help="Save replay model/optimizer checkpoint every N replay steps. Disabled when <= 0.",
+    )
+    parser.add_argument(
+        "--save-checkpoint-dir",
+        default=None,
+        help="Directory to write replay checkpoints when --save-checkpoint-every > 0.",
+    )
     args = parser.parse_args()
 
     args_json_path = Path(args.args_json)
     payload = json.loads(args_json_path.read_text(encoding="utf-8"))
     train_args = _coerce_loaded_args(payload, device_override=args.device)
+    override_sonata_disable_flash = _coerce_optional_bool(args.override_sonata_disable_flash)
+    if override_sonata_disable_flash is not None:
+        train_args.sonata_disable_flash = bool(override_sonata_disable_flash)
     device = torch.device(str(train_args.device))
     if int(args.repeat) < 1:
         raise ValueError(f"--repeat must be >= 1, got {args.repeat}.")
+    if int(args.save_checkpoint_every) > 0 and args.save_checkpoint_dir is None:
+        raise ValueError("--save-checkpoint-dir is required when --save-checkpoint-every > 0.")
+    save_checkpoint_dir = Path(args.save_checkpoint_dir) if args.save_checkpoint_dir is not None else None
+    if save_checkpoint_dir is not None:
+        save_checkpoint_dir.mkdir(parents=True, exist_ok=True)
+    if args.stop_after_step is not None and int(args.stop_after_step) < 1:
+        raise ValueError(f"--stop-after-step must be >= 1, got {args.stop_after_step}.")
+    if args.split_backward_from_step is not None and int(args.split_backward_from_step) < 1:
+        raise ValueError(
+            f"--split-backward-from-step must be >= 1, got {args.split_backward_from_step}."
+        )
 
     effective_rank_seed = _resolve_rank_seed(rank_seed=args.rank_seed, rng_rank=args.rng_rank)
     _seed_everything(int(train_args.seed), int(effective_rank_seed))
@@ -244,13 +358,30 @@ def main() -> None:
                     try:
                         _ensure_window_has_valid_first_step_xyzrgb_support(trainer, window)
                         outputs = trainer(window, capture_visual_diagnostics=False)
-                        if device.type == "cuda":
-                            torch.cuda.synchronize(device=device)
-                        outputs["loss_total"].backward()
-                        if device.type == "cuda":
-                            torch.cuda.synchronize(device=device)
+                        split_backward = (
+                            args.split_backward_from_step is not None
+                            and int(step_counter) >= int(args.split_backward_from_step)
+                        )
+                        _backward_loss_components(
+                            outputs=outputs,
+                            device=device,
+                            split_backward=bool(split_backward),
+                            replay_step=int(step_counter),
+                        )
                         if args.optimizer_step:
                             optimizer.step()
+                        if (
+                            save_checkpoint_dir is not None
+                            and int(args.save_checkpoint_every) > 0
+                            and (int(step_counter) % int(args.save_checkpoint_every) == 0)
+                        ):
+                            _save_checkpoint(
+                                output_dir=save_checkpoint_dir,
+                                model=trainer,
+                                optimizer=optimizer,
+                                step=int(step_counter),
+                                args=train_args,
+                            )
                         print(
                             json.dumps(
                                 {
@@ -264,6 +395,18 @@ def main() -> None:
                             ),
                             flush=True,
                         )
+                        if args.stop_after_step is not None and int(step_counter) >= int(args.stop_after_step):
+                            print(
+                                json.dumps(
+                                    {
+                                        "stage": "stop_after_reached",
+                                        "replay_step": int(step_counter),
+                                    },
+                                    sort_keys=True,
+                                ),
+                                flush=True,
+                            )
+                            return
                     except Exception as exc:
                         print("PICF replay failure:", flush=True)
                         print(json.dumps(record, sort_keys=True), flush=True)
