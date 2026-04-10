@@ -242,7 +242,7 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 这轮本地验证结果：
 
 - `python -m py_compile src/openpi/picf/core/pipeline.py src/openpi/picf/core/pipeline_test.py scripts/picf_core_train.py scripts/picf_core_train_smoke.py`：通过
-- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`54 passed`
+- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`56 passed`
 - `python scripts/picf_core_train_smoke.py --calvin-root /tmp/openpi_picf_smoke_data/task_ABCD_D --device cpu`：通过
 - CPU smoke 当前输出：
   - `loss_total = 0.8595`
@@ -255,6 +255,10 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
   - 改 semantic 不改 `physical_prediction_cache`
   - 改 previous semantic 不改下一步 innovation
   - semantic future auxiliary loss 仍让 predictive cross-attn 保持在图中
+- 验证级别说明：
+  - 以上结论来自代码路径审计、回归测试、CPU smoke、以及云机双卡 smoke
+  - 它支持“当前工程实现满足此处定义的数学 contract”的判断
+  - 但它**不是**机器校验的形式化证明；当前仓库没有 Coq / Lean / TLA+ / model-checking 工件
 
 当前已落地的 downstream 融合口径是：
 

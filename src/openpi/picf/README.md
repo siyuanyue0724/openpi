@@ -1164,12 +1164,16 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - semantic side path language-late
   - anchor / posterior tokens 与 semantic tokens 在 downstream 是平级流，但不要求预先同宽
 - 2026-04-10 本地复核新增通过：
-  - `54 passed` 核心回归
+  - `56 passed` 核心回归
   - CPU 一步训练 smoke
   - 新增红线回归：
     - 改 semantic 不改 `physical_prediction_cache`
     - 改 previous semantic 不改下一步 innovation
     - semantic future auxiliary loss 会把 predictive cross-attn 保持在图中
+- 验证级别说明：
+  - 以上结论来自代码路径审计、回归测试、以及云机双卡 smoke
+  - 它们足以支持“当前工程实现满足既定数学契约”的判断
+  - 但这**不是** Coq / Lean / TLA+ / model checking 意义下的机器校验形式化证明
 
 如果以上两条显式语义路径都没有，core 才会回退到零语义 token。
 
