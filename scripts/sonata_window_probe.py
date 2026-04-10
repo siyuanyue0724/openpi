@@ -42,6 +42,8 @@ def _coerce_bool(value: object) -> bool:
 def _load_args(args_json: Path, *, device: str | None) -> argparse.Namespace:
     payload = json.loads(args_json.read_text(encoding="utf-8"))
     args = argparse.Namespace(**payload)
+    if not hasattr(args, "sonata_disable_flash"):
+        args.sonata_disable_flash = False
     if device is not None:
         args.device = str(device)
     tactile_names = getattr(args, "tactile_sensor_names", ("digit", "gelsight_mini"))

@@ -33,6 +33,8 @@ from scripts.sonata_window_probe import _override_build_sample
 
 def _coerce_loaded_args(payload: dict[str, Any], *, device_override: str | None) -> argparse.Namespace:
     args = argparse.Namespace(**payload)
+    if not hasattr(args, "sonata_disable_flash"):
+        args.sonata_disable_flash = False
     if device_override is not None:
         args.device = str(device_override)
     tactile_names = getattr(args, "tactile_sensor_names", ("digit", "gelsight_mini"))
