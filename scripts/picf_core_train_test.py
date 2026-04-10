@@ -29,6 +29,8 @@ def _base_args() -> argparse.Namespace:
         num_train_steps=30000,
         log_interval=100,
         save_interval=5000,
+        diagnostic_interval=500,
+        diagnostic_visual_upscale=64,
         accum_steps=1,
         max_empty_window_retries=32,
         unroll_steps=2,
@@ -200,11 +202,17 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
             self.device = torch.device("cpu")
             self.dtype = torch.float32
             self.calls: list[torch.Tensor | None] = []
+            self.config = types.SimpleNamespace(visual_real_grid=4)
 
         def step(self, _current, *, previous=None, visual_map_override=None, semantic_override=None, action_future=None):
             del previous, visual_map_override, action_future
             self.calls.append(semantic_override)
-            state = types.SimpleNamespace()
+            state = types.SimpleNamespace(
+                predictive=types.SimpleNamespace(
+                    physical_prediction_cache=types.SimpleNamespace(visual_real=torch.linspace(0.0, 1.0, 48)),
+                    prediction_cache=types.SimpleNamespace(visual_real=torch.linspace(1.0, 0.0, 48)),
+                )
+            )
             return types.SimpleNamespace(
                 state=state,
                 debug={"projective_candidate_density": 0.0},
@@ -251,11 +259,64 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
     original_loss = _MODULE.compute_transition_loss
     try:
         _MODULE.compute_transition_loss = lambda *args, **kwargs: dummy_losses
-        _ = trainer(window)
+        result = trainer(window, capture_visual_diagnostics=True)
     finally:
         _MODULE.compute_transition_loss = original_loss
     assert trainer.core.calls
     torch.testing.assert_close(trainer.core.calls[0], torch.full((1, 4), 1.0))
+    assert len(result["diagnostic_physical_visual_real_seq"]) == 1
+    assert len(result["diagnostic_semantic_visual_real_seq"]) == 1
+
+
+def test_decode_visual_real_prediction_upsamples_grid() -> None:
+    flat = torch.linspace(0.0, 1.0, 48)
+    image = _MODULE._decode_visual_real_prediction(flat, grid=4, upscale=8)
+    assert image is not None
+    assert image.shape == (32, 32, 3)
+    assert image.dtype == np.uint8
+
+
+def test_save_visual_diagnostics_writes_png_gif_and_metadata(tmp_path: Path) -> None:
+    frame0 = PicfObservation(
+        rgb_static=np.full((16, 16, 3), 32, dtype=np.uint8),
+        depth_static=np.zeros((16, 16), dtype=np.float32),
+        robot_obs=np.zeros((15,), dtype=np.float32),
+        prompt="stack blocks",
+        step_id=10,
+        segment_id=3,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+        action=np.zeros((7,), dtype=np.float32),
+    )
+    frame1 = dataclasses.replace(frame0, step_id=11, reset_scaffold=False, rgb_static=np.full((16, 16, 3), 96, dtype=np.uint8))
+    frame2 = dataclasses.replace(frame0, step_id=12, reset_scaffold=False, rgb_static=np.full((16, 16, 3), 160, dtype=np.uint8))
+    window = _MODULE._TransitionWindow(segment_id=3, start_step_id=10, prompt="stack blocks", frames=(frame0, frame1, frame2))
+
+    physical = [torch.linspace(0.0, 1.0, 48), torch.linspace(1.0, 0.0, 48)]
+    semantic = [torch.linspace(0.25, 0.75, 48), torch.linspace(0.75, 0.25, 48)]
+
+    _MODULE._save_visual_diagnostics(
+        output_dir=tmp_path,
+        step=500,
+        window=window,
+        physical_visual_real_seq=physical,
+        semantic_visual_real_seq=semantic,
+        visual_real_grid=4,
+        visual_real_upscale=8,
+    )
+
+    diag_dir = tmp_path / "diagnostics" / "000500"
+    assert (diag_dir / "gt_window_static.gif").is_file()
+    assert (diag_dir / "pred_physical_window_static.gif").is_file()
+    assert (diag_dir / "pred_semantic_window_static.gif").is_file()
+    assert (diag_dir / "compare_grid.png").is_file()
+    assert (diag_dir / "gt_static_t0.png").is_file()
+    assert (diag_dir / "gt_static_t1.png").is_file()
+    assert (diag_dir / "pred_physical_t1.png").is_file()
+    assert (diag_dir / "pred_semantic_t2.png").is_file()
+    metadata = (diag_dir / "metadata.json").read_text(encoding="utf-8")
+    assert "coarse 4x4 RGB reconstructions" in metadata
+    assert "stack blocks" in metadata
 
 
 def test_first_step_window_precheck_rejects_empty_local_support() -> None:

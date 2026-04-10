@@ -595,6 +595,13 @@ mkdir -p /mnt/checkpoints/picf_core/logs && \
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留日志文件、不显示进度条，可改成 `--no-progress`
 - 当前默认 `save_interval=5000`
+- 当前默认 `diagnostic_interval=500`
+  - 每 `500` step 会在 `<checkpoint-base-dir>/picf_core/<exp-name>/diagnostics/<step>/` 下保存：
+    - 当前 / 真值未来静态帧 PNG
+    - `pred_physical` / `pred_semantic` 的 coarse next-frame PNG
+    - 对应短窗口 GIF
+  - 这些 GIF/PNG 来自 PICF 的 `visual_real` future head，可视化的是 **4x4 RGB coarse prediction 上采样结果**
+  - 它不是 CALVIN rollout evaluator 的策略执行视频
 - 云上当前推荐 `wandb offline`，这和旧 `pi0.5` 正式训练命令保持一致
 - 上面这条命令不再显式传 `--warmup-steps`，因为默认已经按总步数自动取 `2%`
 

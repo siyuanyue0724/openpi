@@ -202,6 +202,25 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 - `predictive_semantic_reads = 2`
 - `control_semantic_reads = 2`
 
+当前训练脚本的可视化导出 contract 也已经固定：
+
+- `diagnostic_interval = 500`
+- rank0 每 `500` step 保存一个真实 CALVIN window 的诊断目录
+- 目录里包含：
+  - `gt_static_t*.png`
+  - `pred_physical_t*.png`
+  - `pred_semantic_t*.png`
+  - `gt_window_static.gif`
+  - `pred_physical_window_static.gif`
+  - `pred_semantic_window_static.gif`
+  - `compare_grid.png`
+- 这些 `pred_*` 图像来自 PICF visual future head 的 `visual_real` 分支
+- 当前 `visual_real_grid = 4`，因此它们是 **4x4 coarse RGB future prediction 的上采样诊断图**
+- 它们用于检查：
+  - physical future cache 是否在学当前 world stream 的短时预测
+  - semantic-conditioned readout 是否只做条件调制而不是直接污染 posterior
+- 它们**不等价于** CALVIN evaluator 的 policy rollout video
+
 按当前实现直接统计，异宽融合块本身的参数量为：
 
 - `control_fusion_params = 4,476,930`

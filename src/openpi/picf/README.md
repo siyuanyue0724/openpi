@@ -813,6 +813,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 
 - `<checkpoint-base-dir>/picf_core/<exp-name>/args.json`
 - `<checkpoint-base-dir>/picf_core/<exp-name>/metrics.jsonl`
+- `<checkpoint-base-dir>/picf_core/<exp-name>/diagnostics/<step>/...`
 - `<checkpoint-base-dir>/picf_core/<exp-name>/wandb_id.txt`
 - `<checkpoint-base-dir>/picf_core/<exp-name>/latest.pt`
 - `<checkpoint-base-dir>/picf_core/<exp-name>/<N>/model.pt`
@@ -823,12 +824,25 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 
 - `args.json`：记录本次启动参数
 - `metrics.jsonl`：按 `log_interval` 追加 step 级 JSON 指标
+- `diagnostics/<step>/...`：按 `diagnostic_interval` 保存当前训练 window 的静态相机可视化
+  - `gt_static_t*.png`：真实 CALVIN 当前 / 未来静态帧
+  - `pred_physical_t*.png`：physical future cache 的 `visual_real` 预测上采样图
+  - `pred_semantic_t*.png`：semantic-conditioned future readout 的 `visual_real` 预测上采样图
+  - `gt_window_static.gif` / `pred_*_window_static.gif`：短窗口 GIF
+  - `compare_grid.png`：`current | pred_physical | pred_semantic | target_next` 对比图
 - `wandb_id.txt`：记录当前实验对应的 wandb run id，供 `--resume` 时继续同一 run
 - `latest.pt`：轻量 latest 指针，记录最近一次 checkpoint 的 step 和目录
 - `<N>/...`：按完成步数编号的原子 checkpoint 目录；当前一步 checkpoint 内包含：
   - `model.pt`
   - `optimizer.pt`
   - `metadata.pt`
+
+这里必须明确：
+
+- 这些 `pred_*` 图不是全分辨率视频生成结果
+- 它们来自 PICF visual future head 的 `visual_real` 分支
+- 当前默认是 `visual_real_grid = 4`，所以本质是 **4x4 RGB coarse prediction 的上采样可视化**
+- 它适合看“模型大致在期待什么”，不等价于 CALVIN evaluator 的 policy rollout video
 
 恢复语义是：
 

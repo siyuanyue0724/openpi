@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import torch
 import torch.distributed as dist
+from PIL import Image
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.parameter import UninitializedParameter
 import tqdm.auto as tqdm
@@ -99,6 +100,157 @@ def _rgb_visual_override(rgb: np.ndarray, grid: int = 8) -> torch.Tensor:
     rgb_t = torch.as_tensor(np.asarray(rgb, dtype=np.float32) / 255.0, dtype=torch.float32)
     pooled = torch.nn.functional.adaptive_avg_pool2d(rgb_t.permute(2, 0, 1)[None, :], (grid, grid))[0]
     return pooled.permute(1, 2, 0).contiguous()
+
+
+def _rgb_uint8(rgb: np.ndarray) -> np.ndarray:
+    array = np.asarray(rgb)
+    if array.dtype != np.uint8:
+        array = np.clip(array, 0, 255).astype(np.uint8)
+    return array
+
+
+def _decode_visual_real_prediction(
+    visual_real: torch.Tensor | None,
+    *,
+    grid: int,
+    upscale: int,
+) -> np.ndarray | None:
+    if visual_real is None:
+        return None
+    flat = visual_real.detach().to(device="cpu", dtype=torch.float32).reshape(-1)
+    expected = 3 * (int(grid) ** 2)
+    if flat.numel() != expected:
+        raise ValueError(f"Expected visual_real with {expected} values, got {flat.numel()}.")
+    image = flat.reshape(3, int(grid), int(grid)).permute(1, 2, 0).numpy()
+    image = np.clip(image, 0.0, 1.0)
+    image_uint8 = np.clip(np.round(image * 255.0), 0.0, 255.0).astype(np.uint8)
+    if int(upscale) > 1:
+        side = int(grid) * int(upscale)
+        image_uint8 = np.asarray(
+            Image.fromarray(image_uint8).resize((side, side), resample=Image.Resampling.NEAREST)
+        )
+    return image_uint8
+
+
+def _write_png(path: Path, image: np.ndarray) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    Image.fromarray(_rgb_uint8(image)).save(path)
+
+
+def _write_gif(path: Path, frames: list[np.ndarray], *, duration_ms: int = 400) -> None:
+    if not frames:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    pil_frames = [Image.fromarray(_rgb_uint8(frame)) for frame in frames]
+    pil_frames[0].save(
+        path,
+        save_all=True,
+        append_images=pil_frames[1:],
+        duration=int(duration_ms),
+        loop=0,
+    )
+
+
+def _save_visual_diagnostics(
+    *,
+    output_dir: Path,
+    step: int,
+    window: "_TransitionWindow",
+    physical_visual_real_seq: list[torch.Tensor | None],
+    semantic_visual_real_seq: list[torch.Tensor | None],
+    visual_real_grid: int,
+    visual_real_upscale: int,
+) -> None:
+    diag_dir = output_dir / "diagnostics" / f"{int(step):06d}"
+    if diag_dir.exists():
+        shutil.rmtree(diag_dir)
+    diag_dir.mkdir(parents=True, exist_ok=True)
+
+    gt_frames = [_rgb_uint8(frame.rgb_static) for frame in window.frames]
+    physical_frames: list[np.ndarray] = [gt_frames[0]]
+    semantic_frames: list[np.ndarray] = [gt_frames[0]]
+    records: list[dict[str, Any]] = []
+
+    for index, predicted in enumerate(physical_visual_real_seq, start=1):
+        decoded = _decode_visual_real_prediction(
+            predicted,
+            grid=visual_real_grid,
+            upscale=visual_real_upscale,
+        )
+        if decoded is not None:
+            _write_png(diag_dir / f"pred_physical_t{index}.png", decoded)
+            physical_frames.append(decoded)
+    for index, predicted in enumerate(semantic_visual_real_seq, start=1):
+        decoded = _decode_visual_real_prediction(
+            predicted,
+            grid=visual_real_grid,
+            upscale=visual_real_upscale,
+        )
+        if decoded is not None:
+            _write_png(diag_dir / f"pred_semantic_t{index}.png", decoded)
+            semantic_frames.append(decoded)
+
+    for index, frame in enumerate(window.frames):
+        rgb = _rgb_uint8(frame.rgb_static)
+        _write_png(diag_dir / f"gt_static_t{index}.png", rgb)
+        records.append(
+            {
+                "t": int(index),
+                "step_id": int(frame.step_id),
+                "segment_id": int(frame.segment_id),
+                "timestamp_s": float(frame.timestamp_s),
+                "reset_scaffold": bool(frame.reset_scaffold),
+            }
+        )
+
+    compare_rows: list[np.ndarray] = []
+    for transition_index in range(len(window.frames) - 1):
+        current = gt_frames[transition_index]
+        target_next = gt_frames[transition_index + 1]
+        physical = _decode_visual_real_prediction(
+            physical_visual_real_seq[transition_index] if transition_index < len(physical_visual_real_seq) else None,
+            grid=visual_real_grid,
+            upscale=visual_real_upscale,
+        )
+        semantic = _decode_visual_real_prediction(
+            semantic_visual_real_seq[transition_index] if transition_index < len(semantic_visual_real_seq) else None,
+            grid=visual_real_grid,
+            upscale=visual_real_upscale,
+        )
+        if physical is None:
+            physical = np.zeros_like(target_next)
+        if semantic is None:
+            semantic = np.zeros_like(target_next)
+        compare_size = physical.shape[1], physical.shape[0]
+        current_ref = np.asarray(
+            Image.fromarray(current).resize(compare_size, resample=Image.Resampling.BILINEAR)
+        )
+        target_ref = np.asarray(
+            Image.fromarray(target_next).resize(compare_size, resample=Image.Resampling.BILINEAR)
+        )
+        row = np.concatenate([current_ref, physical, semantic, target_ref], axis=1)
+        compare_rows.append(row)
+    if compare_rows:
+        _write_png(diag_dir / "compare_grid.png", np.concatenate(compare_rows, axis=0))
+
+    _write_gif(diag_dir / "gt_window_static.gif", gt_frames)
+    _write_gif(diag_dir / "pred_physical_window_static.gif", physical_frames)
+    _write_gif(diag_dir / "pred_semantic_window_static.gif", semantic_frames)
+
+    metadata = {
+        "step": int(step),
+        "prompt": window.prompt,
+        "segment_id": int(window.segment_id),
+        "start_step_id": int(window.start_step_id),
+        "visual_real_grid": int(visual_real_grid),
+        "visual_real_upscale": int(visual_real_upscale),
+        "diagnostic_note": (
+            "pred_* images are upsampled visual_real predictions from the PICF future head; "
+            "they are coarse 4x4 RGB reconstructions, not full-resolution generated video frames."
+        ),
+        "frames": records,
+    }
+    (diag_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _default_vjepa_checkpoint(model_name: str) -> str | None:
@@ -219,6 +371,7 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "num_train_steps",
         "log_interval",
         "save_interval",
+        "diagnostic_visual_upscale",
         "accum_steps",
         "max_empty_window_retries",
         "unroll_steps",
@@ -266,6 +419,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(f"weight_decay must be >= 0, got {args.weight_decay}.")
     if float(args.grad_clip_norm) < 0.0:
         raise ValueError(f"grad_clip_norm must be >= 0, got {args.grad_clip_norm}.")
+    if int(args.diagnostic_interval) < 0:
+        raise ValueError(f"diagnostic_interval must be >= 0, got {args.diagnostic_interval}.")
     for name in ("point_backbone_lr_scale", "visual_lr_scale", "tactile_lr_scale", "semantic_lr_scale"):
         value = float(getattr(args, name))
         if value <= 0.0:
@@ -600,10 +755,17 @@ class _PicfWindowTrainer(torch.nn.Module):
         self.visual_grid = int(visual_grid)
         self.use_visual_override = bool(use_visual_override)
 
-    def forward(self, window: _TransitionWindow) -> dict[str, torch.Tensor]:
+    def forward(
+        self,
+        window: _TransitionWindow,
+        *,
+        capture_visual_diagnostics: bool = False,
+    ) -> dict[str, Any]:
         previous = None
         metrics: dict[str, torch.Tensor] | None = None
         totals: list[torch.Tensor] = []
+        physical_visual_real_seq: list[torch.Tensor | None] = []
+        semantic_visual_real_seq: list[torch.Tensor | None] = []
         for index in range(len(window.frames) - 1):
             current = dataclasses.replace(window.frames[index], reset_scaffold=(index == 0))
             nxt = dataclasses.replace(window.frames[index + 1], reset_scaffold=False)
@@ -619,6 +781,15 @@ class _PicfWindowTrainer(torch.nn.Module):
                 semantic_override=semantic_override,
                 action_future=current.action,
             )
+            if capture_visual_diagnostics:
+                physical_visual_real = output.state.predictive.physical_prediction_cache.visual_real
+                semantic_visual_real = output.state.predictive.prediction_cache.visual_real
+                physical_visual_real_seq.append(
+                    None if physical_visual_real is None else physical_visual_real.detach().to(device="cpu")
+                )
+                semantic_visual_real_seq.append(
+                    None if semantic_visual_real is None else semantic_visual_real.detach().to(device="cpu")
+                )
             losses = compute_transition_loss(
                 self.core,
                 output,
@@ -665,7 +836,7 @@ class _PicfWindowTrainer(torch.nn.Module):
         assert metrics is not None
         denom = float(len(window.frames) - 1)
         mean_total = torch.stack(totals).mean()
-        return {
+        result: dict[str, Any] = {
             "loss_total": mean_total,
             "loss_action": metrics["loss_action"] / denom,
             "loss_visual_latent": metrics["loss_visual_latent"] / denom,
@@ -680,6 +851,10 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_pt": metrics["loss_pt"] / denom,
             "projective_candidate_density": metrics["projective_candidate_density"] / denom,
         }
+        if capture_visual_diagnostics:
+            result["diagnostic_physical_visual_real_seq"] = physical_visual_real_seq
+            result["diagnostic_semantic_visual_real_seq"] = semantic_visual_real_seq
+        return result
 
 
 def _is_retryable_first_step_error(exc: RuntimeError) -> bool:
@@ -1274,6 +1449,10 @@ def train(args: argparse.Namespace) -> None:
             _set_optimizer_lr(optimizer, lr)
             optimizer.zero_grad(set_to_none=True)
             trainer_module = model.module if isinstance(model, DistributedDataParallel) else model
+            capture_visual_diagnostics = bool(
+                (args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0))
+                or ((step + 1) == args.num_train_steps)
+            )
             for micro_step in range(args.accum_steps):
                 retry_count = 0
                 while True:
@@ -1308,7 +1487,10 @@ def train(args: argparse.Namespace) -> None:
                     sync_context = contextlib.nullcontext()
                 with sync_context:
                     try:
-                        outputs = model(window)
+                        outputs = model(
+                            window,
+                            capture_visual_diagnostics=capture_visual_diagnostics,
+                        )
                         (outputs["loss_total"] / float(args.accum_steps)).backward()
                     except Exception:
                         logging.exception(
@@ -1346,6 +1528,17 @@ def train(args: argparse.Namespace) -> None:
             if pbar is not None:
                 pbar.update(1)
                 pbar.set_postfix({"loss": f"{current_total:.4f}", "lr": f"{lr:.2e}", "step": int(step + 1)})
+
+            if is_main and capture_visual_diagnostics:
+                _save_visual_diagnostics(
+                    output_dir=output_dir,
+                    step=step + 1,
+                    window=window,
+                    physical_visual_real_seq=list(outputs.get("diagnostic_physical_visual_real_seq", [])),
+                    semantic_visual_real_seq=list(outputs.get("diagnostic_semantic_visual_real_seq", [])),
+                    visual_real_grid=trainer_module.core.config.visual_real_grid,
+                    visual_real_upscale=args.diagnostic_visual_upscale,
+                )
 
             should_log = ((step + 1) % args.log_interval == 0) or ((step + 1) == args.num_train_steps)
             if should_log:
@@ -1418,6 +1611,8 @@ def main() -> None:
     parser.add_argument("--num-train-steps", type=int, default=30000)
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--save-interval", type=int, default=5000)
+    parser.add_argument("--diagnostic-interval", type=int, default=500)
+    parser.add_argument("--diagnostic-visual-upscale", type=int, default=64)
     parser.add_argument("--accum-steps", type=int, default=1)
     parser.add_argument("--max-empty-window-retries", type=int, default=32)
     parser.add_argument("--unroll-steps", type=int, default=2)
