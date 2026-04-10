@@ -132,6 +132,15 @@ class Point(Dict):
         ]
         code = torch.stack(code)
         order = torch.argsort(code)
+        if order.numel() > 0:
+            min_order = int(order.min().item())
+            max_order = int(order.max().item())
+            if min_order < 0 or max_order >= int(code.shape[1]):
+                raise RuntimeError(
+                    "Sonata serialization order out of bounds: "
+                    f"valid=[0,{int(code.shape[1]) - 1}] got min={min_order} max={max_order} "
+                    f"for code.shape={tuple(code.shape)}"
+                )
         inverse = torch.zeros_like(order).scatter_(
             dim=1,
             index=order,
@@ -298,6 +307,15 @@ class RPE(torch.nn.Module):
             + self.pos_bnd  # relative position to positive index
             + torch.arange(3, device=coord.device) * self.rpe_num  # x, y, z stride
         )
+        if idx.numel() > 0:
+            min_index = int(idx.min().item())
+            max_index = int(idx.max().item())
+            if min_index < 0 or max_index >= int(self.rpe_table.shape[0]):
+                raise RuntimeError(
+                    "Sonata RPE index out of bounds: "
+                    f"valid=[0,{int(self.rpe_table.shape[0]) - 1}] got min={min_index} max={max_index} "
+                    f"for coord.shape={tuple(coord.shape)}"
+                )
         out = self.rpe_table.index_select(0, idx.reshape(-1))
         out = out.view(idx.shape + (-1,)).sum(3)
         out = out.permute(0, 3, 1, 2)  # (N, K, K, H) -> (N, H, K, K)

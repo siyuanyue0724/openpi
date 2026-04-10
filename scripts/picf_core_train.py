@@ -10,6 +10,7 @@ import os
 import random
 import shutil
 import time
+from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -1348,6 +1349,8 @@ def train(args: argparse.Namespace) -> None:
         interval_start = time.time()
         steps_in_interval = 0
         retried_windows_interval = 0
+        recent_windows: deque[dict[str, Any]] = deque(maxlen=4)
+        debug_cuda_sync = os.environ.get("OPENPI_DEBUG_CUDA_SYNC", "").strip() not in {"", "0", "false", "False"}
         pbar = (
             tqdm.tqdm(
                 total=args.num_train_steps,
@@ -1430,6 +1433,7 @@ def train(args: argparse.Namespace) -> None:
                 "Window contract: first-step empty xyzrgb windows will be resampled up to %s times per micro-step.",
                 args.max_empty_window_retries,
             )
+            logging.info("CUDA debug sync: enabled=%s", bool(debug_cuda_sync))
             for group in optimizer_group_info:
                 logging.info(
                     "Optimizer group: name=%s lr=%s num_params=%s",
@@ -1486,12 +1490,27 @@ def train(args: argparse.Namespace) -> None:
                 else:
                     sync_context = contextlib.nullcontext()
                 with sync_context:
+                    recent_windows.append(
+                        {
+                            "global_step": int(step + 1),
+                            "micro_step": int(micro_step + 1),
+                            "flat_index": int(flat_index),
+                            "segment": int(window.segment_id),
+                            "start_step": int(window.start_step_id),
+                            "prompt": str(window.prompt),
+                            "retry_count": int(retry_count),
+                        }
+                    )
                     try:
                         outputs = model(
                             window,
                             capture_visual_diagnostics=capture_visual_diagnostics,
                         )
+                        if debug_cuda_sync and device.type == "cuda":
+                            torch.cuda.synchronize(device=device)
                         (outputs["loss_total"] / float(args.accum_steps)).backward()
+                        if debug_cuda_sync and device.type == "cuda":
+                            torch.cuda.synchronize(device=device)
                     except Exception:
                         logging.exception(
                             "PICF training window failure: rank=%s global_step=%s micro_step=%s flat_index=%s "
@@ -1504,6 +1523,7 @@ def train(args: argparse.Namespace) -> None:
                             window.start_step_id,
                             window.prompt,
                         )
+                        logging.error("Recent window history before failure: %s", list(recent_windows))
                         raise
                 metric_accum.loss_total += float(outputs["loss_total"].detach().item())
                 metric_accum.loss_action += float(outputs["loss_action"].detach().item())

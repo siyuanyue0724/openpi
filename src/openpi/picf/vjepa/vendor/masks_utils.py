@@ -15,6 +15,15 @@ def apply_masks(x, masks, concat=True):
     """
     all_x = []
     for m in masks:
+        if m.numel() > 0:
+            min_index = int(m.min().item())
+            max_index = int(m.max().item())
+            if min_index < 0 or max_index >= int(x.size(1)):
+                raise RuntimeError(
+                    "V-JEPA mask index out of bounds: "
+                    f"valid=[0,{int(x.size(1)) - 1}] got min={min_index} max={max_index} "
+                    f"for x.shape={tuple(x.shape)} mask.shape={tuple(m.shape)}"
+                )
         mask_keep = m.unsqueeze(-1).repeat(1, 1, x.size(-1))
         all_x += [torch.gather(x, dim=1, index=mask_keep)]
     if not concat:

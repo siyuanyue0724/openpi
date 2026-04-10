@@ -461,6 +461,7 @@ def test_alignment_loss_point_tactile_branch_uses_tau_pt(tmp_path: Path) -> None
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
     frame.tactile = _make_tactile_packet(frame.step_id)
+    frame.force_vec = np.array([2.0, 0.0, 0.0], dtype=np.float32)
     output = core.step(
         frame,
         point_features_override=_point_override(core, frame),
@@ -472,3 +473,20 @@ def test_alignment_loss_point_tactile_branch_uses_tau_pt(tmp_path: Path) -> None
     assert torch.isfinite(warm.pt)
     assert torch.isfinite(cold.pt)
     assert not torch.allclose(warm.pt, cold.pt)
+
+
+def test_alignment_loss_point_tactile_branch_defaults_off_without_explicit_contact(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    frame.tactile = _make_tactile_packet(frame.step_id)
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=np.full((4, 4, 8), 1.0, dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+    )
+    gate = output.state.token_field.tactile_contact_gate
+    assert gate.shape[0] == 2
+    assert torch.allclose(gate, torch.zeros_like(gate))
+    alignment = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(lambda_pt=1.0))
+    assert torch.allclose(alignment.pt, torch.zeros_like(alignment.pt))

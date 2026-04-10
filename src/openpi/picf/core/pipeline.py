@@ -1273,7 +1273,7 @@ class PicfFullCore(nn.Module):
                     or 0.0
                 )
                 if has_explicit_contact
-                else 1.0
+                else 0.0
             )
             tactile_contact_gate = torch.full(
                 (tactile_tokens.shape[0],),
