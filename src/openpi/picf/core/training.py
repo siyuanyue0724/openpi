@@ -31,6 +31,7 @@ class PicfTransitionLossConfig:
     lambda_visual_real: float = 0.1
     lambda_tactile_real: float = 0.3
     lambda_point_real: float = 0.3
+    lambda_semantic_future_aux: float = 0.25
     lambda_anchor_pv: float = 0.1
     lambda_pv_weak: float = 0.02
     lambda_focus_pv: float = 0.0
@@ -64,6 +65,7 @@ class PicfTransitionLossBreakdown:
     visual_real: torch.Tensor
     tactile_real: torch.Tensor
     point_real: torch.Tensor
+    semantic_future_aux: torch.Tensor
     alignment: torch.Tensor
     anchor_pv: torch.Tensor
     pv_weak: torch.Tensor
@@ -82,6 +84,7 @@ class PicfTransitionLossBreakdown:
             "visual_real": float(self.visual_real.item()),
             "tactile_real": float(self.tactile_real.item()),
             "point_real": float(self.point_real.item()),
+            "semantic_future_aux": float(self.semantic_future_aux.item()),
             "alignment": float(self.alignment.item()),
             "anchor_pv": float(self.anchor_pv.item()),
             "pv_weak": float(self.pv_weak.item()),
@@ -382,7 +385,8 @@ def compute_transition_loss(
 ) -> PicfTransitionLossBreakdown:
     cfg = config or PicfTransitionLossConfig()
     predictive = output_t.state.predictive
-    pred_cache = predictive.prediction_cache
+    pred_cache = predictive.physical_prediction_cache
+    semantic_future_cache = predictive.prediction_cache
     future = extract_future_targets(core, next_observation, visual_map_override=next_visual_map_override)
     alignment = compute_alignment_loss(
         output_t.state,
@@ -457,12 +461,60 @@ def compute_transition_loss(
     else:
         point_real = _zero_weight_loss(pred_cache.point_real, predictive.action)
 
+    if _branch_is_usable(
+        pred=semantic_future_cache.visual_latent,
+        target=future.visual_latent,
+        pred_available=semantic_future_cache.availability[0],
+        target_available=future.availability[0],
+    ):
+        semantic_visual_latent = fn.mse_loss(semantic_future_cache.visual_latent, future.visual_latent)
+    else:
+        semantic_visual_latent = _zero_weight_loss(semantic_future_cache.visual_latent, predictive.action)
+
+    if _branch_is_usable(
+        pred=semantic_future_cache.visual_real,
+        target=future.visual_real,
+        pred_available=semantic_future_cache.availability[1],
+        target_available=future.availability[1],
+    ):
+        semantic_visual_real = fn.l1_loss(semantic_future_cache.visual_real, future.visual_real)
+    else:
+        semantic_visual_real = _zero_weight_loss(semantic_future_cache.visual_real, predictive.action)
+
+    if _branch_is_usable(
+        pred=semantic_future_cache.tactile_real,
+        target=future.tactile_real,
+        pred_available=semantic_future_cache.availability[2],
+        target_available=future.availability[2],
+    ):
+        semantic_tactile_real = fn.l1_loss(semantic_future_cache.tactile_real, future.tactile_real)
+    else:
+        semantic_tactile_real = _zero_weight_loss(semantic_future_cache.tactile_real, predictive.action)
+
+    if _branch_is_usable(
+        pred=semantic_future_cache.point_real,
+        target=future.point_real,
+        pred_available=semantic_future_cache.availability[3],
+        target_available=future.availability[3],
+    ):
+        semantic_point_real = fn.binary_cross_entropy_with_logits(semantic_future_cache.point_real, future.point_real)
+    else:
+        semantic_point_real = _zero_weight_loss(semantic_future_cache.point_real, predictive.action)
+
+    semantic_future_aux = (
+        (cfg.lambda_visual_latent * semantic_visual_latent)
+        + (cfg.lambda_visual_real * semantic_visual_real)
+        + (cfg.lambda_tactile_real * semantic_tactile_real)
+        + (cfg.lambda_point_real * semantic_point_real)
+    )
+
     total = (
         action_loss
         + (cfg.lambda_visual_latent * visual_latent)
         + (cfg.lambda_visual_real * visual_real)
         + (cfg.lambda_tactile_real * tactile_real)
         + (cfg.lambda_point_real * point_real)
+        + (cfg.lambda_semantic_future_aux * semantic_future_aux)
         + alignment.total
     )
     return PicfTransitionLossBreakdown(
@@ -475,6 +527,7 @@ def compute_transition_loss(
         visual_real=visual_real,
         tactile_real=tactile_real,
         point_real=point_real,
+        semantic_future_aux=semantic_future_aux,
         alignment=alignment.total,
         anchor_pv=alignment.anchor_pv,
         pv_weak=alignment.pv_weak,

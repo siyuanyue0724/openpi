@@ -98,6 +98,8 @@ class PicfPredictiveState:
     pooled_state: torch.Tensor
     action: torch.Tensor
     executed_action: torch.Tensor
+    physical_global_pred: torch.Tensor
+    physical_prediction_cache: PicfPredictionCache
     global_pred: torch.Tensor
     prediction_cache: PicfPredictionCache
 

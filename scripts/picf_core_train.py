@@ -280,6 +280,11 @@ def _validate_train_args(args: argparse.Namespace) -> None:
             "semantic_cross_dim must be divisible by attention_heads; "
             f"got semantic_cross_dim={args.semantic_cross_dim} attention_heads={args.attention_heads}."
         )
+    if not (0.0 <= float(args.predictive_semantic_dropout_prob) < 1.0):
+        raise ValueError(
+            "predictive_semantic_dropout_prob must be in [0, 1); "
+            f"got {args.predictive_semantic_dropout_prob}."
+        )
     if str(args.device).startswith("cpu") and args.point_backbone == "sonata":
         raise RuntimeError(
             "point_backbone=sonata currently requires CUDA. "
@@ -536,6 +541,7 @@ class _MetricAccumulator:
     loss_visual_real: float = 0.0
     loss_tactile_real: float = 0.0
     loss_point_real: float = 0.0
+    loss_semantic_future_aux: float = 0.0
     loss_alignment: float = 0.0
     loss_anchor_pv: float = 0.0
     loss_pv_weak: float = 0.0
@@ -551,6 +557,7 @@ class _MetricAccumulator:
         self.loss_visual_real += float(losses.visual_real.item())
         self.loss_tactile_real += float(losses.tactile_real.item())
         self.loss_point_real += float(losses.point_real.item())
+        self.loss_semantic_future_aux += float(losses.semantic_future_aux.item())
         self.loss_alignment += float(losses.alignment.item())
         self.loss_anchor_pv += float(losses.anchor_pv.item())
         self.loss_pv_weak += float(losses.pv_weak.item())
@@ -568,6 +575,7 @@ class _MetricAccumulator:
             "loss_visual_real": self.loss_visual_real / denom,
             "loss_tactile_real": self.loss_tactile_real / denom,
             "loss_point_real": self.loss_point_real / denom,
+            "loss_semantic_future_aux": self.loss_semantic_future_aux / denom,
             "loss_alignment": self.loss_alignment / denom,
             "loss_anchor_pv": self.loss_anchor_pv / denom,
             "loss_pv_weak": self.loss_pv_weak / denom,
@@ -631,6 +639,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_visual_real": losses.visual_real,
                     "loss_tactile_real": losses.tactile_real,
                     "loss_point_real": losses.point_real,
+                    "loss_semantic_future_aux": losses.semantic_future_aux,
                     "loss_alignment": losses.alignment,
                     "loss_anchor_pv": losses.anchor_pv,
                     "loss_pv_weak": losses.pv_weak,
@@ -644,6 +653,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_visual_real"] = metrics["loss_visual_real"] + losses.visual_real
                 metrics["loss_tactile_real"] = metrics["loss_tactile_real"] + losses.tactile_real
                 metrics["loss_point_real"] = metrics["loss_point_real"] + losses.point_real
+                metrics["loss_semantic_future_aux"] = metrics["loss_semantic_future_aux"] + losses.semantic_future_aux
                 metrics["loss_alignment"] = metrics["loss_alignment"] + losses.alignment
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
@@ -662,6 +672,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_visual_real": metrics["loss_visual_real"] / denom,
             "loss_tactile_real": metrics["loss_tactile_real"] / denom,
             "loss_point_real": metrics["loss_point_real"] / denom,
+            "loss_semantic_future_aux": metrics["loss_semantic_future_aux"] / denom,
             "loss_alignment": metrics["loss_alignment"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
@@ -847,6 +858,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         control_layers=args.control_layers,
         predictive_semantic_reads=args.predictive_semantic_reads,
         control_semantic_reads=args.control_semantic_reads,
+        predictive_semantic_dropout_prob=args.predictive_semantic_dropout_prob,
         attention_heads=args.attention_heads,
         future_vote_heads=args.future_vote_heads,
     )
@@ -1188,7 +1200,7 @@ def train(args: argparse.Namespace) -> None:
                 bool(args.wandb_enabled and args.wandb_mode != "disabled"),
             )
             logging.info(
-                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s predictive_semantic_reads=%s control_semantic_reads=%s attention_heads=%s future_vote_heads=%s",
+                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
                 args.hidden_dim,
                 args.posterior_hidden_dim,
                 args.latent_dim,
@@ -1205,6 +1217,7 @@ def train(args: argparse.Namespace) -> None:
                 args.control_layers,
                 args.predictive_semantic_reads,
                 args.control_semantic_reads,
+                args.predictive_semantic_dropout_prob,
                 args.attention_heads,
                 args.future_vote_heads,
             )
@@ -1485,6 +1498,7 @@ def main() -> None:
     parser.add_argument("--control-layers", type=int, default=_SPEC_DEFAULTS.control_layers)
     parser.add_argument("--predictive-semantic-reads", type=int, default=_SPEC_DEFAULTS.predictive_semantic_reads)
     parser.add_argument("--control-semantic-reads", type=int, default=_SPEC_DEFAULTS.control_semantic_reads)
+    parser.add_argument("--predictive-semantic-dropout-prob", type=float, default=_SPEC_DEFAULTS.predictive_semantic_dropout_prob)
     parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)
     parser.add_argument("--future-vote-heads", type=int, default=_SPEC_DEFAULTS.future_vote_heads)
     parser.set_defaults(

@@ -614,13 +614,15 @@ class PicfFullCore(nn.Module):
         self.semantic_summary_proj = nn.LazyLinear(hidden_dim)
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
-        self.predictive_fusion = WorldLatentFusionStack(
-            hidden_dim,
-            self.config.semantic_dim,
-            heads,
-            self_layers=self.config.predictive_layers,
-            cross_layers=self.config.predictive_semantic_reads,
-            cross_inner_dim=self.config.semantic_cross_dim,
+        self.predictive_world = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
+        self.predictive_semantic_reads = nn.ModuleList(
+            GatedCrossAttentionRead(
+                hidden_dim,
+                self.config.semantic_dim,
+                heads,
+                inner_dim=self.config.semantic_cross_dim,
+            )
+            for _ in range(self.config.predictive_semantic_reads)
         )
         self.predictive_pool = AttentionPool(hidden_dim)
 
@@ -638,13 +640,15 @@ class PicfFullCore(nn.Module):
         self.innovation_proj = nn.LazyLinear(self.config.innovation_dim)
         self.innovation_token_proj = nn.Linear(self.config.innovation_dim, hidden_dim)
 
-        self.control_fusion = WorldLatentFusionStack(
-            hidden_dim,
-            self.config.semantic_dim,
-            heads,
-            self_layers=self.config.control_layers,
-            cross_layers=self.config.control_semantic_reads,
-            cross_inner_dim=self.config.semantic_cross_dim,
+        self.control_world = TransformerStack(hidden_dim, heads, self.config.control_layers)
+        self.control_semantic_reads = nn.ModuleList(
+            GatedCrossAttentionRead(
+                hidden_dim,
+                self.config.semantic_dim,
+                heads,
+                inner_dim=self.config.semantic_cross_dim,
+            )
+            for _ in range(self.config.control_semantic_reads)
         )
         self.control_pool = AttentionPool(hidden_dim)
         self.control_state_proj = nn.Linear(hidden_dim, self.config.control_dim)
@@ -827,6 +831,52 @@ class PicfFullCore(nn.Module):
         elif action.numel() > 7:
             action = action[:7]
         return action
+
+    def _semantic_memory(
+        self,
+        semantic_tokens: torch.Tensor,
+        *,
+        dropout_prob: float,
+    ) -> torch.Tensor:
+        if semantic_tokens.shape[0] == 0 or dropout_prob <= 0.0 or not self.training:
+            return semantic_tokens
+        keep = torch.rand((semantic_tokens.shape[0],), device=semantic_tokens.device) >= float(dropout_prob)
+        if not torch.any(keep):
+            keep[int(torch.randint(semantic_tokens.shape[0], (1,), device=semantic_tokens.device).item())] = True
+        return semantic_tokens[keep]
+
+    def _apply_semantic_reads(
+        self,
+        world_tokens: torch.Tensor,
+        semantic_tokens: torch.Tensor,
+        *,
+        reads: nn.ModuleList,
+        dropout_prob: float = 0.0,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        x = world_tokens[None, :]
+        attention = None
+        semantic_memory = self._semantic_memory(semantic_tokens, dropout_prob=dropout_prob)
+        for layer in reads:
+            x, attention = layer(x, semantic_memory[None, :])
+        return x[0], attention
+
+    def _prediction_cache_from_global(self, global_state: torch.Tensor) -> PicfPredictionCache:
+        return PicfPredictionCache(
+            visual_latent=self.visual_latent_head(global_state),
+            visual_real=self.visual_real_head(global_state) if self.config.visual_real_enabled else None,
+            tactile_real=self.tactile_real_head(global_state),
+            point_real=self.point_real_head(global_state),
+            availability=torch.as_tensor(
+                [
+                    1.0,
+                    1.0 if self.config.visual_real_enabled else 0.0,
+                    1.0,
+                    1.0,
+                ],
+                device=self.device,
+                dtype=self.dtype,
+            ),
+        )
 
     def _clip_action(self, action: torch.Tensor) -> torch.Tensor:
         pos = _clip_vector_norm(action[..., :3], max_norm=self.config.max_action_pos_m)
@@ -1697,7 +1747,9 @@ class PicfFullCore(nn.Module):
     ) -> tuple[torch.Tensor, torch.Tensor]:
         if previous is None:
             return torch.zeros((self.config.hidden_dim,), device=self.device, dtype=self.dtype), torch.zeros((4,), device=self.device, dtype=self.dtype)
-        cache = previous.predictive.prediction_cache
+        # Innovation must compare against the world-only predictive basis, not the
+        # semantic-conditioned future readout.
+        cache = previous.predictive.physical_prediction_cache
         branch_specs = (
             ("visual_latent", cache.visual_latent, self.visual_error_encoder, self.config.hidden_dim),
             ("visual_real", cache.visual_real, self.visual_real_error_encoder, self.config.visual_real_dim),
@@ -1765,7 +1817,12 @@ class PicfFullCore(nn.Module):
             ],
             dim=0,
         )
-        control_tokens, _ = self.control_fusion(control_world_tokens, semantic.tokens)
+        control_world_tokens = self.control_world(control_world_tokens[None, :])[0]
+        control_tokens, _ = self._apply_semantic_reads(
+            control_world_tokens,
+            semantic.tokens,
+            reads=self.control_semantic_reads,
+        )
         pooled_hidden = self.control_pool(control_tokens[None, :])[0]
         pooled_state = self.control_state_proj(pooled_hidden)
         action = self._clip_action(self.action_head(pooled_state))
@@ -1781,24 +1838,21 @@ class PicfFullCore(nn.Module):
             dim=0,
         )
         pred_world_tokens = torch.cat([posterior.tokens, pred_tail], dim=0)
-        pred_tokens, _ = self.predictive_fusion(pred_world_tokens, semantic.tokens)
-        global_pred = self.predictive_pool(pred_tokens[None, :])[0]
-        prediction_cache = PicfPredictionCache(
-            visual_latent=self.visual_latent_head(global_pred),
-            visual_real=self.visual_real_head(global_pred) if self.config.visual_real_enabled else None,
-            tactile_real=self.tactile_real_head(global_pred),
-            point_real=self.point_real_head(global_pred),
-            availability=torch.as_tensor(
-                [
-                    1.0,
-                    1.0 if self.config.visual_real_enabled else 0.0,
-                    1.0,
-                    1.0,
-                ],
-                device=self.device,
-                dtype=self.dtype,
-            ),
+        # First produce a purely physical predictive basis. This is the only cache
+        # allowed to feed the next-step innovation constructor.
+        physical_pred_tokens = self.predictive_world(pred_world_tokens[None, :])[0]
+        physical_global_pred = self.predictive_pool(physical_pred_tokens[None, :])[0]
+        physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)
+        # Semantic tokens act only as posterior-late conditioning memory for future
+        # readout. They do not rewrite the physical predictive cache above.
+        pred_tokens, _ = self._apply_semantic_reads(
+            physical_pred_tokens,
+            semantic.tokens,
+            reads=self.predictive_semantic_reads,
+            dropout_prob=self.config.predictive_semantic_dropout_prob,
         )
+        global_pred = self.predictive_pool(pred_tokens[None, :])[0]
+        prediction_cache = self._prediction_cache_from_global(global_pred)
         return PicfPredictiveState(
             semantic_tokens=semantic.tokens,
             semantic_summary=semantic.summary,
@@ -1809,6 +1863,8 @@ class PicfFullCore(nn.Module):
             pooled_state=pooled_state,
             action=action,
             executed_action=executed_action,
+            physical_global_pred=physical_global_pred,
+            physical_prediction_cache=physical_prediction_cache,
             global_pred=global_pred,
             prediction_cache=prediction_cache,
         )

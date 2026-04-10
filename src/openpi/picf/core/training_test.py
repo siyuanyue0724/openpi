@@ -83,6 +83,7 @@ def _make_core(tmp_path: Path) -> tuple[PicfFullCore, CalvinSequentialReplay]:
         control_layers=1,
         predictive_semantic_reads=1,
         control_semantic_reads=1,
+        predictive_semantic_dropout_prob=0.0,
         attention_heads=4,
         query_rounds=2,
         device="cpu",
@@ -172,6 +173,7 @@ def test_transition_loss_closes_one_step_future_supervision_and_backward(tmp_pat
     assert torch.isfinite(losses.total)
     assert losses.total.item() > 0.0
     assert losses.availability.tolist() == [1.0, 1.0, 1.0, 1.0]
+    assert torch.isfinite(losses.semantic_future_aux)
     losses.total.backward()
     assert core.action_head.weight.grad is not None
     assert core.point_real_head.weight.grad is not None
@@ -235,6 +237,32 @@ def test_innovation_keeps_point_error_encoder_in_graph_when_current_point_target
     second.state.predictive.action.sum().backward()
     assert core.point_error_encoder.weight.grad is not None
     assert torch.allclose(core.point_error_encoder.weight.grad, torch.zeros_like(core.point_error_encoder.weight.grad))
+
+
+def test_semantic_future_aux_keeps_predictive_cross_read_in_graph(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    for layer in core.predictive_semantic_reads:
+        layer.cross_gate.data.fill_(3.0)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((4, core.config.semantic_dim), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    core.zero_grad(set_to_none=True)
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+    )
+    losses.total.backward()
+    assert torch.isfinite(losses.semantic_future_aux)
+    assert core.predictive_semantic_reads[0].attn.out_proj.weight.grad is not None
 
 
 def test_alignment_loss_uses_projective_candidates_and_is_finite(tmp_path: Path) -> None:

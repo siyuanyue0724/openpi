@@ -399,21 +399,36 @@
 
 ### 2.4 Global Predictive-Innovation Module
 
-当前 posterior tokens 先做 global posterior self-attention，再生成：
+当前 predictive / innovation 路径现在分成两层：
 
-- visual latent prediction
-- visual real target prediction
-- tactile real target prediction
-- point real target prediction
+1. **物理预测基底**
+   - predictive 分支先只在 world stream 内部做 self-attention
+   - world tokens 由：
+     - `posterior.tokens`
+     - `posterior.global_post`
+     - `proprio_token`
+     - `action_cond_token`
+     构成
+   - 从这个 world-only state 先产生：
+     - `physical_global_pred`
+     - `physical_prediction_cache`
+   - 下一步 innovation **只读取这份 physical prediction cache**
 
-推理时会读取上一步缓存的 prediction cache，与当前真实目标做显式 residual，对应产生 innovation token。
+2. **semantic-conditioned future readout**
+   - 在 `physical_prediction_cache` 固定之后，predictive world tokens 才通过异宽 cross-attention 读取 `semantic_tokens`
+   - 读取后的 semantic-conditioned state 再导出：
+     - `global_pred`
+     - `prediction_cache`
+   - 这份 cache 用于 future-head 训练读出，但**不是 innovation 的物理比较基底**
+
+推理时读取的是上一步 `physical_prediction_cache`，与当前真实目标做显式 residual，对应产生 innovation token。
 
 动作头读取的是：
 
-- posterior tokens
-- innovation token
-- language summary
-- proprio summary
+- `posterior.tokens`
+- `innovation_token`
+- `proprio_token`
+- posterior-late 读取到的 `semantic_tokens`
 
 这就是当前控制路径。
 
@@ -508,7 +523,7 @@ point / visual / tactile / compact context 都先投到统一 hidden size，再�
 
 innovation 来自：
 
-- 上一步 prediction cache
+- 上一步 `physical_prediction_cache`
 - 当前真实 target
 
 的显式残差；当前代码没有把任何 LSTM gate 当 innovation。
@@ -558,7 +573,8 @@ innovation 来自：
 
 当前实现状态：已满足。
 
-当前 runtime 只缓存一步 prediction cache，不做多步 imagination rollout。
+当前 runtime 只缓存一步 `physical_prediction_cache` 与一步 semantic-conditioned `prediction_cache`，
+不做多步 imagination rollout。
 
 
 ## 4. 当前工程化近似
@@ -1114,14 +1130,27 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - predictive 分支额外再拼入：
   - `posterior.global_post`
   - `action_cond_token`
+- predictive 分支现在还会显式拆成两份 cache：
+  - `physical_prediction_cache`
+    - 只来自 semantic 进入前的 world stream
+    - 下一步 innovation **只允许**读取这份 cache
+  - `prediction_cache`
+    - 来自 world<-semantic cross-attention 之后的 semantic-conditioned future readout
+    - 它服务 future head，不反写 posterior / carried prior / innovation base
+- 为降低 future head 走 semantic shortcut 的风险，当前 predictive 分支默认增加：
+  - `predictive_semantic_dropout_prob = 0.1`
+  - 它只作用在 predictive semantic memory 上，不作用于 current posterior
 - 这意味着当前实现更接近旧 `pi0.5` 的 full-token PaliGemma 语义能力，同时继续满足：
   - current posterior language-free
   - semantic side path language-late
   - anchor / posterior tokens 与 semantic tokens 在 downstream 是平级流，但不要求预先同宽
 - 2026-04-10 本地复核新增通过：
-  - `50 passed` 核心回归
+  - `53 passed` 核心回归
   - CPU 一步训练 smoke
-  - `semantic_dim=2048` targeted backward smoke
+  - 新增红线回归：
+    - 改 semantic 不改 `physical_prediction_cache`
+    - 改 previous semantic 不改下一步 innovation
+    - semantic future auxiliary loss 会把 predictive cross-attn 保持在图中
 
 如果以上两条显式语义路径都没有，core 才会回退到零语义 token。
 
@@ -1190,15 +1219,17 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - `pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/pointcloud_picf_test.py src/openpi/training/data_loader_test.py`
 - `from openpi.picf.core import ...` 顶层导入
 
-当前这一组回归结果是：
+那一组较早的最小回归结果是：
 
 - `31 passed`
+
+当前更完整的 core + trainer 回归见上文 5.3，最新为 `53 passed`。
 
 当前 `pipeline_test.py` 覆盖的核心约束包括：
 
 - unified token field / observation anchors / posterior anchors 基本张量闭合
 - language-late：改语言不改 current posterior
-- previous-step prediction 形成 current innovation
+- previous-step `physical_prediction_cache` 形成 current innovation
 - semantic cache reuse
 - first-step `xyzrgb` contract 检查
 - point contract 失效后的 hold / zero-point-token 行为
@@ -1695,7 +1726,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
 - `PicfFullCore` 也已经在真实 CALVIN 帧上做过一次前向闭合核查：
   - 使用真实 point cloud builder
   - 使用 stub tactile encoder 绕开本机缺失的 AnyTouch2 ckpt
-  - current posterior / prediction cache / innovation token / action 都能正确产出
+  - current posterior / physical prediction cache / semantic-conditioned prediction cache / innovation token / action 都能正确产出
 
 这次还做了脚本级数学核查，结果是：
 

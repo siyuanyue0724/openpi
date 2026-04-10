@@ -222,13 +222,19 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 这轮本地验证结果：
 
 - `python -m py_compile src/openpi/picf/core/pipeline.py src/openpi/picf/core/pipeline_test.py scripts/picf_core_train.py scripts/picf_core_train_smoke.py`：通过
-- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`50 passed`
+- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`53 passed`
 - `python scripts/picf_core_train_smoke.py --calvin-root /tmp/openpi_picf_smoke_data/task_ABCD_D --device cpu`：通过
-- 额外 `semantic_dim=2048` targeted backward smoke：通过
-  - `semantic_tokens_shape = (6, 2048)`
-  - `semantic_summary_shape = (1, 64)`
-  - `action_grad_norm = 1.4866`
-  - `predictive_pool_grad_norm = 2.1822`
+- CPU smoke 当前输出：
+  - `loss_total = 0.8595`
+  - `loss_visual_latent = 0.7113`
+  - `loss_visual_real = 0.5978`
+  - `loss_point_real = 0.7382`
+  - `action_grad_norm = 4.6336`
+  - `point_grad_norm = 0.1792`
+- 新增红线回归：
+  - 改 semantic 不改 `physical_prediction_cache`
+  - 改 previous semantic 不改下一步 innovation
+  - semantic future auxiliary loss 仍让 predictive cross-attn 保持在图中
 
 当前已落地的 downstream 融合口径是：
 
@@ -243,11 +249,25 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
   - `posterior.global_post`
   - `proprio_token`
   - `action_cond_token`
-- 两个 world 分支都通过 posterior-late 的 **异宽 gated cross-attention**
-  去读取 `semantic_tokens`
+- control 分支先只在 world stream 内部做 self-attention，
+  然后 world queries 再去 cross-attend `semantic_tokens`
+- predictive 分支也先只在 world stream 内部做 self-attention，
+  先导出：
+  - `physical_global_pred`
+  - `physical_prediction_cache`
+- 只有在这份物理 cache 固定之后，
+  predictive world stream 才再去 cross-attend `semantic_tokens`
+  并导出：
+  - `global_pred`
+  - `prediction_cache`
+- 下一步 innovation **只允许**读取 `previous.predictive.physical_prediction_cache`
+- predictive semantic memory 默认还会使用：
+  - `predictive_semantic_dropout_prob = 0.1`
+  来压制 language shortcut
 - 因而当前数学关系是：
   - semantic 与 anchor/posterior 在 downstream 平级协作
   - 但不要求所有流预先同宽
+  - semantic 不写回 posterior cache / carried prior / physical innovation base
 
 ### (R1) 为什么旧代码里会出现 semantic 投影
 

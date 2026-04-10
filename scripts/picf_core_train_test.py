@@ -57,6 +57,7 @@ def _base_args() -> argparse.Namespace:
         control_layers=2,
         predictive_semantic_reads=2,
         control_semantic_reads=2,
+        predictive_semantic_dropout_prob=0.1,
         attention_heads=8,
         future_vote_heads=4,
         warmup_steps=None,
@@ -155,6 +156,14 @@ def test_validate_train_args_rejects_incompatible_semantic_cross_shape() -> None
         _MODULE._validate_train_args(args)
 
 
+def test_validate_train_args_rejects_invalid_predictive_semantic_dropout_prob() -> None:
+    args = _base_args()
+    args.predictive_semantic_dropout_prob = 1.0
+    _MODULE._normalize_train_args(args)
+    with pytest.raises(ValueError, match="predictive_semantic_dropout_prob must be in \\[0, 1\\)"):
+        _MODULE._validate_train_args(args)
+
+
 def test_validate_train_args_rejects_cpu_sonata() -> None:
     args = _base_args()
     args.device = "cpu"
@@ -208,6 +217,7 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
         visual_real=torch.tensor(0.1),
         tactile_real=torch.tensor(0.1),
         point_real=torch.tensor(0.1),
+        semantic_future_aux=torch.tensor(0.1),
         alignment=torch.tensor(0.1),
         anchor_pv=torch.tensor(0.1),
         pv_weak=torch.tensor(0.1),

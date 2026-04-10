@@ -101,6 +101,7 @@ def _make_core(tmp_path: Path, **overrides) -> tuple[PicfFullCore, CalvinSequent
         control_layers=1,
         predictive_semantic_reads=1,
         control_semantic_reads=1,
+        predictive_semantic_dropout_prob=0.0,
         attention_heads=4,
         query_rounds=2,
     )
@@ -181,6 +182,11 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     assert output.state.posterior.binding.shape == (core.config.persistent_anchors + 1, core.config.observation_anchors)
     assert float(output.state.posterior.support_mass.sum().item()) > 0.0
     assert output.state.predictive.action.shape == (7,)
+    assert output.state.predictive.physical_global_pred.shape == (core.config.hidden_dim,)
+    assert output.state.predictive.physical_prediction_cache.visual_latent is not None
+    assert output.state.predictive.physical_prediction_cache.visual_real is not None
+    assert output.state.predictive.physical_prediction_cache.tactile_real is not None
+    assert output.state.predictive.physical_prediction_cache.point_real is not None
     assert output.state.predictive.prediction_cache.visual_latent is not None
     assert output.state.predictive.prediction_cache.visual_real is not None
     assert output.state.predictive.prediction_cache.tactile_real is not None
@@ -218,7 +224,11 @@ def test_full_core_preserves_2048_wide_semantic_tokens_and_backpropagates(tmp_pa
     )
     assert second.state.predictive.semantic_tokens.shape == (6, 2048)
     assert second.state.predictive.semantic_summary.shape == (1, core.config.hidden_dim)
-    loss = first.state.predictive.action.pow(2).mean() + second.state.predictive.global_pred.pow(2).mean()
+    loss = (
+        first.state.predictive.action.pow(2).mean()
+        + second.state.predictive.physical_global_pred.pow(2).mean()
+        + second.state.predictive.global_pred.pow(2).mean()
+    )
     core.zero_grad(set_to_none=True)
     loss.backward()
     assert core.action_head.weight.grad is not None
@@ -286,6 +296,55 @@ def test_previous_prediction_becomes_current_innovation_signal(tmp_path: Path) -
     assert second.state.predictive.innovation_norm[0].item() > 0.0
 
 
+def test_semantic_changes_do_not_pollute_physical_prediction_cache_or_next_innovation(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, pose_shift=0.01)
+    for layer in core.predictive_semantic_reads:
+        layer.cross_gate.data.fill_(3.0)
+    semantic_a = torch.linspace(-1.0, 1.0, steps=3 * core.config.semantic_dim, dtype=torch.float32).reshape(3, core.config.semantic_dim)
+    semantic_b = torch.linspace(1.0, -1.0, steps=5 * core.config.semantic_dim, dtype=torch.float32).reshape(5, core.config.semantic_dim)
+    first_a = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override={"tokens": semantic_a, "summary": semantic_a.mean(dim=0, keepdim=True)},
+        action_future=frames[0].action,
+    )
+    first_b = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override={"tokens": semantic_b, "summary": semantic_b.mean(dim=0, keepdim=True)},
+        action_future=frames[0].action,
+    )
+    torch.testing.assert_close(first_a.state.predictive.physical_global_pred, first_b.state.predictive.physical_global_pred)
+    torch.testing.assert_close(
+        first_a.state.predictive.physical_prediction_cache.visual_latent,
+        first_b.state.predictive.physical_prediction_cache.visual_latent,
+    )
+    assert not torch.allclose(first_a.state.predictive.global_pred, first_b.state.predictive.global_pred)
+    second_a = core.step(
+        frames[1],
+        previous=first_a.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(2.0),
+        semantic_override=_semantic_features(2.0),
+        action_future=frames[1].action,
+    )
+    second_b = core.step(
+        frames[1],
+        previous=first_b.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(2.0),
+        semantic_override=_semantic_features(2.0),
+        action_future=frames[1].action,
+    )
+    torch.testing.assert_close(second_a.state.predictive.innovation_token, second_b.state.predictive.innovation_token)
+    torch.testing.assert_close(second_a.state.predictive.innovation_norm, second_b.state.predictive.innovation_norm)
+
+
 def test_extract_targets_does_not_mutate_visual_history_when_using_real_visual_path(tmp_path: Path) -> None:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
@@ -311,6 +370,7 @@ def test_extract_targets_does_not_mutate_visual_history_when_using_real_visual_p
             control_layers=1,
             predictive_semantic_reads=1,
             control_semantic_reads=1,
+            predictive_semantic_dropout_prob=0.0,
             attention_heads=4,
             query_rounds=2,
             device="cpu",
@@ -494,6 +554,7 @@ def test_visual_override_without_camera_model_uses_stable_null_projective_branch
             control_layers=1,
             predictive_semantic_reads=1,
             control_semantic_reads=1,
+            predictive_semantic_dropout_prob=0.0,
             attention_heads=4,
             query_rounds=2,
         ),
