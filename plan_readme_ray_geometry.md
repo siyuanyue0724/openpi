@@ -258,6 +258,16 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 - 2026-04-10 额外硬化：
   - `L_pt` 现在只在显式接触或 tactile history pseudo-contact gate 激活时产生正例
   - `Sonata` 中所有高风险高级索引路径都已补运行时 bounds check，若再出现非法索引，将优先报出明确的 Python `RuntimeError`，而不是只有模糊的 CUDA device assert
+  - 训练主路径里残留的 GPU 布尔高级索引已进一步清除：
+    - `projective_attention_bias` 改为 dense masked compute
+    - `PaliGemma` full-token semantic path 改为 right-padded prefix slicing，不再用 `[valid]` 取 token
+    - predictive semantic dropout 改为 dense token dropout，不再用 `[keep]` 子选 token
+    - posterior `S / a` 更新改为 `torch.where`
+  - 云机历史失败序列 replay：
+    - 使用 `scripts/picf_replay_windows.py`
+    - 复核 `r6/r7` 的 `4` 组历史崩溃窗口序列
+    - 条件：`CUDA_LAUNCH_BLOCKING=1`、`optimizer.step()`、`repeat=3`
+    - 结果：全部通过，未再复现 `ScatterGatherKernel.cu:144 index out of bounds`
 - 验证级别说明：
   - 以上结论来自代码路径审计、回归测试、CPU smoke、以及云机双卡 smoke
   - 它支持“当前工程实现满足此处定义的数学 contract”的判断

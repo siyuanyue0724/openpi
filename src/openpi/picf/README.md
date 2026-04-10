@@ -1169,12 +1169,27 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - semantic side path language-late
   - anchor / posterior tokens 与 semantic tokens 在 downstream 是平级流，但不要求预先同宽
 - 2026-04-10 本地复核新增通过：
-  - `58 passed` 核心回归
+  - `66 passed` 核心回归
   - CPU 一步训练 smoke
   - 新增红线回归：
     - 改 semantic 不改 `physical_prediction_cache`
     - 改 previous semantic 不改下一步 innovation
     - semantic future auxiliary loss 会把 predictive cross-attn 保持在图中
+  - 训练稳定性硬化：
+    - 已移除训练主路径里残留的 GPU 布尔高级索引：
+      - `projective_attention_bias` 的 `candidate_mask` gather/scatter
+      - `PaliGemma` full-token path 的 `[valid]` token slicing
+      - predictive semantic memory 的 `[keep]` token dropping
+      - posterior update 里的 `S[valid] / a[valid]` 写回
+    - 当前实现改为：
+      - dense masked compute
+      - right-padded prefix slicing
+      - dense token dropout
+      - `torch.where` 式状态更新
+  - 云机 replay 复核：
+    - 对 `r6/r7` 历史崩溃窗口序列共 `4` 组，使用 `scripts/picf_replay_windows.py`
+    - 在 `CUDA_LAUNCH_BLOCKING=1`、`optimizer.step()`、`repeat=3` 下全部通过
+    - 旧的 `ScatterGatherKernel.cu:144 index out of bounds` 未再复现
 - 验证级别说明：
 - 以上结论来自代码路径审计、回归测试、以及云机双卡 smoke
 - 它们足以支持“当前工程实现满足既定数学契约”的判断

@@ -33,6 +33,11 @@ It duplicates project state that already exists across code, commits, logs, and 
   - explicit contact if available
   - otherwise a tactile-history pseudo-contact gate
 - Sonata high-risk indexing paths now have runtime bounds checks to turn opaque CUDA `ScatterGatherKernel` failures into earlier, explicit Python errors when possible.
+- Remaining training-path boolean advanced indexing has also been removed from:
+  - `projective_attention_bias`
+  - `PaliGemma` valid-token extraction
+  - predictive semantic dropout
+  - posterior `S / a` writeback
 
 ## Key Code Anchors
 
@@ -83,7 +88,7 @@ What is done:
 - cloud regression tests
 - local smoke training
 - cloud dual-GPU smoke training
-- real cloud long-run training in progress
+- cloud replay of the historical failing window sequences
 
 What is not done:
 
@@ -95,6 +100,7 @@ So the correct statement is:
 
 - implementation is currently consistent with the intended mathematical contract
 - no hidden semantic write-back edge has been found
+- the previously observed CUDA `ScatterGatherKernel` training crashes are no longer reproduced by the audited historical window sequences
 - this is not a formal proof of absolute correctness
 
 ## Training-Time Visualization

@@ -1353,6 +1353,14 @@ class PicfFullCore(nn.Module):
         queries = torch.zeros((1, n_obs, hidden_dim), device=self.device, dtype=self.dtype)
         if point_count > 0:
             chosen = _fps_indices(token_field.point_positions, min(n_obs, point_count))
+            if chosen.numel() > 0:
+                min_idx = int(chosen.min().item())
+                max_idx = int(chosen.max().item())
+                if min_idx < 0 or max_idx >= point_count:
+                    raise RuntimeError(
+                        "PICF observation-anchor seed index out of bounds: "
+                        f"valid=[0,{point_count - 1}] got min={min_idx} max={max_idx}"
+                    )
             seed_indices[: chosen.shape[0]] = chosen
             queries[0, : chosen.shape[0]] = token_field.point_tokens[chosen]
         attn = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)

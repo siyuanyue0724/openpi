@@ -871,6 +871,21 @@ def test_semantic_memory_dropout_preserves_shape_and_backward(tmp_path: Path) ->
     assert torch.isfinite(semantic_tokens.grad).all()
 
 
+def test_observation_anchor_seed_indices_stay_in_range(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+    )
+    obs = output.state.observation_anchors
+    valid = obs.seed_indices >= 0
+    if bool(valid.any()):
+        assert int(obs.seed_indices[valid].min().item()) >= 0
+        assert int(obs.seed_indices[valid].max().item()) < int(output.state.token_field.point_tokens.shape[0])
+
+
 def test_projective_candidate_mask_respects_sparse_patch_neighborhood(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
