@@ -7,6 +7,7 @@ from collections import deque
 import os
 from pathlib import Path
 import sys
+import time
 from typing import Any
 
 import numpy as np
@@ -151,6 +152,7 @@ def main() -> None:
 
     override_context = contextlib.nullcontext() if args.point_grid_mode == "default" else _override_build_sample(str(args.point_grid_mode))
     with override_context:
+        start_time = time.time()
         source = _CalvinTransitionSource(
             train_args.calvin_root,
             split=train_args.split,
@@ -161,8 +163,10 @@ def main() -> None:
             tactile_sensor_offsets_m=train_args.tactile_sensor_offsets_m,
         )
         try:
+            print(json.dumps({"stage": "source_ready", "elapsed_s": round(time.time() - start_time, 3)}), flush=True)
             core, semantic_encoder, use_visual_override = _build_model(train_args, device=device)
             core = core.to(device)
+            print(json.dumps({"stage": "model_built", "elapsed_s": round(time.time() - start_time, 3)}), flush=True)
             trainer = _PicfWindowTrainer(
                 core,
                 semantic_encoder=semantic_encoder,
@@ -170,12 +174,15 @@ def main() -> None:
                 use_visual_override=use_visual_override,
             ).to(device)
             _materialize_model_parameters(trainer, source=source, rank=int(effective_rank_seed))
+            print(json.dumps({"stage": "params_materialized", "elapsed_s": round(time.time() - start_time, 3)}), flush=True)
             optimizer, _ = _build_optimizer(trainer, args=train_args)
+            print(json.dumps({"stage": "optimizer_built", "elapsed_s": round(time.time() - start_time, 3)}), flush=True)
             if args.checkpoint:
                 _load_checkpoint(path=Path(args.checkpoint), model=trainer, optimizer=optimizer, device=device)
             trainer.train()
             if debug_tensor_index_guards:
                 _install_debug_tensor_index_guards()
+            print(json.dumps({"stage": "entering_replay_loop", "elapsed_s": round(time.time() - start_time, 3)}), flush=True)
 
             if args.rng_num_windows is not None:
                 rng_rank = int(args.rng_rank if args.rng_rank is not None else effective_rank_seed)
