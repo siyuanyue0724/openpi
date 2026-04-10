@@ -7,6 +7,7 @@ from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
 from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
 from openpi.picf.paligemma.wrapper import _masked_position_ids
 from openpi.picf.paligemma.wrapper import _repair_missing_tied_embeddings
+from openpi.picf.paligemma.wrapper import _take_valid_prefix_tokens
 from openpi.picf.paligemma.wrapper import _Pi0PaliGemmaSemanticEncoder
 
 
@@ -161,3 +162,17 @@ def test_masked_position_ids_keep_valid_positions_and_zero_pad() -> None:
         position_ids,
         torch.tensor([[0, 1, 2, 0, 0], [0, 0, 1, 0, 0]], dtype=torch.int64),
     )
+
+
+def test_take_valid_prefix_tokens_uses_right_padded_prefix_slice() -> None:
+    hidden = torch.arange(18, dtype=torch.float32).reshape(6, 3)
+    pad_mask = torch.tensor([True, True, True, True, False, False])
+    got = _take_valid_prefix_tokens(hidden, pad_mask)
+    torch.testing.assert_close(got, hidden[:4])
+
+
+def test_take_valid_prefix_tokens_rejects_non_right_padded_mask() -> None:
+    hidden = torch.arange(18, dtype=torch.float32).reshape(6, 3)
+    pad_mask = torch.tensor([True, False, True, False, False, False])
+    with pytest.raises(RuntimeError, match="right-padded"):
+        _take_valid_prefix_tokens(hidden, pad_mask)

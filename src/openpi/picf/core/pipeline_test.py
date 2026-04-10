@@ -859,6 +859,18 @@ def test_projective_attention_bias_backward_is_finite(tmp_path: Path) -> None:
     assert all(torch.isfinite(grad).all() for grad in grads)
 
 
+def test_semantic_memory_dropout_preserves_shape_and_backward(tmp_path: Path) -> None:
+    core, _ = _make_core(tmp_path)
+    core.train()
+    semantic_tokens = torch.randn((11, core.config.semantic_dim), device=core.device, dtype=core.dtype, requires_grad=True)
+    dropped = core._semantic_memory(semantic_tokens, dropout_prob=0.25)
+    assert dropped.shape == semantic_tokens.shape
+    loss = dropped.square().mean()
+    loss.backward()
+    assert semantic_tokens.grad is not None
+    assert torch.isfinite(semantic_tokens.grad).all()
+
+
 def test_projective_candidate_mask_respects_sparse_patch_neighborhood(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))

@@ -23,6 +23,7 @@ README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README.md"
 PLAN_PATH = REPO_ROOT / "plan_readme_ray_geometry.md"
 CALVIN_README_PATH = REPO_ROOT / "docs" / "calvin_readme.txt"
 FORMAL_CONTRACT_PATH = REPO_ROOT / "PICF_FORMAL_CONTRACT.md"
+PALIGEMMA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "paligemma" / "wrapper.py"
 
 
 @dataclass
@@ -90,6 +91,7 @@ def _call_order(source: str, func_source: str, call_texts: list[str]) -> CheckRe
 
 def verify_static_contract() -> list[CheckResult]:
     source = _read(PIPELINE_PATH)
+    wrapper_source = _read(PALIGEMMA_WRAPPER_PATH)
     tree = ast.parse(source)
 
     posterior_node = _function_node(tree, "_posterior_update")
@@ -153,6 +155,29 @@ def verify_static_contract() -> list[CheckResult]:
                 "innovation_token, innovation_norm = self._innovation(",
                 "predictive = self._predictive_state(",
             ],
+        ),
+        CheckResult(
+            name="legacy_boolean_advanced_indexing_removed_from_pipeline",
+            ok=all(
+                text not in source
+                for text in (
+                    "semantic_tokens[keep]",
+                    "S[valid] = S_obs[valid]",
+                    "a[valid] = _extent_from_cov(S[valid], self.config)",
+                )
+            ),
+            detail="Pipeline no longer uses the audited boolean advanced-indexing patterns on live training tensors.",
+        ),
+        CheckResult(
+            name="legacy_boolean_advanced_indexing_removed_from_paligemma_wrapper",
+            ok=all(
+                text not in wrapper_source
+                for text in (
+                    "hidden_states[0][valid]",
+                    "prefix_output[0][valid]",
+                )
+            ),
+            detail="PaliGemma wrapper no longer slices trainable token streams with boolean advanced indexing.",
         ),
     ]
     return checks

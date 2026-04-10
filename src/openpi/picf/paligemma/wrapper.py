@@ -89,6 +89,33 @@ def _summary_from_outputs(
     return torch.cat([txt, img], dim=-1)
 
 
+def _take_valid_prefix_tokens(hidden_states: torch.Tensor, pad_mask: torch.Tensor) -> torch.Tensor:
+    if hidden_states.ndim != 2:
+        raise ValueError(f"Expected hidden_states.ndim == 2, got {hidden_states.ndim}.")
+    if pad_mask.ndim != 1:
+        raise ValueError(f"Expected pad_mask.ndim == 1, got {pad_mask.ndim}.")
+    if hidden_states.shape[0] != pad_mask.shape[0]:
+        raise ValueError(
+            "PaliGemma prefix token contract violated: "
+            f"hidden_states.shape[0]={int(hidden_states.shape[0])} "
+            f"!= pad_mask.shape[0]={int(pad_mask.shape[0])}"
+        )
+    valid = pad_mask.to(dtype=torch.bool)
+    valid_len = int(valid.sum().item())
+    if valid_len <= 0:
+        return hidden_states[:0]
+    if valid_len > int(hidden_states.shape[0]):
+        raise RuntimeError(
+            "PaliGemma prefix token contract violated: "
+            f"valid_len={valid_len} exceeds token count={int(hidden_states.shape[0])}"
+        )
+    if not torch.all(valid[:valid_len]):
+        raise RuntimeError("PaliGemma prefix pad mask is not right-padded: found invalid token inside valid prefix.")
+    if valid_len < int(valid.shape[0]) and torch.any(valid[valid_len:]):
+        raise RuntimeError("PaliGemma prefix pad mask is not right-padded: found valid token after padding tail.")
+    return hidden_states[:valid_len]
+
+
 def _resolve_checkpoint_file(checkpoint_path: str | None) -> Path | None:
     if checkpoint_path is None:
         return None
@@ -272,8 +299,7 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
                 if attention_mask is None:
                     tokens_list.append(hidden_states[0])
                 else:
-                    valid = attention_mask[0].to(dtype=torch.bool)
-                    tokens_list.append(hidden_states[0][valid])
+                    tokens_list.append(_take_valid_prefix_tokens(hidden_states[0], attention_mask[0]))
                 summaries.append(
                     _summary_from_outputs(
                         hidden_states=hidden_states,
@@ -512,9 +538,8 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             prefix_output = self._apply_checkpoint(_forward_prefix, prefix_embs, attn_mask_4d, position_ids)
             image_hidden = prefix_output[:, :image_token_count, :] if image_token_count > 0 else None
             text_hidden = prefix_output[:, image_token_count:, :]
-            valid = prefix_pad_masks[0].to(dtype=torch.bool)
             return PaliGemmaSemanticFeatures(
-                tokens=prefix_output[0][valid],
+                tokens=_take_valid_prefix_tokens(prefix_output[0], prefix_pad_masks[0]),
                 summary=_summary_from_outputs(
                     hidden_states=text_hidden,
                     image_hidden_states=image_hidden,

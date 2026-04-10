@@ -843,7 +843,8 @@ class PicfFullCore(nn.Module):
         keep = torch.rand((semantic_tokens.shape[0],), device=semantic_tokens.device) >= float(dropout_prob)
         if not torch.any(keep):
             keep[int(torch.randint(semantic_tokens.shape[0], (1,), device=semantic_tokens.device).item())] = True
-        return semantic_tokens[keep]
+        scale = keep.to(dtype=semantic_tokens.dtype) / max(1.0 - float(dropout_prob), self.config.epsilon_a)
+        return semantic_tokens * scale[:, None]
 
     def _apply_semantic_reads(
         self,
@@ -1548,10 +1549,9 @@ class PicfFullCore(nn.Module):
             S_obs = torch.einsum("in,inab->iab", binding[:-1], second_moment) / denom[:, :, None]
             valid = support_mass > self.config.epsilon_a
             x = torch.where(valid[:, None], x_obs, x_prior)
-            S = S_prior.clone()
-            S[valid] = S_obs[valid]
-            a = a_prior.clone()
-            a[valid] = _extent_from_cov(S[valid], self.config)
+            S = torch.where(valid[:, None, None], S_obs, S_prior)
+            a_obs = _extent_from_cov(S_obs, self.config)
+            a = torch.where(valid[:, None], a_obs, a_prior)
         else:
             x = x_prior
             S = S_prior
