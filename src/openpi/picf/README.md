@@ -1809,6 +1809,15 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
 - `PicfFullCore` 默认会尝试拉起 `AnyTouch2TactileEncoder(allow_random_init=False)`；
   在没有 AnyTouch2 checkpoint 的本机上，需要显式注入 tactile stub / tactile override 才能做纯结构 smoke
 
+云机上的额外工程边界：
+
+- `/mnt` 当前是 `fuse.fx` 挂载。
+- 在云机上直接从 `/mnt/calvin_data/task_ABC_D` 跑 `dir` backend，会在首个 logged step 之前把 worker 阻塞到 `D` state。
+- 切到 `/mnt/calvin_data/task_ABC_D.zip` 的 `zip` backend，也仍然会在同一类 FUSE 路径上阻塞。
+- 对前 `3000` 个训练 steps、`seed=42`、`world_size=2`、`unroll_steps=2` 做精确采样统计后，双 rank 只会访问大约 `17.7k` 个唯一 `episode_*.npz`，估算体积约 `5 GiB`。
+- 这使得“先把首 `3000` steps 需要的 frame 预取到本地 partial mirror，再从本地路径训练”成为当前云机上最可行的稳定方案。
+- 对应脚本见 [`scripts/picf_stage_calvin_partial_cache.py`](/home/siyuanyue/Documents/openpi/scripts/picf_stage_calvin_partial_cache.py)。
+
 
 ## 9. 下一步建议
 

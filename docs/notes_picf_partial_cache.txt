@@ -1,0 +1,7 @@
+PICF partial-cache workaround
+
+- Cloud-side CALVIN training can block in `D` state on `/mnt` because `/mnt` is a `fuse.fx` mount.
+- The issue appears both with `dir` backend and with `zip` backend when the source path still lives on `/mnt`.
+- For the first 3000 training steps with `seed=42`, `world_size=2`, `unroll_steps=2`, the two ranks only touch about `17.7k` unique `episode_*.npz` files.
+- The estimated footprint is about `5 GiB`, so staging only those files to a local task mirror is feasible.
+- Use `scripts/picf_stage_calvin_partial_cache.py` to build the local partial mirror before launching cloud training.
