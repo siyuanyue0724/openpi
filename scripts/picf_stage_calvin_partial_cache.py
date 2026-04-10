@@ -88,15 +88,31 @@ def main() -> None:
     ann_src = source_root / rel_ann
     ann_dst = dest_root / rel_ann
     ann_dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copy2(ann_src, ann_dst)
+    if not ann_dst.exists():
+        shutil.copy2(ann_src, ann_dst)
 
     total_bytes = int(ann_src.stat().st_size)
+    calib_src = source_root / "calib"
+    calib_bytes = 0
+    if calib_src.is_dir():
+        for src_path in sorted(calib_src.rglob("*")):
+            rel_path = src_path.relative_to(source_root)
+            dst_path = dest_root / rel_path
+            if src_path.is_dir():
+                dst_path.mkdir(parents=True, exist_ok=True)
+                continue
+            dst_path.parent.mkdir(parents=True, exist_ok=True)
+            if not dst_path.exists():
+                shutil.copy2(src_path, dst_path)
+            calib_bytes += int(src_path.stat().st_size)
+    total_bytes += int(calib_bytes)
     for step_id in sorted(step_ids):
         rel_npz = Path(args.split) / f"episode_{step_id:07d}.npz"
         src_path = source_root / rel_npz
         dst_path = dest_root / rel_npz
         dst_path.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src_path, dst_path)
+        if not dst_path.exists():
+            shutil.copy2(src_path, dst_path)
         total_bytes += int(src_path.stat().st_size)
 
     manifest = {
@@ -112,6 +128,8 @@ def main() -> None:
         "unique_step_ids": int(len(step_ids)),
         "total_bytes": int(total_bytes),
         "total_gib": float(total_bytes / (1024**3)),
+        "copied_calib": bool(calib_src.is_dir()),
+        "calib_bytes": int(calib_bytes),
         "rank_summary": rank_summary,
     }
     manifest_path = dest_root / "partial_cache_manifest.json"
