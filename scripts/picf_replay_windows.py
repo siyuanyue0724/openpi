@@ -8,6 +8,7 @@ from pathlib import Path
 import sys
 from typing import Any
 
+import numpy as np
 import torch
 
 if __package__ in (None, ""):
@@ -55,15 +56,62 @@ def _parse_flat_indices(raw: str) -> list[int]:
     return [int(value) for value in values]
 
 
+def _generate_rng_flat_indices(
+    *,
+    total_windows: int,
+    dataset_size: int,
+    seed: int,
+    rank: int,
+    skip_windows: int,
+) -> list[int]:
+    if total_windows < 1:
+        raise ValueError(f"Expected total_windows >= 1, got {total_windows}.")
+    if dataset_size < 1:
+        raise ValueError(f"Expected dataset_size >= 1, got {dataset_size}.")
+    if skip_windows < 0:
+        raise ValueError(f"Expected skip_windows >= 0, got {skip_windows}.")
+    rng = np.random.default_rng(int(seed) + 17 * int(rank))
+    flat_indices: list[int] = []
+    total_required = int(skip_windows) + int(total_windows)
+    for index in range(total_required):
+        flat_index = int(rng.integers(0, dataset_size))
+        if index >= skip_windows:
+            flat_indices.append(flat_index)
+    return flat_indices
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Replay specific PICF CALVIN transition windows through the current training graph.")
     parser.add_argument("--args-json", required=True, help="Path to args.json from a PICF training run.")
-    parser.add_argument("--flat-indices", required=True, help="Comma-separated list of flat indices to replay in order.")
+    parser.add_argument("--flat-indices", default=None, help="Comma-separated list of flat indices to replay in order.")
     parser.add_argument("--repeat", type=int, default=1, help="Number of times to repeat the flat-index sequence.")
     parser.add_argument("--device", default=None, help="Override device from args.json, e.g. cuda or cpu.")
     parser.add_argument("--checkpoint", default=None, help="Optional checkpoint directory or latest.pt to load before replay.")
     parser.add_argument("--rank-seed", type=int, default=1, help="Rank offset for seed reproduction. rank=1 matches prior failing worker.")
     parser.add_argument("--optimizer-step", action="store_true", help="Apply optimizer.step() after each replayed window.")
+    parser.add_argument(
+        "--rng-num-windows",
+        type=int,
+        default=None,
+        help="Generate the exact training flat-index sequence from args.seed/rank instead of passing --flat-indices.",
+    )
+    parser.add_argument(
+        "--rng-rank",
+        type=int,
+        default=None,
+        help="Rank to reproduce for --rng-num-windows. Defaults to --rank-seed.",
+    )
+    parser.add_argument(
+        "--rng-skip-windows",
+        type=int,
+        default=0,
+        help="Skip this many training RNG draws before replaying --rng-num-windows windows.",
+    )
+    parser.add_argument(
+        "--dump-generated-sequence",
+        default=None,
+        help="Optional path to save generated flat indices as JSON when using --rng-num-windows.",
+    )
     parser.add_argument(
         "--point-grid-mode",
         choices=("default", "original", "rebased"),
@@ -76,7 +124,6 @@ def main() -> None:
     payload = json.loads(args_json_path.read_text(encoding="utf-8"))
     train_args = _coerce_loaded_args(payload, device_override=args.device)
     device = torch.device(str(train_args.device))
-    flat_indices = _parse_flat_indices(args.flat_indices)
     if int(args.repeat) < 1:
         raise ValueError(f"--repeat must be >= 1, got {args.repeat}.")
 
@@ -107,6 +154,40 @@ def main() -> None:
             if args.checkpoint:
                 _load_checkpoint(path=Path(args.checkpoint), model=trainer, optimizer=optimizer, device=device)
             trainer.train()
+
+            if args.rng_num_windows is not None:
+                rng_rank = int(args.rng_rank if args.rng_rank is not None else args.rank_seed)
+                flat_indices = _generate_rng_flat_indices(
+                    total_windows=int(args.rng_num_windows),
+                    dataset_size=len(source),
+                    seed=int(train_args.seed),
+                    rank=rng_rank,
+                    skip_windows=int(args.rng_skip_windows),
+                )
+                if args.dump_generated_sequence is not None:
+                    dump_path = Path(args.dump_generated_sequence)
+                    dump_path.parent.mkdir(parents=True, exist_ok=True)
+                    dump_path.write_text(json.dumps(flat_indices), encoding="utf-8")
+                print(
+                    json.dumps(
+                        {
+                            "generated_sequence": True,
+                            "dataset_size": int(len(source)),
+                            "seed": int(train_args.seed),
+                            "rng_rank": int(rng_rank),
+                            "rng_skip_windows": int(args.rng_skip_windows),
+                            "rng_num_windows": int(args.rng_num_windows),
+                            "first_indices": flat_indices[: min(16, len(flat_indices))],
+                            "last_indices": flat_indices[-min(16, len(flat_indices)) :],
+                        },
+                        sort_keys=True,
+                    ),
+                    flush=True,
+                )
+            elif args.flat_indices is not None:
+                flat_indices = _parse_flat_indices(args.flat_indices)
+            else:
+                raise ValueError("Pass either --flat-indices or --rng-num-windows.")
 
             recent: deque[dict[str, Any]] = deque(maxlen=8)
             step_counter = 0

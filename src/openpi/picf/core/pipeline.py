@@ -63,6 +63,20 @@ def _to_tensor(
     return torch.as_tensor(value, device=device, dtype=dtype)
 
 
+def _assert_index_tensor_bounds(indices: torch.Tensor, *, size: int, name: str) -> None:
+    if indices.numel() == 0:
+        return
+    indices_long = indices.to(dtype=torch.long)
+    min_idx = int(indices_long.min().item())
+    max_idx = int(indices_long.max().item())
+    if min_idx < 0 or max_idx >= int(size):
+        raise RuntimeError(
+            f"PICF index out of bounds for {name}: "
+            f"valid=[0,{int(size) - 1}] got min={min_idx} max={max_idx} "
+            f"shape={tuple(indices.shape)}"
+        )
+
+
 def _normalize_tensor(x: torch.Tensor, *, eps: float) -> torch.Tensor:
     if x.numel() == 0:
         return x
@@ -1719,6 +1733,9 @@ class PicfFullCore(nn.Module):
             rel = torch.clamp((points - center[None, :]) / max(self.config.crop_radius_m, 1e-6), min=-0.999, max=0.999)
             grid = ((rel + 1.0) * 0.5 * self.config.point_real_grid).long()
             grid = torch.clamp(grid, min=0, max=self.config.point_real_grid - 1)
+            _assert_index_tensor_bounds(grid[:, 0], size=self.config.point_real_grid, name="point_real.grid_x")
+            _assert_index_tensor_bounds(grid[:, 1], size=self.config.point_real_grid, name="point_real.grid_y")
+            _assert_index_tensor_bounds(grid[:, 2], size=self.config.point_real_grid, name="point_real.grid_z")
             occ = torch.zeros((self.config.point_real_grid, self.config.point_real_grid, self.config.point_real_grid), device=self.device, dtype=self.dtype)
             occ[grid[:, 0], grid[:, 1], grid[:, 2]] = 1.0
             targets["point_real"] = occ.reshape(-1)

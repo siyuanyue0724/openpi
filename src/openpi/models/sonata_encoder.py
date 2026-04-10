@@ -186,6 +186,7 @@ class Point(Dict):
 
         if shuffle_orders:
             perm = torch.randperm(code.shape[0])
+            _assert_index_bounds("serialization.shuffle_perm", perm, code.shape[0])
             code = code[perm]
             order = order[perm]
             inverse = inverse[perm]
