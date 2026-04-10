@@ -271,6 +271,18 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
     - 进一步的 exact-prefix replay 必须同时对齐：
       - 训练 flat-index RNG 的 `rng_rank`
       - 模型 / dropout RNG 的 `rank_seed`
+    - 现有 `scripts/picf_replay_windows.py` 还额外支持：
+      - `--override-sonata-disable-flash true/false`
+      - `--split-backward-from-step N`
+      - `--save-checkpoint-every N --save-checkpoint-dir ...`
+    - 这三个开关的用途分别是：
+      - 做 Sonata flash / no-flash A/B
+      - 在疑似崩溃区间把 backward 拆成单项 loss 逐个执行
+      - 为 exact-prefix 长 replay 保留中间状态，后续可以从更靠近崩点的位置继续
+  - 当前 action 权重结论：
+    - crash 定位期间不要再提高 action 权重
+    - 现有云机日志里 `loss_action / loss_total` 已经大约落在 `0.53` 到 `0.82`
+    - 此时继续上调 action，只会改变优化轨迹并污染复现
 - 验证级别说明：
   - 以上结论来自代码路径审计、回归测试、CPU smoke、以及云机双卡 smoke
   - 它支持“当前工程实现满足此处定义的数学 contract”的判断

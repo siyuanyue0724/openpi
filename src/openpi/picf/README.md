@@ -1194,6 +1194,13 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
       - 真实双卡训练复现
       - exact-prefix replay
       - 且 `scripts/picf_replay_windows.py` 中 `rng_rank` 与 `rank_seed` 必须对齐；否则 flat-index 序列虽然一致，但模型/dropout RNG 轨迹并不一致
+      - 现已支持 `--override-sonata-disable-flash true/false` 做 Sonata flash A/B
+      - 现已支持 `--split-backward-from-step N`，在目标区间把 `loss_total.backward()` 拆成各个 loss 组件逐项同步执行
+      - 现已支持 `--save-checkpoint-every N --save-checkpoint-dir ...`，为 long-prefix replay 留中间 checkpoint，避免每次都从 step 1 重放
+    - 当前权重结论：
+      - 在 crash 定位期间**不要继续上调 action loss 权重**
+      - 现有云机日志里 `loss_action / loss_total` 已经长期处于主导区间（约 `0.53` 到 `0.82`）
+      - 先隔离 crash 根因，再决定是否重新配重；否则会把优化轨迹和复现条件一起改掉
 - 验证级别说明：
 - 以上结论来自代码路径审计、回归测试、以及云机双卡 smoke
 - 它们足以支持“当前工程实现满足既定数学契约”的判断
