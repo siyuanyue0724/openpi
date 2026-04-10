@@ -1818,6 +1818,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
 - 这使得“先把首 `3000` steps 需要的 frame 预取到本地 partial mirror，再从本地路径训练”成为当前云机上最可行的稳定方案。
 - partial mirror 不能只复制 `training/episode_*.npz` 和 `training/lang_annotations/auto_lang_ann.npy`；训练初始化还会从 `calvin_root/calib/cameras.json` 构造 pointcloud / visual camera contract，所以 `calib/` 也必须一并带过去。
 - `scripts/picf_stage_calvin_partial_cache.py` 现已默认复制整个 `calib/` 目录，并跳过已存在文件，便于把 `3000`-step cache 向更高步数增量扩展。
+- 另外，`picf_core_train.py` 会在 DDP 包装前用 `source.window(rank)` 做一次 lazy-module warmup；partial cache 也必须覆盖这两个 warmup windows。脚本现在已经把这条初始化读路径纳入 staged set。
 - 对应脚本见 [`scripts/picf_stage_calvin_partial_cache.py`](/home/siyuanyue/Documents/openpi/scripts/picf_stage_calvin_partial_cache.py)。
 
 

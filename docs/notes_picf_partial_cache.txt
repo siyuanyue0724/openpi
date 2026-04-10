@@ -9,3 +9,4 @@ PICF partial-cache workaround
   - `training/lang_annotations/auto_lang_ann.npy`
   - `calib/cameras.json` (and now the whole `calib/` directory)
 - The staging script now skips files that already exist, so the cache can be extended from `3000` steps to a larger safety margin without rebuilding from scratch.
+- The cache must also include the pre-DDP lazy-module warmup windows used by `picf_core_train.py`; those windows are deterministic (`source.window(rank)`) and are now included automatically.

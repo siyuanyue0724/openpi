@@ -33,6 +33,10 @@ def _required_step_ids(
     for rank in ranks:
         rng = np.random.default_rng(int(seed) + 17 * int(rank))
         flat_indices = [int(rng.integers(0, len(source))) for _ in range(int(steps_per_rank))]
+        # picf_core_train does a pre-DDP lazy-module warmup with source.window(rank),
+        # so the partial cache must include that deterministic initialization path too.
+        warmup_flat_index = int(rank) % max(len(source), 1)
+        flat_indices.append(warmup_flat_index)
         rank_steps: set[int] = set()
         rank_segments: set[int] = set()
         for flat_index in flat_indices:
@@ -43,10 +47,11 @@ def _required_step_ids(
                 rank_steps.add(step_id)
                 step_ids.add(step_id)
         summary[int(rank)] = {
-            "num_windows": int(len(flat_indices)),
+            "num_windows": int(steps_per_rank),
             "unique_flat_indices": int(len(set(flat_indices))),
             "unique_segments": int(len(rank_segments)),
             "unique_step_ids": int(len(rank_steps)),
+            "warmup_flat_index": int(warmup_flat_index),
         }
     return step_ids, summary
 
