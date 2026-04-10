@@ -9,7 +9,7 @@ It duplicates project state that already exists across code, commits, logs, and 
 - Local repo: `/home/siyuanyue/Documents/openpi`
 - Branch: `Posterior_VLA`
 - Current synchronized commit:
-  - `da8a0c3` `Add compact handoff document`
+  - `43935e9` `Fix handoff commit references`
 - Local / GitHub / cloud repo are aligned to the same commit.
 
 ## Current PICF Contract
@@ -132,12 +132,14 @@ Current training process:
 
 - experiment: `picf_core_train_ddp_fulltoken_run_r5`
 - command is running under `torchrun` with 2 GPUs
-- current cloud repo HEAD is also `da8a0c3`
+- current cloud repo HEAD is also `43935e9`
 
 Latest checked state at handoff time:
 
 - training process alive
-- recent metrics written through step `400`
+- recent metrics written through step `500`
+- first diagnostics directory has been written:
+  - `/mnt/checkpoints/picf_core/picf_core_train_ddp_fulltoken_run_r5/diagnostics/000500`
 - GPU memory usage near limit but still stable:
   - `GPU0: 39055 / 40960 MiB`
   - `GPU1: 39083 / 40960 MiB`
