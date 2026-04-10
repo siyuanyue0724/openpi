@@ -71,6 +71,11 @@ def _assert_segment_ptr(name, ptr, size):
             f"Sonata segment pointer invalid for {name}: non-monotonic diffs detected "
             f"shape={tuple(ptr.shape)}"
         )
+    if diffs.numel() > 0 and bool(torch.any(diffs == 0)):
+        raise RuntimeError(
+            f"Sonata segment pointer invalid for {name}: zero-length segment detected "
+            f"shape={tuple(ptr.shape)}"
+        )
 
 
 @torch.inference_mode()
@@ -484,6 +489,16 @@ class SerializedAttention(PointModule):
         _assert_index_bounds("attention.pad_values", pad, unpad.shape[0])
         _assert_index_bounds("attention.unpad_values", unpad, pad.shape[0])
         _assert_segment_ptr("attention.cu_seqlens", cu_seqlens, pad.shape[0])
+        segment_lengths = cu_seqlens[1:] - cu_seqlens[:-1]
+        if segment_lengths.numel() > 0:
+            min_len = int(segment_lengths.min().item())
+            max_len = int(segment_lengths.max().item())
+            if min_len <= 0 or max_len > int(self.patch_size):
+                raise RuntimeError(
+                    "Sonata attention segment length contract violated: "
+                    f"valid=(0,{int(self.patch_size)}] got min={min_len} max={max_len} "
+                    f"for cu_seqlens.shape={tuple(cu_seqlens.shape)}"
+                )
         return pad, unpad, cu_seqlens
 
     def forward(self, point):
@@ -508,6 +523,12 @@ class SerializedAttention(PointModule):
         # padding and reshape feat and batch for serialized point patch
         _assert_index_bounds("attention.order_to_feat", order, point.feat.shape[0])
         qkv = self.qkv(point.feat)[order]
+        if self.enable_flash and qkv.shape[0] != int(cu_seqlens[-1].item()):
+            raise RuntimeError(
+                "Sonata flash-attention qkv length contract violated: "
+                f"qkv.shape[0]={int(qkv.shape[0])} "
+                f"!= cu_seqlens[-1]={int(cu_seqlens[-1].item())}"
+            )
 
         if not self.enable_flash:
             # encode and reshape qkv: (N', K, 3, H, C') => (3, N', H, K, C')
