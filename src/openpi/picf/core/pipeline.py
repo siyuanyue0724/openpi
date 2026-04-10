@@ -1256,8 +1256,8 @@ class PicfFullCore(nn.Module):
                 or observation.indent_depth_m is not None
                 or observation.tactile_pressure is not None
             )
-            contact_value = (
-                float(
+            if has_explicit_contact:
+                contact_value = float(
                     explicit_contact_observation(
                         force_vec=_to_tensor(
                             observation.force_vec if observation.force_vec is not None else np.zeros((3,), dtype=np.float32),
@@ -1272,15 +1272,23 @@ class PicfFullCore(nn.Module):
                     )
                     or 0.0
                 )
-                if has_explicit_contact
-                else 0.0
-            )
-            tactile_contact_gate = torch.full(
-                (tactile_tokens.shape[0],),
-                contact_value,
-                device=self.device,
-                dtype=self.dtype,
-            )
+                tactile_contact_gate = torch.full(
+                    (tactile_tokens.shape[0],),
+                    contact_value,
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+            else:
+                pseudo_scores = torch.as_tensor(
+                    [
+                        float(max(0.0, tactile_bundle.sensors[sensor_name].pseudo_contact_score))
+                        for sensor_name in sorted(tactile_bundle.sensors)
+                    ],
+                    device=self.device,
+                    dtype=self.dtype,
+                )
+                tau_pseudo = float(self.config.tau_tactile_pseudo_contact)
+                tactile_contact_gate = (pseudo_scores > tau_pseudo).to(dtype=self.dtype)
 
         context_tokens = self._encode_context_tokens(observation, meta, previous) + self.modality_embedding.weight[3][None, :]
         all_tokens = torch.cat([point_tokens, visual_tokens, tactile_tokens, context_tokens], dim=0)

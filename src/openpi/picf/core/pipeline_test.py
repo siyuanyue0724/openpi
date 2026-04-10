@@ -36,6 +36,7 @@ class _StubTactileEncoder:
         for index, sensor_name in enumerate(sorted(clips_by_sensor)):
             clip = np.asarray(clips_by_sensor[sensor_name], dtype=np.float32)
             value = float(clip.mean()) / 255.0 if clip.size > 0 else 0.0
+            pseudo_contact = float(np.abs(clip[-1] - clip[0]).mean() / 255.0) if clip.shape[0] > 1 else 0.0
             tokens = torch.full((32, 64), value + index, dtype=torch.float32)
             pooled_feature = torch.full((128,), value + index, dtype=torch.float32)
             pose = torch.as_tensor(poses_by_sensor[sensor_name], dtype=torch.float32)
@@ -45,6 +46,7 @@ class _StubTactileEncoder:
                 tokens=tokens,
                 pooled_feature=pooled_feature,
                 T_sens_to_wrist=pose,
+                pseudo_contact_score=pseudo_contact,
             )
             pooled.append(pooled_feature)
         if not pooled:

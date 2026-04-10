@@ -1004,6 +1004,11 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   当前不再是默认预期；若长期为 `0`，优先查 fusion attention map、candidate edge 是否为空，或 visual→point slice 是否被错误 mask
 - `pt == 0`：
   先区分是当前样本 tactile token 不可用，还是 tactile contact gate 接近 `0`
+  当前 `L_pt` 不再在“无接触证据”时强行构造正例。
+  优先级是：
+  - 显式接触：`force_vec / indent_depth_m / tactile_pressure`
+  - 否则退回基于 tactile history 的 pseudo-contact gate
+  对 CALVIN 这类没有显式接触标注的数据，`loss_pt` 可能长期稀疏，但不应再因为无条件正例而卡在 `log(2)` 附近乱学。
 
 第三层是 smoke 脚本的 JSON 输出，来自
 [`scripts/picf_core_train_smoke.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train_smoke.py)：

@@ -114,6 +114,15 @@ def _restore_full_resolution_features(point: Any) -> torch.Tensor:
                 break
             parent = cursor.pooling_parent
             inverse = cursor.pooling_inverse
+        if inverse.numel() > 0:
+            inverse_long = inverse.long()
+            min_idx = int(inverse_long.min().item())
+            max_idx = int(inverse_long.max().item())
+            if min_idx < 0 or max_idx >= int(feat.shape[0]):
+                raise RuntimeError(
+                    "Sonata full-resolution inverse out of bounds: "
+                    f"min={min_idx} max={max_idx} size={int(feat.shape[0])} shape={tuple(inverse.shape)}"
+                )
         feat = feat[inverse]
         cursor = parent
     return feat

@@ -38,6 +38,19 @@ except ImportError:
 from .serialization import encode
 
 
+def _assert_index_bounds(name, index, size):
+    if index.numel() == 0:
+        return
+    index_long = index.long()
+    min_idx = int(index_long.min().item())
+    max_idx = int(index_long.max().item())
+    if min_idx < 0 or max_idx >= int(size):
+        raise RuntimeError(
+            f"Sonata index out of bounds for {name}: "
+            f"min={min_idx} max={max_idx} size={int(size)} shape={tuple(index.shape)}"
+        )
+
+
 @torch.inference_mode()
 def offset2bincount(offset):
     return torch.diff(
@@ -380,6 +393,7 @@ class SerializedAttention(PointModule):
         K = self.patch_size
         rel_pos_key = f"rel_pos_{self.order_index}"
         if rel_pos_key not in point.keys():
+            _assert_index_bounds("rel_pos.order", order, point.grid_coord.shape[0])
             grid_coord = point.grid_coord[order]
             grid_coord = grid_coord.reshape(-1, K, 3)
             point[rel_pos_key] = grid_coord.unsqueeze(2) - grid_coord.unsqueeze(1)
@@ -455,10 +469,15 @@ class SerializedAttention(PointModule):
 
         pad, unpad, cu_seqlens = self.get_padding_and_inverse(point)
 
-        order = point.serialized_order[self.order_index][pad]
-        inverse = unpad[point.serialized_inverse[self.order_index]]
+        serialized_order = point.serialized_order[self.order_index]
+        serialized_inverse = point.serialized_inverse[self.order_index]
+        _assert_index_bounds("attention.pad_to_serialized_order", pad, serialized_order.shape[0])
+        order = serialized_order[pad]
+        _assert_index_bounds("attention.serialized_inverse_to_unpad", serialized_inverse, unpad.shape[0])
+        inverse = unpad[serialized_inverse]
 
         # padding and reshape feat and batch for serialized point patch
+        _assert_index_bounds("attention.order_to_feat", order, point.feat.shape[0])
         qkv = self.qkv(point.feat)[order]
 
         if not self.enable_flash:
@@ -487,6 +506,7 @@ class SerializedAttention(PointModule):
                 softmax_scale=self.scale,
             ).reshape(-1, C)
             feat = feat.to(qkv.dtype)
+        _assert_index_bounds("attention.inverse_to_feat", inverse, feat.shape[0])
         feat = feat[inverse]
 
         # ffn
@@ -755,7 +775,9 @@ class GridUnpooling(PointModule):
         feat = point.feat
 
         parent = self.proj_skip(parent)
-        parent.feat = parent.feat + self.proj(point).feat[inverse]
+        proj_feat = self.proj(point).feat
+        _assert_index_bounds("grid_unpool.inverse", inverse, proj_feat.shape[0])
+        parent.feat = parent.feat + proj_feat[inverse]
         parent.sparse_conv_feat = parent.sparse_conv_feat.replace_feature(parent.feat)
 
         if self.traceable:

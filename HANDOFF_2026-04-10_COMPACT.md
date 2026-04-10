@@ -8,9 +8,7 @@ It duplicates project state that already exists across code, commits, logs, and 
 
 - Local repo: `/home/siyuanyue/Documents/openpi`
 - Branch: `Posterior_VLA`
-- Current synchronized commit:
-  - `43935e9` `Fix handoff commit references`
-- Local / GitHub / cloud repo are aligned to the same commit.
+- This file is intentionally temporary and may need to be deleted later once its content is fully reflected in the main README / plan docs.
 
 ## Current PICF Contract
 
@@ -30,6 +28,11 @@ It duplicates project state that already exists across code, commits, logs, and 
   - semantic-conditioned `prediction_cache` is produced after semantic reads
 - Next-step innovation reads only `previous.predictive.physical_prediction_cache`.
 - `semantic_summary` is bookkeeping / diagnostics only, not the main downstream fusion input.
+- `L_pt` no longer creates unconditional positives on missing-contact data.
+  It uses:
+  - explicit contact if available
+  - otherwise a tactile-history pseudo-contact gate
+- Sonata high-risk indexing paths now have runtime bounds checks to turn opaque CUDA `ScatterGatherKernel` failures into earlier, explicit Python errors when possible.
 
 ## Key Code Anchors
 

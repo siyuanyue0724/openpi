@@ -38,6 +38,7 @@ class _StubTactileEncoder:
         for index, sensor_name in enumerate(sorted(clips_by_sensor)):
             clip = np.asarray(clips_by_sensor[sensor_name], dtype=np.float32)
             value = float(clip.mean()) / 255.0 if clip.size > 0 else 0.0
+            pseudo_contact = float(np.abs(clip[-1] - clip[0]).mean() / 255.0) if clip.shape[0] > 1 else 0.0
             tokens = torch.full((32, 64), value + index, dtype=torch.float32)
             pooled_feature = torch.full((128,), value + index, dtype=torch.float32)
             pose = torch.as_tensor(poses_by_sensor[sensor_name], dtype=torch.float32)
@@ -47,6 +48,7 @@ class _StubTactileEncoder:
                 tokens=tokens,
                 pooled_feature=pooled_feature,
                 T_sens_to_wrist=pose,
+                pseudo_contact_score=pseudo_contact,
             )
             pooled.append(pooled_feature)
         if not pooled:
@@ -490,3 +492,31 @@ def test_alignment_loss_point_tactile_branch_defaults_off_without_explicit_conta
     assert torch.allclose(gate, torch.zeros_like(gate))
     alignment = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(lambda_pt=1.0))
     assert torch.allclose(alignment.pt, torch.zeros_like(alignment.pt))
+
+
+def test_alignment_loss_point_tactile_branch_uses_pseudo_contact_from_tactile_history(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id + 25, pose_shift=0.01)
+
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+    )
+    second = core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+    )
+
+    gate = second.state.token_field.tactile_contact_gate
+    assert gate.shape[0] == 2
+    assert torch.all(gate > 0.0)
+    alignment = compute_alignment_loss(second.state, config=PicfAlignmentLossConfig(lambda_pt=1.0))
+    assert torch.isfinite(alignment.pt)
+    assert alignment.pt > 0.0

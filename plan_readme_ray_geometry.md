@@ -242,7 +242,7 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 这轮本地验证结果：
 
 - `python -m py_compile src/openpi/picf/core/pipeline.py src/openpi/picf/core/pipeline_test.py scripts/picf_core_train.py scripts/picf_core_train_smoke.py`：通过
-- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`58 passed`
+- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`60 passed`
 - `python scripts/picf_core_train_smoke.py --calvin-root /tmp/openpi_picf_smoke_data/task_ABCD_D --device cpu`：通过
 - CPU smoke 当前输出：
   - `loss_total = 0.8595`
@@ -255,6 +255,9 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
   - 改 semantic 不改 `physical_prediction_cache`
   - 改 previous semantic 不改下一步 innovation
   - semantic future auxiliary loss 仍让 predictive cross-attn 保持在图中
+- 2026-04-10 额外硬化：
+  - `L_pt` 现在只在显式接触或 tactile history pseudo-contact gate 激活时产生正例
+  - `Sonata` 中所有高风险高级索引路径都已补运行时 bounds check，若再出现非法索引，将优先报出明确的 Python `RuntimeError`，而不是只有模糊的 CUDA device assert
 - 验证级别说明：
   - 以上结论来自代码路径审计、回归测试、CPU smoke、以及云机双卡 smoke
   - 它支持“当前工程实现满足此处定义的数学 contract”的判断

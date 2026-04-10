@@ -54,6 +54,7 @@ class PicfCoreConfig:
     tau_force_n: float = 1.0
     tau_indent_m: float = 5e-4
     tau_tactile_pressure: float = 0.1
+    tau_tactile_pseudo_contact: float = 0.04
     max_action_pos_m: float = 0.025
     max_action_rot_rad: float = math.pi / 18.0
     max_action_gripper: float = 1.0

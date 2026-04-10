@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 import contextlib
 
+import numpy as np
 import torch
 import torch.nn.functional as fn
 from torch import nn
@@ -60,6 +61,22 @@ def _touch_mae_state_dict(raw_state: dict[str, torch.Tensor], model: torch.nn.Mo
     return new_state
 
 
+def _mean_abs_rgb_delta(current: np.ndarray, reference: np.ndarray) -> float:
+    current_t = torch.as_tensor(np.array(current, copy=True), dtype=torch.float32)
+    reference_t = torch.as_tensor(np.array(reference, copy=True), dtype=torch.float32)
+    if current_t.ndim != 3 or current_t.shape[-1] != 3:
+        raise ValueError(f"Expected tactile RGB image [H,W,3], got {tuple(current_t.shape)}")
+    if reference_t.shape != current_t.shape:
+        raise ValueError(
+            f"Tactile delta reference must match current frame shape, got current={tuple(current_t.shape)} ref={tuple(reference_t.shape)}"
+        )
+    if float(current_t.max().item()) > 1.0:
+        current_t = current_t / 255.0
+    if float(reference_t.max().item()) > 1.0:
+        reference_t = reference_t / 255.0
+    return float(torch.mean(torch.abs(current_t - reference_t)).item())
+
+
 class AnyTouch2TactileEncoder(nn.Module):
     def __init__(self, config: AnyTouchConfig | None = None):
         super().__init__()
@@ -106,7 +123,8 @@ class AnyTouch2TactileEncoder(nn.Module):
         sensor_ids = []
         pose_tensors: dict[str, torch.Tensor] = {}
         for sensor_name in sensor_names:
-            clip = preprocess_tactile_clip(clips_by_sensor[sensor_name], backgrounds_by_sensor.get(sensor_name), self.config)
+            clip_raw = np.asarray(clips_by_sensor[sensor_name])
+            clip = preprocess_tactile_clip(clip_raw, backgrounds_by_sensor.get(sensor_name), self.config)
             batch.append(clip)
             sensor_ids.append(resolve_sensor_id(sensor_name, allow_universal=self.config.allow_universal_sensor_token))
             pose_tensors[sensor_name] = torch.as_tensor(poses_by_sensor[sensor_name], device=self.device, dtype=self.dtype)
@@ -121,6 +139,10 @@ class AnyTouch2TactileEncoder(nn.Module):
         pooled_list = []
         for index, sensor_name in enumerate(sensor_names):
             sensor_tokens = tokens[index]
+            clip_raw = np.asarray(clips_by_sensor[sensor_name])
+            current_rgb = clip_raw[-1]
+            temporal_ref = clip_raw[0]
+            pseudo_contact_score = _mean_abs_rgb_delta(current_rgb, temporal_ref)
             cls_token = sensor_tokens[0]
             sensor_token = sensor_tokens[1:6].mean(dim=0)
             patch_tokens = sensor_tokens[6:]
@@ -135,6 +157,7 @@ class AnyTouch2TactileEncoder(nn.Module):
                 tokens=sensor_tokens,
                 pooled_feature=pooled,
                 T_sens_to_wrist=pose_tensors[sensor_name],
+                pseudo_contact_score=float(pseudo_contact_score),
             )
         pooled_stack = torch.stack(pooled_list, dim=0)
         global_feature = pooled_stack.mean(dim=0)
