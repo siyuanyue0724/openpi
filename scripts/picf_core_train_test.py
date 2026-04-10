@@ -46,7 +46,8 @@ def _base_args() -> argparse.Namespace:
         latent_dim=112,
         innovation_dim=256,
         control_dim=256,
-        semantic_dim=256,
+        semantic_dim=2048,
+        semantic_cross_dim=512,
         future_hidden_dim=256,
         persistent_anchors=16,
         observation_anchors=24,
@@ -54,6 +55,8 @@ def _base_args() -> argparse.Namespace:
         posterior_layers=2,
         predictive_layers=2,
         control_layers=2,
+        predictive_semantic_reads=2,
+        control_semantic_reads=2,
         attention_heads=8,
         future_vote_heads=4,
         warmup_steps=None,
@@ -141,6 +144,14 @@ def test_validate_train_args_rejects_incompatible_attention_shape() -> None:
     args.hidden_dim = 250
     _MODULE._normalize_train_args(args)
     with pytest.raises(ValueError, match="hidden_dim must be divisible by attention_heads"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_rejects_incompatible_semantic_cross_shape() -> None:
+    args = _base_args()
+    args.semantic_cross_dim = 510
+    _MODULE._normalize_train_args(args)
+    with pytest.raises(ValueError, match="semantic_cross_dim must be divisible by attention_heads"):
         _MODULE._validate_train_args(args)
 
 

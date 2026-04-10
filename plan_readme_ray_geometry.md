@@ -174,25 +174,86 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 
 ## 0.0b 推荐主路线与宽度审计（2026-04-10 严格复核）
 
-这一节不是“当前代码已经改完”的声明，
-而是基于当前仓库实现、`pi0.5` 本地代码、以及近期 VLA / VLM 融合论文做出的**推荐下一步主路线**。
+这一节现在既记录**当前已落地实现**，
+也记录基于当前仓库实现、`pi0.5` 本地代码、以及近期 VLA / VLM 融合论文做出的**推荐主路线**。
 
 结论先写在前面：
 
 - **主路线应继续向 `pi0.5 / knowledge-insulating` 靠拢**
 - **但不应把 anchor 退化成普通 prompt token**
-- **也不建议长期停留在“full semantic tokens → shared `hidden_dim=256`”的统一小隐空间方案**
+- **当前代码已经不再停留在“full semantic tokens → shared `hidden_dim=256`”的统一小隐空间方案**
 - 对本版 PICF，更合理的长期结构是：
   - `PaliGemma` 保留高宽度 semantic stream
   - `current posterior` 继续保持 language-free
   - `anchor/posterior` 保留独立 world-state stream
   - 在 posterior 之后，用多层 gated/shared attention 做深融合
 
-### (R1) 为什么当前代码里会出现 semantic 投影
+当前已落地的默认参数是：
 
-当前代码中，semantic token 之所以被投影到 `hidden_dim`，
+- `hidden_dim = 256`
+- `posterior_hidden_dim = 256`
+- `latent_dim = 112`
+- `innovation_dim = 256`
+- `control_dim = 256`
+- `semantic_dim = 2048`
+- `semantic_cross_dim = 512`
+- `future_hidden_dim = 256`
+- `predictive_semantic_reads = 2`
+- `control_semantic_reads = 2`
+
+按当前实现直接统计，异宽融合块本身的参数量为：
+
+- `control_fusion_params = 4,476,930`
+- `predictive_fusion_params = 4,476,930`
+- `total_fusion_params = 8,953,860`
+
+这里的 `total_fusion_params` 已包含：
+
+- world-side self-attention blocks
+- world<-semantic gated cross-attention blocks
+- 对应的 LayerNorm / FF / gate 参数
+
+这说明：
+
+- 让 semantic 保持 `2048` 并不等价于“把整个 PICF 全部抬到 `2048`”
+- 当前实现只把 **semantic 读取接口** 做成宽流
+- world-state 主干仍保持紧凑
+
+这轮本地验证结果：
+
+- `python -m py_compile src/openpi/picf/core/pipeline.py src/openpi/picf/core/pipeline_test.py scripts/picf_core_train.py scripts/picf_core_train_smoke.py`：通过
+- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`50 passed`
+- `python scripts/picf_core_train_smoke.py --calvin-root /tmp/openpi_picf_smoke_data/task_ABCD_D --device cpu`：通过
+- 额外 `semantic_dim=2048` targeted backward smoke：通过
+  - `semantic_tokens_shape = (6, 2048)`
+  - `semantic_summary_shape = (1, 64)`
+  - `action_grad_norm = 1.4866`
+  - `predictive_pool_grad_norm = 2.1822`
+
+当前已落地的 downstream 融合口径是：
+
+- `current posterior` 继续保持 language-free
+- `PaliGemma` 保留 full text/image token stream，宽度保持 `2048`
+- control 分支 world tokens:
+  - `posterior.tokens`
+  - `innovation_token`
+  - `proprio_token`
+- predictive 分支 world tokens:
+  - `posterior.tokens`
+  - `posterior.global_post`
+  - `proprio_token`
+  - `action_cond_token`
+- 两个 world 分支都通过 posterior-late 的 **异宽 gated cross-attention**
+  去读取 `semantic_tokens`
+- 因而当前数学关系是：
+  - semantic 与 anchor/posterior 在 downstream 平级协作
+  - 但不要求所有流预先同宽
+
+### (R1) 为什么旧代码里会出现 semantic 投影
+
+旧代码里，semantic token 之所以被投影到 `hidden_dim`，
 不是因为方法上要求“语义必须压缩”，
-而是因为当前 downstream block 的数学结构要求**统一 `d_model`**。
+而是因为旧 downstream block 的数学结构要求**统一 `d_model`**。
 
 具体地：
 
@@ -213,7 +274,7 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 2. anchor / posterior 升到 semantic width
 3. 改成异宽双流 / cross-attention 结构，不再要求所有 token 先同宽
 
-所以，“为什么有投影”这件事，
+所以，“为什么旧实现里会有投影”这件事，
 **根因是当前 attention 数学结构，而不只是显存。**
 
 ### (R2) 但为什么不建议长期继续使用 `2048 → 256`

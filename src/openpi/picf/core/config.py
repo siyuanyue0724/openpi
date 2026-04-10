@@ -15,13 +15,16 @@ class PicfCoreConfig:
     latent_dim: int = 112
     innovation_dim: int = 256
     control_dim: int = 256
-    semantic_dim: int = 256
+    semantic_dim: int = 2048
+    semantic_cross_dim: int = 512
     future_hidden_dim: int = 256
     future_vote_heads: int = 4
     fusion_layers: int = 4
     posterior_layers: int = 2
     predictive_layers: int = 2
     control_layers: int = 2
+    predictive_semantic_reads: int = 2
+    control_semantic_reads: int = 2
     attention_heads: int = 8
     query_rounds: int = 2
     crop_radius_m: float = 0.08

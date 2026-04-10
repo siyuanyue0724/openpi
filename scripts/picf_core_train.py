@@ -237,6 +237,7 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "innovation_dim",
         "control_dim",
         "semantic_dim",
+        "semantic_cross_dim",
         "future_hidden_dim",
         "persistent_anchors",
         "observation_anchors",
@@ -244,6 +245,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "posterior_layers",
         "predictive_layers",
         "control_layers",
+        "predictive_semantic_reads",
+        "control_semantic_reads",
         "attention_heads",
         "future_vote_heads",
     )
@@ -271,6 +274,11 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "hidden_dim must be divisible by attention_heads; "
             f"got hidden_dim={args.hidden_dim} attention_heads={args.attention_heads}."
+        )
+    if int(args.semantic_cross_dim) % int(args.attention_heads) != 0:
+        raise ValueError(
+            "semantic_cross_dim must be divisible by attention_heads; "
+            f"got semantic_cross_dim={args.semantic_cross_dim} attention_heads={args.attention_heads}."
         )
     if str(args.device).startswith("cpu") and args.point_backbone == "sonata":
         raise RuntimeError(
@@ -829,6 +837,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         innovation_dim=args.innovation_dim,
         control_dim=args.control_dim,
         semantic_dim=args.semantic_dim,
+        semantic_cross_dim=args.semantic_cross_dim,
         future_hidden_dim=args.future_hidden_dim,
         persistent_anchors=args.persistent_anchors,
         observation_anchors=args.observation_anchors,
@@ -836,6 +845,8 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         posterior_layers=args.posterior_layers,
         predictive_layers=args.predictive_layers,
         control_layers=args.control_layers,
+        predictive_semantic_reads=args.predictive_semantic_reads,
+        control_semantic_reads=args.control_semantic_reads,
         attention_heads=args.attention_heads,
         future_vote_heads=args.future_vote_heads,
     )
@@ -1177,13 +1188,14 @@ def train(args: argparse.Namespace) -> None:
                 bool(args.wandb_enabled and args.wandb_mode != "disabled"),
             )
             logging.info(
-                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s attention_heads=%s future_vote_heads=%s",
+                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s predictive_semantic_reads=%s control_semantic_reads=%s attention_heads=%s future_vote_heads=%s",
                 args.hidden_dim,
                 args.posterior_hidden_dim,
                 args.latent_dim,
                 args.innovation_dim,
                 args.control_dim,
                 args.semantic_dim,
+                args.semantic_cross_dim,
                 args.future_hidden_dim,
                 args.persistent_anchors,
                 args.observation_anchors,
@@ -1191,6 +1203,8 @@ def train(args: argparse.Namespace) -> None:
                 args.posterior_layers,
                 args.predictive_layers,
                 args.control_layers,
+                args.predictive_semantic_reads,
+                args.control_semantic_reads,
                 args.attention_heads,
                 args.future_vote_heads,
             )
@@ -1461,6 +1475,7 @@ def main() -> None:
     parser.add_argument("--innovation-dim", type=int, default=_SPEC_DEFAULTS.innovation_dim)
     parser.add_argument("--control-dim", type=int, default=_SPEC_DEFAULTS.control_dim)
     parser.add_argument("--semantic-dim", type=int, default=_SPEC_DEFAULTS.semantic_dim)
+    parser.add_argument("--semantic-cross-dim", type=int, default=_SPEC_DEFAULTS.semantic_cross_dim)
     parser.add_argument("--future-hidden-dim", type=int, default=_SPEC_DEFAULTS.future_hidden_dim)
     parser.add_argument("--persistent-anchors", type=int, default=_SPEC_DEFAULTS.persistent_anchors)
     parser.add_argument("--observation-anchors", type=int, default=_SPEC_DEFAULTS.observation_anchors)
@@ -1468,6 +1483,8 @@ def main() -> None:
     parser.add_argument("--posterior-layers", type=int, default=_SPEC_DEFAULTS.posterior_layers)
     parser.add_argument("--predictive-layers", type=int, default=_SPEC_DEFAULTS.predictive_layers)
     parser.add_argument("--control-layers", type=int, default=_SPEC_DEFAULTS.control_layers)
+    parser.add_argument("--predictive-semantic-reads", type=int, default=_SPEC_DEFAULTS.predictive_semantic_reads)
+    parser.add_argument("--control-semantic-reads", type=int, default=_SPEC_DEFAULTS.control_semantic_reads)
     parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)
     parser.add_argument("--future-vote-heads", type=int, default=_SPEC_DEFAULTS.future_vote_heads)
     parser.set_defaults(

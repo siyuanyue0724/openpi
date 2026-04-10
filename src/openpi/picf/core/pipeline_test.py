@@ -92,12 +92,15 @@ def _make_core(tmp_path: Path, **overrides) -> tuple[PicfFullCore, CalvinSequent
         innovation_dim=64,
         control_dim=64,
         semantic_dim=32,
+        semantic_cross_dim=64,
         future_hidden_dim=64,
         future_vote_heads=3,
         fusion_layers=2,
         posterior_layers=1,
         predictive_layers=1,
         control_layers=1,
+        predictive_semantic_reads=1,
+        control_semantic_reads=1,
         attention_heads=4,
         query_rounds=2,
     )
@@ -153,7 +156,7 @@ def _visual_override(value: float) -> np.ndarray:
     return np.full((4, 4, 8), value, dtype=np.float32)
 
 
-def _semantic_features(value: float, *, num_tokens: int = 3, width: int = 16) -> PaliGemmaSemanticFeatures:
+def _semantic_features(value: float, *, num_tokens: int = 3, width: int = 32) -> PaliGemmaSemanticFeatures:
     tokens = torch.full((num_tokens, width), value, dtype=torch.float32)
     summary = torch.full((1, width), value, dtype=torch.float32)
     return PaliGemmaSemanticFeatures(tokens=tokens, summary=summary)
@@ -183,8 +186,43 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     assert output.state.predictive.prediction_cache.tactile_real is not None
     assert output.state.predictive.prediction_cache.point_real is not None
     assert output.state.predictive.semantic_summary.shape == (1, core.config.hidden_dim)
-    assert output.state.predictive.semantic_tokens.shape[0] == 3
+    assert output.state.predictive.semantic_tokens.shape == (3, core.config.semantic_dim)
     assert output.state.token_field.fusion_attention_mean is not None
+
+
+def test_full_core_preserves_2048_wide_semantic_tokens_and_backpropagates(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        semantic_dim=2048,
+        semantic_cross_dim=256,
+        predictive_semantic_reads=1,
+        control_semantic_reads=1,
+    )
+    frames = list(replay)[:2]
+    semantic0 = torch.randn((6, core.config.semantic_dim), dtype=torch.float32)
+    semantic1 = torch.randn((6, core.config.semantic_dim), dtype=torch.float32)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override={"tokens": semantic0, "summary": semantic0.mean(dim=0, keepdim=True)},
+        action_future=frames[0].action,
+    )
+    second = core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(2.0),
+        semantic_override={"tokens": semantic1, "summary": semantic1.mean(dim=0, keepdim=True)},
+        action_future=frames[1].action,
+    )
+    assert second.state.predictive.semantic_tokens.shape == (6, 2048)
+    assert second.state.predictive.semantic_summary.shape == (1, core.config.hidden_dim)
+    loss = first.state.predictive.action.pow(2).mean() + second.state.predictive.global_pred.pow(2).mean()
+    core.zero_grad(set_to_none=True)
+    loss.backward()
+    assert core.action_head.weight.grad is not None
+    assert core.predictive_pool.score.weight.grad is not None
 
 
 def test_language_is_late_and_does_not_change_current_posterior(tmp_path: Path) -> None:
@@ -264,12 +302,15 @@ def test_extract_targets_does_not_mutate_visual_history_when_using_real_visual_p
             innovation_dim=64,
             control_dim=64,
             semantic_dim=32,
+            semantic_cross_dim=64,
             future_hidden_dim=64,
             future_vote_heads=3,
             fusion_layers=2,
             posterior_layers=1,
             predictive_layers=1,
             control_layers=1,
+            predictive_semantic_reads=1,
+            control_semantic_reads=1,
             attention_heads=4,
             query_rounds=2,
             device="cpu",
@@ -444,12 +485,15 @@ def test_visual_override_without_camera_model_uses_stable_null_projective_branch
             innovation_dim=64,
             control_dim=64,
             semantic_dim=32,
+            semantic_cross_dim=64,
             future_hidden_dim=64,
             future_vote_heads=3,
             fusion_layers=2,
             posterior_layers=1,
             predictive_layers=1,
             control_layers=1,
+            predictive_semantic_reads=1,
+            control_semantic_reads=1,
             attention_heads=4,
             query_rounds=2,
         ),

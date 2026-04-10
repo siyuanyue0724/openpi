@@ -124,6 +124,7 @@ def _build_core(args: argparse.Namespace) -> tuple[PicfFullCore, bool]:
         innovation_dim=64,
         control_dim=64,
         semantic_dim=32,
+        semantic_cross_dim=64,
         future_hidden_dim=64,
         persistent_anchors=8,
         observation_anchors=10,
@@ -131,6 +132,8 @@ def _build_core(args: argparse.Namespace) -> tuple[PicfFullCore, bool]:
         posterior_layers=1,
         predictive_layers=1,
         control_layers=1,
+        predictive_semantic_reads=1,
+        control_semantic_reads=1,
         attention_heads=4,
         future_vote_heads=3,
     )
@@ -284,7 +287,7 @@ def run_smoke(
     nxt = frames[1]
     current_visual = _rgb_visual_override(current.rgb_static) if use_visual_override else None
     next_visual = _rgb_visual_override(nxt.rgb_static) if use_visual_override else None
-    semantic = np.zeros((16,), dtype=np.float32)
+    semantic = np.zeros((core.config.semantic_dim,), dtype=np.float32)
 
     output = core.step(
         current,

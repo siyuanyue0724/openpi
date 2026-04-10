@@ -51,7 +51,8 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
       - `latent_dim=112`
       - `innovation_dim=256`
       - `control_dim=256`
-      - `semantic_dim=256`
+      - `semantic_dim=2048`
+      - `semantic_cross_dim=512`
       - `future_hidden_dim=256`
       - `persistent_anchors=16`
       - `observation_anchors=24`
@@ -437,7 +438,13 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 - 当前 semantic side path 已升级成 **full-token PaliGemma stream**
   - 不是单个 pooled semantic summary token
   - trainer 会保留 `PaliGemma` 的有效文本 token 与图像 token
-  - 然后把这些 token 作为 `semantic_tokens` 送入 posterior 之后的 control / predictive attention
+  - 这些 token 保持 `semantic_dim=2048` 原生宽度
+  - posterior 之后不再先压到 `hidden_dim`
+  - control / predictive 分支改成由 world tokens 通过异宽 gated cross-attention 读取 `semantic_tokens`
+- 2026-04-10 本地复核还新增通过：
+  - `50 passed` 的核心回归
+  - CPU 一步训练 smoke
+  - `semantic_dim=2048` targeted backward smoke
 - 同时仍保留一个 `semantic_summary`
   - 它只是同一批 semantic token 的聚合记录
   - 不是 downstream 唯一能看到的语义输入
@@ -462,12 +469,15 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - `latent_dim=112`
   - `innovation_dim=256`
   - `control_dim=256`
-  - `semantic_dim=256`
+  - `semantic_dim=2048`
+  - `semantic_cross_dim=512`
   - `future_hidden_dim=256`
   - `fusion_layers=4`
   - `posterior_layers=2`
   - `predictive_layers=2`
   - `control_layers=2`
+  - `predictive_semantic_reads=2`
+  - `control_semantic_reads=2`
   - `attention_heads=8`
   - `future_vote_heads=4`
 - `--warmup-steps` 若不显式传入，则自动取 `round(0.02 * num_train_steps)`

@@ -94,7 +94,8 @@
       - `latent_dim=112`
       - `innovation_dim=256`
       - `control_dim=256`
-      - `semantic_dim=256`
+      - `semantic_dim=2048`
+      - `semantic_cross_dim=512`
       - `future_hidden_dim=256`
       - `persistent_anchors=16`
       - `observation_anchors=24`
@@ -844,12 +845,15 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - `latent_dim=112`
   - `innovation_dim=256`
   - `control_dim=256`
-  - `semantic_dim=256`
+  - `semantic_dim=2048`
+  - `semantic_cross_dim=512`
   - `future_hidden_dim=256`
   - `fusion_layers=4`
   - `posterior_layers=2`
   - `predictive_layers=2`
   - `control_layers=2`
+  - `predictive_semantic_reads=2`
+  - `control_semantic_reads=2`
   - `attention_heads=8`
   - `future_vote_heads=4`
 - 也就是说：
@@ -1091,20 +1095,33 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 当前 downstream 使用的是 **完整的 semantic token stream**
   - `PaliGemma` 文本 hidden states 中所有有效 token 会被保留
   - `PaliGemma` 图像 hidden states 中所有有效 token 也会被保留
-  - 这些 token 会一起投影到 PICF `hidden_dim=256`，作为 `semantic_tokens`
+  - 这些 token 保持 `semantic_dim=2048` 原生宽度
+  - 它们不会先被压到 `hidden_dim`
+  - 当前实现改成了 posterior-late 的 **异宽 gated cross-attention**
+    - world query width: `hidden_dim=256`
+    - semantic key/value width: `semantic_dim=2048`
+    - cross inner width: `semantic_cross_dim=512`
 - 同时仍保留一个 `semantic_summary`
   - 它由同一批 semantic token 派生
   - 主要作为预测状态记录、诊断与轻量聚合量
   - 它不是 downstream 唯一可见的语义输入
-- 在 posterior 之后，进入 control / predictive attention 的是：
+- 在 posterior 之后，先形成 world token 流：
   - `posterior.tokens`
-  - `semantic_tokens`
   - `innovation_token`
   - `proprio_token`
+- 然后由这组 world tokens 去读取：
+  - `semantic_tokens`
+- predictive 分支额外再拼入：
+  - `posterior.global_post`
+  - `action_cond_token`
 - 这意味着当前实现更接近旧 `pi0.5` 的 full-token PaliGemma 语义能力，同时继续满足：
   - current posterior language-free
   - semantic side path language-late
-  - anchor / posterior tokens 与 semantic tokens 在 downstream 是平级 token 流
+  - anchor / posterior tokens 与 semantic tokens 在 downstream 是平级流，但不要求预先同宽
+- 2026-04-10 本地复核新增通过：
+  - `50 passed` 核心回归
+  - CPU 一步训练 smoke
+  - `semantic_dim=2048` targeted backward smoke
 
 如果以上两条显式语义路径都没有，core 才会回退到零语义 token。
 

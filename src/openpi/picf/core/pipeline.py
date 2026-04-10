@@ -372,6 +372,89 @@ class CrossAttentionRead(nn.Module):
         return output, mean_weights
 
 
+class GatedCrossAttentionRead(nn.Module):
+    def __init__(self, query_dim: int, kv_dim: int, heads: int, *, inner_dim: int):
+        super().__init__()
+        if inner_dim % heads != 0:
+            raise ValueError(
+                f"inner_dim must be divisible by heads for heterogeneous cross attention; "
+                f"got inner_dim={inner_dim} heads={heads}."
+            )
+        self.query_norm = nn.LayerNorm(query_dim)
+        self.kv_norm = nn.LayerNorm(kv_dim)
+        self.attn = nn.MultiheadAttention(
+            query_dim,
+            heads,
+            batch_first=True,
+            kdim=kv_dim,
+            vdim=kv_dim,
+        )
+        self.cross_gate = nn.Parameter(torch.zeros(()))
+        self.ff_norm = nn.LayerNorm(query_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(query_dim, inner_dim),
+            nn.GELU(),
+            nn.Linear(inner_dim, query_dim),
+        )
+        nn.init.zeros_(self.ff[-1].weight)
+        nn.init.zeros_(self.ff[-1].bias)
+
+    def forward(
+        self,
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        *,
+        attn_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if keys.shape[1] == 0:
+            weights = torch.zeros((queries.shape[1], 0), device=queries.device, dtype=queries.dtype)
+            return queries, weights
+        query_in = self.query_norm(queries)
+        key_in = self.kv_norm(keys)
+        attn_out, weights = self.attn(
+            query_in,
+            key_in,
+            key_in,
+            attn_mask=attn_bias,
+            need_weights=True,
+            average_attn_weights=False,
+        )
+        output = queries + (torch.tanh(self.cross_gate) * attn_out)
+        output = output + self.ff(self.ff_norm(output))
+        mean_weights = weights.mean(dim=1)[0]
+        return output, mean_weights
+
+
+class WorldLatentFusionStack(nn.Module):
+    def __init__(
+        self,
+        world_dim: int,
+        semantic_dim: int,
+        heads: int,
+        *,
+        self_layers: int,
+        cross_layers: int,
+        cross_inner_dim: int,
+    ):
+        super().__init__()
+        self.self_layers = nn.ModuleList(SelfAttentionBlock(world_dim, heads, 1) for _ in range(self_layers))
+        self.cross_layers = nn.ModuleList(
+            GatedCrossAttentionRead(world_dim, semantic_dim, heads, inner_dim=cross_inner_dim)
+            for _ in range(cross_layers)
+        )
+
+    def forward(self, world_tokens: torch.Tensor, semantic_tokens: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor | None]:
+        x = world_tokens[None, :]
+        attention = None
+        num_rounds = max(len(self.self_layers), len(self.cross_layers))
+        for index in range(num_rounds):
+            if index < len(self.self_layers):
+                x, _ = self.self_layers[index](x)
+            if index < len(self.cross_layers):
+                x, attention = self.cross_layers[index](x, semantic_tokens[None, :])
+        return x[0], attention
+
+
 class AttentionPool(nn.Module):
     def __init__(self, hidden_dim: int):
         super().__init__()
@@ -528,11 +611,17 @@ class PicfFullCore(nn.Module):
         self.posterior_self = TransformerStack(hidden_dim, heads, self.config.posterior_layers)
         self.posterior_pool = AttentionPool(hidden_dim)
 
-        self.semantic_token_proj = nn.LazyLinear(hidden_dim)
         self.semantic_summary_proj = nn.LazyLinear(hidden_dim)
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
-        self.predictive_self = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
+        self.predictive_fusion = WorldLatentFusionStack(
+            hidden_dim,
+            self.config.semantic_dim,
+            heads,
+            self_layers=self.config.predictive_layers,
+            cross_layers=self.config.predictive_semantic_reads,
+            cross_inner_dim=self.config.semantic_cross_dim,
+        )
         self.predictive_pool = AttentionPool(hidden_dim)
 
         self.visual_latent_target_proj = nn.LazyLinear(hidden_dim)
@@ -549,7 +638,14 @@ class PicfFullCore(nn.Module):
         self.innovation_proj = nn.LazyLinear(self.config.innovation_dim)
         self.innovation_token_proj = nn.Linear(self.config.innovation_dim, hidden_dim)
 
-        self.control_self = TransformerStack(hidden_dim, heads, self.config.control_layers)
+        self.control_fusion = WorldLatentFusionStack(
+            hidden_dim,
+            self.config.semantic_dim,
+            heads,
+            self_layers=self.config.control_layers,
+            cross_layers=self.config.control_semantic_reads,
+            cross_inner_dim=self.config.semantic_cross_dim,
+        )
         self.control_pool = AttentionPool(hidden_dim)
         self.control_state_proj = nn.Linear(hidden_dim, self.config.control_dim)
         self.action_head = nn.Linear(self.config.control_dim, 7)
@@ -645,7 +741,7 @@ class PicfFullCore(nn.Module):
 
     def _zero_semantic_context(self) -> _SemanticContext:
         return _SemanticContext(
-            tokens=torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype),
+            tokens=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype),
             summary=torch.zeros((1, self.config.hidden_dim), device=self.device, dtype=self.dtype),
         )
 
@@ -661,10 +757,15 @@ class PicfFullCore(nn.Module):
             summary_raw = summary_raw[None, :]
         tokens_raw = _to_tensor(tokens_raw, device=self.device, dtype=self.dtype)
         summary_raw = _to_tensor(summary_raw, device=self.device, dtype=self.dtype)
+        if tokens_raw.shape[0] > 0 and int(tokens_raw.shape[-1]) != int(self.config.semantic_dim):
+            raise RuntimeError(
+                "Semantic token width mismatch. "
+                f"Expected semantic_dim={self.config.semantic_dim}, got tokens shape={tuple(tokens_raw.shape)}."
+            )
         semantic_tokens = (
-            self.semantic_token_proj(tokens_raw)
+            tokens_raw
             if tokens_raw.shape[0] > 0
-            else torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype)
+            else torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype)
         )
         semantic_summary = self.semantic_summary_proj(summary_raw)
         return _SemanticContext(tokens=semantic_tokens, summary=semantic_summary)
@@ -704,7 +805,10 @@ class PicfFullCore(nn.Module):
             raw = self.semantic_wrapper.summarize(outputs=semantic_override)
         raw = _to_tensor(raw, device=self.device, dtype=self.dtype)
         raw = raw if raw.ndim == 2 else raw[None, :]
-        return self._project_semantic_context(tokens_raw=raw, summary_raw=raw)
+        return _SemanticContext(
+            tokens=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype),
+            summary=self.semantic_summary_proj(raw),
+        )
 
     def _previous_action(self, previous: PicfCoreState | None) -> torch.Tensor:
         if previous is None:
@@ -1653,16 +1757,15 @@ class PicfFullCore(nn.Module):
             dtype=self.dtype,
         )
         proprio_token = self.proprio_proj(proprio[None, :])[0]
-        control_tokens = torch.cat(
+        control_world_tokens = torch.cat(
             [
                 posterior.tokens,
-                semantic.tokens,
                 innovation_token[None, :],
                 proprio_token[None, :],
             ],
             dim=0,
         )
-        control_tokens = self.control_self(control_tokens[None, :])[0]
+        control_tokens, _ = self.control_fusion(control_world_tokens, semantic.tokens)
         pooled_hidden = self.control_pool(control_tokens[None, :])[0]
         pooled_state = self.control_state_proj(pooled_hidden)
         action = self._clip_action(self.action_head(pooled_state))
@@ -1677,8 +1780,8 @@ class PicfFullCore(nn.Module):
             [posterior.global_post, proprio_token, self.action_cond_proj(action_cond[None, :])[0]],
             dim=0,
         )
-        pred_tokens = torch.cat([posterior.tokens, semantic.tokens, pred_tail], dim=0)
-        pred_tokens = self.predictive_self(pred_tokens[None, :])[0]
+        pred_world_tokens = torch.cat([posterior.tokens, pred_tail], dim=0)
+        pred_tokens, _ = self.predictive_fusion(pred_world_tokens, semantic.tokens)
         global_pred = self.predictive_pool(pred_tokens[None, :])[0]
         prediction_cache = PicfPredictionCache(
             visual_latent=self.visual_latent_head(global_pred),

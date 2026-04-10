@@ -74,12 +74,15 @@ def _make_core(tmp_path: Path) -> tuple[PicfFullCore, CalvinSequentialReplay]:
         innovation_dim=64,
         control_dim=64,
         semantic_dim=32,
+        semantic_cross_dim=64,
         future_hidden_dim=64,
         future_vote_heads=3,
         fusion_layers=2,
         posterior_layers=1,
         predictive_layers=1,
         control_layers=1,
+        predictive_semantic_reads=1,
+        control_semantic_reads=1,
         attention_heads=4,
         query_rounds=2,
         device="cpu",
@@ -154,7 +157,7 @@ def test_transition_loss_closes_one_step_future_supervision_and_backward(tmp_pat
         frames[0],
         point_features_override=_point_override(core, frames[0]),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
         action_future=frames[0].action,
     )
     core.zero_grad(set_to_none=True)
@@ -183,7 +186,7 @@ def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_u
         frames[0],
         point_features_override=_point_override(core, frames[0]),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
         action_future=frames[0].action,
     )
     pointless_future = dataclasses.replace(
@@ -212,7 +215,7 @@ def test_innovation_keeps_point_error_encoder_in_graph_when_current_point_target
         frames[0],
         point_features_override=_point_override(core, frames[0]),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
         action_future=frames[0].action,
     )
     pointless_current = dataclasses.replace(
@@ -226,7 +229,7 @@ def test_innovation_keeps_point_error_encoder_in_graph_when_current_point_target
         previous=first.state,
         point_features_override=np.zeros((0, 8), dtype=np.float32),
         visual_map_override=_visual_override(2.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
         action_future=pointless_current.action,
     )
     second.state.predictive.action.sum().backward()
@@ -241,7 +244,7 @@ def test_alignment_loss_uses_projective_candidates_and_is_finite(tmp_path: Path)
         frame,
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
     )
     alignment = compute_alignment_loss(output.state)
     assert torch.isfinite(alignment.total)
@@ -313,7 +316,7 @@ def test_alignment_loss_keeps_align_heads_in_graph_when_no_projective_candidates
         frame,
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
     )
     geom = output.state.token_field.projective_geometry
     assert geom is not None
@@ -340,7 +343,7 @@ def test_alignment_loss_tau_pv_changes_bag_contrastive_temperature(tmp_path: Pat
         frame,
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
     )
     warm = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(tau_pv=1.0))
     cold = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(tau_pv=0.01))
@@ -356,7 +359,7 @@ def test_alignment_loss_emits_focus_loss_from_fusion_attention(tmp_path: Path) -
         frame,
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
     )
     alignment = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(lambda_focus_pv=1.0))
     assert torch.isfinite(alignment.focus_pv)
@@ -434,7 +437,7 @@ def test_alignment_loss_point_tactile_branch_uses_tau_pt(tmp_path: Path) -> None
         frame,
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((16,), dtype=np.float32),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
     )
     warm = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(lambda_pt=1.0, tau_pt=1.0))
     cold = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(lambda_pt=1.0, tau_pt=0.01))
