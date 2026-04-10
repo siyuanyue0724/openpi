@@ -30,6 +30,8 @@ from ...processing_utils import Unpack
 from ...utils import LossKwargs, ModelOutput, auto_docstring, can_return_tuple, is_torchdynamo_compiling, logging
 from ..auto import AutoModel
 from .configuration_paligemma import PaliGemmaConfig
+from .safe_ops import merge_image_features_dense
+from .safe_ops import replace_oov_image_tokens
 
 
 logger = logging.get_logger(__name__)
@@ -304,9 +306,11 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
 
         # Replace image id woth PAD if the image token if OOV, to avoid index-errors
         if input_ids is not None and self.config.image_token_id >= self.vocab_size:
-            special_image_mask = input_ids == self.config.image_token_id
-            llm_input_ids = input_ids.clone()
-            llm_input_ids[special_image_mask] = 0
+            llm_input_ids, _ = replace_oov_image_tokens(
+                input_ids,
+                image_token_id=self.config.image_token_id,
+                vocab_size=self.vocab_size,
+            )
         else:
             llm_input_ids = input_ids
 
@@ -330,19 +334,23 @@ class PaliGemmaModel(PaliGemmaPreTrainedModel):
                 special_image_mask = inputs_embeds == self.get_input_embeddings()(
                     torch.tensor(self.config.image_token_id, dtype=torch.long, device=inputs_embeds.device)
                 )
+                if not is_torchdynamo_compiling() and inputs_embeds[special_image_mask].numel() != image_features.numel():
+                    image_tokens_in_text = (special_image_mask).sum(dim=1).sum(dim=0)[0]
+                    raise ValueError(
+                        f"Number of images does not match number of special image tokens in the input text. "
+                        f"Got {image_tokens_in_text} image tokens in the text but {image_features.shape[0] * image_features.shape[1]} "
+                        "tokens from image embeddings."
+                    )
+                image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
             else:
-                special_image_mask = (input_ids == self.config.image_token_id).unsqueeze(-1)
-                special_image_mask = special_image_mask.expand_as(inputs_embeds).to(inputs_embeds.device)
-
-            if not is_torchdynamo_compiling() and inputs_embeds[special_image_mask].numel() != image_features.numel():
-                image_tokens_in_text = (special_image_mask).sum(dim=1).sum(dim=0)[0]
-                raise ValueError(
-                    f"Number of images does not match number of special image tokens in the input text. "
-                    f"Got {image_tokens_in_text} image tokens in the text but {image_features.shape[0] * image_features.shape[1]} "
-                    "tokens from image embeddings."
+                image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
+                inputs_embeds = merge_image_features_dense(
+                    inputs_embeds=inputs_embeds,
+                    input_ids=input_ids,
+                    image_features=image_features,
+                    image_token_id=self.config.image_token_id,
                 )
-            image_features = image_features.to(inputs_embeds.device, inputs_embeds.dtype)
-            inputs_embeds = inputs_embeds.masked_scatter(special_image_mask, image_features)
 
         causal_mask = self._update_causal_mask(
             attention_mask, token_type_ids, past_key_values, cache_position, inputs_embeds, is_training

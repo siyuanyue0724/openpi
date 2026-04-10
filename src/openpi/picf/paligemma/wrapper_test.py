@@ -3,6 +3,8 @@ from __future__ import annotations
 import pytest
 import torch
 
+from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import merge_image_features_dense
+from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import replace_oov_image_tokens
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
 from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
 from openpi.picf.paligemma.wrapper import _masked_position_ids
@@ -176,3 +178,34 @@ def test_take_valid_prefix_tokens_rejects_non_right_padded_mask() -> None:
     pad_mask = torch.tensor([True, False, True, False, False, False])
     with pytest.raises(RuntimeError, match="right-padded"):
         _take_valid_prefix_tokens(hidden, pad_mask)
+
+
+def test_replace_oov_image_tokens_uses_where_without_boolean_setitem() -> None:
+    input_ids = torch.tensor([[5, 9, 1, 9], [9, 2, 3, 9]], dtype=torch.int64)
+    replaced, mask = replace_oov_image_tokens(input_ids, image_token_id=9, vocab_size=8)
+    torch.testing.assert_close(mask, input_ids == 9)
+    torch.testing.assert_close(
+        replaced,
+        torch.tensor([[5, 0, 1, 0], [0, 2, 3, 0]], dtype=torch.int64),
+    )
+
+
+def test_merge_image_features_dense_matches_special_image_slots() -> None:
+    inputs_embeds = torch.zeros((1, 6, 2), dtype=torch.float32)
+    input_ids = torch.tensor([[9, 9, 4, 5, 9, 9]], dtype=torch.int64)
+    image_features = torch.tensor([[[1.0, 10.0], [2.0, 20.0], [3.0, 30.0], [4.0, 40.0]]], dtype=torch.float32)
+
+    merged = merge_image_features_dense(
+        inputs_embeds=inputs_embeds,
+        input_ids=input_ids,
+        image_features=image_features,
+        image_token_id=9,
+    )
+
+    torch.testing.assert_close(
+        merged,
+        torch.tensor(
+            [[[1.0, 10.0], [2.0, 20.0], [0.0, 0.0], [0.0, 0.0], [3.0, 30.0], [4.0, 40.0]]],
+            dtype=torch.float32,
+        ),
+    )
