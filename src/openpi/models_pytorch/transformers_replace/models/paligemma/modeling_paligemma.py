@@ -30,8 +30,8 @@ from ...processing_utils import Unpack
 from ...utils import LossKwargs, ModelOutput, auto_docstring, can_return_tuple, is_torchdynamo_compiling, logging
 from ..auto import AutoModel
 from .configuration_paligemma import PaliGemmaConfig
-from .safe_ops import merge_image_features_dense
-from .safe_ops import replace_oov_image_tokens
+from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import merge_image_features_dense
+from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import replace_oov_image_tokens
 
 
 logger = logging.get_logger(__name__)
