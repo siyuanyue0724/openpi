@@ -279,6 +279,19 @@ pytest -q \
   src/openpi/picf/paligemma/wrapper_test.py
 ```
 
+Single-entry verification script:
+
+```bash
+python scripts/verify_picf_contract.py
+```
+
+This script combines:
+
+- static AST-level contract checks
+- targeted invariance regressions
+- full core regression suite
+- local CPU smoke training
+
 ## 11. Verification Level
 
 Current verification level is:

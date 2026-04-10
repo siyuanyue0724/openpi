@@ -460,6 +460,8 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 但这不是机器校验的形式化证明
   - 更硬的允许边 / 禁止边规格见：
     - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
+  - 一键验证脚本：
+    - `python scripts/verify_picf_contract.py`
 - 同时仍保留一个 `semantic_summary`
   - 它只是同一批 semantic token 的聚合记录
   - 不直接参与 downstream 主融合

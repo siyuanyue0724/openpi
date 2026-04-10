@@ -1177,6 +1177,8 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 当前更硬的工程规格已单独收敛到：
   - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
   - 后续如果修改 `posterior` / `innovation` / `predictive cache` 的读写边，必须同步更新这份规格
+  - 一键脚本入口：
+    - `python scripts/verify_picf_contract.py`
 
 如果以上两条显式语义路径都没有，core 才会回退到零语义 token。
 

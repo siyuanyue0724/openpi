@@ -262,6 +262,8 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 - 当前这条主线的更硬规格，已经收敛到：
   - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
   - 这份文件负责定义允许边、禁止边、状态转移顺序和验证范围
+  - 一键验证脚本：
+    - `python scripts/verify_picf_contract.py`
 
 当前已落地的 downstream 融合口径是：
 
