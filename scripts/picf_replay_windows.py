@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 from collections import deque
 from pathlib import Path
+import sys
 from typing import Any
 
 import torch
+
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.picf_core_train import _build_model
 from scripts.picf_core_train import _build_optimizer
@@ -18,6 +23,7 @@ from scripts.picf_core_train import _normalize_train_args
 from scripts.picf_core_train import _PicfWindowTrainer
 from scripts.picf_core_train import _seed_everything
 from scripts.picf_core_train import _validate_train_args
+from scripts.sonata_window_probe import _override_build_sample
 
 
 def _coerce_loaded_args(payload: dict[str, Any], *, device_override: str | None) -> argparse.Namespace:
@@ -58,6 +64,12 @@ def main() -> None:
     parser.add_argument("--checkpoint", default=None, help="Optional checkpoint directory or latest.pt to load before replay.")
     parser.add_argument("--rank-seed", type=int, default=1, help="Rank offset for seed reproduction. rank=1 matches prior failing worker.")
     parser.add_argument("--optimizer-step", action="store_true", help="Apply optimizer.step() after each replayed window.")
+    parser.add_argument(
+        "--point-grid-mode",
+        choices=("default", "original", "rebased"),
+        default="default",
+        help="Override Sonata local-grid preprocessing during replay for debugging.",
+    )
     args = parser.parse_args()
 
     args_json_path = Path(args.args_json)
@@ -70,77 +82,80 @@ def main() -> None:
 
     _seed_everything(int(train_args.seed), int(args.rank_seed))
 
-    source = _CalvinTransitionSource(
-        train_args.calvin_root,
-        split=train_args.split,
-        backend=train_args.backend,
-        unroll_steps=train_args.unroll_steps,
-        use_tactile=bool(train_args.use_tactile),
-        tactile_sensor_names=train_args.tactile_sensor_names,
-        tactile_sensor_offsets_m=train_args.tactile_sensor_offsets_m,
-    )
-    try:
-        core, semantic_encoder, use_visual_override = _build_model(train_args, device=device)
-        core = core.to(device)
-        trainer = _PicfWindowTrainer(
-            core,
-            semantic_encoder=semantic_encoder,
-            visual_grid=train_args.visual_grid,
-            use_visual_override=use_visual_override,
-        ).to(device)
-        _materialize_model_parameters(trainer, source=source, rank=int(args.rank_seed))
-        optimizer, _ = _build_optimizer(trainer, args=train_args)
-        if args.checkpoint:
-            _load_checkpoint(path=Path(args.checkpoint), model=trainer, optimizer=optimizer, device=device)
-        trainer.train()
+    override_context = contextlib.nullcontext() if args.point_grid_mode == "default" else _override_build_sample(str(args.point_grid_mode))
+    with override_context:
+        source = _CalvinTransitionSource(
+            train_args.calvin_root,
+            split=train_args.split,
+            backend=train_args.backend,
+            unroll_steps=train_args.unroll_steps,
+            use_tactile=bool(train_args.use_tactile),
+            tactile_sensor_names=train_args.tactile_sensor_names,
+            tactile_sensor_offsets_m=train_args.tactile_sensor_offsets_m,
+        )
+        try:
+            core, semantic_encoder, use_visual_override = _build_model(train_args, device=device)
+            core = core.to(device)
+            trainer = _PicfWindowTrainer(
+                core,
+                semantic_encoder=semantic_encoder,
+                visual_grid=train_args.visual_grid,
+                use_visual_override=use_visual_override,
+            ).to(device)
+            _materialize_model_parameters(trainer, source=source, rank=int(args.rank_seed))
+            optimizer, _ = _build_optimizer(trainer, args=train_args)
+            if args.checkpoint:
+                _load_checkpoint(path=Path(args.checkpoint), model=trainer, optimizer=optimizer, device=device)
+            trainer.train()
 
-        recent: deque[dict[str, Any]] = deque(maxlen=8)
-        step_counter = 0
-        for repeat_index in range(int(args.repeat)):
-            for flat_index in flat_indices:
-                step_counter += 1
-                window = source.window(flat_index)
-                record = {
-                    "replay_step": int(step_counter),
-                    "repeat": int(repeat_index),
-                    "flat_index": int(flat_index),
-                    "segment": int(window.segment_id),
-                    "start_step": int(window.start_step_id),
-                    "prompt": str(window.prompt),
-                }
-                recent.append(record)
-                optimizer.zero_grad(set_to_none=True)
-                try:
-                    _ensure_window_has_valid_first_step_xyzrgb_support(trainer, window)
-                    outputs = trainer(window, capture_visual_diagnostics=False)
-                    if device.type == "cuda":
-                        torch.cuda.synchronize(device=device)
-                    outputs["loss_total"].backward()
-                    if device.type == "cuda":
-                        torch.cuda.synchronize(device=device)
-                    if args.optimizer_step:
-                        optimizer.step()
-                    print(
-                        json.dumps(
-                            {
-                                **record,
-                                "loss_total": float(outputs["loss_total"].detach().item()),
-                                "loss_alignment": float(outputs["loss_alignment"].detach().item()),
-                                "loss_pt": float(outputs["loss_pt"].detach().item()),
-                                "projective_candidate_density": float(outputs["projective_candidate_density"].detach().item()),
-                            },
-                            sort_keys=True,
-                        ),
-                        flush=True,
-                    )
-                except Exception as exc:
-                    print("PICF replay failure:", flush=True)
-                    print(json.dumps(record, sort_keys=True), flush=True)
-                    print(f"exception={type(exc).__name__}: {exc}", flush=True)
-                    print(f"recent_history={list(recent)}", flush=True)
-                    raise
-    finally:
-        source.close()
+            recent: deque[dict[str, Any]] = deque(maxlen=8)
+            step_counter = 0
+            for repeat_index in range(int(args.repeat)):
+                for flat_index in flat_indices:
+                    step_counter += 1
+                    window = source.window(flat_index)
+                    record = {
+                        "replay_step": int(step_counter),
+                        "repeat": int(repeat_index),
+                        "flat_index": int(flat_index),
+                        "segment": int(window.segment_id),
+                        "start_step": int(window.start_step_id),
+                        "prompt": str(window.prompt),
+                        "point_grid_mode": str(args.point_grid_mode),
+                    }
+                    recent.append(record)
+                    optimizer.zero_grad(set_to_none=True)
+                    try:
+                        _ensure_window_has_valid_first_step_xyzrgb_support(trainer, window)
+                        outputs = trainer(window, capture_visual_diagnostics=False)
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device=device)
+                        outputs["loss_total"].backward()
+                        if device.type == "cuda":
+                            torch.cuda.synchronize(device=device)
+                        if args.optimizer_step:
+                            optimizer.step()
+                        print(
+                            json.dumps(
+                                {
+                                    **record,
+                                    "loss_total": float(outputs["loss_total"].detach().item()),
+                                    "loss_alignment": float(outputs["loss_alignment"].detach().item()),
+                                    "loss_pt": float(outputs["loss_pt"].detach().item()),
+                                    "projective_candidate_density": float(outputs["projective_candidate_density"].detach().item()),
+                                },
+                                sort_keys=True,
+                            ),
+                            flush=True,
+                        )
+                    except Exception as exc:
+                        print("PICF replay failure:", flush=True)
+                        print(json.dumps(record, sort_keys=True), flush=True)
+                        print(f"exception={type(exc).__name__}: {exc}", flush=True)
+                        print(f"recent_history={list(recent)}", flush=True)
+                        raise
+        finally:
+            source.close()
 
 
 if __name__ == "__main__":
