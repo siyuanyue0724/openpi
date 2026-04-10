@@ -172,6 +172,245 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
   downstream control 与 predictive attention
 - 同时仍记录一个 `semantic_summary` 作为聚合诊断量，但它不是唯一语义输入
 
+## 0.0b 推荐主路线与宽度审计（2026-04-10 严格复核）
+
+这一节不是“当前代码已经改完”的声明，
+而是基于当前仓库实现、`pi0.5` 本地代码、以及近期 VLA / VLM 融合论文做出的**推荐下一步主路线**。
+
+结论先写在前面：
+
+- **主路线应继续向 `pi0.5 / knowledge-insulating` 靠拢**
+- **但不应把 anchor 退化成普通 prompt token**
+- **也不建议长期停留在“full semantic tokens → shared `hidden_dim=256`”的统一小隐空间方案**
+- 对本版 PICF，更合理的长期结构是：
+  - `PaliGemma` 保留高宽度 semantic stream
+  - `current posterior` 继续保持 language-free
+  - `anchor/posterior` 保留独立 world-state stream
+  - 在 posterior 之后，用多层 gated/shared attention 做深融合
+
+### (R1) 为什么当前代码里会出现 semantic 投影
+
+当前代码中，semantic token 之所以被投影到 `hidden_dim`，
+不是因为方法上要求“语义必须压缩”，
+而是因为当前 downstream block 的数学结构要求**统一 `d_model`**。
+
+具体地：
+
+- `SelfAttentionBlock` 使用 `nn.MultiheadAttention(hidden_dim, ...)`
+- `CrossAttentionRead` 也使用 `nn.MultiheadAttention(hidden_dim, ...)`
+- `TransformerStack` / `control_self` / `predictive_self` / `posterior_self`
+  全都建立在同一个 `hidden_dim` 上
+
+因此，只要我们还采用：
+
+**`posterior.tokens || semantic.tokens || innovation || proprio` → shared self-attention**
+
+那么进入这个 shared attention 的 token 必须先处在同一宽度上。
+
+这意味着三种选择里至少要做一种：
+
+1. semantic 降到 shared width
+2. anchor / posterior 升到 semantic width
+3. 改成异宽双流 / cross-attention 结构，不再要求所有 token 先同宽
+
+所以，“为什么有投影”这件事，
+**根因是当前 attention 数学结构，而不只是显存。**
+
+### (R2) 但为什么不建议长期继续使用 `2048 → 256`
+
+虽然“存在投影”本身合理，
+但**`2048 → 256` 这个压缩比偏保守**。
+
+根据当前仓库里的本地 `pi0.5` 配置：
+
+- `PaliGemma` 主宽度：`2048`
+  见 `src/openpi/models/gemma.py`
+- `action expert` 宽度：`1024`
+  见 `src/openpi/models/gemma.py`
+- `pi0.5` 默认图像视角：3 路
+  `base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb`
+  见 `src/openpi/models_pytorch/preprocessing_pytorch.py`
+- `pi0.5` 文本上限：`max_token_len = 200`
+  见 `src/openpi/models/pi0_config.py`
+
+再结合 `PaliGemma 224` 的标准 tokenization：
+
+- 每张 `224×224` 图像对应 `256` image tokens
+
+则本地 `pi0.5` prefix 的上界大致为：
+
+- 图像 token：`3 × 256 = 768`
+- 文本 token：`200`
+- 总 prefix token：`968`
+
+而当前 PICF semantic side path 的上界大致为：
+
+- 图像 token：`2 × 256 = 512`
+- 文本 token：`256`
+- semantic token：`768`
+
+这意味着当前 semantic stream 的 token 数并没有被砍掉，
+但其通道宽度被从 `2048` 投到 `256`，
+即约 **8 倍通道压缩**。
+
+如果粗略用“总语义带宽”近似比较：
+
+- `pi0.5` prefix 上界：`968 × 2048 = 1,982,464`
+- 当前 PICF semantic 上界：`768 × 256 = 196,608`
+
+这里只是工程尺度估算，不是严格信息论量，
+但它足够说明：
+
+**当前 `256` 对“最大化保留 `pi0.5` 语义能力”来说偏窄。**
+
+### (R3) 为什么也不能简单把整个 PICF 都改成 `2048`
+
+如果当前结构不变，
+直接把 shared `hidden_dim` 从 `256` 提到 `2048`，
+代价不只是 semantic 投影层变宽，
+而是整个 PICF downstream 一起膨胀。
+
+当前核心里与 shared width 直接绑定的主要块包括：
+
+- `token_fusion`
+- `obs_self`
+- `posterior_self`
+- `predictive_self`
+- `control_self`
+- `obs_reader`
+- `anchor_reader`
+
+仅按当前实现里的 transformer / cross-attention block 粗略估算：
+
+- 一个 self-attention + FF block 的参数量级约为 `12 d^2`
+- 当前共有约 `11` 个 self-attention blocks
+- 再加 `2` 个 cross-attention read blocks
+
+则只看这些 block 的量级：
+
+- `d=256`：约 `10.2M`
+- `d=512`：约 `40.9M`
+- `d=768`：约 `92.0M`
+- `d=1024`：约 `163.6M`
+- `d=2048`：约 `654.3M`
+
+这里只是这些核心 attention/FF block 的量级，
+还**没有**把：
+
+- 各种 `LazyLinear`
+- posterior vote heads
+- innovation heads
+- real/future heads
+- geometry/readout 投影
+
+统计进去。
+
+因此，若保持当前“单一 shared hidden space”设计，
+把 `hidden_dim` 整体拉到 `2048`，
+其成本不是线性增加，而是会近似按 `d^2` 爆炸。
+
+### (R4) 这不是纯理论问题，而是当前 40GB A100 已经给出工程信号
+
+在当前云机 full-token 训练里，
+`hidden_dim=256` 的版本已经接近 40GB A100 的显存上限。
+
+因此，对当前单流 PICF 结构来说：
+
+- **“semantic 保持 2048，整个 PICF 也统一 2048”**
+  不是一个当前硬件下的现实默认方案
+- 这不是因为“2048 数学上不对”
+- 而是因为“在当前 shared-width 架构里，把所有流都拉到 2048 代价过高”
+
+所以，若要尽量保留 `PaliGemma` 语义能力，
+真正正确的问题不是：
+
+**“要不要投影？”**
+
+而是：
+
+**“在哪里投影，哪些流投影，是否必须所有流同宽？”**
+
+### (R5) 推荐的长期主路线
+
+综合当前代码、`pi0.5` 本地实现和近期论文，
+本版推荐的长期路线是：
+
+**`pi0.5 / knowledge-insulating` 作为 semantic backbone 哲学**
+**+ PICF 的 language-free posterior world model**
+**+ posterior-late 的异宽双流 gated/shared attention 融合**
+
+这条路线比“继续 current 256”更好，
+也比“把所有 token 都塞回单一 monolithic VLM trunk”更贴合本版数学定义。
+
+推荐结构如下：
+
+1. `semantic stream`
+   - 保留 `PaliGemma` full text/image token stream
+   - 宽度建议：`1024` 起步
+   - 如果算力允许，可进一步保留到 `2048`
+
+2. `world-state stream`
+   - `posterior anchor tokens`
+   - `innovation token`
+   - `proprio / action-cond token`
+   - 宽度建议：`256 ~ 384`
+
+3. `fusion`
+   - 在 current posterior 固定之后进行
+   - 不把语言灌进 posterior update
+   - 用多层 gated cross-attention / shared attention
+   - 不要求所有 token 在进入第一层前先强制同宽
+
+### (R6) 如果短期内仍要维持单一 shared width
+
+若短期工程上不改异宽结构，
+则 shared width 的建议是：
+
+- **拒绝**：`256`
+  - 只适合作为当前过渡实现
+  - 不应作为“最大版本”长期配置
+- **最低可接受**：`512`
+  - 仍偏紧
+- **更合理的折中**：`768`
+- **单宽方案的首选**：`1024`
+- **不推荐直接全局 `2048`**
+  - 不是因为数学错误
+  - 而是因为对当前单流 PICF 来说代价过高
+
+因此，若用户要求“最大版本”且仍坚持单宽设计，
+则本版推荐：
+
+**shared `hidden_dim = 1024`**
+
+但若允许做结构升级，
+则优先推荐：
+
+**semantic `1024~2048` + anchors `256~384` + posterior-late cross-attn**
+
+### (R7) 与近期论文的对比性结论
+
+当前推荐并不是“盲目追随 `pi0.5`”，
+而是吸收下列路线的优点：
+
+- `pi0.5 / knowledge insulating`
+  - 强在保留 VLM backbone 的 semantic knowledge
+- `Flamingo`
+  - 强在把 cross-attention 插入主干内部，而不是只在顶层硬拼
+- `DeepVision-VLA`
+  - 强在深层持续注入视觉 expert 特征，而不是只做一次浅层融合
+- `DreamVLA`
+  - 强在 block-wise structured attention，可借来抑制 semantic / geometry / dynamic 之间的脏串扰
+
+因此，本版未来不应退化成：
+
+- 只有一个 pooled semantic token
+- 或者简单 MLP 拼接到 action head
+- 或者所有 token 强行压到很小的共享空间
+
+而应走向：
+
+**语义能力保留优先 + world-state posterior 独立 + 深层受控融合**
+
 ---
 
 ## 0.1 十条硬约束
