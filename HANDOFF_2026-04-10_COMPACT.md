@@ -9,7 +9,7 @@ It duplicates project state that already exists across code, commits, logs, and 
 - Local repo: `/home/siyuanyue/Documents/openpi`
 - Branch: `Posterior_VLA`
 - Current synchronized commit:
-  - `d79bc09` `Clarify PICF verification status in docs`
+  - `da8a0c3` `Add compact handoff document`
 - Local / GitHub / cloud repo are aligned to the same commit.
 
 ## Current PICF Contract
@@ -132,7 +132,7 @@ Current training process:
 
 - experiment: `picf_core_train_ddp_fulltoken_run_r5`
 - command is running under `torchrun` with 2 GPUs
-- current cloud repo HEAD is also `d79bc09`
+- current cloud repo HEAD is also `da8a0c3`
 
 Latest checked state at handoff time:
 
