@@ -24,9 +24,9 @@ class PicfFutureTargets:
 
 @dataclasses.dataclass(frozen=True)
 class PicfTransitionLossConfig:
-    lambda_action_pos: float = 1.5
-    lambda_action_rot: float = 1.5
-    lambda_action_gripper: float = 1.5
+    lambda_action_pos: float = 2.0
+    lambda_action_rot: float = 2.0
+    lambda_action_gripper: float = 2.0
     lambda_visual_latent: float = 0.2
     lambda_visual_real: float = 0.1
     lambda_tactile_real: float = 0.3

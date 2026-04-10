@@ -223,6 +223,9 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
     dummy_losses = types.SimpleNamespace(
         total=torch.tensor(1.0),
         action=torch.tensor(0.1),
+        action_pos=torch.tensor(0.03),
+        action_rot=torch.tensor(0.04),
+        action_gripper=torch.tensor(0.03),
         visual_latent=torch.tensor(0.1),
         visual_real=torch.tensor(0.1),
         tactile_real=torch.tensor(0.1),

@@ -8,6 +8,7 @@ import torch
 from openpi.picf.frame_context import PointFrameContext
 from openpi.picf.sonata.config import SonataPointConfig
 from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
+from openpi.picf.sonata.wrapper import _normalize_local_grid_coords
 from openpi.picf.sonata.wrapper import _restore_full_resolution_features
 from openpi.picf.sonata.wrapper import sonata_runtime_available
 
@@ -81,6 +82,40 @@ def test_sonata_build_sample_uses_xyzrgb_feat_and_keeps_normals_side_channel() -
     )
 
 
+def test_normalize_local_grid_coords_rebases_min_corner_to_zero() -> None:
+    grid = np.array([[345, 42, 61], [438, 131, 145], [356, 90, 64]], dtype=np.int32)
+
+    normalized = _normalize_local_grid_coords(grid)
+
+    assert normalized.dtype == np.int32
+    assert normalized.shape == grid.shape
+    assert np.array_equal(normalized.min(axis=0), np.zeros((3,), dtype=np.int32))
+    assert np.array_equal(normalized.max(axis=0), grid.max(axis=0) - grid.min(axis=0))
+
+
+def test_sonata_build_sample_rebases_inherited_global_grid_offsets() -> None:
+    context = PointFrameContext(
+        grid_coord=np.array([[345, 42, 61], [438, 131, 145]], dtype=np.int32),
+        points_local=np.array([[0.0, 0.1, 0.2], [0.3, 0.4, 0.5]], dtype=np.float32),
+        normals_local=np.array([[0.0, 0.0, 1.0], [0.0, 1.0, 0.0]], dtype=np.float32),
+        colors=np.array([[0.2, 0.4, 0.6], [0.1, 0.3, 0.5]], dtype=np.float32),
+        local_mask=np.array([True, True]),
+        world_to_local=np.eye(4, dtype=np.float32),
+        G_t=np.eye(4, dtype=np.float32),
+    )
+    extractor = SonataPointFeatureExtractor.__new__(SonataPointFeatureExtractor)
+    extractor.device = torch.device("cpu")
+    extractor.model = SimpleNamespace(embedding=SimpleNamespace(in_channels=6))
+    extractor.config = SonataPointConfig()
+
+    sample = extractor._build_sample(context)  # noqa: SLF001
+
+    assert torch.equal(
+        sample["grid_coord"].cpu(),
+        torch.tensor([[0, 0, 0], [93, 89, 84]], dtype=torch.int32),
+    )
+
+
 def test_sonata_build_sample_rejects_non_xyzrgb_in_channels() -> None:
     context = PointFrameContext(
         grid_coord=np.array([[0, 0, 0]], dtype=np.int32),
@@ -141,4 +176,5 @@ def test_sonata_wrapper_encodes_local_points_without_checkpoint() -> None:
     features = extractor.encode_local_context(context)
     assert features.features.shape[0] == 4
     assert features.features.shape[1] == extractor.feature_dim
-    assert np.all(np.isfinite(features.features))
+    feat_np = features.features.detach().cpu().numpy() if isinstance(features.features, torch.Tensor) else np.asarray(features.features)
+    assert np.all(np.isfinite(feat_np))

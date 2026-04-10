@@ -137,6 +137,25 @@ def _normalize_colors(colors: np.ndarray) -> np.ndarray:
     return np.clip(colors, 0.0, 1.0).astype(np.float32)
 
 
+def _normalize_local_grid_coords(grid_coord: np.ndarray) -> np.ndarray:
+    """Rebase a local point subset onto a zero-based voxel grid.
+
+    PICF crops a local subset out of a larger per-frame point cloud before sending
+    it into Sonata. The subset inherits the original frame-level grid coordinates,
+    so its minimum voxel index is often far from zero even though the subset is
+    only meant to represent a small local patch. Sonata's sparse path operates on
+    local voxel neighborhoods, so rebasing to a zero-origin grid preserves all
+    relative geometry while removing a large irrelevant offset.
+    """
+    grid = np.asarray(grid_coord, dtype=np.int32)
+    if grid.size == 0:
+        return grid.reshape((-1, 3))
+    if grid.ndim != 2 or grid.shape[1] != 3:
+        raise ValueError(f"grid_coord must have shape [N,3], got {grid.shape}")
+    grid = grid - grid.min(axis=0, keepdims=True)
+    return grid.astype(np.int32, copy=False)
+
+
 @dataclasses.dataclass(frozen=True)
 class SonataPointFeatures:
     features: np.ndarray | torch.Tensor
@@ -241,12 +260,22 @@ class SonataPointFeatureExtractor(nn.Module):
 
     def _build_sample(self, frame_context: PointFrameContext) -> dict[str, torch.Tensor]:
         coord = np.asarray(frame_context.points_local, dtype=np.float32)
-        grid_coord = np.asarray(frame_context.grid_coord, dtype=np.int32)
+        grid_coord = _normalize_local_grid_coords(frame_context.grid_coord)
         color = _normalize_colors(frame_context.colors)
         normal = np.asarray(frame_context.normals_local, dtype=np.float32)
         # SpatialLM/Sonata point features are strictly xyz+rgb.
         # PICF still keeps normals on the side for scaffold/geometry, but does not
         # concatenate them into the Sonata backbone input.
+        if coord.shape != grid_coord.shape:
+            raise RuntimeError(
+                "PICF Sonata sample contract violated: "
+                f"coord.shape={coord.shape} != grid_coord.shape={grid_coord.shape}"
+            )
+        if normal.shape != coord.shape or color.shape != coord.shape:
+            raise RuntimeError(
+                "PICF Sonata sample contract violated: "
+                f"coord.shape={coord.shape}, normal.shape={normal.shape}, color.shape={color.shape}"
+            )
         feat = np.concatenate([coord, color], axis=1).astype(np.float32)
         in_channels = int(self.model.embedding.in_channels)
         if in_channels != 6:

@@ -694,6 +694,9 @@ class _CalvinTransitionSource:
 class _MetricAccumulator:
     loss_total: float = 0.0
     loss_action: float = 0.0
+    loss_action_pos: float = 0.0
+    loss_action_rot: float = 0.0
+    loss_action_gripper: float = 0.0
     loss_visual_latent: float = 0.0
     loss_visual_real: float = 0.0
     loss_tactile_real: float = 0.0
@@ -710,6 +713,9 @@ class _MetricAccumulator:
     def update(self, losses: PicfTransitionLossBreakdown, *, candidate_density: float) -> None:
         self.loss_total += float(losses.total.item())
         self.loss_action += float(losses.action.item())
+        self.loss_action_pos += float(losses.action_pos.item())
+        self.loss_action_rot += float(losses.action_rot.item())
+        self.loss_action_gripper += float(losses.action_gripper.item())
         self.loss_visual_latent += float(losses.visual_latent.item())
         self.loss_visual_real += float(losses.visual_real.item())
         self.loss_tactile_real += float(losses.tactile_real.item())
@@ -728,6 +734,9 @@ class _MetricAccumulator:
         return {
             "loss_total": self.loss_total / denom,
             "loss_action": self.loss_action / denom,
+            "loss_action_pos": self.loss_action_pos / denom,
+            "loss_action_rot": self.loss_action_rot / denom,
+            "loss_action_gripper": self.loss_action_gripper / denom,
             "loss_visual_latent": self.loss_visual_latent / denom,
             "loss_visual_real": self.loss_visual_real / denom,
             "loss_tactile_real": self.loss_tactile_real / denom,
@@ -808,6 +817,9 @@ class _PicfWindowTrainer(torch.nn.Module):
             if metrics is None:
                 metrics = {
                     "loss_action": losses.action,
+                    "loss_action_pos": losses.action_pos,
+                    "loss_action_rot": losses.action_rot,
+                    "loss_action_gripper": losses.action_gripper,
                     "loss_visual_latent": losses.visual_latent,
                     "loss_visual_real": losses.visual_real,
                     "loss_tactile_real": losses.tactile_real,
@@ -822,6 +834,9 @@ class _PicfWindowTrainer(torch.nn.Module):
                 }
             else:
                 metrics["loss_action"] = metrics["loss_action"] + losses.action
+                metrics["loss_action_pos"] = metrics["loss_action_pos"] + losses.action_pos
+                metrics["loss_action_rot"] = metrics["loss_action_rot"] + losses.action_rot
+                metrics["loss_action_gripper"] = metrics["loss_action_gripper"] + losses.action_gripper
                 metrics["loss_visual_latent"] = metrics["loss_visual_latent"] + losses.visual_latent
                 metrics["loss_visual_real"] = metrics["loss_visual_real"] + losses.visual_real
                 metrics["loss_tactile_real"] = metrics["loss_tactile_real"] + losses.tactile_real
@@ -841,6 +856,9 @@ class _PicfWindowTrainer(torch.nn.Module):
         result: dict[str, Any] = {
             "loss_total": mean_total,
             "loss_action": metrics["loss_action"] / denom,
+            "loss_action_pos": metrics["loss_action_pos"] / denom,
+            "loss_action_rot": metrics["loss_action_rot"] / denom,
+            "loss_action_gripper": metrics["loss_action_gripper"] / denom,
             "loss_visual_latent": metrics["loss_visual_latent"] / denom,
             "loss_visual_real": metrics["loss_visual_real"] / denom,
             "loss_tactile_real": metrics["loss_tactile_real"] / denom,
@@ -1546,6 +1564,9 @@ def train(args: argparse.Namespace) -> None:
                         raise
                 metric_accum.loss_total += float(outputs["loss_total"].detach().item())
                 metric_accum.loss_action += float(outputs["loss_action"].detach().item())
+                metric_accum.loss_action_pos += float(outputs["loss_action_pos"].detach().item())
+                metric_accum.loss_action_rot += float(outputs["loss_action_rot"].detach().item())
+                metric_accum.loss_action_gripper += float(outputs["loss_action_gripper"].detach().item())
                 metric_accum.loss_visual_latent += float(outputs["loss_visual_latent"].detach().item())
                 metric_accum.loss_visual_real += float(outputs["loss_visual_real"].detach().item())
                 metric_accum.loss_tactile_real += float(outputs["loss_tactile_real"].detach().item())
