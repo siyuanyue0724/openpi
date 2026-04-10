@@ -5,6 +5,7 @@ import torch
 
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
 from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
+from openpi.picf.paligemma.wrapper import _masked_position_ids
 from openpi.picf.paligemma.wrapper import _repair_missing_tied_embeddings
 from openpi.picf.paligemma.wrapper import _Pi0PaliGemmaSemanticEncoder
 
@@ -149,3 +150,14 @@ def test_apply_checkpoint_uses_checkpoint_when_inputs_require_grad(
     output = _Pi0PaliGemmaSemanticEncoder._apply_checkpoint(encoder, lambda y: y + 2, x)
     torch.testing.assert_close(output, torch.full((2,), 2.0))
     assert called["value"] is True
+
+
+def test_masked_position_ids_keep_valid_positions_and_zero_pad() -> None:
+    pad_mask = torch.tensor([[True, True, True, False, False], [True, False, True, False, False]])
+
+    position_ids = _masked_position_ids(pad_mask)
+
+    torch.testing.assert_close(
+        position_ids,
+        torch.tensor([[0, 1, 2, 0, 0], [0, 0, 1, 0, 0]], dtype=torch.int64),
+    )

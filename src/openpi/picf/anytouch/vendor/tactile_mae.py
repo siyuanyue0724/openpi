@@ -93,6 +93,22 @@ class TactileVideoMAE(nn.Module):
         target_dtype = self.touch_model.embeddings.patch_embedding.weight.dtype
         patch_embeds = self.touch_model.embeddings.patch_embedding(pixel_values.to(dtype=target_dtype))
         patch_embeds = patch_embeds.flatten(2).transpose(1, 2)
+        if sensor_type is None:
+            raise RuntimeError("AnyTouch emb_forward requires a sensor_type tensor.")
+        min_sensor = int(sensor_type.min().item()) if sensor_type.numel() > 0 else 0
+        max_sensor = int(sensor_type.max().item()) if sensor_type.numel() > 0 else -1
+        if min_sensor < 0 or max_sensor >= int(self.sensor_token.shape[0]):
+            raise RuntimeError(
+                "AnyTouch sensor_type out of range: "
+                f"min={min_sensor} max={max_sensor} num_sensor_tokens={self.sensor_token.shape[0]}"
+            )
+        pos_size = int(self.touch_model.embeddings.position_embedding.num_embeddings)
+        pos_max = int(self.new_position_ids.max().item()) if self.new_position_ids.numel() > 0 else -1
+        if pos_max >= pos_size:
+            raise RuntimeError(
+                "AnyTouch position ids out of range: "
+                f"max={pos_max} num_position_embeddings={pos_size}"
+            )
         pos_emb = self.touch_model.embeddings.position_embedding(self.new_position_ids)
         img_embeddings = patch_embeds + pos_emb[:, 1:, :]
         class_embeds = self.touch_model.embeddings.class_embedding + pos_emb[:, 0, :]

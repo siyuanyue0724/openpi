@@ -30,6 +30,33 @@ class PaliGemmaSemanticFeatures:
     summary: torch.Tensor
 
 
+def _masked_position_ids(pad_mask: torch.Tensor) -> torch.Tensor:
+    """Build non-negative position ids for padded prefix tokens.
+
+    The original PI0 path uses `cumsum(mask) - 1`, which gives `-1` on padded
+    suffix positions. That is mathematically harmless when those tokens are fully
+    masked, but some lower-level CUDA kernels still expect non-negative indices.
+    Here we keep the same valid-token positions while mapping padded positions to
+    `0`, which is equivalent under the attention mask.
+    """
+
+    if pad_mask.ndim != 2:
+        raise ValueError(f"Expected 2D pad mask, got shape={tuple(pad_mask.shape)}")
+    cumsum = torch.cumsum(pad_mask.to(torch.int64), dim=1) - 1
+    return torch.where(pad_mask, cumsum, torch.zeros_like(cumsum))
+
+
+def _assert_index_tensor_in_range(indices: torch.Tensor, *, size: int, name: str) -> None:
+    if indices.numel() == 0:
+        return
+    min_value = int(indices.min().item())
+    max_value = int(indices.max().item())
+    if min_value < 0 or max_value >= int(size):
+        raise RuntimeError(
+            f"{name} out of range for size={size}: min={min_value} max={max_value} shape={tuple(indices.shape)}"
+        )
+
+
 def _resolve_device(config: PaliGemmaSemanticConfig) -> torch.device:
     if config.device is not None:
         return torch.device(config.device)
@@ -433,6 +460,11 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             att_masks += [0] * num_img_tokens
 
         def _lang_embed(tokens: torch.Tensor) -> torch.Tensor:
+            _assert_index_tensor_in_range(
+                tokens,
+                size=int(self.model.language_model.embed_tokens.num_embeddings),
+                name="paligemma_language_token_ids",
+            )
             lang_emb = self.model.language_model.embed_tokens(tokens)
             return lang_emb * math.sqrt(lang_emb.shape[-1])
 
@@ -460,7 +492,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         with context:
             prefix_embs, prefix_pad_masks, prefix_att_masks, image_token_count, lang_masks = self._embed_prefix(observation)
             att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
-            position_ids = torch.cumsum(prefix_pad_masks.to(torch.int64), dim=1) - 1
+            position_ids = _masked_position_ids(prefix_pad_masks)
             attn_mask_4d = self._prepare_attention_masks_4d(att_2d_masks).to(dtype=prefix_embs.dtype)
 
             def _forward_prefix(

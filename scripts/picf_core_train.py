@@ -1280,8 +1280,22 @@ def train(args: argparse.Namespace) -> None:
                 else:
                     sync_context = contextlib.nullcontext()
                 with sync_context:
-                    outputs = model(window)
-                    (outputs["loss_total"] / float(args.accum_steps)).backward()
+                    try:
+                        outputs = model(window)
+                        (outputs["loss_total"] / float(args.accum_steps)).backward()
+                    except Exception:
+                        logging.exception(
+                            "PICF training window failure: rank=%s global_step=%s micro_step=%s flat_index=%s "
+                            "segment=%s start_step=%s prompt=%r",
+                            rank,
+                            int(step + 1),
+                            int(micro_step + 1),
+                            flat_index,
+                            window.segment_id,
+                            window.start_step_id,
+                            window.prompt,
+                        )
+                        raise
                 metric_accum.loss_total += float(outputs["loss_total"].detach().item())
                 metric_accum.loss_action += float(outputs["loss_action"].detach().item())
                 metric_accum.loss_visual_latent += float(outputs["loss_visual_latent"].detach().item())
