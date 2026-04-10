@@ -135,6 +135,11 @@ class AnyTouch2TactileEncoder(nn.Module):
         with context:
             tokens = self.model(inputs, sensor_id_tensor, probe=True)
         hidden_dim = int(tokens.shape[-1])
+        if int(tokens.shape[0]) != len(sensor_names):
+            raise RuntimeError(
+                "AnyTouch sensor-token count mismatch: "
+                f"tokens.shape[0]={int(tokens.shape[0])} sensor_names={len(sensor_names)}"
+            )
         sensors: dict[str, AnyTouchSensorFeatures] = {}
         pooled_list = []
         for index, sensor_name in enumerate(sensor_names):

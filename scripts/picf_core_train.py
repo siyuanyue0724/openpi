@@ -50,6 +50,7 @@ _SPEC_DEFAULTS = PicfCoreConfig()
 _RETRYABLE_FIRST_STEP_ERRORS = (
     "PICF core requires a valid xyzrgb point cloud on the first control step.",
     "PICF core requires non-empty local xyzrgb support on the first control step.",
+    "PICF core requires non-empty local xyzrgb support on window step",
 )
 
 
@@ -866,7 +867,7 @@ def _is_retryable_first_step_error(exc: RuntimeError) -> bool:
 def _ensure_window_has_valid_first_step_xyzrgb_support(
     trainer: _PicfWindowTrainer,
     window: _TransitionWindow,
-) -> None:
+) -> tuple[int, ...]:
     """Validate the data-only first-step contract before entering DDP forward.
 
     Catching retryable first-step errors *inside* a DDP-wrapped forward can leave
@@ -875,9 +876,8 @@ def _ensure_window_has_valid_first_step_xyzrgb_support(
     calibrated point-cloud crop, so it is safe to preflight it before
     `model(window)` enters the distributed graph.
     """
-
-    first = window.frames[0]
     core = trainer.core
+    first = window.frames[0]
     if first.G_t is None:
         first.G_t = core.local_frame.make_transform(first.robot_obs)
     if first.point_set is None:
@@ -892,9 +892,27 @@ def _ensure_window_has_valid_first_step_xyzrgb_support(
     meta = core._build_runtime_meta(first, None)
     if not meta.point_contract_ok:
         raise RuntimeError(_RETRYABLE_FIRST_STEP_ERRORS[0])
-    frame_context = core._point_subset(first)
-    if frame_context.points_local.shape[0] == 0:
-        raise RuntimeError(_RETRYABLE_FIRST_STEP_ERRORS[1])
+    point_counts: list[int] = []
+    for offset, frame in enumerate(window.frames):
+        if frame.G_t is None:
+            frame.G_t = core.local_frame.make_transform(frame.robot_obs)
+        if frame.point_set is None:
+            frame.point_set = core.pointcloud_builder(
+                {
+                    "rgb_static": frame.rgb_static,
+                    "depth_static": frame.depth_static,
+                    "focus_center_world": np.asarray(frame.G_t[:3, 3], dtype=np.float32),
+                    "focus_radius_m": core.config.crop_radius_m,
+                }
+            )
+        frame_context = core._point_subset(frame)
+        point_count = int(frame_context.points_local.shape[0])
+        point_counts.append(point_count)
+        if point_count == 0:
+            if offset == 0:
+                raise RuntimeError(_RETRYABLE_FIRST_STEP_ERRORS[1])
+            raise RuntimeError(f"{_RETRYABLE_FIRST_STEP_ERRORS[2]} {offset}.")
+    return tuple(point_counts)
 
 
 def _lr_for_step(step: int, *, base_lr: float, warmup_steps: int, min_lr: float, total_steps: int) -> float:
@@ -1463,7 +1481,7 @@ def train(args: argparse.Namespace) -> None:
                     flat_index = int(rng.integers(0, len(source)))
                     window = source.window(flat_index)
                     try:
-                        _ensure_window_has_valid_first_step_xyzrgb_support(trainer_module, window)
+                        window_point_counts = _ensure_window_has_valid_first_step_xyzrgb_support(trainer_module, window)
                         break
                     except RuntimeError as exc:
                         if not _is_retryable_first_step_error(exc):
@@ -1499,6 +1517,7 @@ def train(args: argparse.Namespace) -> None:
                             "start_step": int(window.start_step_id),
                             "prompt": str(window.prompt),
                             "retry_count": int(retry_count),
+                            "point_counts": tuple(int(count) for count in window_point_counts),
                         }
                     )
                     try:

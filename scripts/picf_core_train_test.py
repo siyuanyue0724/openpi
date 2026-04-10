@@ -108,6 +108,8 @@ def _base_args() -> argparse.Namespace:
 def test_retryable_first_step_error_detection() -> None:
     exc = RuntimeError("PICF core requires non-empty local xyzrgb support on the first control step.")
     assert _MODULE._is_retryable_first_step_error(exc) is True
+    later = RuntimeError("PICF core requires non-empty local xyzrgb support on window step 1.")
+    assert _MODULE._is_retryable_first_step_error(later) is True
     other = RuntimeError("some other training failure")
     assert _MODULE._is_retryable_first_step_error(other) is False
 
@@ -360,6 +362,52 @@ def test_first_step_window_precheck_rejects_empty_local_support() -> None:
     )
     window = _MODULE._TransitionWindow(segment_id=0, start_step_id=0, prompt="test", frames=(obs, obs))
     with pytest.raises(RuntimeError, match="non-empty local xyzrgb support"):
+        _MODULE._ensure_window_has_valid_first_step_xyzrgb_support(trainer, window)
+
+
+def test_later_step_window_precheck_rejects_empty_local_support() -> None:
+    class _DummyLocalFrame:
+        def make_transform(self, _robot_obs):
+            return np.eye(4, dtype=np.float32)
+
+    class _DummyCore:
+        def __init__(self) -> None:
+            self.local_frame = _DummyLocalFrame()
+            self.config = types.SimpleNamespace(crop_radius_m=0.08)
+
+        def pointcloud_builder(self, _payload):
+            raise AssertionError("pointcloud_builder should not run when point_set is pre-populated")
+
+        def _build_runtime_meta(self, _obs, _previous):
+            return types.SimpleNamespace(point_contract_ok=True)
+
+        def _point_subset(self, obs):
+            count = int(obs.step_id)
+            return types.SimpleNamespace(points_local=np.zeros((count, 3), dtype=np.float32))
+
+    trainer = types.SimpleNamespace(core=_DummyCore())
+    obs0 = PicfObservation(
+        rgb_static=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth_static=np.zeros((8, 8), dtype=np.float32),
+        robot_obs=np.zeros((15,), dtype=np.float32),
+        prompt="test",
+        step_id=1,
+        segment_id=0,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+        point_set=PicfPointCloudFrame(
+            grid_coord=np.zeros((1, 3), dtype=np.int32),
+            xyz_world=np.zeros((1, 3), dtype=np.float32),
+            rgb=np.zeros((1, 3), dtype=np.float32),
+            normal_world=np.zeros((1, 3), dtype=np.float32),
+            valid_point_mask=np.ones((1,), dtype=bool),
+            frame_valid=True,
+        ),
+        G_t=np.eye(4, dtype=np.float32),
+    )
+    obs1 = dataclasses.replace(obs0, step_id=0, reset_scaffold=False)
+    window = _MODULE._TransitionWindow(segment_id=0, start_step_id=0, prompt="test", frames=(obs0, obs1))
+    with pytest.raises(RuntimeError, match="window step 1"):
         _MODULE._ensure_window_has_valid_first_step_xyzrgb_support(trainer, window)
 
 

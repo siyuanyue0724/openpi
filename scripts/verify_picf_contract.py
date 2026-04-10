@@ -162,6 +162,7 @@ def verify_static_contract() -> list[CheckResult]:
                 text not in source
                 for text in (
                     "semantic_tokens[keep]",
+                    "depth_factor[valid_depth_rows]",
                     "S[valid] = S_obs[valid]",
                     "a[valid] = _extent_from_cov(S[valid], self.config)",
                 )

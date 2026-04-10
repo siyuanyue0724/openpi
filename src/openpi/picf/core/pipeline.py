@@ -1093,10 +1093,10 @@ class PicfFullCore(nn.Module):
         depth_factor = torch.ones_like(proj_score)
         valid_depth_rows = depth_valid & visibility
         if valid_depth_rows.any():
-            depth_residual = z[valid_depth_rows, None] - depth_sample[valid_depth_rows, None]
-            depth_factor[valid_depth_rows] = torch.exp(
-                -(depth_residual**2) / (2.0 * (self.config.tau_proj_depth_m**2))
+            depth_row_factor = torch.exp(
+                -(((z - depth_sample)[:, None]) ** 2) / (2.0 * (self.config.tau_proj_depth_m**2))
             )
+            depth_factor = torch.where(valid_depth_rows[:, None], depth_row_factor.expand_as(depth_factor), depth_factor)
         projective_compatibility = proj_score * depth_factor * visibility[:, None].to(dtype=self.dtype)
         projective_compatibility = torch.nan_to_num(projective_compatibility, nan=0.0, posinf=1.0, neginf=0.0)
         projective_compatibility = torch.clamp(projective_compatibility, min=0.0, max=1.0)

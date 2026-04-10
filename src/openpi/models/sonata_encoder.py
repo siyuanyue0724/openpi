@@ -51,6 +51,28 @@ def _assert_index_bounds(name, index, size):
         )
 
 
+def _assert_segment_ptr(name, ptr, size):
+    if ptr.numel() == 0:
+        return
+    ptr_long = ptr.long()
+    diffs = ptr_long[1:] - ptr_long[:-1]
+    if int(ptr_long[0].item()) != 0:
+        raise RuntimeError(
+            f"Sonata segment pointer invalid for {name}: first={int(ptr_long[0].item())} expected=0 "
+            f"shape={tuple(ptr.shape)}"
+        )
+    if int(ptr_long[-1].item()) != int(size):
+        raise RuntimeError(
+            f"Sonata segment pointer invalid for {name}: last={int(ptr_long[-1].item())} "
+            f"expected={int(size)} shape={tuple(ptr.shape)}"
+        )
+    if diffs.numel() > 0 and bool(torch.any(diffs < 0)):
+        raise RuntimeError(
+            f"Sonata segment pointer invalid for {name}: non-monotonic diffs detected "
+            f"shape={tuple(ptr.shape)}"
+        )
+
+
 @torch.inference_mode()
 def offset2bincount(offset):
     return torch.diff(
@@ -455,7 +477,13 @@ class SerializedAttention(PointModule):
             point[cu_seqlens_key] = nn.functional.pad(
                 torch.concat(cu_seqlens), (0, 1), value=_offset_pad[-1]
             )
-        return point[pad_key], point[unpad_key], point[cu_seqlens_key]
+        pad = point[pad_key]
+        unpad = point[unpad_key]
+        cu_seqlens = point[cu_seqlens_key]
+        _assert_index_bounds("attention.pad_values", pad, unpad.shape[0])
+        _assert_index_bounds("attention.unpad_values", unpad, pad.shape[0])
+        _assert_segment_ptr("attention.cu_seqlens", cu_seqlens, pad.shape[0])
+        return pad, unpad, cu_seqlens
 
     def forward(self, point):
         if not self.enable_flash:
@@ -698,8 +726,11 @@ class GridPooling(PointModule):
         _, indices = torch.sort(cluster)
         # index pointer for sorted point, for torch_scatter.segment_csr
         idx_ptr = torch.cat([counts.new_zeros(1), torch.cumsum(counts, dim=0)])
+        _assert_index_bounds("grid_pool.indices", indices, point.feat.shape[0])
+        _assert_segment_ptr("grid_pool.idx_ptr", idx_ptr, indices.shape[0])
         # head_indices of each cluster, for reduce attr e.g. code, batch
         head_indices = indices[idx_ptr[:-1]]
+        _assert_index_bounds("grid_pool.head_indices", head_indices, point.batch.shape[0])
         point_dict = Dict(
             feat=torch_scatter.segment_csr(
                 self.proj(point.feat)[indices], idx_ptr, reduce=self.reduce

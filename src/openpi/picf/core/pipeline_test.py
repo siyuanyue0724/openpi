@@ -14,6 +14,7 @@ from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
 from openpi.picf.core.pipeline import PicfFullCore
+from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.visual_expert import _project_world_points
 from openpi.picf.posterior.visual_expert import _scale_to_grid
@@ -857,6 +858,24 @@ def test_projective_attention_bias_backward_is_finite(tmp_path: Path) -> None:
     grads = [param.grad for param in core.projective_bias_head.parameters() if param.grad is not None]
     assert grads
     assert all(torch.isfinite(grad).all() for grad in grads)
+
+
+def test_projective_compatibility_backward_is_finite(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+    )
+    geom = output.state.token_field.projective_geometry
+    assert geom is not None
+    core.zero_grad(set_to_none=True)
+    loss = compute_alignment_loss(output.state).total
+    loss.backward()
+    grad_tensors = [param.grad for param in core.obs_reader.parameters() if param.grad is not None]
+    assert grad_tensors
+    assert all(torch.isfinite(grad).all() for grad in grad_tensors)
 
 
 def test_semantic_memory_dropout_preserves_shape_and_backward(tmp_path: Path) -> None:
