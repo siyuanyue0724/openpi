@@ -941,15 +941,24 @@ class PicfFullCore(nn.Module):
         bias = torch.zeros((point_count, visual_count), device=self.device, dtype=self.dtype)
         if point_count == 0 or visual_count == 0 or not bool(candidate_mask.any()):
             return bias
+        expected = (point_count, visual_count)
+        actual = tuple(int(dim) for dim in candidate_mask.shape)
+        if actual != expected:
+            raise RuntimeError(
+                "PICF projective-bias contract violated: candidate_mask shape mismatch. "
+                f"expected={expected} got={actual}"
+            )
         delta = point_proj_grid_index[:, None, :] - visual_grid_index[None, :, :]
         point_rays = _normalize_tensor(point_positions - camera_origin_world[None, :], eps=self.config.epsilon_residual)
         ray_align = torch.sum(point_rays[:, None, :] * visual_ray_world[None, :, :], dim=-1, keepdim=True)
         visibility = point_visibility[:, None, None]
         log_depth = torch.log(torch.clamp(point_depth[:, None, None], min=self.config.z_min_m)).expand(-1, visual_count, -1)
         features = torch.cat([delta, log_depth, ray_align, visibility.expand(-1, visual_count, -1)], dim=-1)
-        values = self.projective_bias_head(features[candidate_mask][:, None, :])[:, 0, 0]
-        bias[candidate_mask] = self.config.projective_bias_scale * torch.tanh(values)
-        return bias
+        candidate_weight = candidate_mask.to(dtype=self.dtype)
+        flat_features = features.reshape(point_count * visual_count, 1, features.shape[-1])
+        flat_values = self.projective_bias_head(flat_features)[:, 0, 0]
+        dense_bias = (self.config.projective_bias_scale * torch.tanh(flat_values)).reshape(point_count, visual_count)
+        return dense_bias * candidate_weight
 
     def _fusion_projective_bias(
         self,

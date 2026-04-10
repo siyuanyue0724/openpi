@@ -841,6 +841,24 @@ def test_projective_attention_bias_is_sparse_on_candidate_edges(tmp_path: Path) 
         assert torch.count_nonzero(geom.projective_attention_bias[geom.projective_candidate_mask]).item() > 0
 
 
+def test_projective_attention_bias_backward_is_finite(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+    )
+    geom = output.state.token_field.projective_geometry
+    assert geom is not None
+    core.zero_grad(set_to_none=True)
+    loss = geom.projective_attention_bias.square().sum()
+    loss.backward()
+    grads = [param.grad for param in core.projective_bias_head.parameters() if param.grad is not None]
+    assert grads
+    assert all(torch.isfinite(grad).all() for grad in grads)
+
+
 def test_projective_candidate_mask_respects_sparse_patch_neighborhood(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
