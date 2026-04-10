@@ -168,9 +168,10 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 - 保留下来的语义 token 包括：
   - 文本有效 token
   - 图像有效 token
-- 它们在 current posterior 固定之后，与 posterior anchors / innovation / proprio 一起进入
-  downstream control 与 predictive attention
-- 同时仍记录一个 `semantic_summary` 作为聚合诊断量，但它不是唯一语义输入
+- 它们在 current posterior 固定之后，
+  由 world/control stream 通过 posterior-late 异宽 cross-attention 读取
+- 同时仍记录一个 `semantic_summary` 作为聚合诊断量，
+  但它不直接参与 downstream 主融合
 
 ## 0.0b 推荐主路线与宽度审计（2026-04-10 严格复核）
 
@@ -186,7 +187,7 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
   - `PaliGemma` 保留高宽度 semantic stream
   - `current posterior` 继续保持 language-free
   - `anchor/posterior` 保留独立 world-state stream
-  - 在 posterior 之后，用多层 gated/shared attention 做深融合
+  - 在 posterior 之后，用 world<-semantic 的多层 gated cross-attention 做深融合
 
 当前已落地的默认参数是：
 
@@ -222,7 +223,7 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 这轮本地验证结果：
 
 - `python -m py_compile src/openpi/picf/core/pipeline.py src/openpi/picf/core/pipeline_test.py scripts/picf_core_train.py scripts/picf_core_train_smoke.py`：通过
-- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`53 passed`
+- `pytest -q src/openpi/picf/paligemma/wrapper_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py`：`54 passed`
 - `python scripts/picf_core_train_smoke.py --calvin-root /tmp/openpi_picf_smoke_data/task_ABCD_D --device cpu`：通过
 - CPU smoke 当前输出：
   - `loss_total = 0.8595`
@@ -269,204 +270,130 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
   - 但不要求所有流预先同宽
   - semantic 不写回 posterior cache / carried prior / physical innovation base
 
-### (R1) 为什么旧代码里会出现 semantic 投影
+### (R1) 旧代码里为什么会出现 semantic 投影
 
-旧代码里，semantic token 之所以被投影到 `hidden_dim`，
-不是因为方法上要求“语义必须压缩”，
-而是因为旧 downstream block 的数学结构要求**统一 `d_model`**。
+这是**旧单宽实现**的历史原因，不是当前实现的要求。
 
-具体地：
-
-- `SelfAttentionBlock` 使用 `nn.MultiheadAttention(hidden_dim, ...)`
-- `CrossAttentionRead` 也使用 `nn.MultiheadAttention(hidden_dim, ...)`
-- `TransformerStack` / `control_self` / `predictive_self` / `posterior_self`
-  全都建立在同一个 `hidden_dim` 上
-
-因此，只要我们还采用：
+旧版本 downstream 使用的是统一 `hidden_dim` 的 shared attention，
+因此如果采用：
 
 **`posterior.tokens || semantic.tokens || innovation || proprio` → shared self-attention**
 
-那么进入这个 shared attention 的 token 必须先处在同一宽度上。
+那么进入该层的 token 必须先同宽。
 
-这意味着三种选择里至少要做一种：
+所以旧实现里出现 `semantic -> hidden_dim` 投影，
+根因是**旧 attention 结构要求统一 `d_model`**，
+而不是方法论要求“语义必须被压成小宽度”。
 
-1. semantic 降到 shared width
-2. anchor / posterior 升到 semantic width
-3. 改成异宽双流 / cross-attention 结构，不再要求所有 token 先同宽
+### (R2) 当前实现已经不再做 `2048 → 256` 的 semantic 主压缩
 
-所以，“为什么旧实现里会有投影”这件事，
-**根因是当前 attention 数学结构，而不只是显存。**
+当前代码里：
 
-### (R2) 但为什么不建议长期继续使用 `2048 → 256`
+- `semantic_tokens` 保持 `semantic_dim = 2048`
+- world/control stream 保持 `hidden_dim = 256`
+- 融合通过 posterior-late 的异宽 gated cross-attention 完成
+- `semantic_summary` 只保留为聚合记录与诊断量
 
-虽然“存在投影”本身合理，
-但**`2048 → 256` 这个压缩比偏保守**。
+因此，当前真正存在的宽度问题不再是：
 
-根据当前仓库里的本地 `pi0.5` 配置：
-
-- `PaliGemma` 主宽度：`2048`
-  见 `src/openpi/models/gemma.py`
-- `action expert` 宽度：`1024`
-  见 `src/openpi/models/gemma.py`
-- `pi0.5` 默认图像视角：3 路
-  `base_0_rgb / left_wrist_0_rgb / right_wrist_0_rgb`
-  见 `src/openpi/models_pytorch/preprocessing_pytorch.py`
-- `pi0.5` 文本上限：`max_token_len = 200`
-  见 `src/openpi/models/pi0_config.py`
-
-再结合 `PaliGemma 224` 的标准 tokenization：
-
-- 每张 `224×224` 图像对应 `256` image tokens
-
-则本地 `pi0.5` prefix 的上界大致为：
-
-- 图像 token：`3 × 256 = 768`
-- 文本 token：`200`
-- 总 prefix token：`968`
-
-而当前 PICF semantic side path 的上界大致为：
-
-- 图像 token：`2 × 256 = 512`
-- 文本 token：`256`
-- semantic token：`768`
-
-这意味着当前 semantic stream 的 token 数并没有被砍掉，
-但其通道宽度被从 `2048` 投到 `256`，
-即约 **8 倍通道压缩**。
-
-如果粗略用“总语义带宽”近似比较：
-
-- `pi0.5` prefix 上界：`968 × 2048 = 1,982,464`
-- 当前 PICF semantic 上界：`768 × 256 = 196,608`
-
-这里只是工程尺度估算，不是严格信息论量，
-但它足够说明：
-
-**当前 `256` 对“最大化保留 `pi0.5` 语义能力”来说偏窄。**
-
-### (R3) 为什么也不能简单把整个 PICF 都改成 `2048`
-
-如果当前结构不变，
-直接把 shared `hidden_dim` 从 `256` 提到 `2048`，
-代价不只是 semantic 投影层变宽，
-而是整个 PICF downstream 一起膨胀。
-
-当前核心里与 shared width 直接绑定的主要块包括：
-
-- `token_fusion`
-- `obs_self`
-- `posterior_self`
-- `predictive_self`
-- `control_self`
-- `obs_reader`
-- `anchor_reader`
-
-仅按当前实现里的 transformer / cross-attention block 粗略估算：
-
-- 一个 self-attention + FF block 的参数量级约为 `12 d^2`
-- 当前共有约 `11` 个 self-attention blocks
-- 再加 `2` 个 cross-attention read blocks
-
-则只看这些 block 的量级：
-
-- `d=256`：约 `10.2M`
-- `d=512`：约 `40.9M`
-- `d=768`：约 `92.0M`
-- `d=1024`：约 `163.6M`
-- `d=2048`：约 `654.3M`
-
-这里只是这些核心 attention/FF block 的量级，
-还**没有**把：
-
-- 各种 `LazyLinear`
-- posterior vote heads
-- innovation heads
-- real/future heads
-- geometry/readout 投影
-
-统计进去。
-
-因此，若保持当前“单一 shared hidden space”设计，
-把 `hidden_dim` 整体拉到 `2048`，
-其成本不是线性增加，而是会近似按 `d^2` 爆炸。
-
-### (R4) 这不是纯理论问题，而是当前 40GB A100 已经给出工程信号
-
-在当前云机 full-token 训练里，
-`hidden_dim=256` 的版本已经接近 40GB A100 的显存上限。
-
-因此，对当前单流 PICF 结构来说：
-
-- **“semantic 保持 2048，整个 PICF 也统一 2048”**
-  不是一个当前硬件下的现实默认方案
-- 这不是因为“2048 数学上不对”
-- 而是因为“在当前 shared-width 架构里，把所有流都拉到 2048 代价过高”
-
-所以，若要尽量保留 `PaliGemma` 语义能力，
-真正正确的问题不是：
-
-**“要不要投影？”**
+**“semantic 会不会被先压到 256 再去融合？”**
 
 而是：
 
-**“在哪里投影，哪些流投影，是否必须所有流同宽？”**
+**“world working space = 256` 是否已经足够承载 posterior / innovation / proprio / action-cond 的联合读写？”**
 
-### (R5) 推荐的长期主路线
+### (R3) 回到代码后，对 `hidden_dim = 256` 的判断
 
-综合当前代码、`pi0.5` 本地实现和近期论文，
-本版推荐的长期路线是：
+当前 `world-state` 流并不是普通 control token。
+例如 posterior token 在投到 `hidden_dim` 前，实际携带的是：
 
-**`pi0.5 / knowledge-insulating` 作为 semantic backbone 哲学**
-**+ PICF 的 language-free posterior world model**
-**+ posterior-late 的异宽双流 gated/shared attention 融合**
+- `h_post`
+- `mu_post`
+- `logvar_post`
+- `geometry_pe(x, a, S)`
+- `alpha`
+- `contact_prob`
 
-这条路线比“继续 current 256”更好，
-也比“把所有 token 都塞回单一 monolithic VLM trunk”更贴合本版数学定义。
+按当前默认配置，相关维数为：
 
-推荐结构如下：
+- `_geometry_pe = 78`
+- `posterior token_in = 560`
+- `post_write in = 304`
 
-1. `semantic stream`
-   - 保留 `PaliGemma` full text/image token stream
-   - 宽度建议：`1024` 起步
-   - 如果算力允许，可进一步保留到 `2048`
+也就是说，`256` 确实是压缩后的 world working space。
 
-2. `world-state stream`
-   - `posterior anchor tokens`
-   - `innovation token`
-   - `proprio / action-cond token`
-   - 宽度建议：`256 ~ 384`
+但在当前结构下，这个压缩是发生在 world tokenization 内部，
+不是 semantic 主干被硬砍。
 
-3. `fusion`
-   - 在 current posterior 固定之后进行
-   - 不把语言灌进 posterior update
-   - 用多层 gated cross-attention / shared attention
-   - 不要求所有 token 在进入第一层前先强制同宽
+### (R4) 256 / 384 / 512 的当前 core 成本对比
 
-### (R6) 如果短期内仍要维持单一 shared width
+按当前代码做的本地参数审计，已初始化 PICF core 参数量约为：
 
-若短期工程上不改异宽结构，
-则 shared width 的建议是：
+- `hidden_dim = 256`：`20,606,731`
+- `hidden_dim = 384`：`40,072,843`
+- `hidden_dim = 512`：`65,830,411`
 
-- **拒绝**：`256`
-  - 只适合作为当前过渡实现
-  - 不应作为“最大版本”长期配置
-- **最低可接受**：`512`
-  - 仍偏紧
-- **更合理的折中**：`768`
-- **单宽方案的首选**：`1024`
-- **不推荐直接全局 `2048`**
-  - 不是因为数学错误
-  - 而是因为对当前单流 PICF 来说代价过高
+几个关键模块的变化也很明显：
 
-因此，若用户要求“最大版本”且仍坚持单宽设计，
-则本版推荐：
+- `posterior_self`
+  - `256`: `1,579,520`
+  - `384`: `3,548,928`
+  - `512`: `6,304,768`
+- `predictive_world`
+  - `256`: `1,579,520`
+  - `384`: `3,548,928`
+  - `512`: `6,304,768`
+- `control_world`
+  - `256`: `1,579,520`
+  - `384`: `3,548,928`
+  - `512`: `6,304,768`
+- `predictive_semantic_reads`
+  - `256`: `2,897,410`
+  - `384`: `4,538,114`
+  - `512`: `6,309,890`
 
-**shared `hidden_dim = 1024`**
+所以：
 
-但若允许做结构升级，
-则优先推荐：
+- `384` 是合理扩容档
+- 但不是“免费提升”
+- `256 -> 384` 已接近 **2x**
+- `256 -> 512` 已接近 **3.2x**
 
-**semantic `1024~2048` + anchors `256~384` + posterior-late cross-attn**
+### (R5) 当前默认推荐
+
+当前实现已经满足：
+
+- `semantic_dim = 2048`
+- `world hidden_dim = 256`
+- posterior-late hetero cross-attention
+- no writeback to posterior / carried prior / physical innovation base
+
+在这个前提下，本版默认推荐是：
+
+- **保留 `hidden_dim = 256` 作为当前默认**
+- **保留 `semantic_dim = 2048`**
+- **把 `384` 只作为后续 scaling / ablation 档**
+
+原因是：
+
+- 当前主结构风险已经不在“semantic 被压成 256”
+- 当前 world token 数较小
+- 现有红线测试与 CPU smoke 都已通过
+- 而 `384 / 512` 会显著提高 core 成本
+
+### (R6) 后续如果出现真实 bottleneck，再怎么升
+
+若后续长训或评估表现出：
+
+- posterior/world 读写容量不足
+- innovation / uncertainty 表征过窄
+- action / future head 对 world state 的条件化不充分
+
+则优先级应为：
+
+1. 先把 `hidden_dim` 从 `256` 升到 `384`
+2. 再根据显存和收益决定是否升到 `512`
+3. 不建议在没有证据时把 `384/512` 直接写成默认
 
 ### (R7) 与近期论文的对比性结论
 

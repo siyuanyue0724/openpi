@@ -488,12 +488,17 @@ point / visual / tactile / compact context 都先投到统一 hidden size，再�
 
 当前实现状态：已满足。
 
-`semantic_summary` 只在：
+当前真正进入 downstream 融合的是 `semantic_tokens`：
 
-- predictive state
-- control/action readout
+- control 分支里，world tokens 通过 posterior-late 异宽 cross-attention 读取 `semantic_tokens`
+- predictive 分支里，也是先固定 `physical_prediction_cache`，再去读取 `semantic_tokens`
 
-中使用，不参与 posterior construction。
+`semantic_summary` 现在只保留为：
+
+- predictive state 内的聚合记录
+- 诊断 / 轻量日志量
+
+它不参与 posterior construction，也不直接驱动 control / predictive 主读出。
 
 ### 3.4 H4 tactile 与 point future heads 默认预测真实信号
 
@@ -1120,7 +1125,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 同时仍保留一个 `semantic_summary`
   - 它由同一批 semantic token 派生
   - 主要作为预测状态记录、诊断与轻量聚合量
-  - 它不是 downstream 唯一可见的语义输入
+  - 它不是 downstream 主融合输入
 - 在 posterior 之后，先形成 world token 流：
   - `posterior.tokens`
   - `innovation_token`
@@ -1145,7 +1150,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - semantic side path language-late
   - anchor / posterior tokens 与 semantic tokens 在 downstream 是平级流，但不要求预先同宽
 - 2026-04-10 本地复核新增通过：
-  - `53 passed` 核心回归
+  - `54 passed` 核心回归
   - CPU 一步训练 smoke
   - 新增红线回归：
     - 改 semantic 不改 `physical_prediction_cache`
@@ -1223,7 +1228,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 
 - `31 passed`
 
-当前更完整的 core + trainer 回归见上文 5.3，最新为 `53 passed`。
+当前更完整的 core + trainer 回归见上文 5.3，最新为 `54 passed`。
 
 当前 `pipeline_test.py` 覆盖的核心约束包括：
 

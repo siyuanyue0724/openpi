@@ -345,6 +345,44 @@ def test_semantic_changes_do_not_pollute_physical_prediction_cache_or_next_innov
     torch.testing.assert_close(second_a.state.predictive.innovation_norm, second_b.state.predictive.innovation_norm)
 
 
+def test_semantic_summary_is_bookkeeping_only_and_does_not_change_downstream_readout(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    frame.tactile = _make_tactile_packet(frame.step_id)
+    for layer in core.predictive_semantic_reads:
+        layer.cross_gate.data.fill_(3.0)
+    for layer in core.control_semantic_reads:
+        layer.cross_gate.data.fill_(3.0)
+    semantic_tokens = torch.linspace(
+        -1.0,
+        1.0,
+        steps=4 * core.config.semantic_dim,
+        dtype=torch.float32,
+    ).reshape(4, core.config.semantic_dim)
+    summary_a = torch.full((1, core.config.semantic_dim), -2.0, dtype=torch.float32)
+    summary_b = torch.full((1, core.config.semantic_dim), 3.0, dtype=torch.float32)
+    common_kwargs = dict(
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        action_future=frame.action,
+    )
+    first = core.step(
+        frame,
+        semantic_override={"tokens": semantic_tokens, "summary": summary_a},
+        **common_kwargs,
+    )
+    second = core.step(
+        frame,
+        semantic_override={"tokens": semantic_tokens, "summary": summary_b},
+        **common_kwargs,
+    )
+    assert not torch.allclose(first.state.predictive.semantic_summary, second.state.predictive.semantic_summary)
+    torch.testing.assert_close(first.state.posterior.mu, second.state.posterior.mu)
+    torch.testing.assert_close(first.state.predictive.action, second.state.predictive.action)
+    torch.testing.assert_close(first.state.predictive.physical_global_pred, second.state.predictive.physical_global_pred)
+    torch.testing.assert_close(first.state.predictive.global_pred, second.state.predictive.global_pred)
+
+
 def test_extract_targets_does_not_mutate_visual_history_when_using_real_visual_path(tmp_path: Path) -> None:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])

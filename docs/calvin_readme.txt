@@ -448,7 +448,7 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 当前默认 `predictive_semantic_dropout_prob=0.1`
     - 只作用于 predictive semantic memory，用来抑制 future shortcut
 - 2026-04-10 本地复核还新增通过：
-  - `53 passed` 的核心回归
+  - `54 passed` 的核心回归
   - CPU 一步训练 smoke
   - 新增红线回归：
     - semantic 不改 `physical_prediction_cache`
@@ -456,7 +456,7 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
     - semantic future auxiliary loss 会让 predictive cross-attn 保持在图中
 - 同时仍保留一个 `semantic_summary`
   - 它只是同一批 semantic token 的聚合记录
-  - 不是 downstream 唯一能看到的语义输入
+  - 不直接参与 downstream 主融合
 - 因而当前实现已经是：
   - `language-late`
   - `current posterior language-free`
@@ -704,7 +704,8 @@ export WANDB_SILENT=true && \
   - semantic path 会实例化真实 `PaliGemmaSemanticEncoder`
     - `semantic_source=auto` 默认优先使用本地 `pi05_base_pytorch/model.safetensors`
     - 若本地 checkpoint 不存在，再回退到 HF PaliGemma
-    - 语义摘要每步都会和 posterior tokens / innovation / proprio 一起进入后续 head
+    - 每步保留的 `semantic_tokens` 会在 posterior 固定之后被 world tokens 通过异宽 cross-attention 读取
+    - `semantic_summary` 只保留为聚合记录与诊断量
   - `metrics.jsonl` 采用 append 模式；如果复用同一个 `exp-name` 重新起一个非 `--resume` 训练，日志里会继续追加并可能出现重复 step id
   - 如果需要干净曲线，应该换新的 `exp-name`，或先清理旧实验目录
   - 当前 foundation 路径已经在云机上真实验证过：
