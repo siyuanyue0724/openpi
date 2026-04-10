@@ -10,6 +10,7 @@ import os
 import random
 import shutil
 import time
+import traceback
 from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
@@ -53,6 +54,8 @@ _RETRYABLE_FIRST_STEP_ERRORS = (
     "PICF core requires non-empty local xyzrgb support on window step",
 )
 
+_DEBUG_INDEX_GUARDS_INSTALLED = False
+
 
 class _NullTactileEncoder:
     def encode_sensor_clips(self, *, clips_by_sensor, backgrounds_by_sensor, poses_by_sensor):
@@ -73,6 +76,133 @@ class _ZeroSemanticEncoder(torch.nn.Module):
     def encode_observation(self, observation: PicfObservation) -> torch.Tensor:
         del observation
         return torch.zeros((1, self.dim), dtype=torch.float32)
+
+
+def _debug_index_stack() -> str:
+    stack = traceback.format_stack(limit=8)
+    return "".join(stack[:-2]).strip()
+
+
+def _debug_index_tensor_summary(index: torch.Tensor) -> str:
+    return (
+        f"shape={tuple(index.shape)} dtype={index.dtype} device={index.device} "
+        f"min={int(index.min().item()) if index.numel() > 0 else 'n/a'} "
+        f"max={int(index.max().item()) if index.numel() > 0 else 'n/a'}"
+    )
+
+
+def _debug_check_integer_index(
+    *,
+    op_name: str,
+    data: torch.Tensor,
+    dim: int,
+    index: torch.Tensor,
+) -> None:
+    if index.dtype not in (
+        torch.int8,
+        torch.int16,
+        torch.int32,
+        torch.int64,
+        torch.uint8,
+    ):
+        return
+    if dim < 0:
+        dim += int(data.dim())
+    if dim < 0 or dim >= int(data.dim()) or index.numel() == 0:
+        return
+    size = int(data.shape[dim])
+    min_idx = int(index.min().item())
+    max_idx = int(index.max().item())
+    if min_idx < -size or max_idx >= size:
+        raise RuntimeError(
+            f"{op_name} integer index out of bounds: dim={dim} size={size} "
+            f"data.shape={tuple(data.shape)} index={_debug_index_tensor_summary(index)}\n"
+            f"stack:\n{_debug_index_stack()}"
+        )
+
+
+def _debug_check_getitem_indices(
+    *,
+    op_name: str,
+    data: torch.Tensor,
+    index: Any,
+) -> None:
+    if not isinstance(index, tuple):
+        index_items = (index,)
+    else:
+        index_items = index
+    dim = 0
+    for item in index_items:
+        if item is Ellipsis:
+            remaining = int(data.dim()) - sum(
+                0 if sub is None or sub is Ellipsis else 1 for sub in index_items[index_items.index(item) + 1 :]
+            )
+            dim = remaining
+            continue
+        if item is None:
+            continue
+        if isinstance(item, slice):
+            dim += 1
+            continue
+        if isinstance(item, int):
+            size = int(data.shape[dim]) if dim < int(data.dim()) else 0
+            if item < -size or item >= size:
+                raise RuntimeError(
+                    f"{op_name} scalar index out of bounds: dim={dim} size={size} "
+                    f"index={item} data.shape={tuple(data.shape)}\nstack:\n{_debug_index_stack()}"
+                )
+            dim += 1
+            continue
+        if isinstance(item, torch.Tensor):
+            if item.dtype == torch.bool:
+                continue
+            _debug_check_integer_index(op_name=op_name, data=data, dim=dim, index=item)
+            dim += 1
+
+
+def _install_debug_tensor_index_guards() -> None:
+    global _DEBUG_INDEX_GUARDS_INSTALLED
+    if _DEBUG_INDEX_GUARDS_INSTALLED:
+        return
+
+    original_getitem = torch.Tensor.__getitem__
+    original_setitem = torch.Tensor.__setitem__
+    original_index_select = torch.Tensor.index_select
+    original_gather = torch.gather
+    original_tensor_gather = torch.Tensor.gather
+    original_scatter = torch.Tensor.scatter_
+
+    def guarded_getitem(self: torch.Tensor, index: Any):
+        _debug_check_getitem_indices(op_name="tensor.__getitem__", data=self, index=index)
+        return original_getitem(self, index)
+
+    def guarded_setitem(self: torch.Tensor, index: Any, value: Any):
+        _debug_check_getitem_indices(op_name="tensor.__setitem__", data=self, index=index)
+        return original_setitem(self, index, value)
+
+    def guarded_index_select(self: torch.Tensor, dim: int, index: torch.Tensor):
+        _debug_check_integer_index(op_name="tensor.index_select", data=self, dim=dim, index=index)
+        return original_index_select(self, dim, index)
+
+    def guarded_gather(input_tensor: torch.Tensor, dim: int, index: torch.Tensor, *args: Any, **kwargs: Any):
+        _debug_check_integer_index(op_name="torch.gather", data=input_tensor, dim=dim, index=index)
+        return original_gather(input_tensor, dim, index, *args, **kwargs)
+
+    def guarded_tensor_gather(self: torch.Tensor, dim: int, index: torch.Tensor, *args: Any, **kwargs: Any):
+        _debug_check_integer_index(op_name="tensor.gather", data=self, dim=dim, index=index)
+        return original_tensor_gather(self, dim, index, *args, **kwargs)
+
+    def guarded_scatter(self: torch.Tensor, dim: int, index: torch.Tensor, src: Any, *args: Any, **kwargs: Any):
+        _debug_check_integer_index(op_name="tensor.scatter_", data=self, dim=dim, index=index)
+        return original_scatter(self, dim, index, src, *args, **kwargs)
+
+    torch.Tensor.__getitem__ = guarded_getitem
+    torch.Tensor.__setitem__ = guarded_setitem
+    torch.Tensor.index_select = guarded_index_select
+    torch.gather = guarded_gather
+    torch.Tensor.gather = guarded_tensor_gather
+    torch.Tensor.scatter_ = guarded_scatter
+    _DEBUG_INDEX_GUARDS_INSTALLED = True
 
 
 def _init_logging() -> None:
@@ -1388,8 +1518,11 @@ def train(args: argparse.Namespace) -> None:
         recent_windows: deque[dict[str, Any]] = deque(maxlen=4)
         debug_cuda_sync = os.environ.get("OPENPI_DEBUG_CUDA_SYNC", "").strip() not in {"", "0", "false", "False"}
         debug_autograd_anomaly = os.environ.get("OPENPI_DEBUG_AUTOGRAD_ANOMALY", "").strip() not in {"", "0", "false", "False"}
+        debug_tensor_index_guards = os.environ.get("OPENPI_DEBUG_TENSOR_INDEX_GUARDS", "").strip() not in {"", "0", "false", "False"}
         if debug_autograd_anomaly:
             torch.autograd.set_detect_anomaly(True)
+        if debug_tensor_index_guards:
+            _install_debug_tensor_index_guards()
         pbar = (
             tqdm.tqdm(
                 total=args.num_train_steps,
@@ -1474,6 +1607,7 @@ def train(args: argparse.Namespace) -> None:
             )
             logging.info("CUDA debug sync: enabled=%s", bool(debug_cuda_sync))
             logging.info("Autograd anomaly detection: enabled=%s", bool(debug_autograd_anomaly))
+            logging.info("Tensor index guards: enabled=%s", bool(debug_tensor_index_guards))
             for group in optimizer_group_info:
                 logging.info(
                     "Optimizer group: name=%s lr=%s num_params=%s",

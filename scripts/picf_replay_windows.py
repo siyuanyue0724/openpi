@@ -23,6 +23,7 @@ from scripts.picf_core_train import _load_checkpoint
 from scripts.picf_core_train import _materialize_model_parameters
 from scripts.picf_core_train import _normalize_train_args
 from scripts.picf_core_train import _PicfWindowTrainer
+from scripts.picf_core_train import _install_debug_tensor_index_guards
 from scripts.picf_core_train import _seed_everything
 from scripts.picf_core_train import _validate_train_args
 from scripts.sonata_window_probe import _override_build_sample
@@ -144,8 +145,11 @@ def main() -> None:
     effective_rank_seed = _resolve_rank_seed(rank_seed=args.rank_seed, rng_rank=args.rng_rank)
     _seed_everything(int(train_args.seed), int(effective_rank_seed))
     debug_autograd_anomaly = os.environ.get("OPENPI_DEBUG_AUTOGRAD_ANOMALY", "").strip() not in {"", "0", "false", "False"}
+    debug_tensor_index_guards = os.environ.get("OPENPI_DEBUG_TENSOR_INDEX_GUARDS", "").strip() not in {"", "0", "false", "False"}
     if debug_autograd_anomaly:
         torch.autograd.set_detect_anomaly(True)
+    if debug_tensor_index_guards:
+        _install_debug_tensor_index_guards()
 
     override_context = contextlib.nullcontext() if args.point_grid_mode == "default" else _override_build_sample(str(args.point_grid_mode))
     with override_context:
@@ -195,6 +199,7 @@ def main() -> None:
                             "rng_rank": int(rng_rank),
                             "rank_seed": int(effective_rank_seed),
                             "autograd_anomaly": bool(debug_autograd_anomaly),
+                            "tensor_index_guards": bool(debug_tensor_index_guards),
                             "rng_skip_windows": int(args.rng_skip_windows),
                             "rng_num_windows": int(args.rng_num_windows),
                             "first_indices": flat_indices[: min(16, len(flat_indices))],
