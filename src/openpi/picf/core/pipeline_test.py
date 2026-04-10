@@ -383,6 +383,105 @@ def test_semantic_summary_is_bookkeeping_only_and_does_not_change_downstream_rea
     torch.testing.assert_close(first.state.predictive.global_pred, second.state.predictive.global_pred)
 
 
+def test_previous_semantic_conditioned_predictive_state_does_not_feed_next_prior_or_innovation(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, pose_shift=0.01)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+        action_future=frames[0].action,
+    )
+    mutated_future_cache = dataclasses.replace(
+        first.state.predictive.prediction_cache,
+        visual_latent=torch.full_like(first.state.predictive.prediction_cache.visual_latent, -4.0),
+        visual_real=torch.full_like(first.state.predictive.prediction_cache.visual_real, 2.5),
+        tactile_real=torch.full_like(first.state.predictive.prediction_cache.tactile_real, 1.5),
+        point_real=torch.full_like(first.state.predictive.prediction_cache.point_real, -1.0),
+        availability=torch.zeros_like(first.state.predictive.prediction_cache.availability),
+    )
+    mutated_predictive = dataclasses.replace(
+        first.state.predictive,
+        semantic_tokens=torch.full_like(first.state.predictive.semantic_tokens, -3.0),
+        semantic_summary=torch.full_like(first.state.predictive.semantic_summary, 7.0),
+        global_pred=torch.full_like(first.state.predictive.global_pred, 0.25),
+        prediction_cache=mutated_future_cache,
+    )
+    mutated_previous = dataclasses.replace(first.state, predictive=mutated_predictive)
+    second_base = core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(2.0),
+        semantic_override=_semantic_features(2.0),
+        action_future=frames[1].action,
+    )
+    second_mutated = core.step(
+        frames[1],
+        previous=mutated_previous,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(2.0),
+        semantic_override=_semantic_features(2.0),
+        action_future=frames[1].action,
+    )
+    torch.testing.assert_close(second_base.state.posterior.mu, second_mutated.state.posterior.mu)
+    torch.testing.assert_close(second_base.state.posterior.Sigma, second_mutated.state.posterior.Sigma)
+    torch.testing.assert_close(second_base.state.token_field.context_tokens, second_mutated.state.token_field.context_tokens)
+    torch.testing.assert_close(second_base.state.predictive.innovation_token, second_mutated.state.predictive.innovation_token)
+    torch.testing.assert_close(second_base.state.predictive.innovation_norm, second_mutated.state.predictive.innovation_norm)
+    torch.testing.assert_close(second_base.state.predictive.physical_global_pred, second_mutated.state.predictive.physical_global_pred)
+
+
+def test_previous_physical_prediction_cache_is_the_only_predictive_cache_allowed_to_change_next_innovation(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, pose_shift=0.01)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+        action_future=frames[0].action,
+    )
+    disabled_physical_cache = dataclasses.replace(
+        first.state.predictive.physical_prediction_cache,
+        visual_latent=torch.zeros_like(first.state.predictive.physical_prediction_cache.visual_latent),
+        visual_real=torch.zeros_like(first.state.predictive.physical_prediction_cache.visual_real),
+        tactile_real=torch.zeros_like(first.state.predictive.physical_prediction_cache.tactile_real),
+        point_real=torch.zeros_like(first.state.predictive.physical_prediction_cache.point_real),
+        availability=torch.zeros_like(first.state.predictive.physical_prediction_cache.availability),
+    )
+    changed_previous = dataclasses.replace(
+        first.state,
+        predictive=dataclasses.replace(
+            first.state.predictive,
+            physical_prediction_cache=disabled_physical_cache,
+        ),
+    )
+    second_base = core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(2.0),
+        semantic_override=_semantic_features(2.0),
+        action_future=frames[1].action,
+    )
+    second_changed = core.step(
+        frames[1],
+        previous=changed_previous,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(2.0),
+        semantic_override=_semantic_features(2.0),
+        action_future=frames[1].action,
+    )
+    torch.testing.assert_close(second_base.state.posterior.mu, second_changed.state.posterior.mu)
+    assert not torch.allclose(second_base.state.predictive.innovation_token, second_changed.state.predictive.innovation_token)
+
+
 def test_extract_targets_does_not_mutate_visual_history_when_using_real_visual_path(tmp_path: Path) -> None:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])

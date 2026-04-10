@@ -448,7 +448,7 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 当前默认 `predictive_semantic_dropout_prob=0.1`
     - 只作用于 predictive semantic memory，用来抑制 future shortcut
 - 2026-04-10 本地复核还新增通过：
-  - `56 passed` 的核心回归
+  - `58 passed` 的核心回归
   - CPU 一步训练 smoke
   - 新增红线回归：
     - semantic 不改 `physical_prediction_cache`
@@ -458,6 +458,8 @@ CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
   - 当前结论来自代码路径审计 + 回归测试 + 云机双卡 smoke
   - 它支持“当前实现满足既定数学 contract”的工程判断
   - 但这不是机器校验的形式化证明
+  - 更硬的允许边 / 禁止边规格见：
+    - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
 - 同时仍保留一个 `semantic_summary`
   - 它只是同一批 semantic token 的聚合记录
   - 不直接参与 downstream 主融合
