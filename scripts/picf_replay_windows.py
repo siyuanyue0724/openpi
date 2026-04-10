@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import json
 from collections import deque
+import os
 from pathlib import Path
 import sys
 from typing import Any
@@ -80,6 +81,14 @@ def _generate_rng_flat_indices(
     return flat_indices
 
 
+def _resolve_rank_seed(*, rank_seed: int | None, rng_rank: int | None) -> int:
+    if rank_seed is not None:
+        return int(rank_seed)
+    if rng_rank is not None:
+        return int(rng_rank)
+    return 1
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Replay specific PICF CALVIN transition windows through the current training graph.")
     parser.add_argument("--args-json", required=True, help="Path to args.json from a PICF training run.")
@@ -87,7 +96,12 @@ def main() -> None:
     parser.add_argument("--repeat", type=int, default=1, help="Number of times to repeat the flat-index sequence.")
     parser.add_argument("--device", default=None, help="Override device from args.json, e.g. cuda or cpu.")
     parser.add_argument("--checkpoint", default=None, help="Optional checkpoint directory or latest.pt to load before replay.")
-    parser.add_argument("--rank-seed", type=int, default=1, help="Rank offset for seed reproduction. rank=1 matches prior failing worker.")
+    parser.add_argument(
+        "--rank-seed",
+        type=int,
+        default=None,
+        help="Rank used for model/dropout RNG. Defaults to --rng-rank when provided, else 1.",
+    )
     parser.add_argument("--optimizer-step", action="store_true", help="Apply optimizer.step() after each replayed window.")
     parser.add_argument(
         "--rng-num-windows",
@@ -127,7 +141,11 @@ def main() -> None:
     if int(args.repeat) < 1:
         raise ValueError(f"--repeat must be >= 1, got {args.repeat}.")
 
-    _seed_everything(int(train_args.seed), int(args.rank_seed))
+    effective_rank_seed = _resolve_rank_seed(rank_seed=args.rank_seed, rng_rank=args.rng_rank)
+    _seed_everything(int(train_args.seed), int(effective_rank_seed))
+    debug_autograd_anomaly = os.environ.get("OPENPI_DEBUG_AUTOGRAD_ANOMALY", "").strip() not in {"", "0", "false", "False"}
+    if debug_autograd_anomaly:
+        torch.autograd.set_detect_anomaly(True)
 
     override_context = contextlib.nullcontext() if args.point_grid_mode == "default" else _override_build_sample(str(args.point_grid_mode))
     with override_context:
@@ -149,14 +167,14 @@ def main() -> None:
                 visual_grid=train_args.visual_grid,
                 use_visual_override=use_visual_override,
             ).to(device)
-            _materialize_model_parameters(trainer, source=source, rank=int(args.rank_seed))
+            _materialize_model_parameters(trainer, source=source, rank=int(effective_rank_seed))
             optimizer, _ = _build_optimizer(trainer, args=train_args)
             if args.checkpoint:
                 _load_checkpoint(path=Path(args.checkpoint), model=trainer, optimizer=optimizer, device=device)
             trainer.train()
 
             if args.rng_num_windows is not None:
-                rng_rank = int(args.rng_rank if args.rng_rank is not None else args.rank_seed)
+                rng_rank = int(args.rng_rank if args.rng_rank is not None else effective_rank_seed)
                 flat_indices = _generate_rng_flat_indices(
                     total_windows=int(args.rng_num_windows),
                     dataset_size=len(source),
@@ -175,6 +193,8 @@ def main() -> None:
                             "dataset_size": int(len(source)),
                             "seed": int(train_args.seed),
                             "rng_rank": int(rng_rank),
+                            "rank_seed": int(effective_rank_seed),
+                            "autograd_anomaly": bool(debug_autograd_anomaly),
                             "rng_skip_windows": int(args.rng_skip_windows),
                             "rng_num_windows": int(args.rng_num_windows),
                             "first_indices": flat_indices[: min(16, len(flat_indices))],

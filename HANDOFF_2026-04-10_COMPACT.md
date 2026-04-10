@@ -88,7 +88,7 @@ What is done:
 - cloud regression tests
 - local smoke training
 - cloud dual-GPU smoke training
-- cloud replay of the historical failing window sequences
+- cloud replay tools for historical failing window sequences
 
 What is not done:
 
@@ -100,7 +100,8 @@ So the correct statement is:
 
 - implementation is currently consistent with the intended mathematical contract
 - no hidden semantic write-back edge has been found
-- the previously observed CUDA `ScatterGatherKernel` training crashes are no longer reproduced by the audited historical window sequences
+- the previously observed CUDA `ScatterGatherKernel` crashes were **not** eliminated by the early short-window replays; later real long training still reproduced them around `step≈1200`
+- exact-prefix replay is now the correct debugging path, and it must align both `rng_rank` and `rank_seed`
 - this is not a formal proof of absolute correctness
 
 ## Training-Time Visualization

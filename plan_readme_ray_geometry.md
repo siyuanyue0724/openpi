@@ -265,9 +265,12 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
     - posterior `S / a` 更新改为 `torch.where`
   - 云机历史失败序列 replay：
     - 使用 `scripts/picf_replay_windows.py`
-    - 复核 `r6/r7` 的 `4` 组历史崩溃窗口序列
-    - 条件：`CUDA_LAUNCH_BLOCKING=1`、`optimizer.step()`、`repeat=3`
-    - 结果：全部通过，未再复现 `ScatterGatherKernel.cu:144 index out of bounds`
+    - `r6/r7` 时期对 `4` 组历史崩溃窗口序列做过短 replay
+    - 这些 replay 通过后，后续真实长训练 `r10` 仍然在 `step≈1200` 复现了 `ScatterGatherKernel.cu:144 index out of bounds`
+    - 因此“短 replay 通过”不足以判定问题已消失
+    - 进一步的 exact-prefix replay 必须同时对齐：
+      - 训练 flat-index RNG 的 `rng_rank`
+      - 模型 / dropout RNG 的 `rank_seed`
 - 验证级别说明：
   - 以上结论来自代码路径审计、回归测试、CPU smoke、以及云机双卡 smoke
   - 它支持“当前工程实现满足此处定义的数学 contract”的判断

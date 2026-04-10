@@ -1187,9 +1187,13 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
       - dense token dropout
       - `torch.where` 式状态更新
   - 云机 replay 复核：
-    - 对 `r6/r7` 历史崩溃窗口序列共 `4` 组，使用 `scripts/picf_replay_windows.py`
-    - 在 `CUDA_LAUNCH_BLOCKING=1`、`optimizer.step()`、`repeat=3` 下全部通过
-    - 旧的 `ScatterGatherKernel.cu:144 index out of bounds` 未再复现
+    - `r6/r7` 时期对少量历史崩溃窗口序列做过 `scripts/picf_replay_windows.py` 复核
+    - 这类“短序列 replay 通过”**不能**视为问题已经消失
+    - 后续真实长训练 `r10` 仍在 `step≈1200` 复现了 `ScatterGatherKernel.cu:144 index out of bounds`
+    - 当前更严格的排查方式是：
+      - 真实双卡训练复现
+      - exact-prefix replay
+      - 且 `scripts/picf_replay_windows.py` 中 `rng_rank` 与 `rank_seed` 必须对齐；否则 flat-index 序列虽然一致，但模型/dropout RNG 轨迹并不一致
 - 验证级别说明：
 - 以上结论来自代码路径审计、回归测试、以及云机双卡 smoke
 - 它们足以支持“当前工程实现满足既定数学契约”的判断

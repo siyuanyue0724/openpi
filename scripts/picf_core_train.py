@@ -1387,6 +1387,9 @@ def train(args: argparse.Namespace) -> None:
         retried_windows_interval = 0
         recent_windows: deque[dict[str, Any]] = deque(maxlen=4)
         debug_cuda_sync = os.environ.get("OPENPI_DEBUG_CUDA_SYNC", "").strip() not in {"", "0", "false", "False"}
+        debug_autograd_anomaly = os.environ.get("OPENPI_DEBUG_AUTOGRAD_ANOMALY", "").strip() not in {"", "0", "false", "False"}
+        if debug_autograd_anomaly:
+            torch.autograd.set_detect_anomaly(True)
         pbar = (
             tqdm.tqdm(
                 total=args.num_train_steps,
@@ -1470,6 +1473,7 @@ def train(args: argparse.Namespace) -> None:
                 args.max_empty_window_retries,
             )
             logging.info("CUDA debug sync: enabled=%s", bool(debug_cuda_sync))
+            logging.info("Autograd anomaly detection: enabled=%s", bool(debug_autograd_anomaly))
             for group in optimizer_group_info:
                 logging.info(
                     "Optimizer group: name=%s lr=%s num_params=%s",
