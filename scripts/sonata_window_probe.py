@@ -14,7 +14,6 @@ if __package__ in (None, ""):
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from scripts.picf_core_train import _CalvinTransitionSource
-from scripts.picf_core_train import _coerce_bool
 from scripts.picf_core_train import _default_sonata_checkpoint
 from scripts.picf_core_train import _normalize_train_args
 from scripts.picf_core_train import _seed_everything
@@ -27,6 +26,17 @@ from openpi.picf.sonata.config import SonataPointConfig
 from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
 from openpi.picf.sonata.wrapper import _normalize_colors
 from openpi.picf.sonata.wrapper import _normalize_local_grid_coords
+
+
+def _coerce_bool(value: object) -> bool:
+    if isinstance(value, bool):
+        return value
+    text = str(value).strip().lower()
+    if text in {"1", "true", "yes", "y", "on"}:
+        return True
+    if text in {"0", "false", "no", "n", "off"}:
+        return False
+    raise ValueError(f"Expected a boolean-like value, got {value!r}")
 
 
 def _load_args(args_json: Path, *, device: str | None) -> argparse.Namespace:
