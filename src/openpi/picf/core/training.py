@@ -250,9 +250,29 @@ def _point_tactile_alignment(
     zero = token_field.fused_tokens.new_zeros(())
     if point_embed.shape[0] == 0 or tactile_embed.shape[0] == 0 or point_positions.shape[0] == 0 or tactile_positions.shape[0] == 0:
         return _zero_weight_sum(zero, point_embed, tactile_embed)
+    if point_embed.shape[0] != point_positions.shape[0]:
+        raise RuntimeError(
+            "PICF point-tactile alignment contract violated: "
+            f"point_embed.shape[0]={int(point_embed.shape[0])} "
+            f"!= point_positions.shape[0]={int(point_positions.shape[0])}"
+        )
+    if tactile_embed.shape[0] != tactile_positions.shape[0]:
+        raise RuntimeError(
+            "PICF point-tactile alignment contract violated: "
+            f"tactile_embed.shape[0]={int(tactile_embed.shape[0])} "
+            f"!= tactile_positions.shape[0]={int(tactile_positions.shape[0])}"
+        )
     tau_pt = max(float(config.tau_pt), eps)
     distances = torch.cdist(tactile_positions, point_positions)
     nearest_point = torch.argmin(distances, dim=1)
+    if nearest_point.numel() > 0:
+        min_index = int(nearest_point.min().item())
+        max_index = int(nearest_point.max().item())
+        if min_index < 0 or max_index >= int(point_embed.shape[0]):
+            raise RuntimeError(
+                "PICF point-tactile alignment nearest-point index out of bounds: "
+                f"valid=[0,{int(point_embed.shape[0]) - 1}] got min={min_index} max={max_index}"
+            )
     if tactile_gate.numel() != tactile_embed.shape[0]:
         tactile_gate = torch.ones((tactile_embed.shape[0],), device=tactile_embed.device, dtype=tactile_embed.dtype)
     losses = []
@@ -269,6 +289,55 @@ def _point_tactile_alignment(
     if not losses:
         return _zero_weight_sum(zero, point_embed, tactile_embed)
     return torch.stack(losses).sum() / torch.clamp(torch.stack(weights).sum(), min=eps)
+
+
+def _validate_alignment_contract(
+    state: PicfCoreState,
+    *,
+    candidate_mask: torch.Tensor,
+    projective: torch.Tensor,
+    routing: torch.Tensor,
+) -> None:
+    token_field = state.token_field
+    point_count = int(token_field.point_tokens.shape[0])
+    visual_count = int(token_field.visual_tokens.shape[0])
+    expected = (point_count, visual_count)
+    actual_mask = tuple(int(dim) for dim in candidate_mask.shape)
+    actual_projective = tuple(int(dim) for dim in projective.shape)
+    actual_routing = tuple(int(dim) for dim in routing.shape)
+    if actual_mask != expected:
+        raise RuntimeError(
+            "PICF alignment contract violated: candidate mask shape mismatch. "
+            f"expected={expected} got={actual_mask}"
+        )
+    if actual_projective != expected:
+        raise RuntimeError(
+            "PICF alignment contract violated: projective compatibility shape mismatch. "
+            f"expected={expected} got={actual_projective}"
+        )
+    if actual_routing != expected:
+        raise RuntimeError(
+            "PICF alignment contract violated: routing shape mismatch. "
+            f"expected={expected} got={actual_routing}"
+        )
+    if int(token_field.point_align_embeddings.shape[0]) != point_count:
+        raise RuntimeError(
+            "PICF alignment contract violated: point alignment embedding count mismatch. "
+            f"point_tokens={point_count} point_align_embeddings={int(token_field.point_align_embeddings.shape[0])}"
+        )
+    if int(token_field.visual_align_embeddings.shape[0]) != visual_count:
+        raise RuntimeError(
+            "PICF alignment contract violated: visual alignment embedding count mismatch. "
+            f"visual_tokens={visual_count} visual_align_embeddings={int(token_field.visual_align_embeddings.shape[0])}"
+        )
+    fusion_attention = token_field.fusion_attention_mean
+    if fusion_attention is not None:
+        total_tokens = int(token_field.fused_tokens.shape[0])
+        if tuple(int(dim) for dim in fusion_attention.shape) != (total_tokens, total_tokens):
+            raise RuntimeError(
+                "PICF alignment contract violated: fusion attention shape mismatch. "
+                f"expected={(total_tokens, total_tokens)} got={tuple(int(dim) for dim in fusion_attention.shape)}"
+            )
 
 
 def compute_alignment_loss(
@@ -307,11 +376,23 @@ def compute_alignment_loss(
 
     routing, _, _, _, _ = _routing_consistency(state, config=cfg, eps=1e-6)
     routing = _sanitize_probability_tensor(routing, eps=1e-6, interior=True)
-    anchor_pv = fn.binary_cross_entropy(
-        routing[candidate_mask],
-        projective[candidate_mask],
-        weight=projective[candidate_mask],
+    _validate_alignment_contract(
+        state,
+        candidate_mask=candidate_mask,
+        projective=projective,
+        routing=routing,
     )
+    candidate_weight = candidate_mask.to(dtype=projective.dtype)
+    candidate_count = torch.clamp(candidate_weight.sum(), min=1.0)
+    anchor_pv = (
+        fn.binary_cross_entropy(
+            routing,
+            projective,
+            weight=projective,
+            reduction="none",
+        )
+        * candidate_weight
+    ).sum() / candidate_count
 
     pv_weak = zero
     tau_pv = max(float(cfg.tau_pv), 1e-6)
@@ -320,11 +401,10 @@ def compute_alignment_loss(
     if point_embed.shape[0] > 0 and visual_embed.shape[0] > 1:
         losses = []
         for u in range(visual_embed.shape[0]):
-            point_mask = candidate_mask[:, u]
-            if not bool(point_mask.any()):
+            weights = projective[:, u] * candidate_weight[:, u]
+            if float(weights.sum().item()) <= 0.0:
                 continue
-            weights = projective[point_mask, u]
-            bag = torch.sum(weights[:, None] * point_embed[point_mask], dim=0) / torch.clamp(weights.sum(), min=1e-6)
+            bag = torch.sum(weights[:, None] * point_embed, dim=0) / torch.clamp(weights.sum(), min=1e-6)
             bag = fn.normalize(bag[None, :], dim=-1)[0]
             logits = (bag @ visual_embed.T) / tau_pv
             target = torch.tensor([u], device=logits.device, dtype=torch.long)
@@ -344,10 +424,10 @@ def compute_alignment_loss(
         pv_attention = fusion_attention[point_count : point_count + visual_count, :point_count]
         focus_losses = []
         for u in range(visual_count):
-            point_mask = candidate_mask[:, u]
-            if not bool(point_mask.any()):
+            focus_weight = candidate_weight[:, u]
+            if float(focus_weight.sum().item()) <= 0.0:
                 continue
-            numerator = torch.sum(pv_attention[u, point_mask] * projective[point_mask, u]) + 1e-6
+            numerator = torch.sum(pv_attention[u] * projective[:, u] * focus_weight) + 1e-6
             denominator = torch.sum(pv_attention[u]) + 1e-6
             focus_losses.append(-torch.log(torch.clamp(numerator / denominator, min=1e-6)))
         if focus_losses:

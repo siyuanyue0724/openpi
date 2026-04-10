@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import numpy as np
+import pytest
 import torch
 
 from openpi.picf.contracts import PicfPointCloudFrame
@@ -337,6 +338,59 @@ def test_alignment_loss_sanitizes_probability_contract_before_bce() -> None:
     alignment = compute_alignment_loss(state)
     assert torch.isfinite(alignment.total)
     assert torch.isfinite(alignment.anchor_pv)
+
+
+def test_alignment_loss_raises_on_projective_shape_contract_mismatch() -> None:
+    dtype = torch.float32
+    geometry = PicfProjectiveGeometryState(
+        point_proj_grid_norm=torch.zeros((1, 2), dtype=dtype),
+        point_proj_grid_index=torch.zeros((1, 2), dtype=dtype),
+        point_visibility=torch.ones((1,), dtype=dtype),
+        point_depth=torch.ones((1,), dtype=dtype),
+        point_depth_sample=torch.ones((1,), dtype=dtype),
+        point_depth_valid=torch.ones((1,), dtype=torch.bool),
+        visual_grid_norm=torch.zeros((1, 2), dtype=dtype),
+        visual_grid_index=torch.zeros((1, 2), dtype=dtype),
+        visual_pixel_centers=torch.zeros((1, 2), dtype=dtype),
+        visual_ray_world=torch.zeros((1, 3), dtype=dtype),
+        camera_origin_world=torch.zeros((3,), dtype=dtype),
+        projective_compatibility=torch.ones((1, 2), dtype=dtype),
+        projective_candidate_mask=torch.ones((1, 2), dtype=torch.bool),
+        projective_attention_bias=torch.zeros((1, 2), dtype=dtype),
+    )
+    token_field = PicfTokenFieldState(
+        point_tokens=torch.zeros((1, 4), dtype=dtype),
+        visual_tokens=torch.zeros((1, 4), dtype=dtype),
+        tactile_tokens=torch.zeros((0, 4), dtype=dtype),
+        context_tokens=torch.zeros((0, 4), dtype=dtype),
+        fused_tokens=torch.zeros((2, 4), dtype=dtype),
+        point_positions=torch.zeros((1, 3), dtype=dtype),
+        modality_ids=torch.tensor([0, 1], dtype=torch.long),
+        point_align_embeddings=torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=dtype),
+        visual_align_embeddings=torch.tensor([[1.0, 0.0, 0.0, 0.0]], dtype=dtype),
+        tactile_align_embeddings=torch.zeros((0, 4), dtype=dtype),
+        tactile_positions_world=torch.zeros((0, 3), dtype=dtype),
+        tactile_contact_gate=torch.zeros((0,), dtype=dtype),
+        fusion_attention_mean=torch.tensor([[0.5, 0.5], [0.5, 0.5]], dtype=dtype),
+        projective_geometry=geometry,
+    )
+    obs = PicfObservationAnchorState(
+        seed_indices=torch.tensor([0], dtype=torch.long),
+        tokens=torch.zeros((1, 4), dtype=dtype),
+        point_weights=torch.ones((1, 1), dtype=dtype),
+        routing_mass_point=torch.ones((1, 1), dtype=dtype),
+        routing_mass_visual=torch.ones((1, 1), dtype=dtype),
+        routing_support_point=torch.ones((1,), dtype=dtype),
+        routing_support_visual=torch.ones((1,), dtype=dtype),
+        routing_gate_point=torch.ones((1,), dtype=dtype),
+        routing_gate_visual=torch.ones((1,), dtype=dtype),
+        x=torch.zeros((1, 3), dtype=dtype),
+        S=torch.eye(3, dtype=dtype)[None, :, :],
+        a=torch.ones((1, 3), dtype=dtype),
+    )
+    state = SimpleNamespace(token_field=token_field, observation_anchors=obs)
+    with pytest.raises(RuntimeError, match="candidate mask shape mismatch"):
+        compute_alignment_loss(state)
 
 
 def test_alignment_loss_keeps_align_heads_in_graph_when_no_projective_candidates(tmp_path: Path) -> None:
