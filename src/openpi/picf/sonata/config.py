@@ -15,6 +15,7 @@ class SonataPointConfig:
     trainable: bool = False
     shuffle_orders: bool = False
     allow_random_init: bool = True
+    enable_flash: bool = True
 
     @property
     def default_checkpoint_candidates(self) -> tuple[Path, ...]:

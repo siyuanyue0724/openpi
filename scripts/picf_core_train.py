@@ -55,6 +55,7 @@ _RETRYABLE_FIRST_STEP_ERRORS = (
 )
 
 _DEBUG_INDEX_GUARDS_INSTALLED = False
+_DEBUG_INDEX_TRACE: deque[dict[str, Any]] = deque(maxlen=64)
 
 
 class _NullTactileEncoder:
@@ -89,6 +90,16 @@ def _debug_index_tensor_summary(index: torch.Tensor) -> str:
         f"min={int(index.min().item()) if index.numel() > 0 else 'n/a'} "
         f"max={int(index.max().item()) if index.numel() > 0 else 'n/a'}"
     )
+
+
+def _record_debug_index_event(op_name: str, **payload: Any) -> None:
+    entry = {"op": str(op_name)}
+    entry.update(payload)
+    _DEBUG_INDEX_TRACE.append(entry)
+
+
+def _dump_debug_index_trace() -> list[dict[str, Any]]:
+    return list(_DEBUG_INDEX_TRACE)
 
 
 def _debug_check_integer_index(
@@ -171,30 +182,83 @@ def _install_debug_tensor_index_guards() -> None:
     original_gather = torch.gather
     original_tensor_gather = torch.Tensor.gather
     original_scatter = torch.Tensor.scatter_
+    original_embedding = torch.nn.functional.embedding
+    original_torch_embedding = torch.embedding
 
     def guarded_getitem(self: torch.Tensor, index: Any):
+        _record_debug_index_event(op_name="tensor.__getitem__", data_shape=tuple(self.shape))
         _debug_check_getitem_indices(op_name="tensor.__getitem__", data=self, index=index)
         return original_getitem(self, index)
 
     def guarded_setitem(self: torch.Tensor, index: Any, value: Any):
+        _record_debug_index_event(op_name="tensor.__setitem__", data_shape=tuple(self.shape))
         _debug_check_getitem_indices(op_name="tensor.__setitem__", data=self, index=index)
         return original_setitem(self, index, value)
 
     def guarded_index_select(self: torch.Tensor, dim: int, index: torch.Tensor):
+        _record_debug_index_event(
+            op_name="tensor.index_select",
+            data_shape=tuple(self.shape),
+            dim=int(dim),
+            index=_debug_index_tensor_summary(index),
+        )
         _debug_check_integer_index(op_name="tensor.index_select", data=self, dim=dim, index=index)
         return original_index_select(self, dim, index)
 
     def guarded_gather(input_tensor: torch.Tensor, dim: int, index: torch.Tensor, *args: Any, **kwargs: Any):
+        _record_debug_index_event(
+            op_name="torch.gather",
+            data_shape=tuple(input_tensor.shape),
+            dim=int(dim),
+            index=_debug_index_tensor_summary(index),
+        )
         _debug_check_integer_index(op_name="torch.gather", data=input_tensor, dim=dim, index=index)
         return original_gather(input_tensor, dim, index, *args, **kwargs)
 
     def guarded_tensor_gather(self: torch.Tensor, dim: int, index: torch.Tensor, *args: Any, **kwargs: Any):
+        _record_debug_index_event(
+            op_name="tensor.gather",
+            data_shape=tuple(self.shape),
+            dim=int(dim),
+            index=_debug_index_tensor_summary(index),
+        )
         _debug_check_integer_index(op_name="tensor.gather", data=self, dim=dim, index=index)
         return original_tensor_gather(self, dim, index, *args, **kwargs)
 
     def guarded_scatter(self: torch.Tensor, dim: int, index: torch.Tensor, src: Any, *args: Any, **kwargs: Any):
+        _record_debug_index_event(
+            op_name="tensor.scatter_",
+            data_shape=tuple(self.shape),
+            dim=int(dim),
+            index=_debug_index_tensor_summary(index),
+        )
         _debug_check_integer_index(op_name="tensor.scatter_", data=self, dim=dim, index=index)
         return original_scatter(self, dim, index, src, *args, **kwargs)
+
+    def guarded_embedding(
+        input_tensor: torch.Tensor,
+        weight: torch.Tensor,
+        padding_idx: int | None = None,
+        *args: Any,
+        **kwargs: Any,
+    ):
+        _record_debug_index_event(
+            op_name="torch.nn.functional.embedding",
+            weight_shape=tuple(weight.shape),
+            padding_idx=None if padding_idx is None else int(padding_idx),
+            index=_debug_index_tensor_summary(input_tensor),
+        )
+        _debug_check_integer_index(op_name="torch.nn.functional.embedding", data=weight, dim=0, index=input_tensor)
+        return original_embedding(input_tensor, weight, padding_idx, *args, **kwargs)
+
+    def guarded_torch_embedding(weight: torch.Tensor, input_tensor: torch.Tensor, *args: Any, **kwargs: Any):
+        _record_debug_index_event(
+            op_name="torch.embedding",
+            weight_shape=tuple(weight.shape),
+            index=_debug_index_tensor_summary(input_tensor),
+        )
+        _debug_check_integer_index(op_name="torch.embedding", data=weight, dim=0, index=input_tensor)
+        return original_torch_embedding(weight, input_tensor, *args, **kwargs)
 
     torch.Tensor.__getitem__ = guarded_getitem
     torch.Tensor.__setitem__ = guarded_setitem
@@ -202,6 +266,8 @@ def _install_debug_tensor_index_guards() -> None:
     torch.gather = guarded_gather
     torch.Tensor.gather = guarded_tensor_gather
     torch.Tensor.scatter_ = guarded_scatter
+    torch.nn.functional.embedding = guarded_embedding
+    torch.embedding = guarded_torch_embedding
     _DEBUG_INDEX_GUARDS_INSTALLED = True
 
 
@@ -1214,6 +1280,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 dtype=args.sonata_dtype,
                 trainable=bool(args.point_backbone_trainable),
                 allow_random_init=False,
+                enable_flash=not bool(args.sonata_disable_flash),
             )
         )
 
@@ -1572,9 +1639,10 @@ def train(args: argparse.Namespace) -> None:
                 args.future_vote_heads,
             )
             logging.info(
-                "Backbone contract: point=%s(trainable=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(source=%s trainable=%s)",
+                "Backbone contract: point=%s(trainable=%s flash=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(source=%s trainable=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),
+                getattr(point_feature_extractor, "flash_enabled", None) if point_feature_extractor is not None else None,
                 args.visual_mode,
                 bool(args.visual_trainable),
                 args.tactile_mode,
@@ -1699,6 +1767,8 @@ def train(args: argparse.Namespace) -> None:
                             window.prompt,
                         )
                         logging.error("Recent window history before failure: %s", list(recent_windows))
+                        if _DEBUG_INDEX_TRACE:
+                            logging.error("Recent tensor index trace before failure: %s", _dump_debug_index_trace())
                         raise
                 metric_accum.loss_total += float(outputs["loss_total"].detach().item())
                 metric_accum.loss_action += float(outputs["loss_action"].detach().item())
@@ -1837,6 +1907,7 @@ def main() -> None:
     parser.add_argument("--sonata-checkpoint-path", default=None)
     parser.add_argument("--sonata-stage-name", default="enc4")
     parser.add_argument("--sonata-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument("--sonata-disable-flash", action="store_true")
     parser.add_argument("--point-backbone-lr-scale", type=float, default=0.25)
     parser.add_argument("--visual-mode", choices=["stub", "encoder"], default="stub")
     parser.add_argument("--visual-trainable", action="store_true")

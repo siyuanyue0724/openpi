@@ -19,6 +19,7 @@ if __package__ in (None, ""):
 from scripts.picf_core_train import _build_model
 from scripts.picf_core_train import _build_optimizer
 from scripts.picf_core_train import _CalvinTransitionSource
+from scripts.picf_core_train import _dump_debug_index_trace
 from scripts.picf_core_train import _ensure_window_has_valid_first_step_xyzrgb_support
 from scripts.picf_core_train import _load_checkpoint
 from scripts.picf_core_train import _materialize_model_parameters
@@ -266,6 +267,8 @@ def main() -> None:
                         print(json.dumps(record, sort_keys=True), flush=True)
                         print(f"exception={type(exc).__name__}: {exc}", flush=True)
                         print(f"recent_history={list(recent)}", flush=True)
+                        if _dump_debug_index_trace():
+                            print(f"recent_tensor_index_trace={_dump_debug_index_trace()}", flush=True)
                         raise
         finally:
             source.close()

@@ -215,11 +215,20 @@ class SonataPointFeatureExtractor(nn.Module):
                 f"PICF Sonata wrapper expects SpatialLM/Sonata xyz+rgb input (6 channels), got in_channels={in_channels}."
             )
 
+        env_disable_flash = os.environ.get("OPENPI_SONATA_DISABLE_FLASH", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        self.flash_enabled = bool(
+            self.config.enable_flash and not env_disable_flash and self.device.type == "cuda" and flash_attn is not None
+        )
         self.model = sonata_cls(
             in_channels=in_channels,
             order=("z", "z-trans"),
             shuffle_orders=self.config.shuffle_orders,
-            enable_flash=bool(self.device.type == "cuda" and flash_attn is not None),
+            enable_flash=self.flash_enabled,
             enable_fourier_encode=enable_fourier,
         )
         if state_dict is not None:
