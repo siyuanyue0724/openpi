@@ -47,6 +47,7 @@ def test_precompute_tactile_contact_calibration_smoke(tmp_path: Path) -> None:
     stats = json.loads((output_dir / "tactile_contact_stats.json").read_text())
     assert stats["score_mode"] == "rgb_only"
     assert stats["sampled_frames"] == 4
+    assert stats["negative_pool_size"] >= 1
     assert stats["tau_on"] >= stats["tau_off"]
 
     calibration = json.loads((output_dir / "tactile_fingertip_calibration.json").read_text())

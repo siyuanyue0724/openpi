@@ -154,6 +154,17 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     assert args.warmup_steps == 600
 
 
+def test_final_tactile_defaults_align_with_current_training_spec() -> None:
+    args = _base_args()
+    assert args.stride == 4
+    assert args.max_points == 1024
+    assert args.crop_radius_m == pytest.approx(0.10)
+    assert args.pt_bag_radius_m == pytest.approx(0.045)
+    assert args.pt_bag_sigma_m == pytest.approx(0.015)
+    assert args.pt_bag_kmin == 32
+    assert _MODULE._SPEC_DEFAULTS.crop_radius_m == pytest.approx(0.10)
+
+
 def test_normalize_train_args_disables_semantic_gradient_checkpointing_for_accumulation() -> None:
     args = _base_args()
     args.semantic_mode = "paligemma"

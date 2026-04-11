@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import contextlib
+from typing import Any
 
 import numpy as np
 import torch
@@ -75,6 +76,33 @@ def _mean_abs_rgb_delta(current: np.ndarray, reference: np.ndarray) -> float:
     if float(reference_t.max().item()) > 1.0:
         reference_t = reference_t / 255.0
     return float(torch.mean(torch.abs(current_t - reference_t)).item())
+
+
+def _robust_zscore(value: float, stats: dict[str, Any] | None) -> float:
+    if not stats:
+        return float(value)
+    median = float(stats.get("median", 0.0))
+    iqr = max(float(stats.get("iqr", 1.0)), 1e-8)
+    return float((float(value) - median) / ((iqr / 1.349) + 1e-8))
+
+
+def _calibrated_contact_score(
+    *,
+    sensor_name: str,
+    rgb_residual_score: float,
+    latent_residual_score: float,
+    stats_payload: dict[str, Any] | None,
+    use_latent: bool,
+) -> float:
+    if not stats_payload:
+        return (0.5 * (rgb_residual_score + latent_residual_score)) if use_latent else float(rgb_residual_score)
+    rgb_stats = stats_payload.get("per_sensor_rgb_stats", {}).get(sensor_name)
+    latent_stats = stats_payload.get("per_sensor_latent_stats", {}).get(sensor_name)
+    rgb_score = _robust_zscore(rgb_residual_score, rgb_stats)
+    if not use_latent:
+        return rgb_score
+    latent_score = _robust_zscore(latent_residual_score, latent_stats)
+    return 0.5 * (rgb_score + latent_score)
 
 
 def _pooled_from_sensor_tokens(sensor_tokens: torch.Tensor) -> torch.Tensor:
@@ -192,7 +220,13 @@ class AnyTouch2TactileEncoder(nn.Module):
                     if background_pooled is not None
                     else 0.0
                 )
-                contact_score = 0.5 * (rgb_residual_score + latent_residual_score)
+                contact_score = _calibrated_contact_score(
+                    sensor_name=sensor_name,
+                    rgb_residual_score=rgb_residual_score,
+                    latent_residual_score=latent_residual_score,
+                    stats_payload=self.config.contact_stats_payload,
+                    use_latent=background_pooled is not None,
+                )
             else:
                 rgb_residual_score = _mean_abs_rgb_delta(current_rgb, temporal_ref)
                 latent_residual_score = 0.0

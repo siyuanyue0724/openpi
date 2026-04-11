@@ -60,6 +60,7 @@ def _robust_stats(values: np.ndarray) -> dict[str, float]:
         "q01": float(np.quantile(values, 0.01)),
         "q10": float(np.quantile(values, 0.10)),
         "q50": float(np.quantile(values, 0.50)),
+        "q75": float(np.quantile(values, 0.75)),
         "q90": float(np.quantile(values, 0.90)),
         "q99": float(np.quantile(values, 0.99)),
         "q999": float(np.quantile(values, 0.999)),
@@ -195,7 +196,7 @@ def _compute_latent_backgrounds_and_scores(
     records: list[_FrameRecord],
     backgrounds: dict[str, np.ndarray],
     sensor_names: tuple[str, ...],
-) -> tuple[dict[str, np.ndarray] | None, list[dict[str, float]], list[dict[str, float]]]:
+) -> tuple[dict[str, np.ndarray] | None, list[dict[str, float]], list[dict[str, float]], dict[str, np.ndarray] | None]:
     masks = {sensor_name: _valid_center_mask(records[0].tactile_rgb_by_sensor[sensor_name]) for sensor_name in sensor_names}
     rgb_scores_per_record: list[dict[str, float]] = []
     for record in records:
@@ -210,10 +211,9 @@ def _compute_latent_backgrounds_and_scores(
             }
         )
     if encoder is None:
-        return None, rgb_scores_per_record, [{sensor_name: 0.0 for sensor_name in sensor_names} for _ in records]
+        return None, rgb_scores_per_record, [{sensor_name: 0.0 for sensor_name in sensor_names} for _ in records], None
 
-    background_latents: dict[str, list[np.ndarray]] = {sensor_name: [] for sensor_name in sensor_names}
-    latent_scores: list[dict[str, float]] = []
+    pooled_rows: list[dict[str, np.ndarray]] = []
     for record in records:
         bundle = encoder.encode_sensor_clips(
             clips_by_sensor={sensor_name: np.repeat(record.tactile_rgb_by_sensor[sensor_name][None, ...], encoder.config.num_frames, axis=0) for sensor_name in sensor_names},
@@ -221,34 +221,36 @@ def _compute_latent_backgrounds_and_scores(
             poses_by_sensor={sensor_name: np.eye(4, dtype=np.float32) for sensor_name in sensor_names},
         )
         assert bundle is not None
-        latent_row: dict[str, float] = {}
+        pooled_row: dict[str, np.ndarray] = {}
         for sensor_name in sensor_names:
             sensor = bundle.sensors[sensor_name]
             pooled = sensor.pooled_feature.detach().cpu().numpy().astype(np.float32)
             pooled = pooled / max(float(np.linalg.norm(pooled)), 1e-8)
-            background_latents[sensor_name].append(pooled)
-        latent_scores.append(latent_row)
+            pooled_row[sensor_name] = pooled
+        pooled_rows.append(pooled_row)
 
-    z_bg = {
-        sensor_name: normalize_vectors(np.mean(np.stack(latents, axis=0), axis=0, keepdims=True))[0]
-        for sensor_name, latents in background_latents.items()
-    }
+    rgb_mean_scores = np.asarray(
+        [
+            np.mean([float(row[sensor_name]) for sensor_name in sensor_names], dtype=np.float64)
+            for row in rgb_scores_per_record
+        ],
+        dtype=np.float32,
+    )
+    neg_count = max(1, int(math.ceil(rgb_mean_scores.shape[0] * 0.05)))
+    neg_indices = np.argsort(rgb_mean_scores)[:neg_count]
+    z_bg = {}
+    for sensor_name in sensor_names:
+        negatives = np.stack([pooled_rows[int(index)][sensor_name] for index in neg_indices], axis=0)
+        z_bg[sensor_name] = normalize_vectors(np.mean(negatives, axis=0, keepdims=True))[0]
+
     final_rows: list[dict[str, float]] = []
-    for record in records:
-        bundle = encoder.encode_sensor_clips(
-            clips_by_sensor={sensor_name: np.repeat(record.tactile_rgb_by_sensor[sensor_name][None, ...], encoder.config.num_frames, axis=0) for sensor_name in sensor_names},
-            backgrounds_by_sensor=backgrounds,
-            poses_by_sensor={sensor_name: np.eye(4, dtype=np.float32) for sensor_name in sensor_names},
-        )
-        assert bundle is not None
+    for pooled_row in pooled_rows:
         row: dict[str, float] = {}
         for sensor_name in sensor_names:
-            sensor = bundle.sensors[sensor_name]
-            pooled = sensor.pooled_feature.detach().cpu().numpy().astype(np.float32)
-            pooled = pooled / max(float(np.linalg.norm(pooled)), 1e-8)
+            pooled = pooled_row[sensor_name]
             row[sensor_name] = float(1.0 - np.dot(pooled, z_bg[sensor_name]))
         final_rows.append(row)
-    return z_bg, rgb_scores_per_record, final_rows
+    return z_bg, rgb_scores_per_record, final_rows, {"negative_rgb_mean_scores": rgb_mean_scores, "negative_indices": neg_indices.astype(np.int64)}
 
 
 def _calibrate_fingertips(
@@ -398,11 +400,33 @@ def main() -> None:
             )
         )
 
-    z_bg, rgb_scores, latent_scores = _compute_latent_backgrounds_and_scores(
+    z_bg, rgb_scores, latent_scores, calibration_aux = _compute_latent_backgrounds_and_scores(
         encoder=encoder,
         records=records,
         backgrounds=backgrounds,
         sensor_names=sensor_names,
+    )
+
+    negative_indices = (
+        np.asarray(calibration_aux["negative_indices"], dtype=np.int64)
+        if calibration_aux is not None and "negative_indices" in calibration_aux
+        else np.arange(len(records), dtype=np.int64)
+    )
+    per_sensor_rgb_stats = {
+        sensor_name: _robust_stats(
+            np.asarray([rgb_scores[int(index)][sensor_name] for index in negative_indices], dtype=np.float32)
+        )
+        for sensor_name in sensor_names
+    }
+    per_sensor_latent_stats = (
+        {
+            sensor_name: _robust_stats(
+                np.asarray([latent_scores[int(index)][sensor_name] for index in negative_indices], dtype=np.float32)
+            )
+            for sensor_name in sensor_names
+        }
+        if encoder is not None
+        else {}
     )
 
     score_rows: list[dict[str, float]] = []
@@ -413,18 +437,44 @@ def main() -> None:
         for sensor_name in sensor_names:
             rgb_value = float(rgb_scores[index][sensor_name])
             latent_value = float(latent_scores[index][sensor_name]) if latent_scores is not None else 0.0
+            rgb_score = _zscore(
+                np.asarray([rgb_value], dtype=np.float32),
+                median=per_sensor_rgb_stats[sensor_name]["median"],
+                iqr=per_sensor_rgb_stats[sensor_name]["iqr"],
+            )[0]
+            if encoder is not None:
+                latent_score = _zscore(
+                    np.asarray([latent_value], dtype=np.float32),
+                    median=per_sensor_latent_stats[sensor_name]["median"],
+                    iqr=per_sensor_latent_stats[sensor_name]["iqr"],
+                )[0]
+                combined = float(0.5 * (rgb_score + latent_score))
+            else:
+                latent_score = 0.0
+                combined = float(rgb_score)
             row[f"{sensor_name}_rgb_residual"] = rgb_value
             row[f"{sensor_name}_latent_residual"] = latent_value
-            combined = 0.5 * (rgb_value + latent_value) if encoder is not None else rgb_value
+            row[f"{sensor_name}_rgb_score"] = float(rgb_score)
+            row[f"{sensor_name}_latent_score"] = float(latent_score)
             row[f"{sensor_name}_score"] = combined
             combined_per_sensor.append(combined)
         row["combined_score"] = float(np.mean(combined_per_sensor))
         score_rows.append(row)
         combined_scores.append(float(row["combined_score"]))
     combined_scores_np = np.asarray(combined_scores, dtype=np.float32)
-    score_stats = _robust_stats(combined_scores_np)
-    tau_off = score_stats["q99"]
-    tau_on = score_stats["q999"]
+    negative_combined_scores = np.asarray(
+        [score_rows[int(index)]["combined_score"] for index in negative_indices],
+        dtype=np.float32,
+    )
+    negative_score_stats = _robust_stats(negative_combined_scores)
+    score_stats_all = _robust_stats(combined_scores_np)
+    tau_off = max(float(negative_score_stats["q99"]), float(score_stats_all["q75"]))
+    tau_on = max(float(negative_score_stats["q999"]), float(score_stats_all["q90"]))
+    score_stats = {
+        "threshold_source": "hybrid_negative_tail_plus_global_operating_band",
+        "negative_pool": negative_score_stats,
+        "all_frames": score_stats_all,
+    }
     tau_mid = 0.5 * (tau_on + tau_off)
     temperature = max(0.5 * (tau_on - tau_off), 1e-3)
     contact_prob = _sigmoid((combined_scores_np - tau_mid) / temperature)
@@ -475,6 +525,7 @@ def main() -> None:
     stats_payload = {
         "sensor_names": list(sensor_names),
         "sampled_frames": int(len(records)),
+        "negative_pool_size": int(negative_indices.shape[0]),
         "score_mode": "rgb_latent" if encoder is not None else "rgb_only",
         "score_stats": score_stats,
         "tau_off": float(tau_off),
@@ -482,18 +533,11 @@ def main() -> None:
         "tau_mid": float(tau_mid),
         "temperature": float(temperature),
         "active_rate_tau_on": float(np.mean(active_on)),
+        "negative_active_rate_tau_on": float(np.mean(negative_combined_scores > tau_on)),
         "contact_prob_mean": float(np.mean(contact_prob)),
         "contact_prob_q90": float(np.quantile(contact_prob, 0.90)),
-        "per_sensor_rgb_stats": {
-            sensor_name: _robust_stats(np.asarray([row[f"{sensor_name}_rgb_residual"] for row in score_rows], dtype=np.float32))
-            for sensor_name in sensor_names
-        },
-        "per_sensor_latent_stats": {
-            sensor_name: _robust_stats(np.asarray([row[f"{sensor_name}_latent_residual"] for row in score_rows], dtype=np.float32))
-            for sensor_name in sensor_names
-        }
-        if encoder is not None
-        else {},
+        "per_sensor_rgb_stats": per_sensor_rgb_stats,
+        "per_sensor_latent_stats": per_sensor_latent_stats,
         "top_frames": [
             {
                 "step_id": int(records[int(idx)].step_id),

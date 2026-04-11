@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
+from typing import Any
 
 
 @dataclasses.dataclass(frozen=True)
@@ -21,6 +22,7 @@ class AnyTouchConfig:
     allow_random_init: bool = False
     allow_universal_sensor_token: bool = False
     require_background: bool = False
+    contact_stats_payload: dict[str, Any] | None = None
 
     @property
     def clip_config_path(self) -> Path:

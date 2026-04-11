@@ -28,7 +28,7 @@ class PicfCoreConfig:
     predictive_semantic_dropout_prob: float = 0.1
     attention_heads: int = 8
     query_rounds: int = 2
-    crop_radius_m: float = 0.08
+    crop_radius_m: float = 0.10
     point_focus_sigma_m: float = 0.03
     workspace_radius_m: float = 0.5
     epsilon_s: float = 1e-6

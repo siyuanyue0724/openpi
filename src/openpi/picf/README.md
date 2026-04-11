@@ -255,12 +255,12 @@
   - `lang = "move the sliding door to the left"`
   - `robot_xyz = [0.1629, -0.0897, 0.6189]`
   - 当前最近点距离 `nearest_dist = 0.1286 m`
-  - 但当前训练 contract 的局部 crop 半径只有 `crop_radius_m = 0.08 m`
+  - 但当时训练 contract 的局部 crop 半径只有 `crop_radius_m = 0.08 m`
 - 更关键的是，这不是整帧 point cloud 为空，而是：
   - `total_points = 512`
   - 只是以当前 EE 为中心的局部 ROI 为空
 - 同一段附近逐帧重放表明：
-  - `196435 ~ 196438` 这几帧在 `0.08m` 半径下都没有局部点
+  - `196435 ~ 196438` 这几帧在当时的 `0.08m` 半径下都没有局部点
   - 到 `196439` 开始才重新出现局部点
   - 因此这属于“窗口起点落在 free-space pre-contact 状态”而不是点云构造器坏掉
 
@@ -701,6 +701,21 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - `tactile_backgrounds.npz`
 - `tactile_contact_stats.json`
 - `tactile_fingertip_calibration.json`
+
+当前云机 `task_ABC_D` 的最新短跑验收状态是：
+
+- `rgb_latent_contact_v3` contact calibration 已通过阈值顺序、负样本尾部率和 observed contact rate 检查
+- `tactile_final_verify_20_v9` 与 `tactile_final_smoke_100_v10` 都已跑通
+- 合并这两条 metrics 后：
+  - `mean tactile_contact_prob_mean ≈ 0.664`
+  - `mean tactile_active_rate ≈ 0.167`
+  - `loss_pt_nonzero_rate = 1.0`
+  - `loss_action / loss_total ≈ 0.696`
+- 当前 acceptance audit 唯一剩余告警是：
+  - `front_ratio = 0.55`
+  - 它说明当前 fingertip 几何标定已经可用，但还低于理想目标 `0.6`
+- 一键验收命令：
+  - `python scripts/picf_tactile_acceptance_audit.py --contact-stats <tactile_contact_stats.json> --fingertip-calibration <tactile_fingertip_calibration.json> --metrics <metrics.jsonl>`
 
 也就是说，最终部署不再允许“有 AnyTouch checkpoint，但没有背景 / contact 阈值 / 指尖几何标定”的半配置训练。
 
@@ -1258,6 +1273,13 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
       - 训练日志现在已经真实输出 `tactile_contact_prob_mean` 和 `tactile_active_rate`
       - 如需长期审计，可直接运行：`python scripts/picf_loss_audit.py --log <jsonl_or_log> --tail 300`
       - 如需做 action 权重反事实分析，可附加：`--action-pos-weight <w> --action-rot-weight <w> --action-gripper-weight <w>`
+      - 如需把 calibration 产物与训练 metrics 一起过验收，可运行：`python scripts/picf_tactile_acceptance_audit.py --contact-stats <tactile_contact_stats.json> --fingertip-calibration <tactile_fingertip_calibration.json> --metrics <metrics.jsonl>`
+      - 截至 `2026-04-12`，云机真实 `task_ABC_D` 上的最新短跑验收结论是：
+        - `tactile_final_verify_20_v9` + `tactile_final_smoke_100_v10` 都已跑通
+        - `loss_pt_nonzero_rate = 1.0`
+        - `mean tactile_active_rate ≈ 0.167`
+        - `mean tactile_contact_prob_mean ≈ 0.664`
+        - 当前 acceptance audit 仍保留一条几何告警：`front_ratio = 0.55`，即可用但未达理想 `0.6`
 - 验证级别说明：
 - 以上结论来自代码路径审计、回归测试、以及云机双卡 smoke
 - 它们足以支持“当前工程实现满足既定数学契约”的判断
@@ -1371,8 +1393,8 @@ python scripts/picf_core_train_smoke.py \
   --backend dir \
   --split training \
   --segment-index 0 \
-  --stride 8 \
-  --max-points 512 \
+  --stride 4 \
+  --max-points 1024 \
   --device cuda
 ```
 
@@ -1384,8 +1406,8 @@ UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train_smoke
   --backend dir \
   --split training \
   --segment-index 0 \
-  --stride 8 \
-  --max-points 512 \
+  --stride 4 \
+  --max-points 1024 \
   --device cuda
 ```
 
@@ -1403,8 +1425,8 @@ python scripts/picf_core_train.py \
   --save-interval 5000 \
   --accum-steps 2 \
   --unroll-steps 2 \
-  --stride 8 \
-  --max-points 512 \
+  --stride 4 \
+  --max-points 1024 \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
@@ -1427,7 +1449,8 @@ python scripts/picf_core_train.py \
 - 如果只想保留文件日志、不看进度条，可改成 `--no-progress`
 - 如果是在云上跑长期训练，当前推荐把 wandb 设成 `offline`，这和旧 `pi0.5` 训练 README 的工程口径保持一致
 - 上面这条命令没有再显式传 `--warmup-steps`，因为长期 trainer 默认已经按 `2% * num_train_steps` 自动换算
-- `--max-points 512` 是当前验证过的工程配方，不是 PICF core 结构默认值；如果后续要提高点密度，应单独做显存与收敛回归
+- 当前训练入口的默认几何配方已经切到 `--stride 4 --max-points 1024 --crop-radius-m 0.10`
+- 如果后续还要继续提高点密度，应单独做显存与收敛回归
 - `--max-empty-window-retries 32` 是当前推荐保留的首步窗口安全阈值
   - 它只处理“窗口首帧局部 `xyzrgb` support 为空”的情况
   - 数学上等价于对 PICF 合法首步支持集做 rejection sampling，而不是吞掉任意异常继续训练
@@ -1456,8 +1479,8 @@ UV_CACHE_DIR=/tmp/uv-cache uv run --no-sync python scripts/picf_core_train.py \
   --save-interval 1 \
   --accum-steps 1 \
   --unroll-steps 2 \
-  --stride 8 \
-  --max-points 512 \
+  --stride 4 \
+  --max-points 1024 \
   --device cuda \
   --lr 1e-4 \
   --min-lr 1e-5 \
@@ -1483,8 +1506,8 @@ python scripts/picf_core_train.py \
   --save-interval 5000 \
   --accum-steps 2 \
   --unroll-steps 2 \
-  --stride 8 \
-  --max-points 512 \
+  --stride 4 \
+  --max-points 1024 \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
@@ -1510,8 +1533,8 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --save-interval 5000 \
   --accum-steps 2 \
   --unroll-steps 2 \
-  --stride 8 \
-  --max-points 512 \
+  --stride 4 \
+  --max-points 1024 \
   --device cuda \
   --lr 2e-4 \
   --min-lr 2e-5 \
@@ -1545,7 +1568,7 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   - `start_step = 196437`
   - `lang = "move the sliding door to the left"`
   - `nearest_dist = 0.1286 m`
-  - 当前 `crop_radius_m = 0.08 m`
+  - 当时 `crop_radius_m = 0.08 m`；当前最终 tactile 默认值已提升到 `0.10 m`
 - 也就是说：
   - 整帧 point cloud 仍然有 `512` 个点
   - 但以当前 EE 为中心的局部 `0.08m` ROI 为空

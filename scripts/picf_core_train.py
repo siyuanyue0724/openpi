@@ -1646,6 +1646,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
     tactile_config = None
     tactile_encoder = None
     if args.tactile_mode == "encoder":
+        tactile_contact_stats = _load_tactile_contact_stats_json(args.tactile_contact_stats_path)
         tactile_config = AnyTouchConfig(
             checkpoint_path=args.tactile_checkpoint_path,
             device=str(device),
@@ -1654,6 +1655,8 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             num_frames=args.tactile_num_frames,
             stride=args.tactile_stride,
             allow_random_init=False,
+            require_background=True,
+            contact_stats_payload=tactile_contact_stats,
         )
     else:
         tactile_encoder = _NullTactileEncoder()
