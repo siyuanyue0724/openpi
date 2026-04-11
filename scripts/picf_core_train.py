@@ -947,6 +947,8 @@ def _collect_nonfinite_gradient_diagnostics(
     count = 0
     samples: list[dict[str, Any]] = []
     for name, param in model.named_parameters():
+        if isinstance(param, UninitializedParameter):
+            continue
         grad = param.grad
         if grad is None:
             continue
@@ -985,6 +987,8 @@ def _collect_nonfinite_parameter_diagnostics(
     count = 0
     samples: list[dict[str, Any]] = []
     for name, param in model.named_parameters():
+        if isinstance(param, UninitializedParameter):
+            continue
         param_detached = param.detach()
         if bool(torch.isfinite(param_detached).all().item()):
             continue
@@ -1761,6 +1765,11 @@ def _build_optimizer(
     groups: list[dict[str, Any]] = []
     used_ids: set[int] = set()
 
+    def _safe_numel(param: torch.nn.Parameter) -> int:
+        if isinstance(param, UninitializedParameter):
+            return 0
+        return int(param.numel())
+
     def _append_group(name: str, params: list[torch.nn.Parameter], lr_scale: float) -> None:
         if not params:
             return
@@ -1806,7 +1815,7 @@ def _build_optimizer(
             "name": group.get("name", f"group_{idx}"),
             "lr": float(group["lr"]),
             "lr_scale": float(group.get("lr_scale", 1.0)),
-            "num_params": int(sum(param.numel() for param in group["params"])),
+            "num_params": int(sum(_safe_numel(param) for param in group["params"])),
         }
         for idx, group in enumerate(groups)
     ]
@@ -1992,13 +2001,13 @@ def train(args: argparse.Namespace) -> None:
             if not compact_startup_logging:
                 logging.info(
                     "Backbone runtime types: point=%s semantic=%s",
-                    type(point_feature_extractor).__name__ if point_feature_extractor is not None else "none",
+                    type(core.point_feature_extractor).__name__ if core.point_feature_extractor is not None else "none",
                     type(semantic_encoder).__name__ if semantic_encoder is not None else "none",
                 )
                 logging.info(
                     "Semantic checkpointing request: enabled=%s non_reentrant=%s",
                     bool(args.semantic_gradient_checkpointing),
-                    bool(args.semantic_gradient_checkpointing_non_reentrant),
+                    bool(getattr(args, "semantic_gradient_checkpointing_non_reentrant", False)),
                 )
                 if bool(getattr(args, "semantic_gradient_checkpointing_disabled_for_accum", False)):
                     logging.info(

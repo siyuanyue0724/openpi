@@ -321,6 +321,23 @@ def test_build_optimizer_preserves_foundation_lr_scales() -> None:
     assert name_to_scale["picf_core"] == pytest.approx(1.0)
 
 
+def test_build_optimizer_reports_zero_num_params_for_uninitialized_lazy_modules() -> None:
+    core = types.SimpleNamespace(
+        point_feature_extractor=torch.nn.LazyLinear(4, bias=False),
+        visual_encoder=None,
+        tactile_encoder=None,
+    )
+    trainer = torch.nn.Module()
+    trainer.core = core
+    trainer.semantic_encoder = None
+    args = _base_args()
+    args.point_backbone = "rgb"
+    optimizer, group_info = _MODULE._build_optimizer(trainer, args=args)
+    del optimizer
+    point_group = next(item for item in group_info if item["name"] == "point_backbone")
+    assert point_group["num_params"] == 0
+
+
 def test_build_loss_config_reflects_cli_values() -> None:
     args = _base_args()
     args.lambda_action_pos = 3.0
@@ -400,6 +417,36 @@ def test_collect_nonfinite_parameter_diagnostics_reports_group_and_parameter_nam
     assert diag["samples"][0]["name"] == "0.weight"
     assert diag["samples"][0]["group"] == "first"
     assert diag["samples"][0]["param_has_inf"] is True
+
+
+def test_collect_nonfinite_diagnostics_ignore_uninitialized_lazy_parameters() -> None:
+    class _LazyContainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lazy = torch.nn.LazyLinear(4, bias=False)
+            self.ready = torch.nn.Linear(3, 2, bias=False)
+
+    model = _LazyContainer()
+    optimizer = torch.optim.AdamW(
+        [
+            {"name": "lazy", "params": list(model.lazy.parameters())},
+            {"name": "ready", "params": list(model.ready.parameters())},
+        ],
+        lr=1e-3,
+    )
+    with torch.no_grad():
+        model.ready.weight.fill_(float("inf"))
+    model.ready.weight.grad = torch.full_like(model.ready.weight, float("nan"))
+
+    grad_diag = _MODULE._collect_nonfinite_gradient_diagnostics(model, optimizer=optimizer, max_items=4)
+    param_diag = _MODULE._collect_nonfinite_parameter_diagnostics(model, optimizer=optimizer, max_items=4)
+
+    assert grad_diag["nonfinite_grad_count"] == 1
+    assert grad_diag["samples"][0]["name"] == "ready.weight"
+    assert grad_diag["samples"][0]["group"] == "ready"
+    assert param_diag["nonfinite_param_count"] == 1
+    assert param_diag["samples"][0]["name"] == "ready.weight"
+    assert param_diag["samples"][0]["group"] == "ready"
 
 
 def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
