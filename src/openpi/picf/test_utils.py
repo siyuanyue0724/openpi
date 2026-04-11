@@ -41,7 +41,7 @@ def _make_robot_obs(step_id: int, *, still: bool) -> np.ndarray:
     else:
         robot_obs[0:3] = np.array([0.004 * step_id, 0.0, 0.7], dtype=np.float32)
         robot_obs[3:6] = np.array([0.0, 0.0, 0.02 * step_id], dtype=np.float32)
-    robot_obs[6] = 1.0
+    robot_obs[6] = 0.04
     return robot_obs
 
 
@@ -75,19 +75,23 @@ def build_mini_calvin_dataset(base_dir: Path, *, make_zip: bool = False) -> str:
             rgb_static = _make_rgb(32, 32, shift=step_id * (3 if split == "training" else 5))
             rgb_gripper = _make_rgb(16, 16, shift=step_id * (2 if split == "training" else 4))
             depth_static = _make_depth(32, 32, bias=0.002 * step_id)
+            depth_gripper = _make_depth(16, 16, bias=0.003 * step_id)
             rgb_tactile = _make_tactile_rgb(16, 16, shift=step_id * (11 if split == "training" else 13))
             depth_tactile = _make_tactile_depth(16, 16, bias=0.001 * step_id)
             robot_obs = _make_robot_obs(step_id, still=still)
             rel_actions = np.full((7,), 0.01 * step_id, dtype=np.float32)
+            scene_obs = np.linspace(0.0, 1.0, 24, dtype=np.float32) + np.float32(step_id)
             np.savez(
                 split_dir / f"episode_{step_id:07d}.npz",
                 rgb_static=rgb_static,
                 rgb_gripper=rgb_gripper,
                 depth_static=depth_static,
+                depth_gripper=depth_gripper,
                 rgb_tactile=rgb_tactile,
                 depth_tactile=depth_tactile,
                 robot_obs=robot_obs,
                 rel_actions=rel_actions,
+                scene_obs=scene_obs,
             )
 
     if not make_zip:

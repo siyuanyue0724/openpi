@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from openpi.picf.anytouch.config import AnyTouchConfig
 from openpi.picf.anytouch.wrapper import AnyTouch2TactileEncoder
@@ -15,9 +16,11 @@ def test_anytouch_wrapper_emits_probe_tokens_and_pooled_features() -> None:
     clip = np.full((4, 32, 32, 3), 120, dtype=np.uint8)
     pose = np.eye(4, dtype=np.float32)
 
+    background = np.full((32, 32, 3), 120, dtype=np.uint8)
+
     bundle = encoder.encode_sensor_clips(
         clips_by_sensor={"digit": clip},
-        backgrounds_by_sensor={"digit": np.zeros((32, 32, 3), dtype=np.uint8)},
+        backgrounds_by_sensor={"digit": background},
         poses_by_sensor={"digit": pose},
     )
 
@@ -25,7 +28,9 @@ def test_anytouch_wrapper_emits_probe_tokens_and_pooled_features() -> None:
     assert bundle.global_feature.shape == (3072,)
     assert "digit" in bundle.sensors
     assert bundle.sensors["digit"].tokens.shape == (398, 768)
-    assert bundle.sensors["digit"].pseudo_contact_score == 0.0
+    assert bundle.sensors["digit"].pseudo_contact_score == pytest.approx(0.0, abs=1e-6)
+    assert bundle.sensors["digit"].rgb_residual_score == 0.0
+    assert bundle.sensors["digit"].contact_score < 1e-6
 
 
 def test_anytouch_wrapper_emits_pseudo_contact_from_temporal_change() -> None:
@@ -34,6 +39,7 @@ def test_anytouch_wrapper_emits_pseudo_contact_from_temporal_change() -> None:
             device="cpu",
             dtype="float32",
             allow_random_init=True,
+            require_background=False,
         )
     )
     clip = np.zeros((4, 32, 32, 3), dtype=np.uint8)
@@ -48,3 +54,4 @@ def test_anytouch_wrapper_emits_pseudo_contact_from_temporal_change() -> None:
 
     assert bundle is not None
     assert bundle.sensors["digit"].pseudo_contact_score > 0.0
+    assert bundle.sensors["digit"].rgb_residual_score > 0.0

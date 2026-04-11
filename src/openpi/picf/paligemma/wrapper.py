@@ -3,12 +3,16 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import json
+import logging
 import math
+import os
+import time
 from pathlib import Path
 from typing import Any
 
 import numpy as np
 import torch
+import torch.distributed as dist
 from torch import nn
 from safetensors import safe_open
 from transformers import AutoProcessor
@@ -448,9 +452,38 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         return resized.permute(0, 3, 1, 2).contiguous().to(device=self.device, dtype=self.dtype)
 
     def _prepare_prompt(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
+        debug_prompt = os.environ.get("OPENPI_DEBUG_PALIGEMMA_PROMPT", "").strip() not in {"", "0", "false", "False"}
+        rank = dist.get_rank() if dist.is_available() and dist.is_initialized() else -1
+        start = time.perf_counter()
+        if debug_prompt:
+            logging.info("paligemma_prompt rank=%s begin prompt=%r", rank, str(prompt))
         tokens_np, mask_np = self.tokenizer.tokenize(str(prompt), state=None)
-        tokens = torch.as_tensor(tokens_np[None, :], device=self.device, dtype=torch.long)
-        mask = torch.as_tensor(mask_np[None, :], device=self.device, dtype=torch.bool)
+        if debug_prompt:
+            logging.info(
+                "paligemma_prompt rank=%s tokenize_sec=%.3f token_len=%s",
+                rank,
+                time.perf_counter() - start,
+                len(tokens_np),
+            )
+        # Avoid direct numpy->GPU `as_tensor(...)` in the live DDP path. We first
+        # materialize compact CPU tensors, then perform an explicit device copy.
+        cpu_start = time.perf_counter()
+        tokens_cpu = torch.from_numpy(np.asarray(tokens_np, dtype=np.int64).copy())[None, :].contiguous()
+        mask_cpu = torch.from_numpy(np.asarray(mask_np, dtype=np.bool_).copy())[None, :].contiguous()
+        if debug_prompt:
+            logging.info("paligemma_prompt rank=%s cpu_tensor_sec=%.3f", rank, time.perf_counter() - cpu_start)
+        gpu_start = time.perf_counter()
+        tokens = tokens_cpu.to(device=self.device, dtype=torch.long, non_blocking=False)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(device=self.device)
+        if debug_prompt:
+            logging.info("paligemma_prompt rank=%s tokens_to_device_sec=%.3f", rank, time.perf_counter() - gpu_start)
+        mask_start = time.perf_counter()
+        mask = mask_cpu.to(device=self.device, dtype=torch.bool, non_blocking=False)
+        if self.device.type == "cuda":
+            torch.cuda.synchronize(device=self.device)
+        if debug_prompt:
+            logging.info("paligemma_prompt rank=%s mask_to_device_sec=%.3f total_sec=%.3f", rank, time.perf_counter() - mask_start, time.perf_counter() - start)
         return tokens, mask
 
     def _apply_checkpoint(self, func, *args):

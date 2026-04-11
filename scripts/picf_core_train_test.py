@@ -14,6 +14,7 @@ import torch
 
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.contracts import PicfPointCloudFrame
+from openpi.picf.test_utils import build_mini_calvin_dataset
 
 
 _SCRIPT_PATH = Path(__file__).with_name("picf_core_train.py")
@@ -34,8 +35,10 @@ def _base_args() -> argparse.Namespace:
         accum_steps=1,
         max_empty_window_retries=32,
         unroll_steps=2,
-        stride=8,
-        max_points=512,
+        stride=4,
+        max_points=1024,
+        crop_radius_m=0.10,
+        point_focus_sigma_m=0.03,
         visual_grid=8,
         visual_num_frames=64,
         visual_img_size=384,
@@ -67,6 +70,28 @@ def _base_args() -> argparse.Namespace:
         min_lr=2e-5,
         weight_decay=1e-4,
         grad_clip_norm=1.0,
+        lambda_action_pos=2.0,
+        lambda_action_rot=2.0,
+        lambda_action_gripper=2.0,
+        lambda_visual_latent=0.2,
+        lambda_visual_real=0.1,
+        lambda_tactile_real=0.3,
+        lambda_point_real=0.3,
+        lambda_semantic_future_aux=0.25,
+        lambda_anchor_pv=0.1,
+        lambda_pv_weak=0.02,
+        lambda_focus_pv=0.0,
+        lambda_pt=1.0,
+        tau_pv=0.07,
+        tau_pt=0.07,
+        tau_route_p=0.1,
+        tau_route_v=0.1,
+        pt_bag_radius_m=0.045,
+        pt_bag_sigma_m=0.015,
+        pt_bag_kmin=32,
+        pt_back_slack_m=0.008,
+        p_align_on=0.55,
+        p_align_off=0.35,
         device="cuda",
         point_backbone="sonata",
         point_backbone_trainable=False,
@@ -101,6 +126,15 @@ def _base_args() -> argparse.Namespace:
         tactile_dtype="float32",
         tactile_sensor_names="digit,gelsight_mini",
         tactile_sensor_offsets_m="0.01,0,0;-0.01,0,0",
+        tactile_calibration_path=None,
+        tactile_backgrounds_path=None,
+        tactile_contact_stats_path=None,
+        tactile_contact_tau_on=None,
+        tactile_contact_tau_off=None,
+        tactile_contact_temperature=None,
+        tactile_contact_ema_beta=0.8,
+        tactile_anchor_prob_on=0.8,
+        use_scene_obs=False,
         use_foundation_backbones=False,
     )
 
@@ -144,6 +178,69 @@ def test_foundation_profile_enables_semantic_and_trainable_backbones() -> None:
     assert args.semantic_trainable is True
 
 
+def test_load_tactile_backgrounds_npz_roundtrip(tmp_path: Path) -> None:
+    bg_path = tmp_path / "tactile_backgrounds.npz"
+    np.savez(
+        bg_path,
+        digit=np.full((8, 8, 3), 11, dtype=np.uint8),
+        gelsight_mini=np.full((8, 8, 3), 22, dtype=np.uint8),
+    )
+
+    payload = _MODULE._load_tactile_backgrounds_npz(str(bg_path))
+
+    assert payload is not None
+    assert tuple(sorted(payload)) == ("digit", "gelsight_mini")
+    assert int(payload["digit"][0, 0, 0]) == 11
+    assert int(payload["gelsight_mini"][0, 0, 0]) == 22
+
+
+def test_load_tactile_contact_stats_json_roundtrip(tmp_path: Path) -> None:
+    stats_path = tmp_path / "tactile_contact_stats.json"
+    stats_path.write_text(
+        '{"tau_on": 0.23, "tau_off": 0.22, "temperature": 0.005, "score_mode": "rgb_latent"}',
+        encoding="utf-8",
+    )
+
+    payload = _MODULE._load_tactile_contact_stats_json(str(stats_path))
+
+    assert payload is not None
+    assert payload["tau_on"] == pytest.approx(0.23)
+    assert payload["tau_off"] == pytest.approx(0.22)
+    assert payload["temperature"] == pytest.approx(0.005)
+
+
+def test_calvin_transition_source_emits_dynamic_tactile_packet_and_extra_fields(tmp_path: Path) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
+    backgrounds = {
+        "digit": np.full((32, 32, 3), 7, dtype=np.uint8),
+        "gelsight_mini": np.full((32, 32, 3), 9, dtype=np.uint8),
+    }
+    source = _MODULE._CalvinTransitionSource(
+        str(root),
+        split="training",
+        backend="dir",
+        unroll_steps=2,
+        use_tactile=True,
+        tactile_backgrounds_by_sensor=backgrounds,
+        use_scene_obs=True,
+    )
+
+    window = source.window(0)
+    frame = window.frames[0]
+
+    assert frame.depth_gripper is not None
+    assert frame.scene_obs is not None
+    assert frame.tactile is not None
+    assert frame.tactile.background_rgb_by_sensor is not None
+    np.testing.assert_array_equal(frame.tactile.background_rgb_by_sensor["digit"], backgrounds["digit"])
+    width = float(frame.robot_obs[6])
+    left_x = float(frame.tactile.sensors[0].T_sens_to_wrist[0, 3])
+    right_x = float(frame.tactile.sensors[1].T_sens_to_wrist[0, 3])
+    assert left_x == pytest.approx(0.5 * width)
+    assert right_x == pytest.approx(-0.5 * width)
+    source.close()
+
+
 def test_validate_train_args_rejects_incompatible_attention_shape() -> None:
     args = _base_args()
     args.hidden_dim = 250
@@ -166,6 +263,33 @@ def test_validate_train_args_rejects_invalid_predictive_semantic_dropout_prob() 
     _MODULE._normalize_train_args(args)
     with pytest.raises(ValueError, match="predictive_semantic_dropout_prob must be in \\[0, 1\\)"):
         _MODULE._validate_train_args(args)
+
+
+def test_validate_backbone_args_loads_tactile_contact_thresholds(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    ckpt = tmp_path / "checkpoint-4frames.pth"
+    ckpt.write_bytes(b"stub")
+    backgrounds = tmp_path / "tactile_backgrounds.npz"
+    np.savez(backgrounds, digit=np.zeros((4, 4, 3), dtype=np.uint8), gelsight_mini=np.zeros((4, 4, 3), dtype=np.uint8))
+    calibration = tmp_path / "tactile_fingertip_calibration.json"
+    calibration.write_text('{"u_open_local": [1, 0, 0], "o_local": [0, 0, 0]}', encoding="utf-8")
+    stats = tmp_path / "tactile_contact_stats.json"
+    stats.write_text('{"tau_on": 0.23, "tau_off": 0.22, "temperature": 0.005}', encoding="utf-8")
+
+    monkeypatch.setattr(_MODULE, "_default_anytouch_checkpoint", lambda: str(ckpt))
+    monkeypatch.setattr(_MODULE, "_default_tactile_backgrounds_path", lambda: str(backgrounds))
+    monkeypatch.setattr(_MODULE, "_default_tactile_calibration_path", lambda: str(calibration))
+    monkeypatch.setattr(_MODULE, "_default_tactile_contact_stats_path", lambda: str(stats))
+
+    args = _base_args()
+    args.tactile_mode = "encoder"
+    args.point_backbone = "rgb"
+    args.device = "cuda"
+    _MODULE._validate_backbone_args(args)
+
+    assert args.tactile_contact_stats_path == str(stats)
+    assert args.tactile_contact_tau_on == pytest.approx(0.23)
+    assert args.tactile_contact_tau_off == pytest.approx(0.22)
+    assert args.tactile_contact_temperature == pytest.approx(0.005)
 
 
 def test_validate_train_args_rejects_cpu_sonata() -> None:
@@ -195,6 +319,87 @@ def test_build_optimizer_preserves_foundation_lr_scales() -> None:
     assert name_to_scale["tactile_backbone"] == pytest.approx(0.25)
     assert name_to_scale["semantic_backbone"] == pytest.approx(0.25)
     assert name_to_scale["picf_core"] == pytest.approx(1.0)
+
+
+def test_build_loss_config_reflects_cli_values() -> None:
+    args = _base_args()
+    args.lambda_action_pos = 3.0
+    args.lambda_action_rot = 2.5
+    args.lambda_action_gripper = 1.5
+    args.lambda_pt = 0.25
+    args.pt_bag_radius_m = 0.05
+    args.p_align_on = 0.6
+    args.p_align_off = 0.3
+
+    cfg = _MODULE._build_loss_config(args)
+
+    assert cfg.lambda_action_pos == pytest.approx(3.0)
+    assert cfg.lambda_action_rot == pytest.approx(2.5)
+    assert cfg.lambda_action_gripper == pytest.approx(1.5)
+    assert cfg.lambda_pt == pytest.approx(0.25)
+    assert cfg.pt_bag_radius_m == pytest.approx(0.05)
+    assert cfg.p_align_on == pytest.approx(0.6)
+    assert cfg.p_align_off == pytest.approx(0.3)
+
+
+def test_build_model_propagates_final_tactile_runtime_defaults(tmp_path: Path) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
+    args = _base_args()
+    args.calvin_root = str(root)
+    args.device = "cpu"
+    args.point_backbone = "rgb"
+    args.crop_radius_m = 0.10
+    args.point_focus_sigma_m = 0.03
+    args.tactile_contact_tau_on = 0.23
+    args.tactile_contact_tau_off = 0.22
+    args.tactile_contact_temperature = 0.005
+    args.tactile_anchor_prob_on = 0.8
+
+    core, semantic_encoder, use_visual_override = _MODULE._build_model(args, device=torch.device("cpu"))
+
+    assert semantic_encoder is None
+    assert use_visual_override is True
+    assert core.config.crop_radius_m == pytest.approx(0.10)
+    assert core.config.point_focus_sigma_m == pytest.approx(0.03)
+    assert core.config.tactile_contact_tau_on == pytest.approx(0.23)
+    assert core.config.tactile_contact_tau_off == pytest.approx(0.22)
+    assert core.config.tactile_contact_temperature == pytest.approx(0.005)
+    assert core.config.tactile_anchor_prob_on == pytest.approx(0.8)
+
+
+def test_collect_nonfinite_gradient_diagnostics_reports_group_and_parameter_name() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4, bias=False), torch.nn.Linear(4, 2, bias=False))
+    optimizer = torch.optim.AdamW(
+        [
+            {"name": "first", "params": list(model[0].parameters())},
+            {"name": "second", "params": list(model[1].parameters())},
+        ],
+        lr=1e-3,
+    )
+    model[1].weight.grad = torch.full_like(model[1].weight, float("nan"))
+    diag = _MODULE._collect_nonfinite_gradient_diagnostics(model, optimizer=optimizer, max_items=4)
+    assert diag["nonfinite_grad_count"] == 1
+    assert diag["samples"][0]["name"] == "1.weight"
+    assert diag["samples"][0]["group"] == "second"
+    assert diag["samples"][0]["grad_has_nan"] is True
+
+
+def test_collect_nonfinite_parameter_diagnostics_reports_group_and_parameter_name() -> None:
+    model = torch.nn.Sequential(torch.nn.Linear(3, 4, bias=False), torch.nn.Linear(4, 2, bias=False))
+    optimizer = torch.optim.AdamW(
+        [
+            {"name": "first", "params": list(model[0].parameters())},
+            {"name": "second", "params": list(model[1].parameters())},
+        ],
+        lr=1e-3,
+    )
+    with torch.no_grad():
+        model[0].weight.fill_(float("inf"))
+    diag = _MODULE._collect_nonfinite_parameter_diagnostics(model, optimizer=optimizer, max_items=4)
+    assert diag["nonfinite_param_count"] == 1
+    assert diag["samples"][0]["name"] == "0.weight"
+    assert diag["samples"][0]["group"] == "first"
+    assert diag["samples"][0]["param_has_inf"] is True
 
 
 def test_picf_window_trainer_passes_semantic_override_to_core() -> None:

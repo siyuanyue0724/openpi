@@ -24,18 +24,38 @@ def test_calvin_replay_supports_dir_and_zip(tmp_path: Path) -> None:
 
 def test_calvin_replay_can_emit_explicit_action_proprio_and_tactile_packet(tmp_path: Path) -> None:
     root = build_mini_calvin_dataset(tmp_path / "tactile_case", make_zip=False)
-    frames = list(CalvinSequentialReplay(root, backend="dir", segment_indices=[0], use_tactile=True))
+    backgrounds = {
+        "digit": np.zeros((16, 16, 3), dtype=np.uint8),
+        "gelsight_mini": np.zeros((16, 16, 3), dtype=np.uint8),
+    }
+    frames = list(
+        CalvinSequentialReplay(
+            root,
+            backend="dir",
+            segment_indices=[0],
+            use_tactile=True,
+            use_scene_obs=True,
+            tactile_backgrounds_by_sensor=backgrounds,
+        )
+    )
 
     assert len(frames) == 4
     first = frames[0]
     assert first.proprio is not None
     assert first.action is not None
+    assert first.depth_gripper is not None
+    assert first.scene_obs is not None
     assert first.tactile is not None
     assert len(first.tactile.sensors) == 2
     assert first.tactile.sensors[0].rgb.shape[-1] == 3
     assert first.tactile.sensors[1].rgb.shape[-1] == 3
     assert first.tactile.sensors[0].depth is not None
     assert first.tactile.sensors[0].depth.shape[-1] == 1
+    assert first.tactile.background_for("digit") is not None
+    left_x = float(first.tactile.sensors[0].T_sens_to_wrist[0, 3])
+    right_x = float(first.tactile.sensors[1].T_sens_to_wrist[0, 3])
+    assert np.isclose(left_x, 0.5 * float(first.robot_obs[6]), atol=1e-6)
+    assert np.isclose(right_x, -0.5 * float(first.robot_obs[6]), atol=1e-6)
 
 
 def test_calvin_replay_use_tactile_fails_fast_when_dataset_lacks_tactile_fields(tmp_path: Path) -> None:

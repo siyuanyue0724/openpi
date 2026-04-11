@@ -1,4 +1,5 @@
 from pathlib import Path
+import json
 
 import numpy as np
 
@@ -52,3 +53,51 @@ def test_picf_pointcloud_focus_selection_prioritizes_local_points(tmp_path: Path
     assert chosen.shape == (40,)
     assert int(focus_mask[chosen].sum()) > int(focus_mask[baseline].sum())
     assert int((~focus_mask[chosen]).sum()) > 0
+
+
+def test_picf_pointcloud_merges_static_and_gripper_depth_and_supports_multi_center_focus(tmp_path: Path) -> None:
+    calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
+    builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=128, min_peripheral_points=0)
+    rgb_static = np.full((32, 32, 3), 64, dtype=np.uint8)
+    depth_static = np.full((32, 32), 0.7, dtype=np.float32)
+    rgb_gripper = np.full((16, 16, 3), 192, dtype=np.uint8)
+    depth_gripper = np.full((16, 16), 0.3, dtype=np.float32)
+
+    merged = builder(
+        {
+            "rgb_static": rgb_static,
+            "depth_static": depth_static,
+            "rgb_gripper": rgb_gripper,
+            "depth_gripper": depth_gripper,
+            "focus_centers_world": np.asarray([[0.0, 0.0, 0.7], [0.0, 0.0, 0.3]], dtype=np.float32),
+            "focus_radius_m": 0.08,
+        }
+    )
+
+    assert merged.frame_valid
+    assert merged.xyz_world.shape[0] > 0
+    assert float(merged.xyz_world[:, 2].min()) < 0.5
+    assert float(merged.xyz_world[:, 2].max()) > 0.5
+
+
+def test_picf_pointcloud_supports_gripper_e_t_c_extrinsics(tmp_path: Path) -> None:
+    calvin_root = Path(build_mini_calvin_dataset(tmp_path, make_zip=False))
+    cameras_path = calvin_root / "calib" / "cameras.json"
+    cameras = json.loads(cameras_path.read_text())
+    gripper = cameras["cameras"]["gripper"]
+    gripper["E_T_C"] = gripper.pop("W_T_C")
+    cameras_path.write_text(json.dumps(cameras), encoding="utf-8")
+
+    builder = CalvinDepthToPicfPointCloud(str(calvin_root), stride=1, max_points=64, min_peripheral_points=0)
+    frame = builder(
+        {
+            "rgb_static": np.full((32, 32, 3), 64, dtype=np.uint8),
+            "depth_static": np.full((32, 32), 0.7, dtype=np.float32),
+            "rgb_gripper": np.full((16, 16, 3), 192, dtype=np.uint8),
+            "depth_gripper": np.full((16, 16), 0.3, dtype=np.float32),
+            "robot_obs": np.asarray([0.0, 0.0, 0.7, 0.0, 0.0, 0.0, 0.04], dtype=np.float32),
+        }
+    )
+
+    assert frame.frame_valid
+    assert frame.xyz_world.shape[0] > 0

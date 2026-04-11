@@ -28,6 +28,8 @@ from openpi.picf.core.contracts import PicfPredictionCache
 from openpi.picf.core.contracts import PicfPredictiveState
 from openpi.picf.core.contracts import PicfProjectiveGeometryState
 from openpi.picf.core.contracts import PicfTokenFieldState
+from openpi.picf.core.tactile_contact import contact_prob_with_hysteresis
+from openpi.picf.core.tactile_contact import summarize_contact_context
 from openpi.picf.frame_context import PointFrameContext
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.visual_expert import load_camera_model
@@ -87,6 +89,16 @@ def _clip_vector_norm(x: torch.Tensor, *, max_norm: float) -> torch.Tensor:
     norm = torch.linalg.norm(x, dim=-1, keepdim=True)
     scale = torch.clamp(max_norm / torch.clamp(norm, min=1e-12), max=1.0)
     return x * scale
+
+
+def _variance_from_logvar(logvar: torch.Tensor, *, min_var: float, max_var: float) -> torch.Tensor:
+    if min_var <= 0.0:
+        raise ValueError(f"Expected min_var > 0, got {min_var}.")
+    if max_var < min_var:
+        raise ValueError(f"Expected max_var >= min_var, got min_var={min_var} max_var={max_var}.")
+    logvar_min = math.log(float(min_var))
+    logvar_max = math.log(float(max_var))
+    return torch.exp(torch.clamp(logvar, min=logvar_min, max=logvar_max))
 
 
 def _fourier_features(x: torch.Tensor, *, scale: float, bands: int) -> torch.Tensor:
@@ -264,11 +276,12 @@ def _build_identity_frame_context(
     observation: PicfObservation,
     *,
     crop_radius_m: float,
-    focus_center_world: np.ndarray,
+    focus_centers_world: np.ndarray,
 ) -> PointFrameContext:
     assert observation.point_set is not None
     xyz_world = np.asarray(observation.point_set.xyz_world, dtype=np.float32)
-    dists = np.linalg.norm(xyz_world - focus_center_world[None, :], axis=1)
+    centers = np.asarray(focus_centers_world, dtype=np.float32).reshape(-1, 3)
+    dists = np.linalg.norm(xyz_world[:, None, :] - centers[None, :, :], axis=-1).min(axis=1)
     keep = dists <= float(crop_radius_m)
     return PointFrameContext(
         grid_coord=np.asarray(observation.point_set.grid_coord[keep], dtype=np.int32),
@@ -279,6 +292,20 @@ def _build_identity_frame_context(
         world_to_local=np.eye(4, dtype=np.float32),
         G_t=np.asarray(observation.G_t, dtype=np.float32),
     )
+
+
+def _focus_centers_world_from_observation(observation: PicfObservation) -> np.ndarray:
+    if observation.G_t is None:
+        raise ValueError("PICF focus center construction requires observation.G_t to be set.")
+    centers = [np.asarray(observation.G_t[:3, 3], dtype=np.float32)]
+    packet = observation.tactile
+    if packet is not None:
+        for sensor in packet.sensors:
+            if not sensor.valid:
+                continue
+            sensor_pose_world = np.asarray(observation.G_t, dtype=np.float32) @ np.asarray(sensor.T_sens_to_wrist, dtype=np.float32)
+            centers.append(np.asarray(sensor_pose_world[:3, 3], dtype=np.float32))
+    return np.stack(centers, axis=0)
 
 
 class ResidualMLP(nn.Module):
@@ -558,6 +585,7 @@ class PicfFullCore(nn.Module):
             num_frames=4,
             stride=2,
             allow_random_init=False,
+            require_background=True,
         )
         self.tactile_encoder = tactile_encoder
         self.camera_model = None
@@ -589,6 +617,7 @@ class PicfFullCore(nn.Module):
         self.proprio_context_proj = nn.LazyLinear(hidden_dim)
         self.action_context_proj = nn.LazyLinear(hidden_dim)
         self.timing_context_proj = nn.LazyLinear(hidden_dim)
+        self.contact_context_proj = nn.LazyLinear(hidden_dim)
         proj_coarse_dim = 2 * 4 * 2
         proj_fine_dim = 2 * 8 * 2
         self.null_proj_coarse = nn.Parameter(torch.zeros(proj_coarse_dim, device=self.device, dtype=self.dtype))
@@ -709,8 +738,8 @@ class PicfFullCore(nn.Module):
 
     def _point_subset(self, observation: PicfObservation) -> PointFrameContext:
         assert observation.point_set is not None
-        focus_center_world = np.asarray(observation.G_t[:3, 3], dtype=np.float32)
-        return _build_identity_frame_context(observation, crop_radius_m=self.config.crop_radius_m, focus_center_world=focus_center_world)
+        focus_centers_world = _focus_centers_world_from_observation(observation)
+        return _build_identity_frame_context(observation, crop_radius_m=self.config.crop_radius_m, focus_centers_world=focus_centers_world)
 
     def _extract_point_features(self, frame_context: PointFrameContext, override: torch.Tensor | np.ndarray | None) -> torch.Tensor:
         if override is not None:
@@ -1211,8 +1240,15 @@ class PicfFullCore(nn.Module):
         point_align_embeddings = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
         visual_align_embeddings = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
         tactile_align_embeddings = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
+        tactile_tokens_all = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
+        tactile_tokens_active = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
         tactile_positions_world = torch.zeros((0, 3), device=self.device, dtype=self.dtype)
+        tactile_normals_world = torch.zeros((0, 3), device=self.device, dtype=self.dtype)
         tactile_contact_gate = torch.zeros((0,), device=self.device, dtype=self.dtype)
+        tactile_contact_prob = torch.zeros((0,), device=self.device, dtype=self.dtype)
+        tactile_anchor_mask = torch.zeros((0,), device=self.device, dtype=torch.bool)
+        tactile_contact_score = torch.zeros((0,), device=self.device, dtype=self.dtype)
+        tactile_contact_score_ema = torch.zeros((0,), device=self.device, dtype=self.dtype)
         visual_hw: tuple[int, int] | None = None
         if visual_map is not None and visual_map.numel() > 0:
             visual_hw = (int(visual_map.shape[0]), int(visual_map.shape[1]))
@@ -1258,7 +1294,9 @@ class PicfFullCore(nn.Module):
         if tactile_bundle is not None and tactile_bundle.sensors:
             encoded = []
             positions = []
-            for sensor_name in sorted(tactile_bundle.sensors):
+            normals = []
+            sensor_names = sorted(tactile_bundle.sensors)
+            for sensor_name in sensor_names:
                 sensor = tactile_bundle.sensors[sensor_name]
                 sensor_pose_world = _to_tensor(observation.G_t, device=self.device, dtype=self.dtype) @ sensor.T_sens_to_wrist.to(device=self.device, dtype=self.dtype)
                 sensor_in = torch.cat(
@@ -1272,9 +1310,11 @@ class PicfFullCore(nn.Module):
                 )
                 encoded.append(sensor_in)
                 positions.append(sensor_pose_world[:3, 3])
-            tactile_tokens = self.tactile_token_proj(torch.stack(encoded, dim=0)) + self.modality_embedding.weight[2][None, :]
-            tactile_align_embeddings = _normalize_tensor(self.tactile_align_proj(tactile_tokens), eps=self.config.epsilon_residual)
+                normals.append(_normalize_tensor(sensor_pose_world[:3, 0], eps=self.config.epsilon_residual))
+            tactile_tokens_all = self.tactile_token_proj(torch.stack(encoded, dim=0)) + self.modality_embedding.weight[2][None, :]
+            tactile_align_embeddings = _normalize_tensor(self.tactile_align_proj(tactile_tokens_all), eps=self.config.epsilon_residual)
             tactile_positions_world = torch.stack(positions, dim=0)
+            tactile_normals_world = torch.stack(normals, dim=0)
             has_explicit_contact = (
                 observation.force_vec is not None
                 or observation.indent_depth_m is not None
@@ -1297,25 +1337,58 @@ class PicfFullCore(nn.Module):
                     or 0.0
                 )
                 tactile_contact_gate = torch.full(
-                    (tactile_tokens.shape[0],),
+                    (tactile_tokens_all.shape[0],),
                     contact_value,
                     device=self.device,
                     dtype=self.dtype,
                 )
+                tactile_contact_prob = tactile_contact_gate
+                tactile_anchor_mask = tactile_contact_prob >= float(self.config.tactile_anchor_prob_on)
+                tactile_contact_score = tactile_contact_prob
+                tactile_contact_score_ema = tactile_contact_prob
             else:
-                pseudo_scores = torch.as_tensor(
+                contact_scores = torch.as_tensor(
                     [
-                        float(max(0.0, tactile_bundle.sensors[sensor_name].pseudo_contact_score))
-                        for sensor_name in sorted(tactile_bundle.sensors)
+                        float(
+                            max(
+                                0.0,
+                                tactile_bundle.sensors[sensor_name].contact_score
+                                if getattr(tactile_bundle.sensors[sensor_name], "contact_score", 0.0) > 0.0
+                                else tactile_bundle.sensors[sensor_name].pseudo_contact_score,
+                            )
+                        )
+                        for sensor_name in sensor_names
                     ],
                     device=self.device,
                     dtype=self.dtype,
                 )
-                tau_pseudo = float(self.config.tau_tactile_pseudo_contact)
-                tactile_contact_gate = (pseudo_scores > tau_pseudo).to(dtype=self.dtype)
+                prev_score_ema = None if previous is None else previous.token_field.tactile_contact_score_ema
+                prev_active = None
+                if previous is not None:
+                    prev_active = previous.token_field.tactile_anchor_mask
+                    if prev_active is None and previous.token_field.tactile_contact_gate.shape == contact_scores.shape:
+                        prev_active = previous.token_field.tactile_contact_gate > 0.0
+                tactile_contact_score_ema, tactile_contact_prob, tactile_contact_active = contact_prob_with_hysteresis(
+                    contact_scores,
+                    tau_on=float(max(self.config.tactile_contact_tau_on, self.config.tau_tactile_pseudo_contact)),
+                    tau_off=float(max(self.config.tactile_contact_tau_off, 0.0)),
+                    temperature=float(self.config.tactile_contact_temperature),
+                    ema_beta=float(self.config.tactile_contact_ema_beta),
+                    previous_score_ema=prev_score_ema,
+                    previous_active=prev_active,
+                )
+                tactile_contact_score = contact_scores
+                tactile_contact_gate = tactile_contact_active.to(dtype=self.dtype)
+                tactile_anchor_mask = tactile_contact_prob >= float(self.config.tactile_anchor_prob_on)
+            tactile_tokens_active = tactile_tokens_all[tactile_anchor_mask]
+            tactile_tokens = tactile_tokens_active
 
         context_tokens = self._encode_context_tokens(observation, meta, previous) + self.modality_embedding.weight[3][None, :]
-        all_tokens = torch.cat([point_tokens, visual_tokens, tactile_tokens, context_tokens], dim=0)
+        contact_context = self.contact_context_proj(
+            summarize_contact_context(tactile_contact_prob, tactile_anchor_mask)[None, :]
+        ) + self.modality_embedding.weight[3][None, :]
+        context_tokens = torch.cat([context_tokens, contact_context], dim=0)
+        all_tokens = torch.cat([point_tokens, visual_tokens, tactile_tokens_active, context_tokens], dim=0)
         fusion_attention_mean = None
         if all_tokens.shape[0] > 0:
             fusion_bias = self._fusion_projective_bias(
@@ -1336,7 +1409,7 @@ class PicfFullCore(nn.Module):
             [
                 torch.zeros((point_tokens.shape[0],), device=self.device, dtype=torch.long),
                 torch.ones((visual_tokens.shape[0],), device=self.device, dtype=torch.long),
-                torch.full((tactile_tokens.shape[0],), 2, device=self.device, dtype=torch.long),
+                torch.full((tactile_tokens_active.shape[0],), 2, device=self.device, dtype=torch.long),
                 torch.full((context_tokens.shape[0],), 3, device=self.device, dtype=torch.long),
             ],
             dim=0,
@@ -1354,6 +1427,13 @@ class PicfFullCore(nn.Module):
             tactile_align_embeddings=tactile_align_embeddings,
             tactile_positions_world=tactile_positions_world,
             tactile_contact_gate=tactile_contact_gate,
+            tactile_tokens_all=tactile_tokens_all,
+            tactile_tokens_active=tactile_tokens_active,
+            tactile_contact_prob=tactile_contact_prob,
+            tactile_anchor_mask=tactile_anchor_mask,
+            tactile_normals_world=tactile_normals_world,
+            tactile_contact_score=tactile_contact_score,
+            tactile_contact_score_ema=tactile_contact_score_ema,
             fusion_attention_mean=fusion_attention_mean,
             projective_geometry=projective_geometry,
         )
@@ -1457,7 +1537,11 @@ class PicfFullCore(nn.Module):
         h_prior, c_prior = self.prior_lstm(hidden, (prev.h, prev.c))
         mu_prior = prev.mu + self.prior_delta_mu(hidden)
         logvar_prior = torch.log(torch.clamp(prev_var, min=self.config.sigma_min2)) + self.prior_delta_logvar(hidden)
-        var_prior = torch.clamp(torch.exp(logvar_prior), min=self.config.sigma_min2, max=self.config.sigma_max2)
+        var_prior = _variance_from_logvar(
+            logvar_prior,
+            min_var=self.config.sigma_min2,
+            max_var=self.config.sigma_max2,
+        )
         return h_prior, c_prior, mu_prior, var_prior, prev.x, prev.S, prev.a, prev.alpha
 
     def _sinkhorn_dustbin(self, logits: torch.Tensor) -> torch.Tensor:
@@ -1539,7 +1623,11 @@ class PicfFullCore(nn.Module):
         binding = torch.cat([binding_support, dustbin_final[None, :]], dim=0)
         support_mass = binding_support.sum(dim=1)
         res_mu = self.residual_mu_head(residual_summary[None, :])[0]
-        res_var = torch.clamp(torch.exp(self.residual_logvar_head(residual_summary[None, :])), min=self.config.sigma_min2, max=self.config.sigma_max2)[0]
+        res_var = _variance_from_logvar(
+            self.residual_logvar_head(residual_summary[None, :]),
+            min_var=self.config.sigma_min2,
+            max_var=self.config.sigma_max2,
+        )[0]
         res_h = self.residual_h_head(residual_summary[None, :])[0]
         res_c = self.residual_c_head(residual_summary[None, :])[0]
         bar_h = (1.0 - recycle[:, None]) * h_prior + recycle[:, None] * res_h[None, :]
@@ -1585,7 +1673,13 @@ class PicfFullCore(nn.Module):
         for head in self.vote_heads:
             delta_mu, delta_logvar, gamma = head(evidence_tokens)
             vote_mu.append(bar_mu + delta_mu)
-            vote_var.append(torch.clamp(torch.exp(delta_logvar), min=self.config.sigma_min2, max=self.config.sigma_max2))
+            vote_var.append(
+                _variance_from_logvar(
+                    delta_logvar,
+                    min_var=self.config.sigma_min2,
+                    max_var=self.config.sigma_max2,
+                )
+            )
             vote_gamma.append(gamma)
         vote_mu_t = torch.stack(vote_mu, dim=0)
         vote_var_t = torch.stack(vote_var, dim=0)
@@ -1756,11 +1850,15 @@ class PicfFullCore(nn.Module):
         if observation.G_t is None:
             observation.G_t = self.local_frame.make_transform(observation.robot_obs)
         if observation.point_set is None:
+            focus_centers_world = _focus_centers_world_from_observation(observation)
             observation.point_set = self.pointcloud_builder(
                 {
                     "rgb_static": observation.rgb_static,
                     "depth_static": observation.depth_static,
-                    "focus_center_world": np.asarray(observation.G_t[:3, 3], dtype=np.float32),
+                    "rgb_gripper": observation.rgb_gripper,
+                    "depth_gripper": observation.depth_gripper,
+                    "robot_obs": observation.robot_obs,
+                    "focus_centers_world": focus_centers_world,
                     "focus_radius_m": self.config.crop_radius_m,
                 }
             )
@@ -1936,11 +2034,15 @@ class PicfFullCore(nn.Module):
         if observation.G_t is None:
             observation.G_t = self.local_frame.make_transform(observation.robot_obs)
         if observation.point_set is None:
+            focus_centers_world = _focus_centers_world_from_observation(observation)
             observation.point_set = self.pointcloud_builder(
                 {
                     "rgb_static": observation.rgb_static,
                     "depth_static": observation.depth_static,
-                    "focus_center_world": np.asarray(observation.G_t[:3, 3], dtype=np.float32),
+                    "rgb_gripper": observation.rgb_gripper,
+                    "depth_gripper": observation.depth_gripper,
+                    "robot_obs": observation.robot_obs,
+                    "focus_centers_world": focus_centers_world,
                     "focus_radius_m": self.config.crop_radius_m,
                 }
             )
@@ -1986,11 +2088,16 @@ class PicfFullCore(nn.Module):
             "num_point_tokens": float(token_field.point_tokens.shape[0]),
             "num_visual_tokens": float(token_field.visual_tokens.shape[0]),
             "num_tactile_tokens": float(token_field.tactile_tokens.shape[0]),
+            "num_tactile_tokens_all": float(0 if token_field.tactile_tokens_all is None else token_field.tactile_tokens_all.shape[0]),
             "support_mass_mean": float(posterior.support_mass.mean().item()),
             "active_alpha_sum": float(posterior.alpha.sum().item()),
             "innovation_norm": float(torch.linalg.norm(innovation_token).item()),
             "hold_triggered": 1.0 if hold_reason is not None else 0.0,
         }
+        if token_field.tactile_contact_prob is not None and token_field.tactile_contact_prob.numel() > 0:
+            debug["tactile_contact_prob_mean"] = float(token_field.tactile_contact_prob.mean().item())
+        if token_field.tactile_anchor_mask is not None and token_field.tactile_anchor_mask.numel() > 0:
+            debug["tactile_active_rate"] = float(token_field.tactile_anchor_mask.to(dtype=self.dtype).mean().item())
         if observation_anchors.routing_gate_point.numel() > 0:
             debug["mean_point_route_gate"] = float(observation_anchors.routing_gate_point.mean().item())
             debug["mean_point_route_support"] = float(observation_anchors.routing_support_point.mean().item())

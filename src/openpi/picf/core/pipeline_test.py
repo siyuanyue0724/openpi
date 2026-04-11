@@ -14,6 +14,7 @@ from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
 from openpi.picf.core.pipeline import PicfFullCore
+from openpi.picf.core.pipeline import _variance_from_logvar
 from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.visual_expert import _project_world_points
@@ -31,13 +32,17 @@ class _UnusedVisualEncoder:
 
 class _StubTactileEncoder:
     def encode_sensor_clips(self, *, clips_by_sensor, backgrounds_by_sensor, poses_by_sensor):
-        del backgrounds_by_sensor
         sensors = {}
         pooled = []
         for index, sensor_name in enumerate(sorted(clips_by_sensor)):
             clip = np.asarray(clips_by_sensor[sensor_name], dtype=np.float32)
             value = float(clip.mean()) / 255.0 if clip.size > 0 else 0.0
-            pseudo_contact = float(np.abs(clip[-1] - clip[0]).mean() / 255.0) if clip.shape[0] > 1 else 0.0
+            background = backgrounds_by_sensor.get(sensor_name)
+            if background is not None:
+                background = np.asarray(background, dtype=np.float32)
+                pseudo_contact = float(np.abs(clip[-1] - background).mean() / 255.0)
+            else:
+                pseudo_contact = float(np.abs(clip[-1] - clip[0]).mean() / 255.0) if clip.shape[0] > 1 else 0.0
             tokens = torch.full((32, 64), value + index, dtype=torch.float32)
             pooled_feature = torch.full((128,), value + index, dtype=torch.float32)
             pose = torch.as_tensor(poses_by_sensor[sensor_name], dtype=torch.float32)
@@ -48,6 +53,8 @@ class _StubTactileEncoder:
                 pooled_feature=pooled_feature,
                 T_sens_to_wrist=pose,
                 pseudo_contact_score=pseudo_contact,
+                rgb_residual_score=pseudo_contact,
+                contact_score=pseudo_contact,
             )
             pooled.append(pooled_feature)
         if not pooled:
@@ -123,26 +130,33 @@ def _make_core(tmp_path: Path, **overrides) -> tuple[PicfFullCore, CalvinSequent
 def _point_override(core: PicfFullCore, observation: PicfObservation) -> np.ndarray:
     if observation.G_t is None:
         observation.G_t = core.local_frame.make_transform(observation.robot_obs)
+    focus_centers = [np.asarray(observation.G_t[:3, 3], dtype=np.float32)]
+    if observation.tactile is not None:
+        for sensor in observation.tactile.sensors:
+            focus_centers.append((np.asarray(observation.G_t, dtype=np.float32) @ np.asarray(sensor.T_sens_to_wrist, dtype=np.float32))[:3, 3])
     if observation.point_set is None:
         observation.point_set = core.pointcloud_builder(
             {
                 "rgb_static": observation.rgb_static,
                 "depth_static": observation.depth_static,
-                "focus_center_world": np.asarray(observation.G_t[:3, 3], dtype=np.float32),
+                "rgb_gripper": observation.rgb_gripper,
+                "depth_gripper": observation.depth_gripper,
+                "focus_centers_world": np.stack(focus_centers, axis=0),
                 "focus_radius_m": core.config.crop_radius_m,
             }
         )
     xyz = np.asarray(observation.point_set.xyz_world, dtype=np.float32)
-    center = np.asarray(observation.G_t[:3, 3], dtype=np.float32)
-    keep = np.linalg.norm(xyz - center[None, :], axis=1) <= core.config.crop_radius_m
+    centers = np.stack(focus_centers, axis=0)
+    keep = np.linalg.norm(xyz[:, None, :] - centers[None, :, :], axis=-1).min(axis=1) <= core.config.crop_radius_m
     n_points = int(keep.sum())
     return np.linspace(0.0, 1.0, max(n_points * 8, 1), dtype=np.float32).reshape(n_points, 8) if n_points > 0 else np.zeros((0, 8), dtype=np.float32)
 
 
-def _make_tactile_packet(step_id: int, *, pose_shift: float = 0.0) -> PicfTactilePacket:
-    left = np.full((32, 32, 3), 40 + step_id, dtype=np.uint8)
-    right = np.full((32, 32, 3), 80 + step_id, dtype=np.uint8)
-    bg = np.zeros((32, 32, 3), dtype=np.uint8)
+def _make_tactile_packet(step_id: int, *, pose_shift: float = 0.0, contact_shift: int = 0) -> PicfTactilePacket:
+    left_bg = np.full((32, 32, 3), 40 + step_id, dtype=np.uint8)
+    right_bg = np.full((32, 32, 3), 80 + step_id, dtype=np.uint8)
+    left = np.full((32, 32, 3), 40 + step_id + contact_shift, dtype=np.uint8)
+    right = np.full((32, 32, 3), 80 + step_id + contact_shift, dtype=np.uint8)
     left_pose = np.eye(4, dtype=np.float32)
     left_pose[:3, 3] = np.array([0.01 + pose_shift, 0.0, 0.0], dtype=np.float32)
     right_pose = np.eye(4, dtype=np.float32)
@@ -152,7 +166,7 @@ def _make_tactile_packet(step_id: int, *, pose_shift: float = 0.0) -> PicfTactil
             TactileSensorFrame(rgb=left, sensor_name="digit", T_sens_to_wrist=left_pose, timestamp_s=float(step_id) / 30.0),
             TactileSensorFrame(rgb=right, sensor_name="gelsight_mini", T_sens_to_wrist=right_pose, timestamp_s=float(step_id) / 30.0),
         ),
-        background_rgb_by_sensor={"digit": bg, "gelsight_mini": bg},
+        background_rgb_by_sensor={"digit": left_bg, "gelsight_mini": right_bg},
     )
 
 
@@ -178,7 +192,7 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     )
     assert output.state.token_field.point_tokens.shape[1] == core.config.hidden_dim
     assert output.state.token_field.visual_tokens.shape[0] == 16
-    assert output.state.token_field.context_tokens.shape[0] == 3
+    assert output.state.token_field.context_tokens.shape[0] == 4
     assert output.state.observation_anchors.tokens.shape == (core.config.observation_anchors, core.config.hidden_dim)
     assert output.state.posterior.mu.shape == (core.config.persistent_anchors, core.config.latent_dim)
     assert output.state.posterior.Sigma.shape == (core.config.persistent_anchors, core.config.latent_dim, core.config.latent_dim)
@@ -197,6 +211,39 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     assert output.state.predictive.semantic_summary.shape == (1, core.config.hidden_dim)
     assert output.state.predictive.semantic_tokens.shape == (3, core.config.semantic_dim)
     assert output.state.token_field.fusion_attention_mean is not None
+
+
+def test_tactile_tokens_only_enter_fusion_when_pseudo_contact_is_active(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, pose_shift=0.01, contact_shift=25)
+
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+    second = core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+
+    assert first.state.token_field.tactile_tokens_all is not None
+    assert first.state.token_field.tactile_tokens_all.shape[0] == 2
+    assert first.state.token_field.tactile_tokens.shape[0] == 0
+    assert first.state.token_field.tactile_contact_prob is not None
+    assert torch.all(first.state.token_field.tactile_contact_prob < core.config.tactile_anchor_prob_on)
+
+    assert second.state.token_field.tactile_tokens_all is not None
+    assert second.state.token_field.tactile_tokens_all.shape[0] == 2
+    assert second.state.token_field.tactile_tokens.shape[0] == 2
+    assert second.state.token_field.tactile_anchor_mask is not None
+    assert bool(torch.all(second.state.token_field.tactile_anchor_mask).item())
 
 
 def test_full_core_preserves_2048_wide_semantic_tokens_and_backpropagates(tmp_path: Path) -> None:
@@ -236,6 +283,19 @@ def test_full_core_preserves_2048_wide_semantic_tokens_and_backpropagates(tmp_pa
     loss.backward()
     assert core.action_head.weight.grad is not None
     assert core.predictive_pool.score.weight.grad is not None
+
+
+def test_variance_from_logvar_avoids_exp_backward_nan_on_saturated_entries() -> None:
+    logvar = torch.tensor([1000.0, -1000.0, 0.0], dtype=torch.float32, requires_grad=True)
+    weights = torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)
+    var = _variance_from_logvar(logvar, min_var=1e-4, max_var=10.0)
+    loss = torch.sum(var * weights)
+    loss.backward()
+    assert torch.allclose(var.detach(), torch.tensor([10.0, 1e-4, 1.0], dtype=torch.float32))
+    assert torch.isfinite(logvar.grad).all()
+    assert float(logvar.grad[0].item()) == 0.0
+    assert float(logvar.grad[1].item()) == 0.0
+    assert float(logvar.grad[2].item()) > 0.0
 
 
 def test_language_is_late_and_does_not_change_current_posterior(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ class AnyTouchConfig:
     std: tuple[float, float, float] = (0.26862954, 0.26130258, 0.27577711)
     allow_random_init: bool = False
     allow_universal_sensor_token: bool = False
+    require_background: bool = False
 
     @property
     def clip_config_path(self) -> Path:

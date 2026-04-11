@@ -3,18 +3,22 @@ from __future__ import annotations
 import argparse
 import contextlib
 import dataclasses
+import faulthandler
 import json
 import logging
 import math
 import os
 import random
+import signal
 import shutil
+import sys
 import time
 import traceback
 from collections import deque
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
+from typing import TextIO
 
 import numpy as np
 import torch
@@ -34,11 +38,13 @@ from openpi.picf.contracts import PicfObservation
 from openpi.picf.core import PicfCoreConfig
 from openpi.picf.core import PicfFullCore
 from openpi.picf.core import PicfTransitionLossBreakdown
+from openpi.picf.core import PicfTransitionLossConfig
 from openpi.picf.core import compute_transition_loss
 from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticEncoder
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.replay.calvin_replay import _calvin_tactile_packet
+from openpi.picf.replay.calvin_replay import _resolve_tactile_calibration
 from openpi.picf.sonata.config import SonataPointConfig
 from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
 from openpi.picf.vjepa.config import VjepaVisualConfig
@@ -77,6 +83,21 @@ class _ZeroSemanticEncoder(torch.nn.Module):
     def encode_observation(self, observation: PicfObservation) -> torch.Tensor:
         del observation
         return torch.zeros((1, self.dim), dtype=torch.float32)
+
+
+def _register_fault_dump_handler(*, stream: TextIO | None = None) -> bool:
+    """Register SIGUSR1 -> faulthandler stack dump for live hang diagnosis."""
+    if not hasattr(signal, "SIGUSR1"):
+        return False
+    try:
+        try:
+            faulthandler.unregister(signal.SIGUSR1)
+        except RuntimeError:
+            pass
+        faulthandler.register(signal.SIGUSR1, file=stream or sys.stderr, all_threads=True, chain=False)
+    except (RuntimeError, ValueError, OSError):
+        return False
+    return True
 
 
 def _debug_index_stack() -> str:
@@ -470,6 +491,33 @@ def _default_anytouch_checkpoint() -> str | None:
     return str(candidate) if candidate.is_file() else None
 
 
+def _default_tactile_backgrounds_path() -> str | None:
+    candidates = (
+        Path("assets") / "calvin" / "tactile_backgrounds.npz",
+        Path("assets") / "calvin" / "tactile_backgrounds.npy.npz",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _default_tactile_calibration_path() -> str | None:
+    candidates = (
+        Path("assets") / "calvin" / "tactile_fingertip_calibration.json",
+        Path("assets") / "calvin" / "tcp_tactile_calibration.json",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return None
+
+
+def _default_tactile_contact_stats_path() -> str | None:
+    candidate = Path("assets") / "calvin" / "tactile_contact_stats.json"
+    return str(candidate) if candidate.is_file() else None
+
+
 def _default_sonata_checkpoint() -> str | None:
     candidate = Path("src") / "pretrain" / "SpatialLM_Sonata_encoder.pth"
     return str(candidate) if candidate.is_file() else None
@@ -531,6 +579,20 @@ def _parse_tactile_sensor_offsets(raw: str) -> tuple[tuple[float, float, float],
     return tuple(offsets)
 
 
+def _load_tactile_backgrounds_npz(path: str | None) -> dict[str, np.ndarray] | None:
+    if path is None:
+        return None
+    payload = np.load(Path(path).expanduser(), allow_pickle=False)
+    return {str(key): np.asarray(payload[key]) for key in payload.files}
+
+
+def _load_tactile_contact_stats_json(path: str | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    return dict(payload)
+
+
 def _apply_foundation_profile(args: argparse.Namespace) -> None:
     if not bool(args.use_foundation_backbones):
         return
@@ -582,6 +644,7 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "visual_tubelet_size",
         "tactile_num_frames",
         "tactile_stride",
+        "pt_bag_kmin",
         "hidden_dim",
         "posterior_hidden_dim",
         "latent_dim",
@@ -617,12 +680,48 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(f"weight_decay must be >= 0, got {args.weight_decay}.")
     if float(args.grad_clip_norm) < 0.0:
         raise ValueError(f"grad_clip_norm must be >= 0, got {args.grad_clip_norm}.")
+    if float(args.crop_radius_m) <= 0.0:
+        raise ValueError(f"crop_radius_m must be > 0, got {args.crop_radius_m}.")
+    if float(args.point_focus_sigma_m) <= 0.0:
+        raise ValueError(f"point_focus_sigma_m must be > 0, got {args.point_focus_sigma_m}.")
     if int(args.diagnostic_interval) < 0:
         raise ValueError(f"diagnostic_interval must be >= 0, got {args.diagnostic_interval}.")
     for name in ("point_backbone_lr_scale", "visual_lr_scale", "tactile_lr_scale", "semantic_lr_scale"):
         value = float(getattr(args, name))
         if value <= 0.0:
             raise ValueError(f"{name} must be > 0, got {value}.")
+    for name in (
+        "lambda_action_pos",
+        "lambda_action_rot",
+        "lambda_action_gripper",
+        "lambda_visual_latent",
+        "lambda_visual_real",
+        "lambda_tactile_real",
+        "lambda_point_real",
+        "lambda_semantic_future_aux",
+        "lambda_anchor_pv",
+        "lambda_pv_weak",
+        "lambda_focus_pv",
+        "lambda_pt",
+    ):
+        value = float(getattr(args, name))
+        if value < 0.0:
+            raise ValueError(f"{name} must be >= 0, got {value}.")
+    if float(args.pt_bag_radius_m) <= 0.0:
+        raise ValueError(f"pt_bag_radius_m must be > 0, got {args.pt_bag_radius_m}.")
+    if float(args.pt_bag_sigma_m) <= 0.0:
+        raise ValueError(f"pt_bag_sigma_m must be > 0, got {args.pt_bag_sigma_m}.")
+    if float(args.pt_back_slack_m) < 0.0:
+        raise ValueError(f"pt_back_slack_m must be >= 0, got {args.pt_back_slack_m}.")
+    if not (0.0 <= float(args.p_align_off) <= float(args.p_align_on) <= 1.0):
+        raise ValueError(
+            "p_align_off / p_align_on must satisfy 0 <= p_align_off <= p_align_on <= 1; "
+            f"got p_align_off={args.p_align_off} p_align_on={args.p_align_on}."
+        )
+    if float(args.tactile_anchor_prob_on) < 0.0 or float(args.tactile_anchor_prob_on) > 1.0:
+        raise ValueError(
+            f"tactile_anchor_prob_on must be in [0, 1], got {args.tactile_anchor_prob_on}."
+        )
     if int(args.hidden_dim) % int(args.attention_heads) != 0:
         raise ValueError(
             "hidden_dim must be divisible by attention_heads; "
@@ -663,10 +762,53 @@ def _validate_backbone_args(args: argparse.Namespace) -> None:
     if args.tactile_mode == "encoder":
         args.use_tactile = True
         args.tactile_checkpoint_path = args.tactile_checkpoint_path or _default_anytouch_checkpoint()
+        args.tactile_backgrounds_path = args.tactile_backgrounds_path or _default_tactile_backgrounds_path()
+        args.tactile_calibration_path = args.tactile_calibration_path or _default_tactile_calibration_path()
+        args.tactile_contact_stats_path = (
+            args.tactile_contact_stats_path or _default_tactile_contact_stats_path()
+        )
         if args.tactile_checkpoint_path is None:
             raise FileNotFoundError(
                 "tactile_mode=encoder requires an AnyTouch2 checkpoint. "
                 "Pass --tactile-checkpoint-path or download checkpoint-4frames.pth into checkpoints/foundation/anytouch2/."
+            )
+        if args.tactile_backgrounds_path is None:
+            raise FileNotFoundError(
+                "tactile_mode=encoder on CALVIN requires calibrated tactile backgrounds. "
+                "Pass --tactile-backgrounds-path or place tactile_backgrounds.npz under assets/calvin/."
+            )
+        if args.tactile_calibration_path is None:
+            raise FileNotFoundError(
+                "tactile_mode=encoder on CALVIN requires fingertip geometry calibration. "
+                "Pass --tactile-calibration-path or place tactile_fingertip_calibration.json under assets/calvin/."
+            )
+        if args.tactile_contact_stats_path is None:
+            raise FileNotFoundError(
+                "tactile_mode=encoder on CALVIN requires calibrated tactile contact thresholds. "
+                "Pass --tactile-contact-stats-path or place tactile_contact_stats.json under assets/calvin/."
+            )
+        stats = _load_tactile_contact_stats_json(args.tactile_contact_stats_path)
+        if stats is None:
+            raise FileNotFoundError(
+                f"Failed to load tactile contact stats from {args.tactile_contact_stats_path!r}."
+            )
+        if args.tactile_contact_tau_on is None:
+            args.tactile_contact_tau_on = float(stats["tau_on"])
+        if args.tactile_contact_tau_off is None:
+            args.tactile_contact_tau_off = float(stats["tau_off"])
+        if args.tactile_contact_temperature is None:
+            temp = stats.get("temperature")
+            if temp is None:
+                temp = max(0.5 * (float(args.tactile_contact_tau_on) - float(args.tactile_contact_tau_off)), 1e-3)
+            args.tactile_contact_temperature = float(temp)
+        if float(args.tactile_contact_tau_on) <= float(args.tactile_contact_tau_off):
+            raise ValueError(
+                "tactile contact thresholds must satisfy tau_on > tau_off; "
+                f"got tau_on={args.tactile_contact_tau_on} tau_off={args.tactile_contact_tau_off}."
+            )
+        if float(args.tactile_contact_temperature) <= 0.0:
+            raise ValueError(
+                f"tactile_contact_temperature must be > 0, got {args.tactile_contact_temperature}."
             )
     if args.point_backbone == "sonata":
         args.sonata_checkpoint_path = args.sonata_checkpoint_path or _default_sonata_checkpoint()
@@ -777,6 +919,94 @@ def _grad_norm(parameters: Iterator[torch.nn.Parameter]) -> float:
     return float(math.sqrt(sq_sum)) if found else 0.0
 
 
+def _optimizer_param_group_lookup(optimizer: torch.optim.Optimizer | None) -> dict[int, str]:
+    if optimizer is None:
+        return {}
+    lookup: dict[int, str] = {}
+    for index, group in enumerate(optimizer.param_groups):
+        name = str(group.get("name", f"group_{index}"))
+        for param in group.get("params", ()):
+            lookup[id(param)] = name
+    return lookup
+
+
+def _tensor_finite_abs_max(tensor: torch.Tensor) -> float:
+    if tensor.numel() == 0:
+        return 0.0
+    safe = torch.nan_to_num(tensor.detach(), nan=0.0, posinf=0.0, neginf=0.0)
+    return float(safe.abs().max().item())
+
+
+def _collect_nonfinite_gradient_diagnostics(
+    model: torch.nn.Module,
+    *,
+    optimizer: torch.optim.Optimizer | None = None,
+    max_items: int = 16,
+) -> dict[str, Any]:
+    group_lookup = _optimizer_param_group_lookup(optimizer)
+    count = 0
+    samples: list[dict[str, Any]] = []
+    for name, param in model.named_parameters():
+        grad = param.grad
+        if grad is None:
+            continue
+        grad_detached = grad.detach()
+        if bool(torch.isfinite(grad_detached).all().item()):
+            continue
+        count += 1
+        if len(samples) >= max_items:
+            continue
+        samples.append(
+            {
+                "name": str(name),
+                "group": group_lookup.get(id(param)),
+                "shape": tuple(int(dim) for dim in param.shape),
+                "grad_has_nan": bool(torch.isnan(grad_detached).any().item()),
+                "grad_has_inf": bool(torch.isinf(grad_detached).any().item()),
+                "grad_abs_max_finite": _tensor_finite_abs_max(grad_detached),
+                "param_has_nan": bool(torch.isnan(param.detach()).any().item()),
+                "param_has_inf": bool(torch.isinf(param.detach()).any().item()),
+                "param_abs_max_finite": _tensor_finite_abs_max(param.detach()),
+            }
+        )
+    return {
+        "nonfinite_grad_count": int(count),
+        "samples": samples,
+    }
+
+
+def _collect_nonfinite_parameter_diagnostics(
+    model: torch.nn.Module,
+    *,
+    optimizer: torch.optim.Optimizer | None = None,
+    max_items: int = 16,
+) -> dict[str, Any]:
+    group_lookup = _optimizer_param_group_lookup(optimizer)
+    count = 0
+    samples: list[dict[str, Any]] = []
+    for name, param in model.named_parameters():
+        param_detached = param.detach()
+        if bool(torch.isfinite(param_detached).all().item()):
+            continue
+        count += 1
+        if len(samples) >= max_items:
+            continue
+        samples.append(
+            {
+                "name": str(name),
+                "group": group_lookup.get(id(param)),
+                "shape": tuple(int(dim) for dim in param.shape),
+                "param_has_nan": bool(torch.isnan(param_detached).any().item()),
+                "param_has_inf": bool(torch.isinf(param_detached).any().item()),
+                "param_abs_max_finite": _tensor_finite_abs_max(param_detached),
+            }
+        )
+    return {
+        "nonfinite_param_count": int(count),
+        "samples": samples,
+    }
+
+
 @dataclasses.dataclass(frozen=True)
 class _TransitionWindow:
     segment_id: int
@@ -797,6 +1027,9 @@ class _CalvinTransitionSource:
         use_tactile: bool = False,
         tactile_sensor_names: tuple[str, ...] = _DEFAULT_TACTILE_SENSOR_NAMES,
         tactile_sensor_offsets_m: tuple[tuple[float, float, float], ...] = _DEFAULT_TACTILE_SENSOR_OFFSETS_M,
+        tactile_calibration: dict[str, object] | str | Path | None = None,
+        tactile_backgrounds_by_sensor: dict[str, np.ndarray] | None = None,
+        use_scene_obs: bool = False,
         frame_dt_s: float = 1.0 / 30.0,
     ) -> None:
         if int(unroll_steps) < 1:
@@ -818,6 +1051,18 @@ class _CalvinTransitionSource:
         self.use_tactile = bool(use_tactile)
         self.tactile_sensor_names = tuple(tactile_sensor_names)
         self.tactile_sensor_offsets_m = tuple(tuple(offset) for offset in tactile_sensor_offsets_m)
+        calibration_payload = tactile_calibration
+        explicit_legacy_offsets = (
+            tactile_sensor_offsets_m is not None
+            and tuple(tuple(float(value) for value in offset) for offset in tactile_sensor_offsets_m) != _DEFAULT_TACTILE_SENSOR_OFFSETS_M
+        )
+        if tactile_calibration is None and explicit_legacy_offsets:
+            calibration_payload = {"sensor_centers_local": tactile_sensor_offsets_m}
+        self.tactile_calibration = _resolve_tactile_calibration(calibration_payload)
+        self.tactile_backgrounds_by_sensor = None if tactile_backgrounds_by_sensor is None else {
+            str(name): np.asarray(image) for name, image in tactile_backgrounds_by_sensor.items()
+        }
+        self.use_scene_obs = bool(use_scene_obs)
         self.frame_dt_s = float(frame_dt_s)
         self.window_index: list[tuple[int, int]] = []
         for segment_id, segment in enumerate(self.segments):
@@ -836,11 +1081,13 @@ class _CalvinTransitionSource:
 
     def _load_frame(self, segment_id: int, step_id: int, *, reset_scaffold: bool) -> PicfObservation:
         segment = self.segments[segment_id]
-        keys = ["rgb_static", "depth_static", "robot_obs", "rel_actions"]
+        keys = ["rgb_static", "depth_static", "depth_gripper", "robot_obs", "rel_actions"]
         if self.use_wrist_rgb:
             keys.append("rgb_gripper")
         if self.use_tactile:
             keys.extend(["rgb_tactile", "depth_tactile"])
+        if self.use_scene_obs:
+            keys.append("scene_obs")
         frame = self.reader.read_npz(step_id, keys=keys)
         timestamp_s = float(step_id) * self.frame_dt_s
         tactile = (
@@ -848,7 +1095,9 @@ class _CalvinTransitionSource:
                 frame,
                 timestamp_s=timestamp_s,
                 sensor_names=self.tactile_sensor_names,
-                sensor_offsets_m=self.tactile_sensor_offsets_m,
+                robot_obs=frame["robot_obs"],
+                calibration=self.tactile_calibration,
+                background_rgb_by_sensor=self.tactile_backgrounds_by_sensor,
             )
             if self.use_tactile
             else None
@@ -856,6 +1105,7 @@ class _CalvinTransitionSource:
         return PicfObservation(
             rgb_static=frame["rgb_static"],
             depth_static=frame["depth_static"],
+            depth_gripper=frame.get("depth_gripper"),
             robot_obs=frame["robot_obs"],
             prompt=segment.lang,
             step_id=int(step_id),
@@ -863,6 +1113,7 @@ class _CalvinTransitionSource:
             timestamp_s=timestamp_s,
             reset_scaffold=bool(reset_scaffold),
             rgb_gripper=frame.get("rgb_gripper"),
+            scene_obs=frame.get("scene_obs"),
             proprio=frame["robot_obs"],
             action=frame.get("rel_actions"),
             tactile=tactile,
@@ -955,18 +1206,21 @@ class _PicfWindowTrainer(torch.nn.Module):
         semantic_encoder: torch.nn.Module | None,
         visual_grid: int,
         use_visual_override: bool,
+        loss_config: PicfTransitionLossConfig | None = None,
     ) -> None:
         super().__init__()
         self.core = core
         self.semantic_encoder = semantic_encoder
         self.visual_grid = int(visual_grid)
         self.use_visual_override = bool(use_visual_override)
+        self.loss_config = loss_config or PicfTransitionLossConfig()
 
     def forward(
         self,
         window: _TransitionWindow,
         *,
         capture_visual_diagnostics: bool = False,
+        debug_phase_label: str | None = None,
     ) -> dict[str, Any]:
         previous = None
         metrics: dict[str, torch.Tensor] | None = None
@@ -974,13 +1228,25 @@ class _PicfWindowTrainer(torch.nn.Module):
         physical_visual_real_seq: list[torch.Tensor | None] = []
         semantic_visual_real_seq: list[torch.Tensor | None] = []
         for index in range(len(window.frames) - 1):
+            transition_start = time.perf_counter()
+            if debug_phase_label is not None:
+                logging.info("%s transition=%s begin", debug_phase_label, index)
             current = dataclasses.replace(window.frames[index], reset_scaffold=(index == 0))
             nxt = dataclasses.replace(window.frames[index + 1], reset_scaffold=False)
             current_visual = _rgb_visual_override(current.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
             next_visual = _rgb_visual_override(nxt.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
             semantic_override = None
             if self.semantic_encoder is not None:
+                semantic_start = time.perf_counter()
                 semantic_override = self.semantic_encoder.encode_observation(current)
+                if debug_phase_label is not None:
+                    logging.info(
+                        "%s transition=%s semantic_encode_sec=%.3f",
+                        debug_phase_label,
+                        index,
+                        time.perf_counter() - semantic_start,
+                    )
+            step_start = time.perf_counter()
             output = self.core.step(
                 current,
                 previous=previous,
@@ -988,6 +1254,13 @@ class _PicfWindowTrainer(torch.nn.Module):
                 semantic_override=semantic_override,
                 action_future=current.action,
             )
+            if debug_phase_label is not None:
+                logging.info(
+                    "%s transition=%s core_step_sec=%.3f",
+                    debug_phase_label,
+                    index,
+                    time.perf_counter() - step_start,
+                )
             if capture_visual_diagnostics:
                 physical_visual_real = output.state.predictive.physical_prediction_cache.visual_real
                 semantic_visual_real = output.state.predictive.prediction_cache.visual_real
@@ -997,13 +1270,23 @@ class _PicfWindowTrainer(torch.nn.Module):
                 semantic_visual_real_seq.append(
                     None if semantic_visual_real is None else semantic_visual_real.detach().to(device="cpu")
                 )
+            loss_start = time.perf_counter()
             losses = compute_transition_loss(
                 self.core,
                 output,
                 nxt,
                 action_target=current.action,
                 next_visual_map_override=next_visual,
+                config=self.loss_config,
             )
+            if debug_phase_label is not None:
+                logging.info(
+                    "%s transition=%s loss_sec=%.3f total_transition_sec=%.3f",
+                    debug_phase_label,
+                    index,
+                    time.perf_counter() - loss_start,
+                    time.perf_counter() - transition_start,
+                )
             totals.append(losses.total)
             candidate_density = torch.as_tensor(
                 float(output.debug.get("projective_candidate_density", 0.0)),
@@ -1269,6 +1552,19 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         predictive_semantic_dropout_prob=args.predictive_semantic_dropout_prob,
         attention_heads=args.attention_heads,
         future_vote_heads=args.future_vote_heads,
+        crop_radius_m=float(getattr(args, "crop_radius_m", _SPEC_DEFAULTS.crop_radius_m)),
+        point_focus_sigma_m=float(getattr(args, "point_focus_sigma_m", _SPEC_DEFAULTS.point_focus_sigma_m)),
+        tactile_contact_tau_on=float(getattr(args, "tactile_contact_tau_on", _SPEC_DEFAULTS.tactile_contact_tau_on)),
+        tactile_contact_tau_off=float(getattr(args, "tactile_contact_tau_off", _SPEC_DEFAULTS.tactile_contact_tau_off)),
+        tactile_contact_temperature=float(
+            getattr(args, "tactile_contact_temperature", _SPEC_DEFAULTS.tactile_contact_temperature)
+        ),
+        tactile_contact_ema_beta=float(
+            getattr(args, "tactile_contact_ema_beta", _SPEC_DEFAULTS.tactile_contact_ema_beta)
+        ),
+        tactile_anchor_prob_on=float(
+            getattr(args, "tactile_anchor_prob_on", _SPEC_DEFAULTS.tactile_anchor_prob_on)
+        ),
     )
     point_feature_extractor = None
     if args.point_backbone == "sonata":
@@ -1361,6 +1657,33 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         tactile_encoder=tactile_encoder,
     )
     return core, semantic_encoder, use_visual_override
+
+
+def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
+    return PicfTransitionLossConfig(
+        lambda_action_pos=float(getattr(args, "lambda_action_pos", 2.0)),
+        lambda_action_rot=float(getattr(args, "lambda_action_rot", 2.0)),
+        lambda_action_gripper=float(getattr(args, "lambda_action_gripper", 2.0)),
+        lambda_visual_latent=float(getattr(args, "lambda_visual_latent", 0.2)),
+        lambda_visual_real=float(getattr(args, "lambda_visual_real", 0.1)),
+        lambda_tactile_real=float(getattr(args, "lambda_tactile_real", 0.3)),
+        lambda_point_real=float(getattr(args, "lambda_point_real", 0.3)),
+        lambda_semantic_future_aux=float(getattr(args, "lambda_semantic_future_aux", 0.25)),
+        lambda_anchor_pv=float(getattr(args, "lambda_anchor_pv", 0.1)),
+        lambda_pv_weak=float(getattr(args, "lambda_pv_weak", 0.02)),
+        lambda_focus_pv=float(getattr(args, "lambda_focus_pv", 0.0)),
+        lambda_pt=float(getattr(args, "lambda_pt", 1.0)),
+        tau_pv=float(getattr(args, "tau_pv", 0.07)),
+        tau_pt=float(getattr(args, "tau_pt", 0.07)),
+        tau_route_p=float(getattr(args, "tau_route_p", 0.1)),
+        tau_route_v=float(getattr(args, "tau_route_v", 0.1)),
+        pt_bag_radius_m=float(getattr(args, "pt_bag_radius_m", 0.045)),
+        pt_bag_sigma_m=float(getattr(args, "pt_bag_sigma_m", 0.015)),
+        pt_bag_kmin=int(getattr(args, "pt_bag_kmin", 32)),
+        pt_back_slack_m=float(getattr(args, "pt_back_slack_m", 0.008)),
+        p_align_on=float(getattr(args, "p_align_on", 0.55)),
+        p_align_off=float(getattr(args, "p_align_off", 0.35)),
+    )
 
 
 def _materialize_model_parameters(
@@ -1520,6 +1843,8 @@ def train(args: argparse.Namespace) -> None:
     is_main = False
     source: _CalvinTransitionSource | None = None
     pbar: Any = None
+    fault_dump_handle: TextIO | None = None
+    fault_dump_path: Path | None = None
     try:
         _seed_everything(args.seed, rank)
         is_main = _is_main(rank)
@@ -1527,6 +1852,12 @@ def train(args: argparse.Namespace) -> None:
         latest_path = output_dir / "latest.pt"
         metrics_path = output_dir / "metrics.jsonl"
         _prepare_output_dir(output_dir=output_dir, args=args, is_main=is_main, use_ddp=use_ddp, device=device)
+        fault_dump_path = output_dir / f"stackdump_rank{rank}.log"
+        try:
+            fault_dump_handle = fault_dump_path.open("a", encoding="utf-8")
+        except OSError:
+            fault_dump_handle = None
+        fault_dump_registered = _register_fault_dump_handler(stream=fault_dump_handle)
         source = _CalvinTransitionSource(
             args.calvin_root,
             split=args.split,
@@ -1535,6 +1866,9 @@ def train(args: argparse.Namespace) -> None:
             use_tactile=bool(args.use_tactile),
             tactile_sensor_names=args.tactile_sensor_names,
             tactile_sensor_offsets_m=args.tactile_sensor_offsets_m,
+            tactile_calibration=args.tactile_calibration_path,
+            tactile_backgrounds_by_sensor=_load_tactile_backgrounds_npz(args.tactile_backgrounds_path),
+            use_scene_obs=bool(args.use_scene_obs),
         )
 
         core, semantic_encoder, use_visual_override = _build_model(args, device=device)
@@ -1544,6 +1878,7 @@ def train(args: argparse.Namespace) -> None:
             semantic_encoder=semantic_encoder,
             visual_grid=args.visual_grid,
             use_visual_override=use_visual_override,
+            loss_config=_build_loss_config(args),
         ).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
         optimizer, optimizer_group_info = _build_optimizer(model, args=args)
@@ -1586,6 +1921,8 @@ def train(args: argparse.Namespace) -> None:
         debug_cuda_sync = os.environ.get("OPENPI_DEBUG_CUDA_SYNC", "").strip() not in {"", "0", "false", "False"}
         debug_autograd_anomaly = os.environ.get("OPENPI_DEBUG_AUTOGRAD_ANOMALY", "").strip() not in {"", "0", "false", "False"}
         debug_tensor_index_guards = os.environ.get("OPENPI_DEBUG_TENSOR_INDEX_GUARDS", "").strip() not in {"", "0", "false", "False"}
+        debug_phase_limit = int(os.environ.get("OPENPI_DEBUG_PHASE_LIMIT", "0") or "0")
+        verbose_startup_logs = os.environ.get("OPENPI_VERBOSE_STARTUP_LOGS", "").strip() not in {"", "0", "false", "False"}
         if debug_autograd_anomaly:
             torch.autograd.set_detect_anomaly(True)
         if debug_tensor_index_guards:
@@ -1639,52 +1976,64 @@ def train(args: argparse.Namespace) -> None:
                 args.future_vote_heads,
             )
             logging.info(
-                "Backbone contract: point=%s(trainable=%s flash=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(source=%s trainable=%s)",
+                "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),
-                getattr(point_feature_extractor, "flash_enabled", None) if point_feature_extractor is not None else None,
+                bool(not args.sonata_disable_flash),
                 args.visual_mode,
                 bool(args.visual_trainable),
                 args.tactile_mode,
                 bool(args.tactile_trainable),
                 args.semantic_mode,
-                getattr(semantic_encoder, "source", "none") if semantic_encoder is not None else "none",
                 bool(args.semantic_trainable),
             )
-            if semantic_encoder is not None:
+            compact_startup_logging = bool(use_ddp and not verbose_startup_logs)
+            logging.info("Startup logging: compact=%s", compact_startup_logging)
+            if not compact_startup_logging:
                 logging.info(
-                    "Semantic checkpointing: enabled=%s non_reentrant=%s requested=%s",
-                    bool(getattr(semantic_encoder, "gradient_checkpointing_enabled", False)),
-                    bool(getattr(semantic_encoder, "gradient_checkpointing_non_reentrant", False)),
+                    "Backbone runtime types: point=%s semantic=%s",
+                    type(point_feature_extractor).__name__ if point_feature_extractor is not None else "none",
+                    type(semantic_encoder).__name__ if semantic_encoder is not None else "none",
+                )
+                logging.info(
+                    "Semantic checkpointing request: enabled=%s non_reentrant=%s",
                     bool(args.semantic_gradient_checkpointing),
+                    bool(args.semantic_gradient_checkpointing_non_reentrant),
                 )
-            if bool(getattr(args, "semantic_gradient_checkpointing_disabled_for_accum", False)):
+                if bool(getattr(args, "semantic_gradient_checkpointing_disabled_for_accum", False)):
+                    logging.info(
+                        "Semantic contract: disabled PaliGemma gradient checkpointing because accum_steps=%s > 1; "
+                        "this avoids DDP 'mark ready twice' failures during gradient accumulation.",
+                        args.accum_steps,
+                    )
                 logging.info(
-                    "Semantic contract: disabled PaliGemma gradient checkpointing because accum_steps=%s > 1; "
-                    "this avoids DDP 'mark ready twice' failures during gradient accumulation.",
-                    args.accum_steps,
+                    "LR contract: cosine decay with warmup_steps=%s (%.2f%% of total steps).",
+                    args.warmup_steps,
+                    warmup_fraction,
                 )
-            logging.info(
-                "LR contract: cosine decay with warmup_steps=%s (%.2f%% of total steps).",
-                args.warmup_steps,
-                warmup_fraction,
-            )
-            logging.info(
-                "Window contract: first-step empty xyzrgb windows will be resampled up to %s times per micro-step.",
-                args.max_empty_window_retries,
-            )
-            logging.info("CUDA debug sync: enabled=%s", bool(debug_cuda_sync))
-            logging.info("Autograd anomaly detection: enabled=%s", bool(debug_autograd_anomaly))
-            logging.info("Tensor index guards: enabled=%s", bool(debug_tensor_index_guards))
-            for group in optimizer_group_info:
                 logging.info(
-                    "Optimizer group: name=%s lr=%s num_params=%s",
-                    group["name"],
-                    group["lr"],
-                    group["num_params"],
+                    "Window contract: first-step empty xyzrgb windows will be resampled up to %s times per micro-step.",
+                    args.max_empty_window_retries,
                 )
+                logging.info("CUDA debug sync: enabled=%s", bool(debug_cuda_sync))
+                logging.info("Autograd anomaly detection: enabled=%s", bool(debug_autograd_anomaly))
+                logging.info("Tensor index guards: enabled=%s", bool(debug_tensor_index_guards))
+                logging.info("Phase timing debug: phase_limit=%s", debug_phase_limit)
+                logging.info("Fault dump handler (SIGUSR1): enabled=%s", bool(fault_dump_registered))
+                if fault_dump_path is not None:
+                    logging.info("Fault dump path: %s", fault_dump_path)
+                for group in optimizer_group_info:
+                    logging.info(
+                        "Optimizer group: name=%s lr=%s num_params=%s",
+                        group["name"],
+                        group["lr"],
+                        group["num_params"],
+                    )
 
         for step in range(start_step, args.num_train_steps):
+            debug_phase_enabled = debug_phase_limit > 0 and step < debug_phase_limit
+            if debug_phase_enabled:
+                logging.info("phase step=%s rank=%s step_begin", int(step + 1), rank)
             lr = _lr_for_step(
                 step,
                 base_lr=args.lr,
@@ -1693,19 +2042,69 @@ def train(args: argparse.Namespace) -> None:
                 total_steps=args.num_train_steps,
             )
             _set_optimizer_lr(optimizer, lr)
+            if debug_phase_enabled:
+                logging.info("phase step=%s rank=%s lr_set lr=%.8f", int(step + 1), rank, float(lr))
             optimizer.zero_grad(set_to_none=True)
+            if debug_phase_enabled:
+                logging.info("phase step=%s rank=%s zero_grad_done", int(step + 1), rank)
             trainer_module = model.module if isinstance(model, DistributedDataParallel) else model
             capture_visual_diagnostics = bool(
                 (args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0))
                 or ((step + 1) == args.num_train_steps)
             )
             for micro_step in range(args.accum_steps):
+                sample_start = time.perf_counter()
                 retry_count = 0
+                if debug_phase_enabled:
+                    logging.info(
+                        "phase step=%s micro=%s rank=%s sample_begin",
+                        int(step + 1),
+                        int(micro_step + 1),
+                        rank,
+                    )
                 while True:
+                    rng_start = time.perf_counter()
                     flat_index = int(rng.integers(0, len(source)))
+                    if debug_phase_enabled:
+                        logging.info(
+                            "phase step=%s micro=%s rank=%s rng_pick_sec=%.3f flat_index=%s",
+                            int(step + 1),
+                            int(micro_step + 1),
+                            rank,
+                            time.perf_counter() - rng_start,
+                            flat_index,
+                        )
+                    window_load_start = time.perf_counter()
                     window = source.window(flat_index)
+                    if debug_phase_enabled:
+                        logging.info(
+                            "phase step=%s micro=%s rank=%s window_load_sec=%.3f flat_index=%s segment=%s start_step=%s prompt=%r",
+                            int(step + 1),
+                            int(micro_step + 1),
+                            rank,
+                            time.perf_counter() - window_load_start,
+                            flat_index,
+                            int(window.segment_id),
+                            int(window.start_step_id),
+                            str(window.prompt),
+                        )
                     try:
+                        ensure_start = time.perf_counter()
                         window_point_counts = _ensure_window_has_valid_first_step_xyzrgb_support(trainer_module, window)
+                        if debug_phase_enabled:
+                            logging.info(
+                                "phase step=%s micro=%s rank=%s sample_validate_sec=%.3f ensure_sec=%.3f flat_index=%s segment=%s start_step=%s prompt=%r point_counts=%s",
+                                int(step + 1),
+                                int(micro_step + 1),
+                                rank,
+                                time.perf_counter() - sample_start,
+                                time.perf_counter() - ensure_start,
+                                flat_index,
+                                int(window.segment_id),
+                                int(window.start_step_id),
+                                str(window.prompt),
+                                tuple(int(count) for count in window_point_counts),
+                            )
                         break
                     except RuntimeError as exc:
                         if not _is_retryable_first_step_error(exc):
@@ -1731,6 +2130,33 @@ def train(args: argparse.Namespace) -> None:
                     sync_context = model.no_sync()
                 else:
                     sync_context = contextlib.nullcontext()
+                # Keep all ranks aligned before entering the DDP-wrapped forward.
+                # The exact DDP probe is stable with an explicit post-preflight barrier,
+                # while the unconstrained training loop can let one rank run far ahead
+                # of the other during semantic prefix preparation.
+                if debug_phase_enabled:
+                    logging.info(
+                        "phase step=%s micro=%s rank=%s preforward_barrier_enter flat_index=%s segment=%s start_step=%s prompt=%r",
+                        int(step + 1),
+                        int(micro_step + 1),
+                        rank,
+                        flat_index,
+                        int(window.segment_id),
+                        int(window.start_step_id),
+                        str(window.prompt),
+                    )
+                _distributed_barrier(use_ddp=use_ddp, device=device)
+                if debug_phase_enabled:
+                    logging.info(
+                        "phase step=%s micro=%s rank=%s preforward_barrier_exit flat_index=%s segment=%s start_step=%s prompt=%r",
+                        int(step + 1),
+                        int(micro_step + 1),
+                        rank,
+                        flat_index,
+                        int(window.segment_id),
+                        int(window.start_step_id),
+                        str(window.prompt),
+                    )
                 with sync_context:
                     recent_windows.append(
                         {
@@ -1745,13 +2171,27 @@ def train(args: argparse.Namespace) -> None:
                         }
                     )
                     try:
+                        forward_label = None
+                        if debug_phase_enabled:
+                            forward_label = (
+                                f"phase step={int(step + 1)} micro={int(micro_step + 1)} rank={rank} "
+                                f"segment={int(window.segment_id)} start={int(window.start_step_id)}"
+                            )
+                            logging.info("%s forward_begin", forward_label)
+                        forward_start = time.perf_counter()
                         outputs = model(
                             window,
                             capture_visual_diagnostics=capture_visual_diagnostics,
+                            debug_phase_label=forward_label,
                         )
+                        if debug_phase_enabled:
+                            logging.info("%s forward_sec=%.3f", forward_label, time.perf_counter() - forward_start)
                         if debug_cuda_sync and device.type == "cuda":
                             torch.cuda.synchronize(device=device)
+                        backward_start = time.perf_counter()
                         (outputs["loss_total"] / float(args.accum_steps)).backward()
+                        if debug_phase_enabled:
+                            logging.info("%s backward_sec=%.3f", forward_label, time.perf_counter() - backward_start)
                         if debug_cuda_sync and device.type == "cuda":
                             torch.cuda.synchronize(device=device)
                     except Exception:
@@ -1787,9 +2227,32 @@ def train(args: argparse.Namespace) -> None:
                 metric_accum.candidate_density += float(outputs["projective_candidate_density"].detach().item())
                 metric_accum.num_windows += 1
 
+            clip_start = time.perf_counter()
+            grad_issue = _collect_nonfinite_gradient_diagnostics(model, optimizer=optimizer, max_items=24)
+            if int(grad_issue["nonfinite_grad_count"]) > 0:
+                logging.error(
+                    "Non-finite gradient detected before grad clipping / optimizer step: %s",
+                    grad_issue,
+                )
+                logging.error("Recent window history before non-finite gradient: %s", list(recent_windows))
+                if _DEBUG_INDEX_TRACE:
+                    logging.error("Recent tensor index trace before non-finite gradient: %s", _dump_debug_index_trace())
+                raise RuntimeError("Non-finite gradients detected before optimizer step.")
             if args.grad_clip_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip_norm)
+            if debug_phase_enabled:
+                logging.info("phase step=%s rank=%s grad_clip_sec=%.3f", int(step + 1), rank, time.perf_counter() - clip_start)
+            opt_start = time.perf_counter()
             optimizer.step()
+            param_issue = _collect_nonfinite_parameter_diagnostics(model, optimizer=optimizer, max_items=24)
+            if int(param_issue["nonfinite_param_count"]) > 0:
+                logging.error("Non-finite parameter detected immediately after optimizer.step: %s", param_issue)
+                logging.error("Recent window history before non-finite parameter: %s", list(recent_windows))
+                if _DEBUG_INDEX_TRACE:
+                    logging.error("Recent tensor index trace before non-finite parameter: %s", _dump_debug_index_trace())
+                raise RuntimeError("Non-finite parameters detected after optimizer step.")
+            if debug_phase_enabled:
+                logging.info("phase step=%s rank=%s optimizer_step_sec=%.3f", int(step + 1), rank, time.perf_counter() - opt_start)
             steps_in_interval += 1
             current_total = float(outputs["loss_total"].detach().item())
 
@@ -1862,6 +2325,8 @@ def train(args: argparse.Namespace) -> None:
             source.close()
         if is_main and wandb_active:
             wandb.finish()
+        if fault_dump_handle is not None:
+            fault_dump_handle.close()
         _cleanup_distributed()
 
 
@@ -1884,14 +2349,38 @@ def main() -> None:
     parser.add_argument("--accum-steps", type=int, default=1)
     parser.add_argument("--max-empty-window-retries", type=int, default=32)
     parser.add_argument("--unroll-steps", type=int, default=2)
-    parser.add_argument("--stride", type=int, default=8)
-    parser.add_argument("--max-points", type=int, default=512)
+    parser.add_argument("--stride", type=int, default=4)
+    parser.add_argument("--max-points", type=int, default=1024)
+    parser.add_argument("--crop-radius-m", type=float, default=0.10)
+    parser.add_argument("--point-focus-sigma-m", type=float, default=_SPEC_DEFAULTS.point_focus_sigma_m)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--min-lr", type=float, default=2e-5)
     parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--lambda-action-pos", type=float, default=2.0)
+    parser.add_argument("--lambda-action-rot", type=float, default=2.0)
+    parser.add_argument("--lambda-action-gripper", type=float, default=2.0)
+    parser.add_argument("--lambda-visual-latent", type=float, default=0.2)
+    parser.add_argument("--lambda-visual-real", type=float, default=0.1)
+    parser.add_argument("--lambda-tactile-real", type=float, default=0.3)
+    parser.add_argument("--lambda-point-real", type=float, default=0.3)
+    parser.add_argument("--lambda-semantic-future-aux", type=float, default=0.25)
+    parser.add_argument("--lambda-anchor-pv", type=float, default=0.1)
+    parser.add_argument("--lambda-pv-weak", type=float, default=0.02)
+    parser.add_argument("--lambda-focus-pv", type=float, default=0.0)
+    parser.add_argument("--lambda-pt", type=float, default=1.0)
+    parser.add_argument("--tau-pv", type=float, default=0.07)
+    parser.add_argument("--tau-pt", type=float, default=0.07)
+    parser.add_argument("--tau-route-p", type=float, default=0.1)
+    parser.add_argument("--tau-route-v", type=float, default=0.1)
+    parser.add_argument("--pt-bag-radius-m", type=float, default=0.045)
+    parser.add_argument("--pt-bag-sigma-m", type=float, default=0.015)
+    parser.add_argument("--pt-bag-kmin", type=int, default=32)
+    parser.add_argument("--pt-back-slack-m", type=float, default=0.008)
+    parser.add_argument("--p-align-on", type=float, default=0.55)
+    parser.add_argument("--p-align-off", type=float, default=0.35)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--project-name", default="openpi")
     parser.add_argument("--wandb-run-name", default=None)
@@ -1932,6 +2421,15 @@ def main() -> None:
     parser.add_argument("--use-tactile", action="store_true")
     parser.add_argument("--tactile-sensor-names", default="digit,gelsight_mini")
     parser.add_argument("--tactile-sensor-offsets-m", default="0.01,0,0;-0.01,0,0")
+    parser.add_argument("--tactile-calibration-path", default=None)
+    parser.add_argument("--tactile-backgrounds-path", default=None)
+    parser.add_argument("--tactile-contact-stats-path", default=None)
+    parser.add_argument("--tactile-contact-tau-on", type=float, default=None)
+    parser.add_argument("--tactile-contact-tau-off", type=float, default=None)
+    parser.add_argument("--tactile-contact-temperature", type=float, default=None)
+    parser.add_argument("--tactile-contact-ema-beta", type=float, default=_SPEC_DEFAULTS.tactile_contact_ema_beta)
+    parser.add_argument("--tactile-anchor-prob-on", type=float, default=_SPEC_DEFAULTS.tactile_anchor_prob_on)
+    parser.add_argument("--use-scene-obs", action="store_true")
     parser.add_argument("--semantic-mode", choices=["zero", "paligemma"], default="zero")
     parser.add_argument("--semantic-source", choices=["auto", "hf", "pi0_pytorch"], default="auto")
     parser.add_argument("--semantic-model-name", default=_default_paligemma_model_name())

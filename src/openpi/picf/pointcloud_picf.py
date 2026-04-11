@@ -11,6 +11,7 @@ from openpi.picf.contracts import PicfPointCloudFrame
 from openpi.picf.geometry import normalize_vectors
 from openpi.picf.geometry import transform_normals
 from openpi.picf.geometry import transform_points
+from openpi.picf.scaffold.local_frame import EndEffectorLocalFrame
 
 
 def _finite_difference_normals(points_cam: np.ndarray, valid_mask: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -84,12 +85,14 @@ class CalvinDepthToPicfPointCloud:
         cameras_json_path: str,
         *,
         cam_name: str = "static",
+        gripper_cam_name: str = "gripper",
         stride: int = 2,
         max_points: int = 4096,
         voxel_size: float = 0.005,
         z_min: float = 0.1,
         z_max: float = 10.0,
         use_world: bool = True,
+        use_gripper_depth: bool = True,
         depth_scale: float = 1.0,
         selection_mode: str = "fps",
         min_peripheral_points: int = 128,
@@ -99,19 +102,18 @@ class CalvinDepthToPicfPointCloud:
         cam_table = cams.get("cameras", cams)
         if cam_name not in cam_table:
             raise KeyError(f"Camera '{cam_name}' not found. Available: {list(cam_table.keys())}")
-        cam = cam_table[cam_name]
-        if "K" in cam:
-            self.K = as_3x3(cam["K"])
-        elif "intrinsics" in cam:
-            self.K = as_3x3(cam["intrinsics"])
-        else:
-            raise KeyError(f"Camera '{cam_name}' missing intrinsics. Keys={list(cam.keys())}")
-        if "W_T_C" in cam:
-            self.W_T_C = as_4x4(cam["W_T_C"])
-        elif "viewMatrix" in cam:
-            self.W_T_C = np.linalg.inv(as_4x4(cam["viewMatrix"])).astype(np.float32)
-        else:
-            raise KeyError(f"Camera '{cam_name}' missing extrinsics. Keys={list(cam.keys())}")
+        self.static_cam_name = str(cam_name)
+        self.gripper_cam_name = str(gripper_cam_name)
+        self.use_gripper_depth = bool(use_gripper_depth)
+        self._local_frame = EndEffectorLocalFrame()
+        self._camera_specs = {
+            self.static_cam_name: self._load_camera_spec(cam_table, self.static_cam_name),
+        }
+        if self.gripper_cam_name in cam_table:
+            self._camera_specs[self.gripper_cam_name] = self._load_camera_spec(cam_table, self.gripper_cam_name)
+        static_spec = self._camera_specs[self.static_cam_name]
+        self.K = static_spec["K"]
+        self.W_T_C = static_spec["W_T_C"]
         self._fx = float(self.K[0, 0])
         self._fy = float(self.K[1, 1])
         self._cx = float(self.K[0, 2])
@@ -128,6 +130,36 @@ class CalvinDepthToPicfPointCloud:
         self.focus_boost = float(focus_boost)
         if self.selection_mode not in {"fps", "linspace"}:
             raise ValueError(f"selection_mode must be 'fps' or 'linspace', got {self.selection_mode!r}")
+
+    @staticmethod
+    def _load_camera_spec(cam_table: Mapping[str, object], cam_name: str) -> dict[str, np.ndarray]:
+        cam = cam_table[cam_name]
+        if "K" in cam:
+            K = as_3x3(cam["K"])
+        elif "intrinsics" in cam:
+            K = as_3x3(cam["intrinsics"])
+        else:
+            raise KeyError(f"Camera '{cam_name}' missing intrinsics. Keys={list(cam.keys())}")
+        if "W_T_C" in cam:
+            W_T_C = as_4x4(cam["W_T_C"])
+            E_T_C = None
+        elif "E_T_C" in cam:
+            W_T_C = None
+            E_T_C = as_4x4(cam["E_T_C"])
+        elif "viewMatrix" in cam:
+            W_T_C = np.linalg.inv(as_4x4(cam["viewMatrix"])).astype(np.float32)
+            E_T_C = None
+        else:
+            raise KeyError(f"Camera '{cam_name}' missing extrinsics. Keys={list(cam.keys())}")
+        return {
+            "K": K,
+            "W_T_C": W_T_C,
+            "E_T_C": E_T_C,
+            "fx": np.float32(K[0, 0]),
+            "fy": np.float32(K[1, 1]),
+            "cx": np.float32(K[0, 2]),
+            "cy": np.float32(K[1, 2]),
+        }
 
     def _select_subset_indices(self, xyz: np.ndarray, count: int) -> np.ndarray:
         if xyz.shape[0] <= count:
@@ -169,74 +201,117 @@ class CalvinDepthToPicfPointCloud:
         chosen_peripheral = peripheral_idx[self._select_subset_indices(xyz[peripheral_idx], remaining)]
         return np.concatenate([chosen_focus, chosen_peripheral], axis=0)
 
-    def __call__(self, sample: Mapping[str, np.ndarray]) -> PicfPointCloudFrame:
-        rgb = np.asarray(sample["rgb_static"])
-        depth = np.asarray(sample["depth_static"], dtype=np.float32)
-        if depth.ndim == 3 and depth.shape[-1] == 1:
-            depth = depth[..., 0]
-        if depth.ndim != 2:
-            raise ValueError(f"depth_static must be 2D, got {depth.shape}")
-        depth = depth * self.depth_scale
-        height, width = depth.shape
-        uu, vv = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
-        valid = np.isfinite(depth) & (depth > self.z_min) & (depth < self.z_max)
-        if not np.any(valid):
-            return PicfPointCloudFrame(
-                grid_coord=np.zeros((0, 3), dtype=np.int32),
-                xyz_world=np.zeros((0, 3), dtype=np.float32),
-                rgb=np.zeros((0, 3), dtype=np.float32),
-                normal_world=np.zeros((0, 3), dtype=np.float32),
-                valid_point_mask=np.zeros((0,), dtype=bool),
-                frame_valid=False,
+    def _sample_camera(
+        self,
+        *,
+        rgb: np.ndarray | None,
+        depth: np.ndarray | None,
+        camera_name: str,
+        robot_obs: np.ndarray | None = None,
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray] | None:
+        if depth is None:
+            return None
+        depth_np = np.asarray(depth, dtype=np.float32)
+        if depth_np.ndim == 3 and depth_np.shape[-1] == 1:
+            depth_np = depth_np[..., 0]
+        if depth_np.ndim != 2:
+            raise ValueError(f"{camera_name} depth must be 2D, got {depth_np.shape}")
+        if rgb is None:
+            rgb_np = np.zeros((*depth_np.shape, 3), dtype=np.uint8)
+        else:
+            rgb_np = np.asarray(rgb)
+        if rgb_np.ndim != 3 or rgb_np.shape[:2] != depth_np.shape or rgb_np.shape[-1] != 3:
+            raise ValueError(
+                f"{camera_name} rgb/depth resolution mismatch: rgb={rgb_np.shape} depth={depth_np.shape}"
             )
-
-        x = (uu - self._cx) / self._fx * depth
-        y = (vv - self._cy) / self._fy * depth
-        points_cam = np.stack([x, y, depth], axis=-1).astype(np.float32)
+        depth_np = depth_np * self.depth_scale
+        spec = self._camera_specs[camera_name]
+        camera_pose_world = spec["W_T_C"]
+        if camera_pose_world is None:
+            if robot_obs is None:
+                raise ValueError(
+                    f"{camera_name} camera requires robot_obs to resolve E_T_C extrinsics into world coordinates."
+                )
+            camera_pose_world = (self._local_frame.make_transform(np.asarray(robot_obs, dtype=np.float32)) @ spec["E_T_C"]).astype(
+                np.float32
+            )
+        height, width = depth_np.shape
+        uu, vv = np.meshgrid(np.arange(width, dtype=np.float32), np.arange(height, dtype=np.float32))
+        valid = np.isfinite(depth_np) & (depth_np > self.z_min) & (depth_np < self.z_max)
+        if not np.any(valid):
+            return None
+        x = (uu - float(spec["cx"])) / float(spec["fx"]) * depth_np
+        y = (vv - float(spec["cy"])) / float(spec["fy"]) * depth_np
+        points_cam = np.stack([x, y, depth_np], axis=-1).astype(np.float32)
         normals_cam, normal_valid = _finite_difference_normals(points_cam, valid)
-
         step_mask = np.zeros_like(valid, dtype=bool)
         step_mask[:: self.stride, :: self.stride] = True
         sampled_mask = valid & step_mask
-        sampled_indices = np.argwhere(sampled_mask)
-        if sampled_indices.size == 0:
-            return PicfPointCloudFrame(
-                grid_coord=np.zeros((0, 3), dtype=np.int32),
-                xyz_world=np.zeros((0, 3), dtype=np.float32),
-                rgb=np.zeros((0, 3), dtype=np.float32),
-                normal_world=np.zeros((0, 3), dtype=np.float32),
-                valid_point_mask=np.zeros((0,), dtype=bool),
-                frame_valid=False,
-            )
-
+        if not np.any(sampled_mask):
+            return None
         xyz_cam = points_cam[sampled_mask]
-        rgb_sel = rgb[sampled_mask].astype(np.float32) / 255.0
+        rgb_sel = rgb_np[sampled_mask].astype(np.float32) / 255.0
         normals_sel = normals_cam[sampled_mask]
         missing_normals = ~normal_valid[sampled_mask]
         if np.any(missing_normals):
             fallback = normalize_vectors(-xyz_cam[missing_normals])
             normals_sel = normals_sel.copy()
             normals_sel[missing_normals] = fallback
-
         if self.use_world:
-            xyz = transform_points(xyz_cam, self.W_T_C)
-            normals = transform_normals(normals_sel, self.W_T_C)
+            xyz = transform_points(xyz_cam, camera_pose_world)
+            normals = transform_normals(normals_sel, camera_pose_world)
         else:
             xyz = xyz_cam.astype(np.float32)
             normals = normalize_vectors(normals_sel)
+        return xyz, rgb_sel, normals
+
+    def __call__(self, sample: Mapping[str, np.ndarray]) -> PicfPointCloudFrame:
+        clouds: list[tuple[np.ndarray, np.ndarray, np.ndarray]] = []
+        static_cloud = self._sample_camera(
+            rgb=np.asarray(sample["rgb_static"]),
+            depth=np.asarray(sample["depth_static"], dtype=np.float32),
+            camera_name=self.static_cam_name,
+            robot_obs=None if sample.get("robot_obs") is None else np.asarray(sample["robot_obs"], dtype=np.float32),
+        )
+        if static_cloud is not None:
+            clouds.append(static_cloud)
+        if self.use_gripper_depth and self.gripper_cam_name in self._camera_specs:
+            gripper_cloud = self._sample_camera(
+                rgb=None if sample.get("rgb_gripper") is None else np.asarray(sample["rgb_gripper"]),
+                depth=None if sample.get("depth_gripper") is None else np.asarray(sample["depth_gripper"], dtype=np.float32),
+                camera_name=self.gripper_cam_name,
+                robot_obs=None if sample.get("robot_obs") is None else np.asarray(sample["robot_obs"], dtype=np.float32),
+            )
+            if gripper_cloud is not None:
+                clouds.append(gripper_cloud)
+        if not clouds:
+            return PicfPointCloudFrame(
+                grid_coord=np.zeros((0, 3), dtype=np.int32),
+                xyz_world=np.zeros((0, 3), dtype=np.float32),
+                rgb=np.zeros((0, 3), dtype=np.float32),
+                normal_world=np.zeros((0, 3), dtype=np.float32),
+                valid_point_mask=np.zeros((0,), dtype=bool),
+                frame_valid=False,
+            )
+        xyz = np.concatenate([xyz_part for xyz_part, _, _ in clouds], axis=0)
+        rgb_sel = np.concatenate([rgb_part for _, rgb_part, _ in clouds], axis=0)
+        normals = np.concatenate([normal_part for _, _, normal_part in clouds], axis=0)
 
         focus_mask = None
         focus_weights = None
+        focus_centers_world = sample.get("focus_centers_world")
         focus_center_world = sample.get("focus_center_world")
         focus_radius_m = sample.get("focus_radius_m")
-        if focus_center_world is not None:
+        if focus_centers_world is None and focus_center_world is not None:
+            focus_centers_world = np.asarray(focus_center_world, dtype=np.float32).reshape(1, 3)
+        if focus_centers_world is not None:
             if not self.use_world:
                 raise ValueError("focus_center_world requires use_world=True so point selection stays in a single frame.")
             if focus_radius_m is None:
-                raise ValueError("focus_radius_m is required when focus_center_world is provided.")
-            focus_center = np.asarray(focus_center_world, dtype=np.float32).reshape(3)
+                raise ValueError("focus_radius_m is required when focus_centers_world is provided.")
+            focus_centers = np.asarray(focus_centers_world, dtype=np.float32).reshape(-1, 3)
             focus_radius = float(focus_radius_m)
-            focus_dist = np.linalg.norm(xyz - focus_center[None, :], axis=1)
+            focus_dist = np.linalg.norm(xyz[:, None, :] - focus_centers[None, :, :], axis=-1).min(axis=1)
             focus_mask = focus_dist <= focus_radius
             focus_weights = 1.0 + self.focus_boost * np.exp(-(focus_dist**2) / max(2.0 * focus_radius * focus_radius, 1e-8))
 

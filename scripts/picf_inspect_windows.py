@@ -33,6 +33,21 @@ def _finite_stats(name: str, value) -> dict[str, object]:
     }
 
 
+def _point_set_stats(point_set) -> dict[str, object] | None:
+    if point_set is None:
+        return None
+    valid_mask = np.asarray(point_set.valid_point_mask, dtype=bool)
+    return {
+        "frame_valid": bool(point_set.frame_valid),
+        "num_points": int(point_set.num_points),
+        "num_valid_points": int(valid_mask.sum()),
+        **_finite_stats("grid_coord", point_set.grid_coord),
+        **_finite_stats("xyz_world", point_set.xyz_world),
+        **_finite_stats("rgb", point_set.rgb),
+        **_finite_stats("normal_world", point_set.normal_world),
+    }
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="Inspect specific CALVIN transition windows used by PICF training.")
     parser.add_argument("--calvin-root", required=True)
@@ -81,7 +96,10 @@ def main() -> None:
                         "rgb_gripper_shape": _shape(frame.rgb_gripper),
                         **_finite_stats("depth_static", frame.depth_static),
                         "robot_obs_shape": _shape(frame.robot_obs),
+                        **_finite_stats("robot_obs", frame.robot_obs),
                         "action_shape": _shape(frame.action),
+                        **_finite_stats("action", frame.action),
+                        "point_set": _point_set_stats(frame.point_set),
                         "tactile": tactile_shapes,
                     }
                 )

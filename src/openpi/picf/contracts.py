@@ -115,6 +115,8 @@ class PicfObservation:
     timestamp_s: float
     reset_scaffold: bool
     rgb_gripper: np.ndarray | None = None
+    depth_gripper: np.ndarray | None = None
+    scene_obs: np.ndarray | None = None
     point_set: PicfPointCloudFrame | None = None
     runtime_meta: RuntimeMeta | None = None
     G_t: np.ndarray | None = None
@@ -132,6 +134,10 @@ class PicfObservation:
         self.robot_obs = np.asarray(self.robot_obs, dtype=np.float32).reshape(-1)
         if self.rgb_gripper is not None:
             self.rgb_gripper = np.asarray(self.rgb_gripper)
+        if self.depth_gripper is not None:
+            self.depth_gripper = np.asarray(self.depth_gripper, dtype=np.float32)
+        if self.scene_obs is not None:
+            self.scene_obs = np.asarray(self.scene_obs, dtype=np.float32).reshape(-1)
         if self.G_t is not None:
             self.G_t = np.asarray(self.G_t, dtype=np.float32)
         if self.proprio is not None:

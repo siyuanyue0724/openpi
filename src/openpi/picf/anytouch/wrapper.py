@@ -77,6 +77,16 @@ def _mean_abs_rgb_delta(current: np.ndarray, reference: np.ndarray) -> float:
     return float(torch.mean(torch.abs(current_t - reference_t)).item())
 
 
+def _pooled_from_sensor_tokens(sensor_tokens: torch.Tensor) -> torch.Tensor:
+    cls_token = sensor_tokens[0]
+    sensor_token = sensor_tokens[1:6].mean(dim=0)
+    patch_tokens = sensor_tokens[6:]
+    patch_avg = patch_tokens.mean(dim=0)
+    patch_max = patch_tokens.max(dim=0).values
+    pooled = torch.cat([cls_token, sensor_token, patch_avg, patch_max], dim=-1)
+    return fn.layer_norm(pooled, normalized_shape=(pooled.shape[0],))
+
+
 class AnyTouch2TactileEncoder(nn.Module):
     def __init__(self, config: AnyTouchConfig | None = None):
         super().__init__()
@@ -122,18 +132,35 @@ class AnyTouch2TactileEncoder(nn.Module):
         batch = []
         sensor_ids = []
         pose_tensors: dict[str, torch.Tensor] = {}
+        background_batch = []
+        background_sensor_names: list[str] = []
+        background_sensor_ids: list[int] = []
         for sensor_name in sensor_names:
             clip_raw = np.asarray(clips_by_sensor[sensor_name])
-            clip = preprocess_tactile_clip(clip_raw, backgrounds_by_sensor.get(sensor_name), self.config)
+            background_rgb = None if backgrounds_by_sensor.get(sensor_name) is None else np.asarray(backgrounds_by_sensor[sensor_name])
+            clip = preprocess_tactile_clip(clip_raw, background_rgb, self.config)
             batch.append(clip)
-            sensor_ids.append(resolve_sensor_id(sensor_name, allow_universal=self.config.allow_universal_sensor_token))
+            sensor_id = resolve_sensor_id(sensor_name, allow_universal=self.config.allow_universal_sensor_token)
+            sensor_ids.append(sensor_id)
             pose_tensors[sensor_name] = torch.as_tensor(poses_by_sensor[sensor_name], device=self.device, dtype=self.dtype)
+            if background_rgb is not None:
+                background_clip = np.repeat(background_rgb[None, ...], clip_raw.shape[0], axis=0)
+                background_batch.append(preprocess_tactile_clip(background_clip, background_rgb, self.config))
+                background_sensor_names.append(sensor_name)
+                background_sensor_ids.append(sensor_id)
         inputs = torch.stack(batch, dim=0).to(device=self.device, dtype=self.dtype)
         sensor_id_tensor = torch.as_tensor(sensor_ids, device=self.device, dtype=torch.long)
         use_grad = bool(self.trainable and self.training)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
             tokens = self.model(inputs, sensor_id_tensor, probe=True)
+            background_pooled_by_sensor: dict[str, torch.Tensor] = {}
+            if background_batch:
+                background_inputs = torch.stack(background_batch, dim=0).to(device=self.device, dtype=self.dtype)
+                background_ids = torch.as_tensor(background_sensor_ids, device=self.device, dtype=torch.long)
+                background_tokens = self.model(background_inputs, background_ids, probe=True)
+                for index, sensor_name in enumerate(background_sensor_names):
+                    background_pooled_by_sensor[sensor_name] = _pooled_from_sensor_tokens(background_tokens[index])
         hidden_dim = int(tokens.shape[-1])
         if int(tokens.shape[0]) != len(sensor_names):
             raise RuntimeError(
@@ -147,22 +174,40 @@ class AnyTouch2TactileEncoder(nn.Module):
             clip_raw = np.asarray(clips_by_sensor[sensor_name])
             current_rgb = clip_raw[-1]
             temporal_ref = clip_raw[0]
-            pseudo_contact_score = _mean_abs_rgb_delta(current_rgb, temporal_ref)
-            cls_token = sensor_tokens[0]
-            sensor_token = sensor_tokens[1:6].mean(dim=0)
-            patch_tokens = sensor_tokens[6:]
-            patch_avg = patch_tokens.mean(dim=0)
-            patch_max = patch_tokens.max(dim=0).values
-            pooled = torch.cat([cls_token, sensor_token, patch_avg, patch_max], dim=-1)
-            pooled = fn.layer_norm(pooled, normalized_shape=(pooled.shape[0],))
+            pooled = _pooled_from_sensor_tokens(sensor_tokens)
             pooled_list.append(pooled)
+            background_pooled = background_pooled_by_sensor.get(sensor_name)
+            if backgrounds_by_sensor.get(sensor_name) is not None:
+                rgb_residual_score = _mean_abs_rgb_delta(current_rgb, np.asarray(backgrounds_by_sensor[sensor_name]))
+                latent_residual_score = (
+                    float(
+                        1.0
+                        - fn.cosine_similarity(
+                            pooled,
+                            background_pooled,
+                            dim=0,
+                            eps=1e-6,
+                        ).item()
+                    )
+                    if background_pooled is not None
+                    else 0.0
+                )
+                contact_score = 0.5 * (rgb_residual_score + latent_residual_score)
+            else:
+                rgb_residual_score = _mean_abs_rgb_delta(current_rgb, temporal_ref)
+                latent_residual_score = 0.0
+                contact_score = rgb_residual_score
             sensors[sensor_name] = AnyTouchSensorFeatures(
                 sensor_name=sensor_name,
                 sensor_id=int(sensor_id_tensor[index].item()),
                 tokens=sensor_tokens,
                 pooled_feature=pooled,
                 T_sens_to_wrist=pose_tensors[sensor_name],
-                pseudo_contact_score=float(pseudo_contact_score),
+                pseudo_contact_score=float(contact_score),
+                background_pooled_feature=background_pooled,
+                rgb_residual_score=float(rgb_residual_score),
+                latent_residual_score=float(latent_residual_score),
+                contact_score=float(contact_score),
             )
         pooled_stack = torch.stack(pooled_list, dim=0)
         global_feature = pooled_stack.mean(dim=0)

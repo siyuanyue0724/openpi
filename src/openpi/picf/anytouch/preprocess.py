@@ -21,7 +21,12 @@ def preprocess_tactile_clip(clip: np.ndarray, background_rgb: np.ndarray | None,
     if frames.ndim != 4 or frames.shape[-1] != 3:
         raise ValueError(f"Expected tactile clip [T,H,W,3], got {frames.shape}")
     clip_tensor = torch.stack([_to_float01(frame) for frame in frames], dim=0)
-    bg = _to_float01(background_rgb) if background_rgb is not None else clip_tensor[0]
+    if background_rgb is None:
+        if config.require_background:
+            raise ValueError("Tactile preprocessing requires a calibrated background frame.")
+        bg = clip_tensor[0]
+    else:
+        bg = _to_float01(background_rgb)
     clip_tensor = clip_tensor - bg.unsqueeze(0) + float(config.offset)
     clip_tensor = clip_tensor.clamp(0.0, 1.0)
     clip_tensor = clip_tensor.permute(0, 3, 1, 2).contiguous()

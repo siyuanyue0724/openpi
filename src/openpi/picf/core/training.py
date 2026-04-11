@@ -40,6 +40,12 @@ class PicfTransitionLossConfig:
     tau_pt: float = 0.07
     tau_route_p: float = 0.1
     tau_route_v: float = 0.1
+    pt_bag_radius_m: float = 0.045
+    pt_bag_sigma_m: float = 0.015
+    pt_bag_kmin: int = 32
+    pt_back_slack_m: float = 0.008
+    p_align_on: float = 0.55
+    p_align_off: float = 0.35
 
 
 @dataclasses.dataclass(frozen=True)
@@ -52,6 +58,12 @@ class PicfAlignmentLossConfig:
     tau_pt: float = 0.07
     tau_route_p: float = 0.1
     tau_route_v: float = 0.1
+    pt_bag_radius_m: float = 0.045
+    pt_bag_sigma_m: float = 0.015
+    pt_bag_kmin: int = 32
+    pt_back_slack_m: float = 0.008
+    p_align_on: float = 0.55
+    p_align_off: float = 0.35
 
 
 @dataclasses.dataclass(frozen=True)
@@ -246,7 +258,9 @@ def _point_tactile_alignment(
     tactile_embed = token_field.tactile_align_embeddings
     point_positions = token_field.point_positions
     tactile_positions = token_field.tactile_positions_world
+    tactile_prob = token_field.tactile_contact_prob
     tactile_gate = token_field.tactile_contact_gate
+    tactile_normals = token_field.tactile_normals_world
     zero = token_field.fused_tokens.new_zeros(())
     if point_embed.shape[0] == 0 or tactile_embed.shape[0] == 0 or point_positions.shape[0] == 0 or tactile_positions.shape[0] == 0:
         return _zero_weight_sum(zero, point_embed, tactile_embed)
@@ -262,27 +276,37 @@ def _point_tactile_alignment(
             f"tactile_embed.shape[0]={int(tactile_embed.shape[0])} "
             f"!= tactile_positions.shape[0]={int(tactile_positions.shape[0])}"
         )
+    if tactile_prob is None or tactile_prob.numel() != tactile_embed.shape[0]:
+        tactile_prob = tactile_gate
+    if tactile_prob is None or tactile_prob.numel() != tactile_embed.shape[0]:
+        tactile_prob = torch.ones((tactile_embed.shape[0],), device=tactile_embed.device, dtype=tactile_embed.dtype)
     tau_pt = max(float(config.tau_pt), eps)
-    distances = torch.cdist(tactile_positions, point_positions)
-    nearest_point = torch.argmin(distances, dim=1)
-    if nearest_point.numel() > 0:
-        min_index = int(nearest_point.min().item())
-        max_index = int(nearest_point.max().item())
-        if min_index < 0 or max_index >= int(point_embed.shape[0]):
-            raise RuntimeError(
-                "PICF point-tactile alignment nearest-point index out of bounds: "
-                f"valid=[0,{int(point_embed.shape[0]) - 1}] got min={min_index} max={max_index}"
-            )
-    if tactile_gate.numel() != tactile_embed.shape[0]:
-        tactile_gate = torch.ones((tactile_embed.shape[0],), device=tactile_embed.device, dtype=tactile_embed.dtype)
+    radius = max(float(config.pt_bag_radius_m), eps)
+    sigma = max(float(config.pt_bag_sigma_m), eps)
+    k_min = max(int(config.pt_bag_kmin), 1)
+    p_align_on = max(float(config.p_align_on), eps)
+    p_align_off = max(min(float(config.p_align_off), p_align_on - eps), 0.0)
     losses = []
     weights = []
     for tactile_index in range(tactile_embed.shape[0]):
-        weight = tactile_gate[tactile_index]
+        weight = torch.clamp((tactile_prob[tactile_index] - p_align_off) / max(p_align_on - p_align_off, eps), min=0.0, max=1.0)
         if float(weight.item()) <= 0.0:
             continue
-        point_index = int(nearest_point[tactile_index].item())
-        logits = (point_embed[point_index] @ tactile_embed.T) / tau_pt
+        diffs = point_positions - tactile_positions[tactile_index][None, :]
+        dists = torch.linalg.norm(diffs, dim=-1)
+        candidate_mask = dists <= radius
+        if tactile_normals is not None and tactile_normals.shape == tactile_positions.shape:
+            normal = tactile_normals[tactile_index]
+            candidate_mask = candidate_mask & ((diffs @ normal) >= -float(config.pt_back_slack_m))
+        candidate_idx = torch.nonzero(candidate_mask, as_tuple=False).reshape(-1)
+        if candidate_idx.numel() < k_min:
+            candidate_idx = torch.topk(dists, k=min(k_min, dists.shape[0]), largest=False).indices
+        if candidate_idx.numel() == 0:
+            continue
+        selected_dists = dists[candidate_idx]
+        alpha = torch.exp(-(selected_dists**2) / (2.0 * (sigma**2)))
+        pooled = torch.sum(alpha[:, None] * point_embed[candidate_idx], dim=0) / torch.clamp(alpha.sum(), min=eps)
+        logits = (pooled @ tactile_embed.T) / tau_pt
         target = torch.tensor([tactile_index], device=logits.device, dtype=torch.long)
         losses.append(weight * fn.cross_entropy(logits[None, :], target))
         weights.append(weight)

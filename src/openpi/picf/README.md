@@ -186,6 +186,8 @@
     - `depth_tactile = (160, 120, 2)`
   - 也就是两路 tactile RGB 传感器按通道拼接后的 `3*K` 形式
   - 现有 [`src/openpi/picf/replay/calvin_replay.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/replay/calvin_replay.py) 已能把它拆成两路 `PicfTactilePacket`
+  - CALVIN 还明确提供 `depth_gripper`；当前 point path 已经把它并入双深度几何分支，不再只依赖 `depth_static`
+  - `robot_obs[0:6]` 在 CALVIN 里是 TCP pose，`robot_obs[6]` 是 gripper opening width；当前 tactile pose 也不再是假定的固定 `±1cm`，而是用 TCP-local 标定量和 opening width 动态求左右指尖中心
 - 在云机上，真实 `V-JEPA + AnyTouch + CALVIN tactile replay` 组合已经完成一步训练闭环：
   - 使用 `CalvinSequentialReplay(... use_tactile=True)` 构造 observation
   - `PicfFullCore` 同时加载真实 `V-JEPA` 与真实 `AnyTouch` checkpoint
@@ -673,10 +675,36 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - sparse radius-neighborhood candidate mask：已实现
 - attention-level geometry bias：已实现
 - focus loss：已实现，默认从 fusion attention slice 读出
-- point-tactile alignment loss：已实现，当前通过 tactile sensor world pose 最近点近似构造正例
+- point-tactile alignment loss：已实现，当前使用 fingertip-centered local bag
+  - 候选集 = “指尖中心半径球 + 传感器前半空间”
+  - 候选过少时回退到 KNN
+  - point embedding 先做高斯加权池化，再与 tactile embedding 做分类式对齐
 - `FusionTransformer`：当前已经是 bias-capable attention stack，并能导出平均 attention map
 
-### 4.7 当前 `L_{pv}^{weak}` 是代码对齐版近似
+### 4.7 最终 tactile 部署默认值
+
+当前训练入口 [`scripts/picf_core_train.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train.py) 已切到这组默认值：
+
+- `--stride 4`
+- `--max-points 1024`
+- `--crop-radius-m 0.10`
+- `--point-focus-sigma-m 0.03`
+- `--pt-bag-radius-m 0.045`
+- `--pt-bag-sigma-m 0.015`
+- `--pt-bag-kmin 32`
+- `--pt-back-slack-m 0.008`
+- `--p-align-on 0.55`
+- `--p-align-off 0.35`
+
+当 `tactile_mode=encoder` 时，训练入口现在会 fail fast 检查三份离线标定产物：
+
+- `tactile_backgrounds.npz`
+- `tactile_contact_stats.json`
+- `tactile_fingertip_calibration.json`
+
+也就是说，最终部署不再允许“有 AnyTouch checkpoint，但没有背景 / contact 阈值 / 指尖几何标定”的半配置训练。
+
+### 4.8 当前 `L_{pv}^{weak}` 是代码对齐版近似
 
 总纲里更理想的 `L_{pv}^{weak}` 会排除 projective neighborhood 高度重叠的 visual negatives。
 当前代码先用了更简单、数值稳定的近似：
@@ -704,7 +732,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 但 `projective_compatibility` 本身仍是 dense 计算，再与 sparse neighborhood 相交
 - 也就是说，当前是“dense compatibility + sparse candidate mask”的实现，而不是完全稀疏的 compatibility builder
 
-### 4.8 Observation / Anchor read 当前用 residual cross-attention 近似实现
+### 4.9 Observation / Anchor read 当前用 residual cross-attention 近似实现
 
 总纲里 observation-anchor read 和 persistent-anchor evidence read 记成了显式 `GRU_obs / GRU_anc` 更新。
 当前代码实现采用的是更轻量的工程近似：
@@ -775,13 +803,16 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 当前 `_CalvinTransitionSource` 已经会在 `use_tactile=True` 时读取：
   - `rgb_tactile`
   - `depth_tactile`
+  - `depth_gripper`
   - 并通过 `_calvin_tactile_packet(...)` 拆成两路 `PicfTactilePacket`
+  - 该 packet 现在还会带 calibrated tactile background，并用 TCP-local 动态指尖中心替代固定 `±1cm`
 - visual path 现在分两种：
   - `visual_mode=stub`：走 `_rgb_visual_override(...) + _NullVisualEncoder()`
   - `visual_mode=encoder`：真实实例化 `Vjepa2VisualEncoder`
 - tactile path 现在分两种：
   - `tactile_mode=stub`：走 `_NullTactileEncoder()`
   - `tactile_mode=encoder`：真实实例化 `AnyTouch2TactileEncoder`
+  - encoder 路径在 CALVIN 上默认要求 calibrated background；没有 background 时不再回退到 `clip[0]`
 - point path 现在分两种：
   - `point_backbone=rgb`：轻量 RGB point feature
   - `point_backbone=sonata`：真实实例化 `SonataPointFeatureExtractor`
@@ -1008,6 +1039,10 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   优先级是：
   - 显式接触：`force_vec / indent_depth_m / tactile_pressure`
   - 否则退回基于 tactile history 的 pseudo-contact gate
+  - 当前 pseudo-contact gate 采用 fast-on / slow-off：
+    - turn-on 看当前 contact evidence，避免首帧真实接触被 EMA 延迟吞掉
+    - release 仍保留 EMA 路径，避免 gate chatter
+  - no-contact tactile 仍然保留在 perception/world-model 路径里，但不会再进入 fusion / anchor / `L_pt` 几何正例
   对 CALVIN 这类没有显式接触标注的数据，`loss_pt` 可能长期稀疏，但不应再因为无条件正例而卡在 `log(2)` 附近乱学。
 
 第三层是 smoke 脚本的 JSON 输出，来自
@@ -1194,13 +1229,33 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
       - 真实双卡训练复现
       - exact-prefix replay
       - 且 `scripts/picf_replay_windows.py` 中 `rng_rank` 与 `rank_seed` 必须对齐；否则 flat-index 序列虽然一致，但模型/dropout RNG 轨迹并不一致
+      - 且 exact-prefix replay 不能把 `rng_num_windows` 误当成“raw RNG draws 数”；真实训练会把 retryable 空窗直接丢掉并继续抽样，所以 replay 必须按“accepted windows + retryable resample”去重放
+      - 在 `r38` 的 rank1 复盘里，训练日志中的 accepted `step=455..458` 对应 raw RNG draws `463..466`，说明前面已经发生了 `8` 次 retryable resample；如果 replay 不模拟这层 resample，就会把参数轨迹对错
       - 现已支持 `--override-sonata-disable-flash true/false` 做 Sonata flash A/B
       - 现已支持 `--split-backward-from-step N`，在目标区间把 `loss_total.backward()` 拆成各个 loss 组件逐项同步执行
       - 现已支持 `--save-checkpoint-every N --save-checkpoint-dir ...`，为 long-prefix replay 留中间 checkpoint，避免每次都从 step 1 重放
+      - replay checkpoint 现已额外保存 `replay_rng.pt`；resume 时如果没有这个文件，就不能把该条恢复轨迹视为“严格 exact replay”
+      - replay checkpoint 现已支持 `--max-checkpoints K` 自动裁剪旧 step 目录；云机调试默认应保持 `K<=5`，避免再次把 `/tmp` 写爆
+      - replay 还必须镜像训练主循环的 **per-step LR schedule** 和 **grad clipping**；否则即便 flat-index 前缀对齐，也会因为优化器语义不同而过早偏离真实参数轨迹
+      - 当 `--rng-num-windows` 与 `--checkpoint` 一起使用时，若 checkpoint 目录中存在 `replay_state.json`，replay 会恢复到保存时的 accepted-step / raw-draw / retryable-skip 计数，再继续往后重放；这一步对带 resample 的 exact-prefix replay 很关键，否则从 step 400 之后继续时会再次把 RNG 轨迹跑偏
+      - 对所有 `logvar -> variance` 路径，不能写成 `torch.clamp(torch.exp(logvar), min=..., max=...)`
+        - 在 `logvar` 很大时，前向会先溢出成 `inf`，再被 `clamp` 截回有限值；但反向会命中 `ExpBackward0` 的 `0 * inf -> NaN`
+        - 当前实现已统一改成“先在 log-space 截断到 `[log(sigma_min2), log(sigma_max2)]`，再 `exp`”，这样前向语义等价，反向不会再制造假性非有限梯度
+      - 运行策略应区分两种模式：
+        - `split-backward` / `diagnose-nonfinite-by-component` 是**窄区间诊断模式**，只在已经把坏点压缩到很小区间时打开；它会显著拖慢 replay，不适合作为常规 1500+/12500+ 长跑默认配置
+        - 常规稳定性验证 / 长跑应优先使用 exact-prefix replay 或真实训练，但默认关闭逐组件诊断；一旦再次出现非有限梯度，再从最近 replay checkpoint 回退到窄区间重放并打开诊断
+      - 本地和云机应保持关键调试文件同步，至少包括：
+        - `src/openpi/picf/core/pipeline.py`
+        - `scripts/picf_replay_windows.py`
+        - 对应测试和 README
+      - 单窗 probe 只能说明“这个窗口本身是否天然有毒”；例如 `flat_index=797970`（训练日志中 point counts 为 `(3,1,3)`）单独做 split-backward probe 可以完全通过，所以根因更可能是“真实前缀参数状态 + retryable resample 后的 accepted-window 轨迹”
     - 当前权重结论：
       - 在 crash 定位期间**不要继续上调 action loss 权重**
-      - 现有云机日志里 `loss_action / loss_total` 已经长期处于主导区间（约 `0.53` 到 `0.82`）
-      - 先隔离 crash 根因，再决定是否重新配重；否则会把优化轨迹和复现条件一起改掉
+      - 现有训练实现里，`loss_action = 2.0 * L_pos + 2.0 * L_rot + 2.0 * L_gripper`
+      - 旧云机 `1500` step replay 的最近 `300` 条 loss 统计里，`loss_action / loss_total ≈ 0.88`
+      - 同一窗口里 `loss_pt / loss_total ≈ 0.0018`；所以当前主矛盾不是“action 权重太小”，而是旧 tactile 配置几乎没有真正激活 point-tactile grounding
+      - 对最终 tactile 方案，应该先看 `tactile_active_rate / pt_bag_nonempty_rate / loss_pt_nonzero_rate`，而不是先把 action 权重继续上调
+      - 如需长期审计，可直接运行：`python scripts/picf_loss_audit.py --log <jsonl_or_log> --tail 300`
 - 验证级别说明：
 - 以上结论来自代码路径审计、回归测试、以及云机双卡 smoke
 - 它们足以支持“当前工程实现满足既定数学契约”的判断
@@ -1819,6 +1874,10 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
 - partial mirror 不能只复制 `training/episode_*.npz` 和 `training/lang_annotations/auto_lang_ann.npy`；训练初始化还会从 `calvin_root/calib/cameras.json` 构造 pointcloud / visual camera contract，所以 `calib/` 也必须一并带过去。
 - `scripts/picf_stage_calvin_partial_cache.py` 现已默认复制整个 `calib/` 目录，并跳过已存在文件，便于把 `3000`-step cache 向更高步数增量扩展。
 - 另外，`picf_core_train.py` 会在 DDP 包装前用 `source.window(rank)` 做一次 lazy-module warmup；partial cache 也必须覆盖这两个 warmup windows。脚本现在已经把这条初始化读路径纳入 staged set。
+- 云机上后续又定位到另一类非数据问题：DDP 主训练脚本在 startup 阶段打印过多 runtime-introspection 日志时，rank0 可能会在真正进入 step loop 之前长时间卡住，表面现象像“训练没起步、GPU 几乎空闲、metrics 也不落盘”。
+- 当前修复是让 `scripts/picf_core_train.py` 在 DDP 下默认启用 compact startup logging，只保留必要 contract 日志；如果必须排查 startup，再显式设置 `OPENPI_VERBOSE_STARTUP_LOGS=1` 打开详细日志。
+- 对应地，云机稳定性验证应优先使用本地 partial cache + `/tmp` 本地 checkpoint/log 路径；只有确认 step loop 能稳定推进后，再考虑把 checkpoint/log 落回 `/mnt`。
+- `scripts/picf_replay_windows.py` 的 `split-backward` 诊断现已改成“逐组件重算 forward/backward，再执行一次真实 `loss_total.backward()`”；这样避免了单图 `retain_graph=True` 连续回传造成的诊断态额外显存峰值，更适合在 `450+` 这类高风险区间做组件级定位。
 - 对应脚本见 [`scripts/picf_stage_calvin_partial_cache.py`](/home/siyuanyue/Documents/openpi/scripts/picf_stage_calvin_partial_cache.py)。
 
 

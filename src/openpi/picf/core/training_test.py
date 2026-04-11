@@ -33,13 +33,17 @@ class _UnusedVisualEncoder:
 
 class _StubTactileEncoder:
     def encode_sensor_clips(self, *, clips_by_sensor, backgrounds_by_sensor, poses_by_sensor):
-        del backgrounds_by_sensor
         sensors = {}
         pooled = []
         for index, sensor_name in enumerate(sorted(clips_by_sensor)):
             clip = np.asarray(clips_by_sensor[sensor_name], dtype=np.float32)
             value = float(clip.mean()) / 255.0 if clip.size > 0 else 0.0
-            pseudo_contact = float(np.abs(clip[-1] - clip[0]).mean() / 255.0) if clip.shape[0] > 1 else 0.0
+            background = backgrounds_by_sensor.get(sensor_name)
+            if background is not None:
+                background = np.asarray(background, dtype=np.float32)
+                pseudo_contact = float(np.abs(clip[-1] - background).mean() / 255.0)
+            else:
+                pseudo_contact = float(np.abs(clip[-1] - clip[0]).mean() / 255.0) if clip.shape[0] > 1 else 0.0
             tokens = torch.full((32, 64), value + index, dtype=torch.float32)
             pooled_feature = torch.full((128,), value + index, dtype=torch.float32)
             pose = torch.as_tensor(poses_by_sensor[sensor_name], dtype=torch.float32)
@@ -50,6 +54,8 @@ class _StubTactileEncoder:
                 pooled_feature=pooled_feature,
                 T_sens_to_wrist=pose,
                 pseudo_contact_score=pseudo_contact,
+                rgb_residual_score=pseudo_contact,
+                contact_score=pseudo_contact,
             )
             pooled.append(pooled_feature)
         if not pooled:
@@ -104,26 +110,33 @@ def _make_core(tmp_path: Path) -> tuple[PicfFullCore, CalvinSequentialReplay]:
 def _point_override(core: PicfFullCore, observation: PicfObservation) -> np.ndarray:
     if observation.G_t is None:
         observation.G_t = core.local_frame.make_transform(observation.robot_obs)
+    focus_centers = [np.asarray(observation.G_t[:3, 3], dtype=np.float32)]
+    if observation.tactile is not None:
+        for sensor in observation.tactile.sensors:
+            focus_centers.append((np.asarray(observation.G_t, dtype=np.float32) @ np.asarray(sensor.T_sens_to_wrist, dtype=np.float32))[:3, 3])
     if observation.point_set is None:
         observation.point_set = core.pointcloud_builder(
             {
                 "rgb_static": observation.rgb_static,
                 "depth_static": observation.depth_static,
-                "focus_center_world": np.asarray(observation.G_t[:3, 3], dtype=np.float32),
+                "rgb_gripper": observation.rgb_gripper,
+                "depth_gripper": observation.depth_gripper,
+                "focus_centers_world": np.stack(focus_centers, axis=0),
                 "focus_radius_m": core.config.crop_radius_m,
             }
         )
     xyz = np.asarray(observation.point_set.xyz_world, dtype=np.float32)
-    center = np.asarray(observation.G_t[:3, 3], dtype=np.float32)
-    keep = np.linalg.norm(xyz - center[None, :], axis=1) <= core.config.crop_radius_m
+    centers = np.stack(focus_centers, axis=0)
+    keep = np.linalg.norm(xyz[:, None, :] - centers[None, :, :], axis=-1).min(axis=1) <= core.config.crop_radius_m
     n_points = int(keep.sum())
     return np.linspace(0.0, 1.0, max(n_points * 8, 1), dtype=np.float32).reshape(n_points, 8) if n_points > 0 else np.zeros((0, 8), dtype=np.float32)
 
 
-def _make_tactile_packet(step_id: int, *, pose_shift: float = 0.0) -> PicfTactilePacket:
-    left = np.full((32, 32, 3), 40 + step_id, dtype=np.uint8)
-    right = np.full((32, 32, 3), 80 + step_id, dtype=np.uint8)
-    bg = np.zeros((32, 32, 3), dtype=np.uint8)
+def _make_tactile_packet(step_id: int, *, pose_shift: float = 0.0, contact_shift: int = 0) -> PicfTactilePacket:
+    left_bg = np.full((32, 32, 3), 40 + step_id, dtype=np.uint8)
+    right_bg = np.full((32, 32, 3), 80 + step_id, dtype=np.uint8)
+    left = np.full((32, 32, 3), 40 + step_id + contact_shift, dtype=np.uint8)
+    right = np.full((32, 32, 3), 80 + step_id + contact_shift, dtype=np.uint8)
     left_pose = np.eye(4, dtype=np.float32)
     left_pose[:3, 3] = np.array([0.01 + pose_shift, 0.0, 0.0], dtype=np.float32)
     right_pose = np.eye(4, dtype=np.float32)
@@ -133,7 +146,7 @@ def _make_tactile_packet(step_id: int, *, pose_shift: float = 0.0) -> PicfTactil
             TactileSensorFrame(rgb=left, sensor_name="digit", T_sens_to_wrist=left_pose, timestamp_s=float(step_id) / 30.0),
             TactileSensorFrame(rgb=right, sensor_name="gelsight_mini", T_sens_to_wrist=right_pose, timestamp_s=float(step_id) / 30.0),
         ),
-        background_rgb_by_sensor={"digit": bg, "gelsight_mini": bg},
+        background_rgb_by_sensor={"digit": left_bg, "gelsight_mini": right_bg},
     )
 
 
@@ -544,6 +557,9 @@ def test_alignment_loss_point_tactile_branch_defaults_off_without_explicit_conta
     gate = output.state.token_field.tactile_contact_gate
     assert gate.shape[0] == 2
     assert torch.allclose(gate, torch.zeros_like(gate))
+    assert output.state.token_field.tactile_tokens_all is not None
+    assert output.state.token_field.tactile_tokens_all.shape[0] == 2
+    assert output.state.token_field.tactile_tokens.shape[0] == 0
     alignment = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(lambda_pt=1.0))
     assert torch.allclose(alignment.pt, torch.zeros_like(alignment.pt))
 
@@ -552,7 +568,7 @@ def test_alignment_loss_point_tactile_branch_uses_pseudo_contact_from_tactile_hi
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
     frames[0].tactile = _make_tactile_packet(frames[0].step_id)
-    frames[1].tactile = _make_tactile_packet(frames[1].step_id + 25, pose_shift=0.01)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, pose_shift=0.01, contact_shift=25)
 
     first = core.step(
         frames[0],
@@ -571,6 +587,57 @@ def test_alignment_loss_point_tactile_branch_uses_pseudo_contact_from_tactile_hi
     gate = second.state.token_field.tactile_contact_gate
     assert gate.shape[0] == 2
     assert torch.all(gate > 0.0)
+    assert second.state.token_field.tactile_tokens.shape[0] == 2
     alignment = compute_alignment_loss(second.state, config=PicfAlignmentLossConfig(lambda_pt=1.0))
     assert torch.isfinite(alignment.pt)
     assert alignment.pt > 0.0
+
+
+def test_alignment_loss_uses_fingertip_local_bag_and_front_halfspace() -> None:
+    dtype = torch.float32
+    token_field = PicfTokenFieldState(
+        point_tokens=torch.zeros((2, 2), dtype=dtype),
+        visual_tokens=torch.zeros((0, 2), dtype=dtype),
+        tactile_tokens=torch.zeros((0, 2), dtype=dtype),
+        context_tokens=torch.zeros((0, 2), dtype=dtype),
+        fused_tokens=torch.zeros((0, 2), dtype=dtype),
+        point_positions=torch.tensor([[-0.001, 0.0, 0.0], [0.02, 0.0, 0.0]], dtype=dtype),
+        modality_ids=torch.zeros((0,), dtype=torch.long),
+        point_align_embeddings=torch.tensor([[0.0, 1.0], [1.0, 0.0]], dtype=dtype),
+        visual_align_embeddings=torch.zeros((0, 2), dtype=dtype),
+        tactile_align_embeddings=torch.tensor([[1.0, 0.0], [0.0, 1.0]], dtype=dtype),
+        tactile_positions_world=torch.tensor([[0.0, 0.0, 0.0], [0.3, 0.0, 0.0]], dtype=dtype),
+        tactile_contact_gate=torch.tensor([1.0, 0.0], dtype=dtype),
+        tactile_contact_prob=torch.tensor([1.0, 0.2], dtype=dtype),
+        tactile_normals_world=torch.tensor([[1.0, 0.0, 0.0], [1.0, 0.0, 0.0]], dtype=dtype),
+    )
+    obs = PicfObservationAnchorState(
+        seed_indices=torch.zeros((0,), dtype=torch.long),
+        tokens=torch.zeros((0, 2), dtype=dtype),
+        point_weights=torch.zeros((0, 2), dtype=dtype),
+        routing_mass_point=torch.zeros((0, 2), dtype=dtype),
+        routing_mass_visual=torch.zeros((0, 0), dtype=dtype),
+        routing_support_point=torch.zeros((2,), dtype=dtype),
+        routing_support_visual=torch.zeros((0,), dtype=dtype),
+        routing_gate_point=torch.zeros((2,), dtype=dtype),
+        routing_gate_visual=torch.zeros((0,), dtype=dtype),
+        x=torch.zeros((0, 3), dtype=dtype),
+        S=torch.zeros((0, 3, 3), dtype=dtype),
+        a=torch.zeros((0, 3), dtype=dtype),
+    )
+    state = SimpleNamespace(token_field=token_field, observation_anchors=obs)
+    alignment = compute_alignment_loss(
+        state,
+        config=PicfAlignmentLossConfig(
+            lambda_pt=1.0,
+            tau_pt=0.1,
+            pt_bag_radius_m=0.03,
+            pt_bag_sigma_m=0.01,
+            pt_bag_kmin=1,
+            pt_back_slack_m=0.0005,
+            p_align_on=0.55,
+            p_align_off=0.35,
+        ),
+    )
+    assert torch.isfinite(alignment.pt)
+    assert float(alignment.pt.item()) < 1e-3

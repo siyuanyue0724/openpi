@@ -29,6 +29,7 @@ class PicfCoreConfig:
     attention_heads: int = 8
     query_rounds: int = 2
     crop_radius_m: float = 0.08
+    point_focus_sigma_m: float = 0.03
     workspace_radius_m: float = 0.5
     epsilon_s: float = 1e-6
     epsilon_a: float = 1e-6
@@ -55,6 +56,11 @@ class PicfCoreConfig:
     tau_indent_m: float = 5e-4
     tau_tactile_pressure: float = 0.1
     tau_tactile_pseudo_contact: float = 0.04
+    tactile_contact_tau_on: float = 0.08
+    tactile_contact_tau_off: float = 0.04
+    tactile_contact_temperature: float = 0.02
+    tactile_contact_ema_beta: float = 0.8
+    tactile_anchor_prob_on: float = 0.8
     max_action_pos_m: float = 0.025
     max_action_rot_rad: float = math.pi / 18.0
     max_action_gripper: float = 1.0

@@ -13,6 +13,10 @@ class AnyTouchSensorFeatures:
     pooled_feature: torch.Tensor
     T_sens_to_wrist: torch.Tensor
     pseudo_contact_score: float = 0.0
+    background_pooled_feature: torch.Tensor | None = None
+    rgb_residual_score: float = 0.0
+    latent_residual_score: float = 0.0
+    contact_score: float = 0.0
 
 
 @dataclasses.dataclass(frozen=True)

@@ -39,8 +39,15 @@ class PicfTokenFieldState:
     tactile_align_embeddings: torch.Tensor
     tactile_positions_world: torch.Tensor
     tactile_contact_gate: torch.Tensor
-    fusion_attention_mean: torch.Tensor | None
-    projective_geometry: PicfProjectiveGeometryState | None
+    tactile_tokens_all: torch.Tensor | None = None
+    tactile_tokens_active: torch.Tensor | None = None
+    tactile_contact_prob: torch.Tensor | None = None
+    tactile_anchor_mask: torch.Tensor | None = None
+    tactile_normals_world: torch.Tensor | None = None
+    tactile_contact_score: torch.Tensor | None = None
+    tactile_contact_score_ema: torch.Tensor | None = None
+    fusion_attention_mean: torch.Tensor | None = None
+    projective_geometry: PicfProjectiveGeometryState | None = None
 
 
 @dataclasses.dataclass
