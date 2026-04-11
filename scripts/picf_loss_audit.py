@@ -9,6 +9,9 @@ from statistics import mean
 _LOSS_KEYS = (
     "loss_total",
     "loss_action",
+    "loss_action_pos",
+    "loss_action_rot",
+    "loss_action_gripper",
     "loss_visual_latent",
     "loss_visual_real",
     "loss_tactile_real",
@@ -41,6 +44,9 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Summarize PICF weighted loss contributions from JSONL-like logs.")
     parser.add_argument("--log", required=True)
     parser.add_argument("--tail", type=int, default=300)
+    parser.add_argument("--action-pos-weight", type=float, default=None)
+    parser.add_argument("--action-rot-weight", type=float, default=None)
+    parser.add_argument("--action-gripper-weight", type=float, default=None)
     args = parser.parse_args()
 
     rows = _load_rows(Path(args.log).expanduser())
@@ -52,14 +58,45 @@ def main() -> None:
     means = {key: mean(float(row.get(key, 0.0)) for row in rows) for key in _LOSS_KEYS}
     total = max(means["loss_total"], 1e-9)
     ratios = {key: (value / total) for key, value in means.items() if key != "loss_total"}
+    payload: dict[str, object] = {
+        "num_rows": len(rows),
+        "means": means,
+        "ratios_to_total": ratios,
+    }
+
+    if (
+        args.action_pos_weight is not None
+        and args.action_rot_weight is not None
+        and args.action_gripper_weight is not None
+        and all(
+            any(key in row for row in rows)
+            for key in ("loss_action_pos", "loss_action_rot", "loss_action_gripper", "loss_action", "loss_total")
+        )
+    ):
+        alt_action_values = [
+            (float(args.action_pos_weight) * float(row.get("loss_action_pos", 0.0)))
+            + (float(args.action_rot_weight) * float(row.get("loss_action_rot", 0.0)))
+            + (float(args.action_gripper_weight) * float(row.get("loss_action_gripper", 0.0)))
+            for row in rows
+        ]
+        other_values = [
+            float(row.get("loss_total", 0.0)) - float(row.get("loss_action", 0.0))
+            for row in rows
+        ]
+        alt_action_mean = mean(alt_action_values)
+        alt_total_mean = mean(other_values) + alt_action_mean
+        payload["counterfactual_action_weights"] = {
+            "lambda_action_pos": float(args.action_pos_weight),
+            "lambda_action_rot": float(args.action_rot_weight),
+            "lambda_action_gripper": float(args.action_gripper_weight),
+            "mean_loss_action": alt_action_mean,
+            "mean_loss_total": alt_total_mean,
+            "loss_action_ratio_to_total": alt_action_mean / max(alt_total_mean, 1e-9),
+        }
 
     print(
         json.dumps(
-            {
-                "num_rows": len(rows),
-                "means": means,
-                "ratios_to_total": ratios,
-            },
+            payload,
             ensure_ascii=False,
             indent=2,
         )

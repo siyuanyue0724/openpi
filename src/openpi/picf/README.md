@@ -1255,7 +1255,9 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
       - 旧云机 `1500` step replay 的最近 `300` 条 loss 统计里，`loss_action / loss_total ≈ 0.88`
       - 同一窗口里 `loss_pt / loss_total ≈ 0.0018`；所以当前主矛盾不是“action 权重太小”，而是旧 tactile 配置几乎没有真正激活 point-tactile grounding
       - 对最终 tactile 方案，应该先看 `tactile_active_rate / pt_bag_nonempty_rate / loss_pt_nonzero_rate`，而不是先把 action 权重继续上调
+      - 训练日志现在已经真实输出 `tactile_contact_prob_mean` 和 `tactile_active_rate`
       - 如需长期审计，可直接运行：`python scripts/picf_loss_audit.py --log <jsonl_or_log> --tail 300`
+      - 如需做 action 权重反事实分析，可附加：`--action-pos-weight <w> --action-rot-weight <w> --action-gripper-weight <w>`
 - 验证级别说明：
 - 以上结论来自代码路径审计、回归测试、以及云机双卡 smoke
 - 它们足以支持“当前工程实现满足既定数学契约”的判断

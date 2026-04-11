@@ -1159,9 +1159,18 @@ class _MetricAccumulator:
     loss_focus_pv: float = 0.0
     loss_pt: float = 0.0
     candidate_density: float = 0.0
+    tactile_contact_prob_mean: float = 0.0
+    tactile_active_rate: float = 0.0
     num_windows: int = 0
 
-    def update(self, losses: PicfTransitionLossBreakdown, *, candidate_density: float) -> None:
+    def update(
+        self,
+        losses: PicfTransitionLossBreakdown,
+        *,
+        candidate_density: float,
+        tactile_contact_prob_mean: float = 0.0,
+        tactile_active_rate: float = 0.0,
+    ) -> None:
         self.loss_total += float(losses.total.item())
         self.loss_action += float(losses.action.item())
         self.loss_action_pos += float(losses.action_pos.item())
@@ -1178,6 +1187,8 @@ class _MetricAccumulator:
         self.loss_focus_pv += float(losses.focus_pv.item())
         self.loss_pt += float(losses.pt.item())
         self.candidate_density += float(candidate_density)
+        self.tactile_contact_prob_mean += float(tactile_contact_prob_mean)
+        self.tactile_active_rate += float(tactile_active_rate)
         self.num_windows += 1
 
     def averages(self) -> dict[str, float]:
@@ -1199,6 +1210,8 @@ class _MetricAccumulator:
             "loss_focus_pv": self.loss_focus_pv / denom,
             "loss_pt": self.loss_pt / denom,
             "projective_candidate_density": self.candidate_density / denom,
+            "tactile_contact_prob_mean": self.tactile_contact_prob_mean / denom,
+            "tactile_active_rate": self.tactile_active_rate / denom,
         }
 
 
@@ -1297,6 +1310,16 @@ class _PicfWindowTrainer(torch.nn.Module):
                 device=self.core.device,
                 dtype=self.core.dtype,
             )
+            tactile_contact_prob_mean = torch.as_tensor(
+                float(output.debug.get("tactile_contact_prob_mean", 0.0)),
+                device=self.core.device,
+                dtype=self.core.dtype,
+            )
+            tactile_active_rate = torch.as_tensor(
+                float(output.debug.get("tactile_active_rate", 0.0)),
+                device=self.core.device,
+                dtype=self.core.dtype,
+            )
             if metrics is None:
                 metrics = {
                     "loss_action": losses.action,
@@ -1314,6 +1337,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_focus_pv": losses.focus_pv,
                     "loss_pt": losses.pt,
                     "projective_candidate_density": candidate_density,
+                    "tactile_contact_prob_mean": tactile_contact_prob_mean,
+                    "tactile_active_rate": tactile_active_rate,
                 }
             else:
                 metrics["loss_action"] = metrics["loss_action"] + losses.action
@@ -1331,6 +1356,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_focus_pv"] = metrics["loss_focus_pv"] + losses.focus_pv
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
                 metrics["projective_candidate_density"] = metrics["projective_candidate_density"] + candidate_density
+                metrics["tactile_contact_prob_mean"] = metrics["tactile_contact_prob_mean"] + tactile_contact_prob_mean
+                metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + tactile_active_rate
             previous = output.state
 
         assert metrics is not None
@@ -1353,6 +1380,8 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_focus_pv": metrics["loss_focus_pv"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
             "projective_candidate_density": metrics["projective_candidate_density"] / denom,
+            "tactile_contact_prob_mean": metrics["tactile_contact_prob_mean"] / denom,
+            "tactile_active_rate": metrics["tactile_active_rate"] / denom,
         }
         if capture_visual_diagnostics:
             result["diagnostic_physical_visual_real_seq"] = physical_visual_real_seq
@@ -2234,6 +2263,8 @@ def train(args: argparse.Namespace) -> None:
                 metric_accum.loss_focus_pv += float(outputs["loss_focus_pv"].detach().item())
                 metric_accum.loss_pt += float(outputs["loss_pt"].detach().item())
                 metric_accum.candidate_density += float(outputs["projective_candidate_density"].detach().item())
+                metric_accum.tactile_contact_prob_mean += float(outputs.get("tactile_contact_prob_mean", 0.0).detach().item())
+                metric_accum.tactile_active_rate += float(outputs.get("tactile_active_rate", 0.0).detach().item())
                 metric_accum.num_windows += 1
 
             clip_start = time.perf_counter()

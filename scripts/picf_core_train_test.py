@@ -449,6 +449,19 @@ def test_collect_nonfinite_diagnostics_ignore_uninitialized_lazy_parameters() ->
     assert param_diag["samples"][0]["group"] == "ready"
 
 
+def test_metric_accumulator_reports_tactile_contact_observability() -> None:
+    accum = _MODULE._MetricAccumulator(
+        tactile_contact_prob_mean=0.6,
+        tactile_active_rate=0.25,
+        num_windows=2,
+    )
+
+    averages = accum.averages()
+
+    assert averages["tactile_contact_prob_mean"] == pytest.approx(0.3)
+    assert averages["tactile_active_rate"] == pytest.approx(0.125)
+
+
 def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
     class _DummyCore(torch.nn.Module):
         def __init__(self) -> None:
@@ -469,7 +482,11 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
             )
             return types.SimpleNamespace(
                 state=state,
-                debug={"projective_candidate_density": 0.0},
+                debug={
+                    "projective_candidate_density": 0.0,
+                    "tactile_contact_prob_mean": 0.25,
+                    "tactile_active_rate": 0.5,
+                },
             )
 
     dummy_losses = types.SimpleNamespace(
@@ -523,6 +540,8 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
     torch.testing.assert_close(trainer.core.calls[0], torch.full((1, 4), 1.0))
     assert len(result["diagnostic_physical_visual_real_seq"]) == 1
     assert len(result["diagnostic_semantic_visual_real_seq"]) == 1
+    assert result["tactile_contact_prob_mean"].item() == pytest.approx(0.25)
+    assert result["tactile_active_rate"].item() == pytest.approx(0.5)
 
 
 def test_decode_visual_real_prediction_upsamples_grid() -> None:
