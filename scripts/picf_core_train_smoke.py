@@ -16,6 +16,11 @@ from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
 from openpi.picf.sonata.config import SonataPointConfig
 from openpi.picf.sonata.wrapper import SonataPointFeatureExtractor
 from openpi.picf.vjepa.config import VjepaVisualConfig
+from picf_core_train import _default_tactile_backgrounds_path
+from picf_core_train import _default_tactile_calibration_path
+from picf_core_train import _default_tactile_contact_stats_path
+from picf_core_train import _load_tactile_backgrounds_npz
+from picf_core_train import _load_tactile_contact_stats_json
 
 CUDA_RUNTIME_AT_IMPORT = bool(torch.cuda.is_available() and torch.cuda.device_count() > 0)
 _DEFAULT_TACTILE_SENSOR_NAMES = ("digit", "gelsight_mini")
@@ -106,8 +111,28 @@ def _validate_backbone_args(args: argparse.Namespace) -> None:
     if args.tactile_mode == "encoder":
         args.use_tactile = True
         args.tactile_checkpoint_path = args.tactile_checkpoint_path or _default_anytouch_checkpoint()
+        args.tactile_backgrounds_path = args.tactile_backgrounds_path or _default_tactile_backgrounds_path()
+        args.tactile_calibration_path = args.tactile_calibration_path or _default_tactile_calibration_path()
+        args.tactile_contact_stats_path = args.tactile_contact_stats_path or _default_tactile_contact_stats_path()
         if args.tactile_checkpoint_path is None:
             raise FileNotFoundError("tactile_mode=encoder requires --tactile-checkpoint-path or a default AnyTouch checkpoint.")
+        if args.tactile_backgrounds_path is None:
+            raise FileNotFoundError(
+                "tactile_mode=encoder on CALVIN requires calibrated tactile backgrounds."
+            )
+        if args.tactile_calibration_path is None:
+            raise FileNotFoundError(
+                "tactile_mode=encoder on CALVIN requires fingertip geometry calibration."
+            )
+        if args.tactile_contact_stats_path is None:
+            raise FileNotFoundError(
+                "tactile_mode=encoder on CALVIN requires calibrated tactile contact thresholds."
+            )
+        stats = _load_tactile_contact_stats_json(args.tactile_contact_stats_path)
+        if stats is None:
+            raise FileNotFoundError(
+                f"Failed to load tactile contact stats from {args.tactile_contact_stats_path!r}."
+            )
     if args.point_backbone == "sonata":
         args.sonata_checkpoint_path = args.sonata_checkpoint_path or _default_sonata_checkpoint()
         if args.sonata_checkpoint_path is None:
@@ -180,6 +205,11 @@ def _build_core(args: argparse.Namespace) -> tuple[PicfFullCore, bool]:
     tactile_config = None
     tactile_encoder = None
     if args.tactile_mode == "encoder":
+        tactile_contact_stats = _load_tactile_contact_stats_json(args.tactile_contact_stats_path)
+        if tactile_contact_stats is None:
+            raise FileNotFoundError(
+                f"Failed to load tactile contact stats from {args.tactile_contact_stats_path!r}."
+            )
         tactile_config = AnyTouchConfig(
             checkpoint_path=args.tactile_checkpoint_path,
             device=args.device,
@@ -187,6 +217,10 @@ def _build_core(args: argparse.Namespace) -> tuple[PicfFullCore, bool]:
             num_frames=args.tactile_num_frames,
             stride=args.tactile_stride,
             allow_random_init=False,
+            contact_tau_on=float(tactile_contact_stats["tau_on"]),
+            contact_tau_off=float(tactile_contact_stats["tau_off"]),
+            contact_temperature=float(tactile_contact_stats.get("temperature", max(0.5 * (float(tactile_contact_stats["tau_on"]) - float(tactile_contact_stats["tau_off"])), 1e-3))),
+            contact_stats_payload=tactile_contact_stats,
         )
     else:
         tactile_encoder = _NullTactileEncoder()
@@ -235,6 +269,9 @@ def run_smoke(
     sonata_checkpoint_path: str | None,
     sonata_stage_name: str,
     sonata_dtype: str,
+    tactile_backgrounds_path: str | None = None,
+    tactile_calibration_path: str | None = None,
+    tactile_contact_stats_path: str | None = None,
 ) -> dict[str, float | int | str | bool]:
     np.random.seed(0)
     torch.manual_seed(0)
@@ -249,6 +286,8 @@ def run_smoke(
         use_tactile=bool(use_tactile),
         tactile_sensor_names=tactile_sensor_names,
         tactile_sensor_offsets_m=tactile_sensor_offsets_m,
+        tactile_calibration=tactile_calibration_path,
+        tactile_backgrounds_by_sensor=_load_tactile_backgrounds_npz(tactile_backgrounds_path),
     )
     frames = list(replay)
     replay.close()
@@ -276,6 +315,9 @@ def run_smoke(
         visual_use_last_two_mean=visual_use_last_two_mean,
         tactile_mode=tactile_mode,
         tactile_checkpoint_path=tactile_checkpoint_path,
+        tactile_backgrounds_path=tactile_backgrounds_path,
+        tactile_calibration_path=tactile_calibration_path,
+        tactile_contact_stats_path=tactile_contact_stats_path,
         tactile_dtype=tactile_dtype,
         tactile_num_frames=tactile_num_frames,
         tactile_stride=tactile_stride,
@@ -360,8 +402,8 @@ def main() -> None:
     parser.add_argument("--split", default="training", choices=["training", "validation"])
     parser.add_argument("--backend", default="dir", choices=["dir", "zip"])
     parser.add_argument("--segment-index", type=int, default=0)
-    parser.add_argument("--stride", type=int, default=8)
-    parser.add_argument("--max-points", type=int, default=512)
+    parser.add_argument("--stride", type=int, default=4)
+    parser.add_argument("--max-points", type=int, default=1024)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
     parser.add_argument("--lr", type=float, default=1e-4)
     parser.add_argument("--use-foundation-backbones", action="store_true")
@@ -381,6 +423,9 @@ def main() -> None:
     parser.add_argument("--visual-use-last-two-mean", action="store_true")
     parser.add_argument("--tactile-mode", choices=["stub", "encoder"], default="stub")
     parser.add_argument("--tactile-checkpoint-path", default=None)
+    parser.add_argument("--tactile-backgrounds-path", default=None)
+    parser.add_argument("--tactile-calibration-path", default=None)
+    parser.add_argument("--tactile-contact-stats-path", default=None)
     parser.add_argument("--tactile-dtype", default="float32", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--tactile-num-frames", type=int, default=4)
     parser.add_argument("--tactile-stride", type=int, default=2)
@@ -416,6 +461,9 @@ def main() -> None:
         visual_tubelet_size=args.visual_tubelet_size,
         visual_use_last_two_mean=bool(args.visual_use_last_two_mean),
         tactile_checkpoint_path=args.tactile_checkpoint_path,
+        tactile_backgrounds_path=args.tactile_backgrounds_path,
+        tactile_calibration_path=args.tactile_calibration_path,
+        tactile_contact_stats_path=args.tactile_contact_stats_path,
         tactile_dtype=args.tactile_dtype,
         tactile_num_frames=args.tactile_num_frames,
         tactile_stride=args.tactile_stride,
