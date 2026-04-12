@@ -13,7 +13,9 @@ import numpy as np
 import torch
 
 from openpi.picf.contracts import PicfObservation
+from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import PicfPointCloudFrame
+from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.test_utils import build_mini_calvin_dataset
 
 
@@ -694,6 +696,93 @@ def test_later_step_window_precheck_rejects_empty_local_support() -> None:
     window = _MODULE._TransitionWindow(segment_id=0, start_step_id=0, prompt="test", frames=(obs0, obs1))
     with pytest.raises(RuntimeError, match="window step 1"):
         _MODULE._ensure_window_has_valid_first_step_xyzrgb_support(trainer, window)
+
+
+def test_first_step_window_precheck_uses_full_pointcloud_payload() -> None:
+    class _DummyLocalFrame:
+        def make_transform(self, _robot_obs):
+            return np.eye(4, dtype=np.float32)
+
+    class _DummyCore:
+        def __init__(self) -> None:
+            self.local_frame = _DummyLocalFrame()
+            self.config = types.SimpleNamespace(crop_radius_m=0.10)
+            self.payloads: list[dict[str, np.ndarray | float | None]] = []
+
+        def pointcloud_builder(self, payload):
+            self.payloads.append(payload)
+            return PicfPointCloudFrame(
+                grid_coord=np.zeros((1, 3), dtype=np.int32),
+                xyz_world=np.zeros((1, 3), dtype=np.float32),
+                rgb=np.zeros((1, 3), dtype=np.float32),
+                normal_world=np.tile(np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32), (1, 1)),
+                valid_point_mask=np.ones((1,), dtype=bool),
+                frame_valid=True,
+            )
+
+        def _build_runtime_meta(self, _obs, _previous):
+            return types.SimpleNamespace(point_contract_ok=True)
+
+        def _point_subset(self, _obs):
+            return types.SimpleNamespace(points_local=np.zeros((1, 3), dtype=np.float32))
+
+    tactile = PicfTactilePacket(
+        sensors=(
+            TactileSensorFrame(
+                rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+                sensor_name="left",
+                T_sens_to_wrist=np.asarray(
+                    [[1.0, 0.0, 0.0, 0.10], [0.0, 1.0, 0.0, 0.00], [0.0, 0.0, 1.0, 0.00], [0.0, 0.0, 0.0, 1.0]],
+                    dtype=np.float32,
+                ),
+                timestamp_s=0.0,
+            ),
+            TactileSensorFrame(
+                rgb=np.zeros((8, 8, 3), dtype=np.uint8),
+                sensor_name="right",
+                T_sens_to_wrist=np.asarray(
+                    [[1.0, 0.0, 0.0, -0.10], [0.0, 1.0, 0.0, 0.00], [0.0, 0.0, 1.0, 0.00], [0.0, 0.0, 0.0, 1.0]],
+                    dtype=np.float32,
+                ),
+                timestamp_s=0.0,
+            ),
+        )
+    )
+    base = PicfObservation(
+        rgb_static=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth_static=np.ones((8, 8), dtype=np.float32),
+        rgb_gripper=np.full((6, 6, 3), 127, dtype=np.uint8),
+        depth_gripper=np.full((6, 6), 0.25, dtype=np.float32),
+        robot_obs=np.zeros((15,), dtype=np.float32),
+        prompt="test",
+        step_id=0,
+        segment_id=0,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+        tactile=tactile,
+        G_t=np.eye(4, dtype=np.float32),
+    )
+    window = _MODULE._TransitionWindow(
+        segment_id=0,
+        start_step_id=0,
+        prompt="test",
+        frames=(base, dataclasses.replace(base, step_id=1, reset_scaffold=False)),
+    )
+    trainer = types.SimpleNamespace(core=_DummyCore())
+
+    point_counts = _MODULE._ensure_window_has_valid_first_step_xyzrgb_support(trainer, window)
+
+    assert point_counts == (1, 1)
+    assert len(trainer.core.payloads) == 2
+    for payload in trainer.core.payloads:
+        assert payload["rgb_gripper"] is not None
+        assert payload["depth_gripper"] is not None
+        assert payload["robot_obs"] is not None
+        np.testing.assert_allclose(
+            np.asarray(payload["focus_centers_world"], dtype=np.float32),
+            np.asarray([[0.0, 0.0, 0.0], [0.10, 0.0, 0.0], [-0.10, 0.0, 0.0]], dtype=np.float32),
+        )
+        assert float(payload["focus_radius_m"]) == pytest.approx(0.10)
 
 
 def test_checkpoint_roundtrip_preserves_trainable_semantic_state(tmp_path: Path) -> None:

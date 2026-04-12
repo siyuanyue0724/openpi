@@ -1413,6 +1413,35 @@ def _is_retryable_first_step_error(exc: RuntimeError) -> bool:
     return any(pattern in message for pattern in _RETRYABLE_FIRST_STEP_ERRORS)
 
 
+def _focus_centers_world_from_observation(observation: PicfObservation) -> np.ndarray:
+    if observation.G_t is None:
+        raise ValueError("PICF focus center construction requires observation.G_t to be set.")
+    centers = [np.asarray(observation.G_t[:3, 3], dtype=np.float32)]
+    packet = observation.tactile
+    if packet is not None:
+        for sensor in packet.sensors:
+            if not sensor.valid:
+                continue
+            sensor_pose_world = np.asarray(observation.G_t, dtype=np.float32) @ np.asarray(sensor.T_sens_to_wrist, dtype=np.float32)
+            centers.append(np.asarray(sensor_pose_world[:3, 3], dtype=np.float32))
+    return np.stack(centers, axis=0)
+
+
+def _pointcloud_payload_from_observation(
+    core: PicfFullCore,
+    observation: PicfObservation,
+) -> dict[str, np.ndarray | float]:
+    return {
+        "rgb_static": observation.rgb_static,
+        "depth_static": observation.depth_static,
+        "rgb_gripper": observation.rgb_gripper,
+        "depth_gripper": observation.depth_gripper,
+        "robot_obs": observation.robot_obs,
+        "focus_centers_world": _focus_centers_world_from_observation(observation),
+        "focus_radius_m": core.config.crop_radius_m,
+    }
+
+
 def _ensure_window_has_valid_first_step_xyzrgb_support(
     trainer: _PicfWindowTrainer,
     window: _TransitionWindow,
@@ -1430,14 +1459,7 @@ def _ensure_window_has_valid_first_step_xyzrgb_support(
     if first.G_t is None:
         first.G_t = core.local_frame.make_transform(first.robot_obs)
     if first.point_set is None:
-        first.point_set = core.pointcloud_builder(
-            {
-                "rgb_static": first.rgb_static,
-                "depth_static": first.depth_static,
-                "focus_center_world": np.asarray(first.G_t[:3, 3], dtype=np.float32),
-                "focus_radius_m": core.config.crop_radius_m,
-            }
-        )
+        first.point_set = core.pointcloud_builder(_pointcloud_payload_from_observation(core, first))
     meta = core._build_runtime_meta(first, None)
     if not meta.point_contract_ok:
         raise RuntimeError(_RETRYABLE_FIRST_STEP_ERRORS[0])
@@ -1446,14 +1468,7 @@ def _ensure_window_has_valid_first_step_xyzrgb_support(
         if frame.G_t is None:
             frame.G_t = core.local_frame.make_transform(frame.robot_obs)
         if frame.point_set is None:
-            frame.point_set = core.pointcloud_builder(
-                {
-                    "rgb_static": frame.rgb_static,
-                    "depth_static": frame.depth_static,
-                    "focus_center_world": np.asarray(frame.G_t[:3, 3], dtype=np.float32),
-                    "focus_radius_m": core.config.crop_radius_m,
-                }
-            )
+            frame.point_set = core.pointcloud_builder(_pointcloud_payload_from_observation(core, frame))
         frame_context = core._point_subset(frame)
         point_count = int(frame_context.points_local.shape[0])
         point_counts.append(point_count)

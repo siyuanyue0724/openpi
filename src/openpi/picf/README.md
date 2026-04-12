@@ -1457,6 +1457,9 @@ python scripts/picf_core_train.py \
 - `--max-empty-window-retries 32` 是当前推荐保留的首步窗口安全阈值
   - 它只处理“窗口首帧局部 `xyzrgb` support 为空”的情况
   - 数学上等价于对 PICF 合法首步支持集做 rejection sampling，而不是吞掉任意异常继续训练
+  - 当前 trainer preflight 已和 core runtime 使用同一条 pointcloud payload
+  - 也就是首步合法性检查现在同样会使用 `depth_static + depth_gripper + robot_obs + focus_centers_world=[TCP,left_tip,right_tip]`
+  - 这样 rejection sampling 不会再因为旧的 static-only / 单中心 crop 而系统性低估指尖局部几何
 
 正式开训前先确认四件事：
 
