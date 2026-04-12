@@ -1016,3 +1016,63 @@ def test_load_checkpoint_sequential_across_ranks_only_loads_local_rank(monkeypat
     assert step == 456
     assert loaded == [1]
     assert barriers == [1, 1]
+
+
+def test_build_model_sequential_across_ranks_serializes_backbone_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def fake_build_model(args, *, device):
+        del args, device
+        calls.append(("build", 0))
+        return object(), object(), True
+
+    def fake_barrier(*, use_ddp, device):
+        del device
+        calls.append(("barrier", int(use_ddp)))
+
+    monkeypatch.setattr(_MODULE, "_build_model", fake_build_model)
+    monkeypatch.setattr(_MODULE, "_distributed_barrier", fake_barrier)
+
+    core, semantic_encoder, use_visual_override = _MODULE._build_model_sequential_across_ranks(
+        _base_args(),
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=2,
+    )
+
+    assert core is not None
+    assert semantic_encoder is not None
+    assert use_visual_override is True
+    assert calls == [
+        ("build", 0),
+        ("barrier", 1),
+        ("barrier", 1),
+    ]
+
+
+def test_build_model_sequential_across_ranks_only_builds_local_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+    built: list[int] = []
+    barriers: list[int] = []
+
+    def fake_build_model(args, *, device):
+        del args, device
+        built.append(1)
+        return "core", None, False
+
+    def fake_barrier(*, use_ddp, device):
+        del device
+        barriers.append(int(use_ddp))
+
+    monkeypatch.setattr(_MODULE, "_build_model", fake_build_model)
+    monkeypatch.setattr(_MODULE, "_distributed_barrier", fake_barrier)
+
+    result = _MODULE._build_model_sequential_across_ranks(
+        _base_args(),
+        device=torch.device("cpu"),
+        rank=1,
+        world_size=2,
+    )
+
+    assert result == ("core", None, False)
+    assert built == [1]
+    assert barriers == [1, 1]

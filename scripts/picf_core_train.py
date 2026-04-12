@@ -1676,6 +1676,30 @@ def _load_checkpoint_sequential_across_ranks(
     return int(step_tensor.item())
 
 
+def _build_model_sequential_across_ranks(
+    args: argparse.Namespace,
+    *,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+) -> tuple[PicfFullCore, torch.nn.Module | None, bool]:
+    """Serialize heavyweight backbone construction across DDP ranks.
+
+    The foundation backbones and semantic model are loaded from large checkpoints on
+    shared storage. Building them on every rank concurrently can stall in kernel
+    page-wait. Let each rank build once in turn, with barriers between turns.
+    """
+    if world_size <= 1:
+        return _build_model(args, device=device)
+    built: tuple[PicfFullCore, torch.nn.Module | None, bool] | None = None
+    for build_rank in range(int(world_size)):
+        if rank == build_rank:
+            built = _build_model(args, device=device)
+        _distributed_barrier(use_ddp=True, device=device)
+    assert built is not None
+    return built
+
+
 def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[PicfFullCore, torch.nn.Module | None, bool]:
     builder = CalvinDepthToPicfPointCloud(args.calvin_root, stride=args.stride, max_points=args.max_points)
     config = PicfCoreConfig(
@@ -2028,7 +2052,12 @@ def train(args: argparse.Namespace) -> None:
             use_scene_obs=bool(args.use_scene_obs),
         )
 
-        core, semantic_encoder, use_visual_override = _build_model(args, device=device)
+        core, semantic_encoder, use_visual_override = _build_model_sequential_across_ranks(
+            args,
+            device=device,
+            rank=rank,
+            world_size=world_size,
+        )
         core = core.to(device)
         model = _PicfWindowTrainer(
             core,
