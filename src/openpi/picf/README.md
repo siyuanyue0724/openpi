@@ -1488,6 +1488,26 @@ python scripts/picf_core_train.py \
 - 如果不想上报 wandb，可改成 `--no-wandb`
 - 如果只想保留文件日志、不看进度条，可改成 `--no-progress`
 - 如果是在云上跑长期训练，当前推荐把 wandb 设成 `offline`，这和旧 `pi0.5` 训练 README 的工程口径保持一致
+
+如果想在不影响训练、也不占 GPU 的前提下实时看 `metrics.jsonl` 的收敛趋势，当前可以直接用：
+
+```bash
+python scripts/picf_watch_metrics.py /mnt/checkpoints/picf_core/picf_core/<exp-name>/metrics.jsonl --follow --clear-screen
+```
+
+这个脚本只做三件事：
+
+- 追加读取 `metrics.jsonl`
+- 打印最近值与最近 `N` 条的滑动均值
+- 为 `loss_total / loss_action / loss_pt / tactile_active_rate / tactile_contact_prob_mean` 画 ASCII sparkline
+
+它不 import 训练主模块，不会触发 CUDA 初始化，所以适合直接放在 JupyterLab 的 terminal 里长期挂着。
+
+如果只想每次刷新一次，而不是持续 follow：
+
+```bash
+python scripts/picf_watch_metrics.py /mnt/checkpoints/picf_core/picf_core/<exp-name>/metrics.jsonl
+```
 - 上面这条命令没有再显式传 `--warmup-steps`，因为长期 trainer 默认已经按 `2% * num_train_steps` 自动换算
 - 当前训练入口的默认几何配方已经切到 `--stride 4 --max-points 1024 --crop-radius-m 0.10`
 - 单卡 full foundation 当前推荐 `--accum-steps 1`
