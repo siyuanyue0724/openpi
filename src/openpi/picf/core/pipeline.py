@@ -460,8 +460,12 @@ class GatedCrossAttentionRead(nn.Module):
             need_weights=True,
             average_attn_weights=False,
         )
-        output = queries + (torch.tanh(self.cross_gate) * attn_out)
-        output = output + self.ff(self.ff_norm(output))
+        # Keep the entire read block dormant until the semantic gate opens. If the
+        # FF residual is left ungated, the block can learn a prompt-independent
+        # query transform while semantic cross-attention remains effectively shut.
+        gate = torch.tanh(self.cross_gate)
+        output = queries + (gate * attn_out)
+        output = output + (gate * self.ff(self.ff_norm(output)))
         mean_weights = weights.mean(dim=1)[0]
         return output, mean_weights
 

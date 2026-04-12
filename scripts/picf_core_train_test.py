@@ -525,6 +525,37 @@ def test_metric_accumulator_reports_tactile_contact_observability() -> None:
     assert averages["tactile_active_rate"] == pytest.approx(0.125)
 
 
+def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> None:
+    accum = _MODULE._MetricAccumulator()
+    outputs = {
+        "loss_total": torch.tensor(1.0),
+        "loss_action": torch.tensor(0.2),
+        "loss_action_pos": torch.tensor(0.05),
+        "loss_action_rot": torch.tensor(0.06),
+        "loss_action_gripper": torch.tensor(0.09),
+        "loss_visual_latent": torch.tensor(0.01),
+        "loss_visual_real": torch.tensor(0.02),
+        "loss_tactile_real": torch.tensor(0.03),
+        "loss_point_real": torch.tensor(0.04),
+        "loss_semantic_future_aux": torch.tensor(0.17),
+        "loss_alignment": torch.tensor(0.05),
+        "loss_anchor_pv": torch.tensor(0.06),
+        "loss_pv_weak": torch.tensor(0.07),
+        "loss_focus_pv": torch.tensor(0.08),
+        "loss_pt": torch.tensor(0.09),
+        "projective_candidate_density": torch.tensor(0.11),
+        "tactile_contact_prob_mean": torch.tensor(0.12),
+        "tactile_active_rate": torch.tensor(0.13),
+    }
+
+    accum.update_from_outputs(outputs)
+    averages = accum.averages()
+
+    assert averages["loss_semantic_future_aux"] == pytest.approx(0.17)
+    assert averages["loss_action"] == pytest.approx(0.2)
+    assert averages["tactile_contact_prob_mean"] == pytest.approx(0.12)
+
+
 def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
     class _DummyCore(torch.nn.Module):
         def __init__(self) -> None:

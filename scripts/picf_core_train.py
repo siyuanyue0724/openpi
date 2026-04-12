@@ -1242,6 +1242,27 @@ class _MetricAccumulator:
         self.tactile_active_rate += float(tactile_active_rate)
         self.num_windows += 1
 
+    def update_from_outputs(self, outputs: dict[str, torch.Tensor]) -> None:
+        self.loss_total += float(outputs["loss_total"].detach().item())
+        self.loss_action += float(outputs["loss_action"].detach().item())
+        self.loss_action_pos += float(outputs["loss_action_pos"].detach().item())
+        self.loss_action_rot += float(outputs["loss_action_rot"].detach().item())
+        self.loss_action_gripper += float(outputs["loss_action_gripper"].detach().item())
+        self.loss_visual_latent += float(outputs["loss_visual_latent"].detach().item())
+        self.loss_visual_real += float(outputs["loss_visual_real"].detach().item())
+        self.loss_tactile_real += float(outputs["loss_tactile_real"].detach().item())
+        self.loss_point_real += float(outputs["loss_point_real"].detach().item())
+        self.loss_semantic_future_aux += float(outputs["loss_semantic_future_aux"].detach().item())
+        self.loss_alignment += float(outputs["loss_alignment"].detach().item())
+        self.loss_anchor_pv += float(outputs["loss_anchor_pv"].detach().item())
+        self.loss_pv_weak += float(outputs["loss_pv_weak"].detach().item())
+        self.loss_focus_pv += float(outputs["loss_focus_pv"].detach().item())
+        self.loss_pt += float(outputs["loss_pt"].detach().item())
+        self.candidate_density += float(outputs["projective_candidate_density"].detach().item())
+        self.tactile_contact_prob_mean += float(outputs.get("tactile_contact_prob_mean", 0.0).detach().item())
+        self.tactile_active_rate += float(outputs.get("tactile_active_rate", 0.0).detach().item())
+        self.num_windows += 1
+
     def averages(self) -> dict[str, float]:
         denom = max(self.num_windows, 1)
         return {
@@ -2329,24 +2350,7 @@ def train(args: argparse.Namespace) -> None:
                         if _DEBUG_INDEX_TRACE:
                             logging.error("Recent tensor index trace before failure: %s", _dump_debug_index_trace())
                         raise
-                metric_accum.loss_total += float(outputs["loss_total"].detach().item())
-                metric_accum.loss_action += float(outputs["loss_action"].detach().item())
-                metric_accum.loss_action_pos += float(outputs["loss_action_pos"].detach().item())
-                metric_accum.loss_action_rot += float(outputs["loss_action_rot"].detach().item())
-                metric_accum.loss_action_gripper += float(outputs["loss_action_gripper"].detach().item())
-                metric_accum.loss_visual_latent += float(outputs["loss_visual_latent"].detach().item())
-                metric_accum.loss_visual_real += float(outputs["loss_visual_real"].detach().item())
-                metric_accum.loss_tactile_real += float(outputs["loss_tactile_real"].detach().item())
-                metric_accum.loss_point_real += float(outputs["loss_point_real"].detach().item())
-                metric_accum.loss_alignment += float(outputs["loss_alignment"].detach().item())
-                metric_accum.loss_anchor_pv += float(outputs["loss_anchor_pv"].detach().item())
-                metric_accum.loss_pv_weak += float(outputs["loss_pv_weak"].detach().item())
-                metric_accum.loss_focus_pv += float(outputs["loss_focus_pv"].detach().item())
-                metric_accum.loss_pt += float(outputs["loss_pt"].detach().item())
-                metric_accum.candidate_density += float(outputs["projective_candidate_density"].detach().item())
-                metric_accum.tactile_contact_prob_mean += float(outputs.get("tactile_contact_prob_mean", 0.0).detach().item())
-                metric_accum.tactile_active_rate += float(outputs.get("tactile_active_rate", 0.0).detach().item())
-                metric_accum.num_windows += 1
+                metric_accum.update_from_outputs(outputs)
 
             clip_start = time.perf_counter()
             grad_issue = _collect_nonfinite_gradient_diagnostics(model, optimizer=optimizer, max_items=24)

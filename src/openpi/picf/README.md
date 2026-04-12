@@ -738,6 +738,17 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 这样即使 tactile token 还没到 `tactile_anchor_prob_on`，policy / context 仍然能区分“左指更像接触”还是“右指更像接触”
 - pseudo-contact hysteresis 的上一时刻状态现在也优先继承 `tactile_contact_gate`，而不是更严格的 `tactile_anchor_mask`
   - 这样 EMA / on-off gate 的记忆语义与接触检测本身保持一致，不会被 fusion 门槛意外收紧
+- `scripts/picf_core_train.py` 的 metrics 聚合也已补齐 `loss_semantic_future_aux`
+  - 旧版训练日志里如果长期看到 `loss_semantic_future_aux = 0.0`，优先怀疑的是 logging bug，而不是语义分支完全没训练
+  - 当前聚合逻辑已经直接从 `outputs["loss_semantic_future_aux"]` 统计该项
+- `GatedCrossAttentionRead` 现在对整个 semantic read block 使用同一个 `cross_gate`
+  - 旧实现只 gate 了 cross-attention 残差，但 FF 残差始终开启
+  - 这会允许 read block 在 `cross_gate ≈ 0` 时仍然学习 prompt 无关的 query-only 变换，削弱 semantic gate 的设计意图
+  - 现在 `cross_gate = 0` 时整个 read block 退化为 identity；只有 gate 打开后，semantic cross-attention 和 FF 才一起参与
+  - 本地回归测试已覆盖：`test_gated_cross_attention_read_is_identity_when_gate_is_closed_even_if_ff_learns`
+  - 用同一个 `v24/5000` checkpoint 做 patched 单窗口诊断时，`global_minus_physical_norm` 会从旧实现的约 `0.74` 降到约 `0.006`
+    - 这说明旧实现里确实存在 prompt 无关的 semantic bypass
+    - 如果 patched 后 action 仍几乎不变，则说明 `5000` checkpoint 的问题更接近“semantic read gate 尚未打开”，而不是“prompt 根本没进模型”
 
 ### 4.8 当前 `L_{pv}^{weak}` 是代码对齐版近似
 

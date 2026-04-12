@@ -295,6 +295,25 @@ def test_hysteresis_uses_previous_contact_gate_not_anchor_mask(tmp_path: Path, m
     assert bool(torch.all(captured["previous_active"]).item())
 
 
+def test_gated_cross_attention_read_is_identity_when_gate_is_closed_even_if_ff_learns() -> None:
+    layer = pipeline_module.GatedCrossAttentionRead(query_dim=8, kv_dim=8, heads=2, inner_dim=16)
+    queries = torch.randn((3, 8), dtype=torch.float32)
+    keys = torch.randn((4, 8), dtype=torch.float32)
+    with torch.no_grad():
+        layer.ff[0].weight.fill_(0.25)
+        layer.ff[0].bias.fill_(0.1)
+        layer.ff[-1].weight.fill_(0.2)
+        layer.ff[-1].bias.fill_(0.05)
+        layer.cross_gate.zero_()
+    output_closed, _ = layer(queries, keys)
+    torch.testing.assert_close(output_closed, queries)
+
+    with torch.no_grad():
+        layer.cross_gate.fill_(3.0)
+    output_open, _ = layer(queries, keys)
+    assert not torch.allclose(output_open, queries)
+
+
 def test_full_core_preserves_2048_wide_semantic_tokens_and_backpropagates(tmp_path: Path) -> None:
     core, replay = _make_core(
         tmp_path,
