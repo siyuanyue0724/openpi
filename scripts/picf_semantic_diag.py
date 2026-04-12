@@ -128,6 +128,8 @@ def _describe_variant(
         "token_count": token_count,
         "semantic_summary_norm": summary_norm,
         "semantic_tokens_norm": token_norm,
+        "control_tokens_norm": float(torch.linalg.norm(output.state.predictive.control_tokens.float()).item()),
+        "pooled_state_norm": float(torch.linalg.norm(output.state.predictive.pooled_state.float()).item()),
         "action": output.state.predictive.action.detach().cpu().tolist(),
         "physical_global_pred_norm": float(torch.linalg.norm(output.state.predictive.physical_global_pred.float()).item()),
         "global_pred_norm": float(torch.linalg.norm(output.state.predictive.global_pred.float()).item()),

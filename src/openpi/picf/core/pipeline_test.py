@@ -476,7 +476,7 @@ def test_semantic_changes_do_not_pollute_physical_prediction_cache_or_next_innov
     torch.testing.assert_close(second_a.state.predictive.innovation_norm, second_b.state.predictive.innovation_norm)
 
 
-def test_semantic_summary_is_bookkeeping_only_and_does_not_change_downstream_readout(tmp_path: Path) -> None:
+def test_semantic_summary_directly_conditions_control_and_semantic_future_readout(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
     frame.tactile = _make_tactile_packet(frame.step_id)
@@ -509,9 +509,42 @@ def test_semantic_summary_is_bookkeeping_only_and_does_not_change_downstream_rea
     )
     assert not torch.allclose(first.state.predictive.semantic_summary, second.state.predictive.semantic_summary)
     torch.testing.assert_close(first.state.posterior.mu, second.state.posterior.mu)
-    torch.testing.assert_close(first.state.predictive.action, second.state.predictive.action)
     torch.testing.assert_close(first.state.predictive.physical_global_pred, second.state.predictive.physical_global_pred)
-    torch.testing.assert_close(first.state.predictive.global_pred, second.state.predictive.global_pred)
+    assert not torch.allclose(first.state.predictive.control_tokens, second.state.predictive.control_tokens)
+    assert not torch.allclose(first.state.predictive.pooled_state, second.state.predictive.pooled_state)
+    assert not torch.allclose(first.state.predictive.action, second.state.predictive.action)
+    assert not torch.allclose(first.state.predictive.global_pred, second.state.predictive.global_pred)
+
+
+def test_semantic_summary_alone_can_condition_action_without_cross_reads(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path, predictive_semantic_reads=0, control_semantic_reads=0)
+    frame = next(iter(replay))
+    frame.tactile = _make_tactile_packet(frame.step_id)
+    empty_tokens = torch.zeros((0, core.config.semantic_dim), dtype=torch.float32)
+    summary_a = torch.full((1, core.config.semantic_dim), -1.5, dtype=torch.float32)
+    summary_b = torch.full((1, core.config.semantic_dim), 2.5, dtype=torch.float32)
+    common_kwargs = dict(
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        action_future=frame.action,
+    )
+    first = core.step(
+        frame,
+        semantic_override={"tokens": empty_tokens, "summary": summary_a},
+        **common_kwargs,
+    )
+    second = core.step(
+        frame,
+        semantic_override={"tokens": empty_tokens, "summary": summary_b},
+        **common_kwargs,
+    )
+    torch.testing.assert_close(first.state.posterior.mu, second.state.posterior.mu)
+    torch.testing.assert_close(first.state.predictive.physical_global_pred, second.state.predictive.physical_global_pred)
+    assert first.state.predictive.semantic_tokens.shape[0] == 0
+    assert second.state.predictive.semantic_tokens.shape[0] == 0
+    assert not torch.allclose(first.state.predictive.control_tokens, second.state.predictive.control_tokens)
+    assert not torch.allclose(first.state.predictive.action, second.state.predictive.action)
+    assert not torch.allclose(first.state.predictive.global_pred, second.state.predictive.global_pred)
 
 
 def test_previous_semantic_conditioned_predictive_state_does_not_feed_next_prior_or_innovation(tmp_path: Path) -> None:

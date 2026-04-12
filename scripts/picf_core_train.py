@@ -2426,6 +2426,7 @@ def train(args: argparse.Namespace) -> None:
                 if _DEBUG_INDEX_TRACE:
                     logging.error("Recent tensor index trace before non-finite gradient: %s", _dump_debug_index_trace())
                 raise RuntimeError("Non-finite gradients detected before optimizer step.")
+            preclip_local_grad = _grad_norm(model.parameters())
             if args.grad_clip_norm > 0:
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip_norm)
             if debug_phase_enabled:
@@ -2467,12 +2468,14 @@ def train(args: argparse.Namespace) -> None:
                 retried_windows = float(retried_windows_interval)
                 if world_size > 1:
                     averages = {k: _reduce_mean(v, device=device, world_size=world_size) for k, v in averages.items()}
+                    preclip_local_grad = _reduce_mean(preclip_local_grad, device=device, world_size=world_size)
                     local_grad = _reduce_mean(local_grad, device=device, world_size=world_size)
                     retried_windows = _reduce_sum(retried_windows, device=device, world_size=world_size)
                 if is_main:
                     record = {
                         "step": int(step + 1),
                         "lr": float(lr),
+                        "preclip_grad_norm": float(preclip_local_grad),
                         "grad_norm": float(local_grad),
                         "steps_per_sec": float(steps_in_interval / elapsed),
                         "windows_per_sec": float(metric_accum.num_windows / elapsed),

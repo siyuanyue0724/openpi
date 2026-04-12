@@ -495,12 +495,19 @@ point / visual / tactile / compact context 都先投到统一 hidden size，再�
 - control 分支里，world tokens 通过 posterior-late 异宽 cross-attention 读取 `semantic_tokens`
 - predictive 分支里，也是先固定 `physical_prediction_cache`，再去读取 `semantic_tokens`
 
-`semantic_summary` 现在只保留为：
+`semantic_summary` 当前的语义需要单独说明：
 
-- predictive state 内的聚合记录
-- 诊断 / 轻量日志量
+- 它仍然不参与 `_posterior_update(...)`
+- 它也不参与 language-free 的 `physical_prediction_cache`
+- 但它现在已经直接注入 control / predictive 的 world token 主路径
+  - control 侧：`control_world_tokens` 会先追加一个 `semantic_summary` token，再进入 semantic late reads
+  - predictive 侧：`physical_pred_tokens` 保持 language-free；随后 semantic-conditioned future readout 会在这组 tokens 上追加 `semantic_summary` token，再进入 semantic late reads
 
-它不参与 posterior construction，也不直接驱动 control / predictive 主读出。
+这一步是刻意向 `pi0.5 / pi0.5-sonata` 的“语言先进入主干，再由后续层消化”靠拢：
+
+- mixed image+text prefix 仍然保留，这本身就是正确设计
+- 但 prompt 的聚合摘要不再只是 bookkeeping，而是会直接条件化 control / predictive 主读出
+- 同时 innovation / posterior / physical basis 仍然保持 language-late，不会被当前帧语言信息污染
 
 ### 3.4 H4 tactile 与 point future heads 默认预测真实信号
 
@@ -1224,12 +1231,15 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
     - cross inner width: `semantic_cross_dim=512`
 - 同时仍保留一个 `semantic_summary`
   - 它由同一批 semantic token 派生
-  - 主要作为预测状态记录、诊断与轻量聚合量
-  - 它不是 downstream 主融合输入
+  - 它不进入 posterior，也不进入 language-free 的 physical prediction cache
+  - 但它现在会直接追加到 control / predictive 的 world token 序列里，作为语言主干条件
+  - 这让当前 PICF 比旧的“纯 late semantic read”更接近 `pi0.5-sonata` 的直接语言条件化方式
 - 在 posterior 之后，先形成 world token 流：
   - `posterior.tokens`
   - `innovation_token`
   - `proprio_token`
+- control 路径会再追加：
+  - `semantic_summary_token`
 - 然后由这组 world tokens 去读取：
   - `semantic_tokens`
 - predictive 分支额外再拼入：
@@ -1736,6 +1746,15 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
     - `loss_pt = 0.0`
     - `projective_candidate_density = 0.3047`
     - `grad_norm ≈ 1.0`
+    - `preclip_grad_norm` 当前也会单独记录
+
+这里的 `grad_norm` 需要明确解释：
+
+- 当前训练日志里的 `grad_norm` 是 **clip 之后** 的值
+- 默认 `--grad-clip-norm = 1.0`
+- 所以长期看到 `grad_norm ≈ 1.0`，首先说明的是 clipping 经常触发，而不是训练一定异常
+- 现在脚本已经额外记录 `preclip_grad_norm`
+  - 判断是否应该放宽 clipping，应该看 `preclip_grad_norm`，而不是只看被截断后的 `grad_norm`
 
 和前一轮相比，`loss_alignment / loss_anchor_pv / loss_focus_pv` 的数值口径会有明显变化，
 这是因为 v0.4.8 现在已经真实接入了：

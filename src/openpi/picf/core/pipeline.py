@@ -557,6 +557,7 @@ class PaliGemmaSemanticWrapper:
 class _SemanticContext:
     tokens: torch.Tensor
     summary: torch.Tensor
+    available: bool
 
 
 class PicfFullCore(nn.Module):
@@ -794,6 +795,7 @@ class PicfFullCore(nn.Module):
         return _SemanticContext(
             tokens=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype),
             summary=torch.zeros((1, self.config.hidden_dim), device=self.device, dtype=self.dtype),
+            available=False,
         )
 
     def _project_semantic_context(
@@ -819,7 +821,7 @@ class PicfFullCore(nn.Module):
             else torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype)
         )
         semantic_summary = self.semantic_summary_proj(summary_raw)
-        return _SemanticContext(tokens=semantic_tokens, summary=semantic_summary)
+        return _SemanticContext(tokens=semantic_tokens, summary=semantic_summary, available=True)
 
     def _semantic_context(
         self,
@@ -859,7 +861,21 @@ class PicfFullCore(nn.Module):
         return _SemanticContext(
             tokens=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype),
             summary=self.semantic_summary_proj(raw),
+            available=True,
         )
+
+    def _condition_world_tokens_with_semantic_summary(
+        self,
+        world_tokens: torch.Tensor,
+        semantic: _SemanticContext,
+    ) -> torch.Tensor:
+        # PI0/PI0.5 style conditioning keeps language in the main control path.
+        # PICF still uses late semantic reads, but the projected semantic summary
+        # should also enter the control/predictive token stream directly instead of
+        # living only as bookkeeping in the state.
+        if not semantic.available:
+            return world_tokens
+        return torch.cat([world_tokens, semantic.summary], dim=0)
 
     def _previous_action(self, previous: PicfCoreState | None) -> torch.Tensor:
         if previous is None:
@@ -1968,6 +1984,7 @@ class PicfFullCore(nn.Module):
             dim=0,
         )
         control_world_tokens = self.control_world(control_world_tokens[None, :])[0]
+        control_world_tokens = self._condition_world_tokens_with_semantic_summary(control_world_tokens, semantic)
         control_tokens, _ = self._apply_semantic_reads(
             control_world_tokens,
             semantic.tokens,
@@ -1993,10 +2010,13 @@ class PicfFullCore(nn.Module):
         physical_pred_tokens = self.predictive_world(pred_world_tokens[None, :])[0]
         physical_global_pred = self.predictive_pool(physical_pred_tokens[None, :])[0]
         physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)
-        # Semantic tokens act only as posterior-late conditioning memory for future
-        # readout. They do not rewrite the physical predictive cache above.
+        # The physical predictive basis remains language-free so innovation keeps
+        # comparing world-only residuals. Language still needs a direct path into
+        # the semantic-conditioned future readout, so we append the projected
+        # semantic summary after the physical cache is frozen.
+        pred_conditioned_tokens = self._condition_world_tokens_with_semantic_summary(physical_pred_tokens, semantic)
         pred_tokens, _ = self._apply_semantic_reads(
-            physical_pred_tokens,
+            pred_conditioned_tokens,
             semantic.tokens,
             reads=self.predictive_semantic_reads,
             dropout_prob=self.config.predictive_semantic_dropout_prob,

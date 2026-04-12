@@ -219,7 +219,8 @@ def verify_regressions() -> list[CheckResult]:
     tests = [
         "src/openpi/picf/core/pipeline_test.py::test_language_is_late_and_does_not_change_current_posterior",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_changes_do_not_pollute_physical_prediction_cache_or_next_innovation",
-        "src/openpi/picf/core/pipeline_test.py::test_semantic_summary_is_bookkeeping_only_and_does_not_change_downstream_readout",
+        "src/openpi/picf/core/pipeline_test.py::test_semantic_summary_directly_conditions_control_and_semantic_future_readout",
+        "src/openpi/picf/core/pipeline_test.py::test_semantic_summary_alone_can_condition_action_without_cross_reads",
         "src/openpi/picf/core/pipeline_test.py::test_prior_and_context_use_previous_executed_action_not_previous_policy_output",
         "src/openpi/picf/core/pipeline_test.py::test_previous_semantic_conditioned_predictive_state_does_not_feed_next_prior_or_innovation",
         "src/openpi/picf/core/pipeline_test.py::test_previous_physical_prediction_cache_is_the_only_predictive_cache_allowed_to_change_next_innovation",
