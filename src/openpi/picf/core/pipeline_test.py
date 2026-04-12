@@ -1000,3 +1000,41 @@ def test_sinkhorn_dustbin_stays_finite_and_backward_stable(tmp_path: Path) -> No
     loss.backward()
     assert logits.grad is not None
     assert torch.isfinite(logits.grad).all()
+
+
+def test_extract_targets_tactile_real_is_summary_head_not_per_sensor_reconstruction(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    frame.G_t = core.local_frame.make_transform(frame.robot_obs)
+    left_pose = np.eye(4, dtype=np.float32)
+    right_pose = np.eye(4, dtype=np.float32)
+    frame.tactile = PicfTactilePacket(
+        sensors=(
+            TactileSensorFrame(
+                rgb=np.zeros((32, 32, 3), dtype=np.uint8),
+                sensor_name="digit",
+                T_sens_to_wrist=left_pose,
+                timestamp_s=float(frame.step_id) / 30.0,
+            ),
+            TactileSensorFrame(
+                rgb=np.full((32, 32, 3), 255, dtype=np.uint8),
+                sensor_name="gelsight_mini",
+                T_sens_to_wrist=right_pose,
+                timestamp_s=float(frame.step_id) / 30.0,
+            ),
+        ),
+        background_rgb_by_sensor={
+            "digit": np.zeros((32, 32, 3), dtype=np.uint8),
+            "gelsight_mini": np.zeros((32, 32, 3), dtype=np.uint8),
+        },
+    )
+    targets, availability = core.extract_targets(frame, visual_map_override=_visual_override(1.0))
+    tactile_real = targets["tactile_real"]
+    assert tactile_real is not None
+    base_dim = core.config.tactile_real_grid**2
+    tactile_base = tactile_real[:base_dim]
+    tactile_aux = tactile_real[base_dim:]
+    assert tactile_aux.shape[0] == core.config.tactile_aux_dim
+    torch.testing.assert_close(tactile_base, torch.full_like(tactile_base, 0.5), atol=1e-6, rtol=0.0)
+    assert float(tactile_aux[4].item()) == pytest.approx(0.5, abs=1e-6)
+    assert bool(availability[2].item()) is True

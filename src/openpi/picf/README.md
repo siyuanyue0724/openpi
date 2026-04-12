@@ -716,6 +716,8 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - 它说明当前 fingertip 几何标定已经可用，但还低于理想目标 `0.6`
 - 一键验收命令：
   - `python scripts/picf_tactile_acceptance_audit.py --contact-stats <tactile_contact_stats.json> --fingertip-calibration <tactile_fingertip_calibration.json> --metrics <metrics.jsonl>`
+- 指尖几何标定脚本 `scripts/calvin/precompute_tactile_contact_calibration.py` 现在会先为 top-contact 帧预缓存一次 merged point cloud 支持集，再搜索 `(u_open_local, o_local)`；
+  不再按“候选参数数目 × 帧数”重复建点云，这样才能稳定完成完整几何标定，而不是只能依赖早期 pilot 结果
 
 也就是说，最终部署不再允许“有 AnyTouch checkpoint，但没有背景 / contact 阈值 / 指尖几何标定”的半配置训练。
 
@@ -1275,6 +1277,20 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
       - 现有训练实现里，`loss_action = 2.0 * L_pos + 2.0 * L_rot + 2.0 * L_gripper`
       - 旧云机 `1500` step replay 的最近 `300` 条 loss 统计里，`loss_action / loss_total ≈ 0.88`
       - 同一窗口里 `loss_pt / loss_total ≈ 0.0018`；所以当前主矛盾不是“action 权重太小”，而是旧 tactile 配置几乎没有真正激活 point-tactile grounding
+      - 当前 baseline 仍保持：
+        - `lambda_action_pos = 2.0`
+        - `lambda_action_rot = 2.0`
+        - `lambda_action_gripper = 2.0`
+        - `lambda_visual_latent = 0.2`
+        - `lambda_visual_real = 0.1`
+        - `lambda_tactile_real = 0.3`
+        - `lambda_point_real = 0.3`
+        - `lambda_semantic_future_aux = 0.25`
+        - `lambda_anchor_pv = 0.1`
+        - `lambda_pv_weak = 0.02`
+        - `lambda_focus_pv = 0.0`
+        - `lambda_pt = 1.0`
+      - 当前没有证据支持继续上调 action 权重；在真实短跑验收里，`loss_action / loss_total ≈ 0.696`，action 已经是主导项
       - 对最终 tactile 方案，应该先看 `tactile_active_rate / pt_bag_nonempty_rate / loss_pt_nonzero_rate`，而不是先把 action 权重继续上调
       - 训练日志现在已经真实输出 `tactile_contact_prob_mean` 和 `tactile_active_rate`
       - 如需长期审计，可直接运行：`python scripts/picf_loss_audit.py --log <jsonl_or_log> --tail 300`
@@ -1286,6 +1302,11 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
         - `mean tactile_active_rate ≈ 0.167`
         - `mean tactile_contact_prob_mean ≈ 0.664`
         - 当前 acceptance audit 仍保留一条几何告警：`front_ratio = 0.55`，即可用但未达理想 `0.6`
+      - `tactile_real` 当前应理解为“摘要辅助头”而不是“左右传感器逐路重建头”：
+        - 每个 tactile sensor 的 RGB 会先转灰度并池化到 `4x4`
+        - 然后对所有有效 sensor 的 pooled map 求平均
+        - 再拼接 contact / force / indent / pressure / sensor-count fraction / pose xyz 这类 aux
+        - 因此它适合作为 world-model 的弱 tactile state target，不应被解读成强 per-sensor tactile future reconstruction
 - 验证级别说明：
 - 以上结论来自代码路径审计、回归测试、以及云机双卡 smoke
 - 它们足以支持“当前工程实现满足既定数学契约”的判断

@@ -109,6 +109,13 @@ class _FrameRecord:
     tactile_rgb_by_sensor: dict[str, np.ndarray]
 
 
+@dataclass(frozen=True)
+class _FingertipSearchFrame:
+    record: _FrameRecord
+    G_t: np.ndarray
+    xyz_world: np.ndarray
+
+
 def _load_sampled_records(
     *,
     root: str,
@@ -159,6 +166,68 @@ def _load_sampled_records(
         )
     reader.close()
     return records
+
+
+def _search_grids() -> tuple[list[np.ndarray], np.ndarray, np.ndarray, np.ndarray]:
+    axes = [
+        np.array([1.0, 0.0, 0.0], dtype=np.float32),
+        np.array([-1.0, 0.0, 0.0], dtype=np.float32),
+        np.array([0.0, 1.0, 0.0], dtype=np.float32),
+        np.array([0.0, -1.0, 0.0], dtype=np.float32),
+        np.array([0.0, 0.0, 1.0], dtype=np.float32),
+        np.array([0.0, 0.0, -1.0], dtype=np.float32),
+    ]
+    x_grid = np.arange(-0.02, 0.0201, 0.005, dtype=np.float32)
+    y_grid = np.arange(-0.02, 0.0201, 0.005, dtype=np.float32)
+    z_grid = np.arange(-0.03, 0.0301, 0.005, dtype=np.float32)
+    return axes, x_grid, y_grid, z_grid
+
+
+def _precompute_fingertip_search_frames(
+    *,
+    calvin_root: str,
+    records: list[_FrameRecord],
+    top_indices: np.ndarray,
+    point_stride: int,
+    point_max_points: int,
+    point_crop_radius_m: float,
+    offset_norm_max: float,
+) -> list[_FingertipSearchFrame]:
+    if top_indices.size == 0:
+        return []
+    builder = CalvinDepthToPicfPointCloud(
+        calvin_root,
+        stride=point_stride,
+        max_points=max(int(point_max_points), 4096),
+        min_peripheral_points=0,
+    )
+    local_frame = EndEffectorLocalFrame()
+    selected = [records[int(index)] for index in top_indices]
+    max_width = max(float(record.robot_obs[6]) for record in selected)
+    support_radius_m = float(point_crop_radius_m) + float(offset_norm_max) + (0.5 * max_width)
+    cached: list[_FingertipSearchFrame] = []
+    for record in selected:
+        G_t = local_frame.make_transform(record.robot_obs)
+        tcp_center_world = np.asarray(G_t[:3, 3], dtype=np.float32)
+        point_set = builder(
+            {
+                "rgb_static": record.rgb_static,
+                "depth_static": record.depth_static,
+                "rgb_gripper": record.rgb_gripper,
+                "depth_gripper": record.depth_gripper,
+                "robot_obs": record.robot_obs,
+                "focus_center_world": tcp_center_world,
+                "focus_radius_m": support_radius_m,
+            }
+        )
+        cached.append(
+            _FingertipSearchFrame(
+                record=record,
+                G_t=G_t,
+                xyz_world=np.asarray(point_set.xyz_world, dtype=np.float32),
+            )
+        )
+    return cached
 
 
 def _compute_global_backgrounds(
@@ -265,26 +334,25 @@ def _calibrate_fingertips(
     front_radius_m: float,
     front_slack_m: float,
 ) -> dict[str, object]:
-    builder = CalvinDepthToPicfPointCloud(
-        calvin_root,
-        stride=point_stride,
-        max_points=point_max_points,
-        min_peripheral_points=0,
-    )
-    local_frame = EndEffectorLocalFrame()
     count = max(1, int(math.ceil(combined_scores.shape[0] * float(top_fraction))))
     top_indices = np.argsort(combined_scores)[-count:]
-    axes = [
-        np.array([1.0, 0.0, 0.0], dtype=np.float32),
-        np.array([-1.0, 0.0, 0.0], dtype=np.float32),
-        np.array([0.0, 1.0, 0.0], dtype=np.float32),
-        np.array([0.0, -1.0, 0.0], dtype=np.float32),
-        np.array([0.0, 0.0, 1.0], dtype=np.float32),
-        np.array([0.0, 0.0, -1.0], dtype=np.float32),
-    ]
-    x_grid = np.arange(-0.02, 0.0201, 0.005, dtype=np.float32)
-    y_grid = np.arange(-0.02, 0.0201, 0.005, dtype=np.float32)
-    z_grid = np.arange(-0.03, 0.0301, 0.005, dtype=np.float32)
+    axes, x_grid, y_grid, z_grid = _search_grids()
+    offset_norm_max = float(
+        np.sqrt(
+            float(np.max(np.abs(x_grid))) ** 2
+            + float(np.max(np.abs(y_grid))) ** 2
+            + float(np.max(np.abs(z_grid))) ** 2
+        )
+    )
+    search_frames = _precompute_fingertip_search_frames(
+        calvin_root=calvin_root,
+        records=records,
+        top_indices=top_indices,
+        point_stride=point_stride,
+        point_max_points=point_max_points,
+        point_crop_radius_m=point_crop_radius_m,
+        offset_norm_max=offset_norm_max,
+    )
     best: dict[str, object] | None = None
     for axis in axes:
         for ox in x_grid:
@@ -293,9 +361,9 @@ def _calibrate_fingertips(
                     o_local = np.array([ox, oy, oz], dtype=np.float32)
                     dist_terms: list[float] = []
                     front_terms: list[float] = []
-                    for index in top_indices:
-                        record = records[int(index)]
-                        G_t = local_frame.make_transform(record.robot_obs)
+                    for search_frame in search_frames:
+                        record = search_frame.record
+                        G_t = search_frame.G_t
                         left_local, right_local = _local_sensor_centers(
                             width=float(record.robot_obs[6]),
                             u_open_local=axis,
@@ -304,18 +372,7 @@ def _calibrate_fingertips(
                         normals_local = np.stack([axis, -axis], axis=0).astype(np.float32)
                         centers_world = transform_points(np.stack([left_local, right_local], axis=0), G_t)
                         normals_world = normalize_vectors((G_t[:3, :3] @ normals_local.T).T)
-                        point_set = builder(
-                            {
-                                "rgb_static": record.rgb_static,
-                                "depth_static": record.depth_static,
-                                "rgb_gripper": record.rgb_gripper,
-                                "depth_gripper": record.depth_gripper,
-                                "robot_obs": record.robot_obs,
-                                "focus_centers_world": centers_world,
-                                "focus_radius_m": point_crop_radius_m,
-                            }
-                        )
-                        xyz = np.asarray(point_set.xyz_world, dtype=np.float32)
+                        xyz = search_frame.xyz_world
                         if xyz.shape[0] == 0:
                             dist_terms.extend([point_crop_radius_m, point_crop_radius_m])
                             front_terms.extend([0.0, 0.0])
