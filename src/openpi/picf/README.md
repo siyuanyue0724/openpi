@@ -1507,6 +1507,32 @@ python scripts/picf_watch_metrics.py /mnt/checkpoints/picf_core/picf_core/<exp-n
 
 ```bash
 python scripts/picf_watch_metrics.py /mnt/checkpoints/picf_core/picf_core/<exp-name>/metrics.jsonl
+
+如果不需要实时刷新，而是想看更稳定的 trend，当前更推荐：
+
+```bash
+python scripts/picf_watch_metrics.py /mnt/checkpoints/picf_core/picf_core/<exp-name>/metrics.jsonl --window 50
+```
+
+如果想直接生成一张可在 JupyterLab 文件浏览器里点开的 PNG，当前可以用：
+
+```bash
+python scripts/picf_plot_metrics.py \
+  /mnt/checkpoints/picf_core/picf_core/<exp-name>/metrics.jsonl \
+  --smoothing-window 50 \
+  --output /mnt/checkpoints/picf_core/picf_core/<exp-name>/metrics_trend.png
+```
+
+这个脚本：
+
+- 只读 `metrics.jsonl`
+- 使用 `matplotlib` 的 `Agg` 后端
+- 不会加载模型，也不会占 GPU
+- 默认把原始曲线用淡色叠加，再画 `50` 步 rolling mean
+- 一张图里同时给出：
+  - `loss_total / loss_action / loss_alignment / loss_pt`
+  - 各个细分 loss
+  - `tactile_active_rate / tactile_contact_prob_mean / projective_candidate_density / steps_per_sec`
 ```
 - 上面这条命令没有再显式传 `--warmup-steps`，因为长期 trainer 默认已经按 `2% * num_train_steps` 自动换算
 - 当前训练入口的默认几何配方已经切到 `--stride 4 --max-points 1024 --crop-radius-m 0.10`
