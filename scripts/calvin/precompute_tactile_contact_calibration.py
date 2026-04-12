@@ -88,6 +88,33 @@ def _trimmed_mean(values: np.ndarray, trim: float) -> float:
     return float(values[cut : values.size - cut].mean())
 
 
+def _candidate_is_better(
+    candidate: dict[str, float],
+    incumbent: dict[str, float] | None,
+    *,
+    target_front_ratio: float,
+) -> bool:
+    if incumbent is None:
+        return True
+    cand_front = float(candidate["front_ratio"])
+    inc_front = float(incumbent["front_ratio"])
+    cand_trimmed = float(candidate["d_nn_trimmed_mean"])
+    inc_trimmed = float(incumbent["d_nn_trimmed_mean"])
+    cand_ok = cand_front >= float(target_front_ratio)
+    inc_ok = inc_front >= float(target_front_ratio)
+    if cand_ok != inc_ok:
+        return cand_ok
+    if cand_ok and inc_ok:
+        if cand_trimmed != inc_trimmed:
+            return cand_trimmed < inc_trimmed
+        return cand_front > inc_front
+    if cand_front != inc_front:
+        return cand_front > inc_front
+    if cand_trimmed != inc_trimmed:
+        return cand_trimmed < inc_trimmed
+    return float(candidate["objective"]) < float(incumbent["objective"])
+
+
 def _local_sensor_centers(
     *,
     width: float,
@@ -330,6 +357,7 @@ def _calibrate_fingertips(
     combined_scores: np.ndarray,
     top_fraction: float,
     max_top_frames: int | None,
+    target_front_ratio: float,
     point_stride: int,
     point_max_points: int,
     point_crop_radius_m: float,
@@ -406,15 +434,16 @@ def _calibrate_fingertips(
                     trimmed = _trimmed_mean(np.asarray(dist_terms), trim=0.2)
                     front_ratio = float(np.mean(front_terms)) if front_terms else 0.0
                     objective = trimmed + (0.02 * max(0.0, 0.6 - front_ratio))
-                    if best is None or objective < float(best["objective"]):
-                        best = {
-                            "objective": float(objective),
-                            "u_open_local": axis.tolist(),
-                            "o_local": o_local.tolist(),
-                            "d_nn_trimmed_mean": float(trimmed),
-                            "front_ratio": float(front_ratio),
-                            "evaluated_frames": int(len(top_indices)),
-                        }
+                    candidate = {
+                        "objective": float(objective),
+                        "u_open_local": axis.tolist(),
+                        "o_local": o_local.tolist(),
+                        "d_nn_trimmed_mean": float(trimmed),
+                        "front_ratio": float(front_ratio),
+                        "evaluated_frames": int(len(top_indices)),
+                    }
+                    if _candidate_is_better(candidate, best, target_front_ratio=float(target_front_ratio)):
+                        best = candidate
     assert best is not None
     print(json.dumps({"stage": "fingertip_search_done", **best}), file=sys.stderr, flush=True)
     return best
@@ -431,6 +460,7 @@ def main() -> None:
     parser.add_argument("--background-retain-fraction", type=float, default=0.10)
     parser.add_argument("--contact-top-fraction", type=float, default=0.05)
     parser.add_argument("--geometry-max-top-frames", type=int, default=24)
+    parser.add_argument("--target-front-ratio", type=float, default=0.60)
     parser.add_argument("--point-stride", type=int, default=4)
     parser.add_argument("--point-max-points", type=int, default=1024)
     parser.add_argument("--point-crop-radius-m", type=float, default=0.10)
@@ -576,6 +606,7 @@ def main() -> None:
             combined_scores=combined_scores_np,
             top_fraction=args.contact_top_fraction,
             max_top_frames=args.geometry_max_top_frames,
+            target_front_ratio=args.target_front_ratio,
             point_stride=args.point_stride,
             point_max_points=args.point_max_points,
             point_crop_radius_m=args.point_crop_radius_m,

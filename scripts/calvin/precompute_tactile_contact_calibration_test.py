@@ -121,6 +121,7 @@ def test_calibrate_fingertips_precomputes_support_cloud_once_per_selected_frame(
         combined_scores=np.asarray([0.1, 1.0], dtype=np.float32),
         top_fraction=0.5,
         max_top_frames=1,
+        target_front_ratio=0.60,
         point_stride=4,
         point_max_points=1024,
         point_crop_radius_m=0.10,
@@ -190,6 +191,7 @@ def test_calibrate_fingertips_caps_geometry_frames(monkeypatch, tmp_path: Path) 
         combined_scores=np.asarray([0.1, 0.2, 0.3, 0.4, 0.5, 0.6], dtype=np.float32),
         top_fraction=1.0,
         max_top_frames=2,
+        target_front_ratio=0.60,
         point_stride=4,
         point_max_points=1024,
         point_crop_radius_m=0.10,
@@ -199,3 +201,20 @@ def test_calibrate_fingertips_caps_geometry_frames(monkeypatch, tmp_path: Path) 
 
     assert call_count["value"] == 2
     assert calibration["evaluated_frames"] == 2
+
+
+def test_candidate_selection_prioritizes_front_ratio_threshold() -> None:
+    from scripts.calvin.precompute_tactile_contact_calibration import _candidate_is_better
+
+    incumbent = {
+        "objective": 0.008,
+        "d_nn_trimmed_mean": 0.006,
+        "front_ratio": 0.55,
+    }
+    candidate = {
+        "objective": 0.011,
+        "d_nn_trimmed_mean": 0.011,
+        "front_ratio": 0.61,
+    }
+    assert _candidate_is_better(candidate, incumbent, target_front_ratio=0.60) is True
+    assert _candidate_is_better(incumbent, candidate, target_front_ratio=0.60) is False
