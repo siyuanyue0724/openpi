@@ -718,6 +718,7 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - `python scripts/picf_tactile_acceptance_audit.py --contact-stats <tactile_contact_stats.json> --fingertip-calibration <tactile_fingertip_calibration.json> --metrics <metrics.jsonl>`
 - 指尖几何标定脚本 `scripts/calvin/precompute_tactile_contact_calibration.py` 现在会先为 top-contact 帧预缓存一次 merged point cloud 支持集，再搜索 `(u_open_local, o_local)`；
   不再按“候选参数数目 × 帧数”重复建点云，这样才能稳定完成完整几何标定，而不是只能依赖早期 pilot 结果
+- 同时几何搜索默认只使用高置信接触的前 `24` 帧（`--geometry-max-top-frames 24`），避免把大量边缘接触/弱接触帧也平均进 objective，拖慢搜索且稀释 `front_ratio`
 
 也就是说，最终部署不再允许“有 AnyTouch checkpoint，但没有背景 / contact 阈值 / 指尖几何标定”的半配置训练。
 

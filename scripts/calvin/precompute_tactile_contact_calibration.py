@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -328,6 +329,7 @@ def _calibrate_fingertips(
     records: list[_FrameRecord],
     combined_scores: np.ndarray,
     top_fraction: float,
+    max_top_frames: int | None,
     point_stride: int,
     point_max_points: int,
     point_crop_radius_m: float,
@@ -335,7 +337,9 @@ def _calibrate_fingertips(
     front_slack_m: float,
 ) -> dict[str, object]:
     count = max(1, int(math.ceil(combined_scores.shape[0] * float(top_fraction))))
-    top_indices = np.argsort(combined_scores)[-count:]
+    top_indices = np.argsort(combined_scores)[::-1][:count]
+    if max_top_frames is not None and int(max_top_frames) > 0:
+        top_indices = top_indices[: int(max_top_frames)]
     axes, x_grid, y_grid, z_grid = _search_grids()
     offset_norm_max = float(
         np.sqrt(
@@ -352,6 +356,18 @@ def _calibrate_fingertips(
         point_max_points=point_max_points,
         point_crop_radius_m=point_crop_radius_m,
         offset_norm_max=offset_norm_max,
+    )
+    print(
+        json.dumps(
+            {
+                "stage": "fingertip_search_ready",
+                "selected_frames": int(len(search_frames)),
+                "candidate_axes": int(len(axes)),
+                "candidate_offsets": int(x_grid.size * y_grid.size * z_grid.size),
+            }
+        ),
+        file=sys.stderr,
+        flush=True,
     )
     best: dict[str, object] | None = None
     for axis in axes:
@@ -400,6 +416,7 @@ def _calibrate_fingertips(
                             "evaluated_frames": int(len(top_indices)),
                         }
     assert best is not None
+    print(json.dumps({"stage": "fingertip_search_done", **best}), file=sys.stderr, flush=True)
     return best
 
 
@@ -413,6 +430,7 @@ def main() -> None:
     parser.add_argument("--max-frames", type=int, default=2000)
     parser.add_argument("--background-retain-fraction", type=float, default=0.10)
     parser.add_argument("--contact-top-fraction", type=float, default=0.05)
+    parser.add_argument("--geometry-max-top-frames", type=int, default=24)
     parser.add_argument("--point-stride", type=int, default=4)
     parser.add_argument("--point-max-points", type=int, default=1024)
     parser.add_argument("--point-crop-radius-m", type=float, default=0.10)
@@ -557,6 +575,7 @@ def main() -> None:
             records=records,
             combined_scores=combined_scores_np,
             top_fraction=args.contact_top_fraction,
+            max_top_frames=args.geometry_max_top_frames,
             point_stride=args.point_stride,
             point_max_points=args.point_max_points,
             point_crop_radius_m=args.point_crop_radius_m,
