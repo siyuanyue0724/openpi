@@ -13,6 +13,7 @@ from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
+from openpi.picf.core import pipeline as pipeline_module
 from openpi.picf.core.pipeline import PicfFullCore
 from openpi.picf.core.pipeline import _variance_from_logvar
 from openpi.picf.core.training import compute_alignment_loss
@@ -244,6 +245,54 @@ def test_tactile_tokens_only_enter_fusion_when_pseudo_contact_is_active(tmp_path
     assert second.state.token_field.tactile_tokens.shape[0] == 2
     assert second.state.token_field.tactile_anchor_mask is not None
     assert bool(torch.all(second.state.token_field.tactile_anchor_mask).item())
+
+
+def test_hysteresis_uses_previous_contact_gate_not_anchor_mask(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id, contact_shift=10)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, contact_shift=10)
+
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+    first.state.token_field.tactile_contact_gate = torch.tensor([1.0, 1.0], dtype=core.dtype)
+    first.state.token_field.tactile_anchor_mask = torch.tensor([False, False], dtype=torch.bool)
+
+    captured: dict[str, torch.Tensor | None] = {}
+
+    def _fake_hysteresis(
+        scores: torch.Tensor,
+        *,
+        tau_on: float,
+        tau_off: float,
+        temperature: float,
+        ema_beta: float,
+        previous_score_ema: torch.Tensor | None = None,
+        previous_active: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        del tau_on, tau_off, temperature, ema_beta, previous_score_ema
+        captured["previous_active"] = None if previous_active is None else previous_active.clone()
+        scores_t = torch.as_tensor(scores, device=core.device, dtype=core.dtype)
+        probs = torch.full_like(scores_t, 0.85)
+        active = torch.ones_like(scores_t, dtype=torch.bool)
+        return scores_t, probs, active
+
+    monkeypatch.setattr(pipeline_module, "contact_prob_with_hysteresis", _fake_hysteresis)
+
+    core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+
+    assert captured["previous_active"] is not None
+    assert bool(torch.all(captured["previous_active"]).item())
 
 
 def test_full_core_preserves_2048_wide_semantic_tokens_and_backpropagates(tmp_path: Path) -> None:

@@ -1365,9 +1365,15 @@ class PicfFullCore(nn.Module):
                 prev_score_ema = None if previous is None else previous.token_field.tactile_contact_score_ema
                 prev_active = None
                 if previous is not None:
-                    prev_active = previous.token_field.tactile_anchor_mask
-                    if prev_active is None and previous.token_field.tactile_contact_gate.shape == contact_scores.shape:
-                        prev_active = previous.token_field.tactile_contact_gate > 0.0
+                    prev_gate = previous.token_field.tactile_contact_gate
+                    if prev_gate is not None and prev_gate.shape == contact_scores.shape:
+                        # Hysteresis should resume from the previous contact-active
+                        # state, not the stricter anchor/fusion gate.
+                        prev_active = prev_gate > 0.0
+                    else:
+                        prev_anchor = previous.token_field.tactile_anchor_mask
+                        if prev_anchor is not None and prev_anchor.shape == contact_scores.shape:
+                            prev_active = prev_anchor
                 tactile_contact_score_ema, tactile_contact_prob, tactile_contact_active = contact_prob_with_hysteresis(
                     contact_scores,
                     tau_on=float(max(self.config.tactile_contact_tau_on, self.config.tau_tactile_pseudo_contact)),

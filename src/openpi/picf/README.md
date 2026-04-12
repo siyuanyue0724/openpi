@@ -736,6 +736,8 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 输入 4 维现在是 `[p_left, p_right, max(p), mean(p)]`
 - 不再把左右接触概率压成重复的全局统计量
 - 这样即使 tactile token 还没到 `tactile_anchor_prob_on`，policy / context 仍然能区分“左指更像接触”还是“右指更像接触”
+- pseudo-contact hysteresis 的上一时刻状态现在也优先继承 `tactile_contact_gate`，而不是更严格的 `tactile_anchor_mask`
+  - 这样 EMA / on-off gate 的记忆语义与接触检测本身保持一致，不会被 fusion 门槛意外收紧
 
 ### 4.8 当前 `L_{pv}^{weak}` 是代码对齐版近似
 
