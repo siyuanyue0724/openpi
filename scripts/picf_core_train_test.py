@@ -222,6 +222,20 @@ def test_load_tactile_contact_stats_json_roundtrip(tmp_path: Path) -> None:
     assert payload["temperature"] == pytest.approx(0.005)
 
 
+def test_load_tactile_calibration_json_roundtrip(tmp_path: Path) -> None:
+    calibration_path = tmp_path / "tactile_fingertip_calibration.json"
+    calibration_path.write_text(
+        '{"u_open_local": [0, 0, 1], "o_local": [0.0, 0.02, -0.03], "recommended_pt_bag_radius_m": 0.035, "recommended_pt_bag_sigma_m": 0.0117}',
+        encoding="utf-8",
+    )
+
+    payload = _MODULE._load_tactile_calibration_json(str(calibration_path))
+
+    assert payload is not None
+    assert payload["recommended_pt_bag_radius_m"] == pytest.approx(0.035)
+    assert payload["recommended_pt_bag_sigma_m"] == pytest.approx(0.0117)
+
+
 def test_calvin_transition_source_emits_dynamic_tactile_packet_and_extra_fields(tmp_path: Path) -> None:
     root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
     backgrounds = {
@@ -303,6 +317,42 @@ def test_validate_backbone_args_loads_tactile_contact_thresholds(monkeypatch: py
     assert args.tactile_contact_tau_on == pytest.approx(0.23)
     assert args.tactile_contact_tau_off == pytest.approx(0.22)
     assert args.tactile_contact_temperature == pytest.approx(0.005)
+
+
+def test_validate_backbone_args_applies_recommended_pt_bag_geometry_when_defaults_are_implicit(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    ckpt = tmp_path / "checkpoint-4frames.pth"
+    ckpt.write_bytes(b"stub")
+    backgrounds = tmp_path / "tactile_backgrounds.npz"
+    np.savez(backgrounds, digit=np.zeros((4, 4, 3), dtype=np.uint8), gelsight_mini=np.zeros((4, 4, 3), dtype=np.uint8))
+    calibration = tmp_path / "tactile_fingertip_calibration.json"
+    calibration.write_text(
+        '{"u_open_local": [0, 0, 1], "o_local": [0.0, 0.02, -0.03], "recommended_pt_bag_radius_m": 0.03545, "recommended_pt_bag_sigma_m": 0.01182}',
+        encoding="utf-8",
+    )
+    stats = tmp_path / "tactile_contact_stats.json"
+    stats.write_text('{"tau_on": 0.23, "tau_off": 0.22, "temperature": 0.005}', encoding="utf-8")
+
+    monkeypatch.setattr(_MODULE, "_default_anytouch_checkpoint", lambda: str(ckpt))
+    monkeypatch.setattr(_MODULE, "_default_tactile_backgrounds_path", lambda: str(backgrounds))
+    monkeypatch.setattr(_MODULE, "_default_tactile_calibration_path", lambda: str(calibration))
+    monkeypatch.setattr(_MODULE, "_default_tactile_contact_stats_path", lambda: str(stats))
+
+    args = _base_args()
+    args.tactile_mode = "encoder"
+    args.point_backbone = "rgb"
+    args.device = "cuda"
+    args.pt_bag_radius_m = None
+    args.pt_bag_sigma_m = None
+    _MODULE._normalize_train_args(args)
+    _MODULE._validate_backbone_args(args)
+
+    assert args.pt_bag_radius_m == pytest.approx(0.03545)
+    assert args.pt_bag_sigma_m == pytest.approx(0.01182)
+    assert args.pt_bag_radius_m_source == "calibration"
+    assert args.pt_bag_sigma_m_source == "calibration"
 
 
 def test_validate_train_args_rejects_cpu_sonata() -> None:

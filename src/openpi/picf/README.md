@@ -689,8 +689,12 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - `--max-points 1024`
 - `--crop-radius-m 0.10`
 - `--point-focus-sigma-m 0.03`
-- `--pt-bag-radius-m 0.045`
-- `--pt-bag-sigma-m 0.015`
+- `--pt-bag-radius-m` / `--pt-bag-sigma-m`
+  - 现在默认不再硬编码成固定训练值
+  - 当 `tactile_mode=encoder` 且提供 `tactile_fingertip_calibration.json` 时，训练会自动优先采用 calibration 产物里的：
+    - `recommended_pt_bag_radius_m`
+    - `recommended_pt_bag_sigma_m`
+  - 只有在 calibration 没给推荐值时，才回退到基线 `0.045 / 0.015`
 - `--pt-bag-kmin 32`
 - `--pt-back-slack-m 0.008`
 - `--p-align-on 0.55`
@@ -711,9 +715,11 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - `mean tactile_active_rate ≈ 0.167`
   - `loss_pt_nonzero_rate = 1.0`
   - `loss_action / loss_total ≈ 0.696`
-- 当前 acceptance audit 唯一剩余告警是：
-  - `front_ratio = 0.55`
-  - 它说明当前 fingertip 几何标定已经可用，但还低于理想目标 `0.6`
+- 最新完整几何标定 `tactile_calib_task_ABC_D_rgb_latent_full_v8` 已把 fingertip 前半空间质量抬过验收线：
+  - `front_ratio = 0.6303`
+  - `d_nn_trimmed_mean = 0.01023`
+  - `recommended_pt_bag_radius_m = 0.03545`
+  - `recommended_pt_bag_sigma_m = 0.01182`
 - 一键验收命令：
   - `python scripts/picf_tactile_acceptance_audit.py --contact-stats <tactile_contact_stats.json> --fingertip-calibration <tactile_fingertip_calibration.json> --metrics <metrics.jsonl>`
 - 指尖几何标定脚本 `scripts/calvin/precompute_tactile_contact_calibration.py` 现在会先为 top-contact 帧预缓存一次 merged point cloud 支持集，再搜索 `(u_open_local, o_local)`；
@@ -1305,7 +1311,8 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
         - `loss_pt_nonzero_rate = 1.0`
         - `mean tactile_active_rate ≈ 0.167`
         - `mean tactile_contact_prob_mean ≈ 0.664`
-        - 当前 acceptance audit 仍保留一条几何告警：`front_ratio = 0.55`，即可用但未达理想 `0.6`
+        - 最新完整几何 calibration `v8` 已通过 fingertip 前半空间门槛：`front_ratio = 0.6303`
+        - 当训练未显式指定 `--pt-bag-radius-m/--pt-bag-sigma-m` 时，入口现在会自动采用 calibration 提供的推荐值，而不是继续硬编码 `0.045 / 0.015`
       - `tactile_real` 当前应理解为“摘要辅助头”而不是“左右传感器逐路重建头”：
         - 每个 tactile sensor 的 RGB 会先转灰度并池化到 `4x4`
         - 然后对所有有效 sensor 的 pooled map 求平均

@@ -593,6 +593,13 @@ def _load_tactile_contact_stats_json(path: str | None) -> dict[str, Any] | None:
     return dict(payload)
 
 
+def _load_tactile_calibration_json(path: str | None) -> dict[str, Any] | None:
+    if path is None:
+        return None
+    payload = json.loads(Path(path).expanduser().read_text(encoding="utf-8"))
+    return dict(payload)
+
+
 def _apply_foundation_profile(args: argparse.Namespace) -> None:
     if not bool(args.use_foundation_backbones):
         return
@@ -613,6 +620,18 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.warmup_steps = max(1, int(round(0.02 * float(args.num_train_steps))))
     else:
         args.warmup_steps = int(args.warmup_steps)
+    if getattr(args, "pt_bag_radius_m", None) is None:
+        args.pt_bag_radius_m = 0.045
+        args.pt_bag_radius_m_source = "default"
+    else:
+        args.pt_bag_radius_m = float(args.pt_bag_radius_m)
+        args.pt_bag_radius_m_source = "cli"
+    if getattr(args, "pt_bag_sigma_m", None) is None:
+        args.pt_bag_sigma_m = 0.015
+        args.pt_bag_sigma_m_source = "default"
+    else:
+        args.pt_bag_sigma_m = float(args.pt_bag_sigma_m)
+        args.pt_bag_sigma_m_source = "cli"
     args.semantic_gradient_checkpointing_disabled_for_accum = False
     if (
         int(args.accum_steps) > 1
@@ -801,6 +820,19 @@ def _validate_backbone_args(args: argparse.Namespace) -> None:
                 "tactile_mode=encoder on CALVIN requires fingertip geometry calibration. "
                 "Pass --tactile-calibration-path or place tactile_fingertip_calibration.json under assets/calvin/."
             )
+        tactile_calibration_payload = _load_tactile_calibration_json(args.tactile_calibration_path)
+        if tactile_calibration_payload is None:
+            raise FileNotFoundError(
+                f"Failed to load tactile fingertip calibration from {args.tactile_calibration_path!r}."
+            )
+        recommended_radius = tactile_calibration_payload.get("recommended_pt_bag_radius_m")
+        if recommended_radius is not None and getattr(args, "pt_bag_radius_m_source", "") == "default":
+            args.pt_bag_radius_m = float(recommended_radius)
+            args.pt_bag_radius_m_source = "calibration"
+        recommended_sigma = tactile_calibration_payload.get("recommended_pt_bag_sigma_m")
+        if recommended_sigma is not None and getattr(args, "pt_bag_sigma_m_source", "") == "default":
+            args.pt_bag_sigma_m = float(recommended_sigma)
+            args.pt_bag_sigma_m_source = "calibration"
         if args.tactile_contact_stats_path is None:
             raise FileNotFoundError(
                 "tactile_mode=encoder on CALVIN requires calibrated tactile contact thresholds. "
@@ -2031,6 +2063,16 @@ def train(args: argparse.Namespace) -> None:
                 bool(args.wandb_enabled and args.wandb_mode != "disabled"),
             )
             logging.info(
+                "Tactile geometry config: pt_bag_radius_m=%s (source=%s) pt_bag_sigma_m=%s (source=%s) p_align_off=%s p_align_on=%s tactile_anchor_prob_on=%s",
+                args.pt_bag_radius_m,
+                getattr(args, "pt_bag_radius_m_source", "unknown"),
+                args.pt_bag_sigma_m,
+                getattr(args, "pt_bag_sigma_m_source", "unknown"),
+                args.p_align_off,
+                args.p_align_on,
+                args.tactile_anchor_prob_on,
+            )
+            logging.info(
                 "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
                 args.hidden_dim,
                 args.posterior_hidden_dim,
@@ -2454,8 +2496,8 @@ def main() -> None:
     parser.add_argument("--tau-pt", type=float, default=0.07)
     parser.add_argument("--tau-route-p", type=float, default=0.1)
     parser.add_argument("--tau-route-v", type=float, default=0.1)
-    parser.add_argument("--pt-bag-radius-m", type=float, default=0.045)
-    parser.add_argument("--pt-bag-sigma-m", type=float, default=0.015)
+    parser.add_argument("--pt-bag-radius-m", type=float, default=None)
+    parser.add_argument("--pt-bag-sigma-m", type=float, default=None)
     parser.add_argument("--pt-bag-kmin", type=int, default=32)
     parser.add_argument("--pt-back-slack-m", type=float, default=0.008)
     parser.add_argument("--p-align-on", type=float, default=0.55)
