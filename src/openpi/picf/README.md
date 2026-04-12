@@ -719,6 +719,12 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 
 也就是说，最终部署不再允许“有 AnyTouch checkpoint，但没有背景 / contact 阈值 / 指尖几何标定”的半配置训练。
 
+当前 `contact_context` token 也已经保留双指 laterality：
+
+- 输入 4 维现在是 `[p_left, p_right, max(p), mean(p)]`
+- 不再把左右接触概率压成重复的全局统计量
+- 这样即使 tactile token 还没到 `tactile_anchor_prob_on`，policy / context 仍然能区分“左指更像接触”还是“右指更像接触”
+
 ### 4.8 当前 `L_{pv}^{weak}` 是代码对齐版近似
 
 总纲里更理想的 `L_{pv}^{weak}` 会排除 projective neighborhood 高度重叠的 visual negatives。

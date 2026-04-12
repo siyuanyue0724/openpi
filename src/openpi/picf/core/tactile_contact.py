@@ -6,13 +6,21 @@ import torch
 def summarize_contact_context(contact_prob: torch.Tensor, anchor_mask: torch.Tensor) -> torch.Tensor:
     if contact_prob.numel() == 0:
         return torch.zeros((4,), device=contact_prob.device, dtype=contact_prob.dtype)
-    active = anchor_mask.to(dtype=contact_prob.dtype)
+    _ = anchor_mask
+    if contact_prob.numel() == 1:
+        left_prob = contact_prob[0]
+        right_prob = contact_prob[0]
+    else:
+        # Preserve per-sensor laterality for the common two-finger case used by
+        # CALVIN, while keeping the token width fixed for downstream projections.
+        left_prob = contact_prob[0]
+        right_prob = contact_prob[1]
     return torch.stack(
         [
-            torch.mean(contact_prob),
+            left_prob,
+            right_prob,
             torch.max(contact_prob),
-            torch.mean(active),
-            torch.sum(contact_prob) / max(int(contact_prob.numel()), 1),
+            torch.mean(contact_prob),
         ],
         dim=0,
     )
