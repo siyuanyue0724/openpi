@@ -945,3 +945,74 @@ def test_checkpoint_loader_accepts_legacy_core_only_state(tmp_path: Path) -> Non
 
     assert step == 9
     torch.testing.assert_close(reloaded.core.proj.weight, trainer.core.proj.weight)
+
+
+def test_load_checkpoint_sequential_across_ranks_serializes_resume_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[tuple[str, int]] = []
+
+    def fake_load_checkpoint(*, path, model, optimizer, device):
+        del path, model, optimizer, device
+        calls.append(("load", 0))
+        return 123
+
+    def fake_barrier(*, use_ddp, device):
+        del device
+        calls.append(("barrier", int(use_ddp)))
+
+    def fake_broadcast(tensor, src):
+        calls.append(("broadcast", int(src)))
+
+    monkeypatch.setattr(_MODULE, "_load_checkpoint", fake_load_checkpoint)
+    monkeypatch.setattr(_MODULE, "_distributed_barrier", fake_barrier)
+    monkeypatch.setattr(_MODULE.dist, "broadcast", fake_broadcast)
+
+    step = _MODULE._load_checkpoint_sequential_across_ranks(
+        path=Path("/tmp/fake"),
+        model=object(),
+        optimizer=object(),
+        device=torch.device("cpu"),
+        rank=0,
+        world_size=2,
+    )
+
+    assert step == 123
+    assert calls == [
+        ("load", 0),
+        ("barrier", 1),
+        ("barrier", 1),
+        ("broadcast", 0),
+    ]
+
+
+def test_load_checkpoint_sequential_across_ranks_only_loads_local_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+    loaded: list[int] = []
+    barriers: list[int] = []
+
+    def fake_load_checkpoint(*, path, model, optimizer, device):
+        del path, model, optimizer, device
+        loaded.append(1)
+        return 456
+
+    def fake_barrier(*, use_ddp, device):
+        del device
+        barriers.append(int(use_ddp))
+
+    def fake_broadcast(tensor, src):
+        del src
+
+    monkeypatch.setattr(_MODULE, "_load_checkpoint", fake_load_checkpoint)
+    monkeypatch.setattr(_MODULE, "_distributed_barrier", fake_barrier)
+    monkeypatch.setattr(_MODULE.dist, "broadcast", fake_broadcast)
+
+    step = _MODULE._load_checkpoint_sequential_across_ranks(
+        path=Path("/tmp/fake"),
+        model=object(),
+        optimizer=object(),
+        device=torch.device("cpu"),
+        rank=1,
+        world_size=2,
+    )
+
+    assert step == 456
+    assert loaded == [1]
+    assert barriers == [1, 1]

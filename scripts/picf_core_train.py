@@ -1649,6 +1649,33 @@ def _load_checkpoint(
     return int(payload.get("step", 0))
 
 
+def _load_checkpoint_sequential_across_ranks(
+    *,
+    path: Path,
+    model: _PicfWindowTrainer | DistributedDataParallel,
+    optimizer: torch.optim.Optimizer,
+    device: torch.device,
+    rank: int,
+    world_size: int,
+) -> int:
+    """Avoid shared-filesystem page-read stalls by serializing DDP checkpoint loads.
+
+    Foundation checkpoints are still loaded independently during model construction,
+    but the large resume checkpoint for PICF trainer state should only be read by one
+    rank at a time on networked storage.
+    """
+    if world_size <= 1:
+        return _load_checkpoint(path=path, model=model, optimizer=optimizer, device=device)
+    loaded_step = 0
+    for load_rank in range(int(world_size)):
+        if rank == load_rank:
+            loaded_step = _load_checkpoint(path=path, model=model, optimizer=optimizer, device=device)
+        _distributed_barrier(use_ddp=True, device=device)
+    step_tensor = torch.tensor([int(loaded_step)], device=device, dtype=torch.int64)
+    dist.broadcast(step_tensor, src=0)
+    return int(step_tensor.item())
+
+
 def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[PicfFullCore, torch.nn.Module | None, bool]:
     builder = CalvinDepthToPicfPointCloud(args.calvin_root, stride=args.stride, max_points=args.max_points)
     config = PicfCoreConfig(
@@ -2030,7 +2057,14 @@ def train(args: argparse.Namespace) -> None:
         if resume_path is not None:
             if not resume_path.exists():
                 raise FileNotFoundError(f"Resume checkpoint not found: {resume_path}")
-            start_step = _load_checkpoint(path=resume_path, model=model, optimizer=optimizer, device=device)
+            start_step = _load_checkpoint_sequential_across_ranks(
+                path=resume_path,
+                model=model,
+                optimizer=optimizer,
+                device=device,
+                rank=rank,
+                world_size=world_size,
+            )
             logging.info("Resumed from %s at step=%s", resume_path, start_step)
 
         if is_main:
