@@ -1423,7 +1423,7 @@ python scripts/picf_core_train.py \
   --num-train-steps 30000 \
   --log-interval 100 \
   --save-interval 5000 \
-  --accum-steps 2 \
+  --accum-steps 1 \
   --unroll-steps 2 \
   --stride 4 \
   --max-points 1024 \
@@ -1450,6 +1450,9 @@ python scripts/picf_core_train.py \
 - 如果是在云上跑长期训练，当前推荐把 wandb 设成 `offline`，这和旧 `pi0.5` 训练 README 的工程口径保持一致
 - 上面这条命令没有再显式传 `--warmup-steps`，因为长期 trainer 默认已经按 `2% * num_train_steps` 自动换算
 - 当前训练入口的默认几何配方已经切到 `--stride 4 --max-points 1024 --crop-radius-m 0.10`
+- 单卡 full foundation 当前推荐 `--accum-steps 1`
+  - `--accum-steps 2` 在这台 `39.5 GiB` 云机上已真实复现 `torch.OutOfMemoryError`
+  - 坏点在 V-JEPA backward 重算阶段，而不是 checkpoint 缺失或轻量路径误开
 - 如果后续还要继续提高点密度，应单独做显存与收敛回归
 - `--max-empty-window-retries 32` 是当前推荐保留的首步窗口安全阈值
   - 它只处理“窗口首帧局部 `xyzrgb` support 为空”的情况
@@ -1504,7 +1507,7 @@ python scripts/picf_core_train.py \
   --num-train-steps 30000 \
   --log-interval 100 \
   --save-interval 5000 \
-  --accum-steps 2 \
+  --accum-steps 1 \
   --unroll-steps 2 \
   --stride 4 \
   --max-points 1024 \
@@ -1548,7 +1551,9 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
 如果需要严格对齐旧 `pi0.5` 的“全局 batch=2”口径：
 
 - 双卡 DDP：保持 `--accum-steps 1`
-- 单卡：改成 `--accum-steps 2`
+- 单卡：理论上可改成 `--accum-steps 2`
+  - 但当前这台 `39.5 GiB` 云机上，single-GPU + full foundation + `--accum-steps 2` 已真实复现 OOM
+  - 因此当前工程推荐仍是单卡 `--accum-steps 1`，或直接切双卡 DDP
 
 这条 DDP 命令当前已经做过最小起步回归和一次 `120` step 的 post-fix 回归，但还没有做长程收敛验证；因此它适合正式试训，不应被误写成“已完成多卡配方定型”。
 

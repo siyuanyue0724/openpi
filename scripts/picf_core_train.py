@@ -626,6 +626,25 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.semantic_gradient_checkpointing_disabled_for_accum = True
 
 
+def _warn_single_gpu_foundation_accum_risk(
+    args: argparse.Namespace,
+    *,
+    world_size: int,
+    logger: logging.Logger,
+) -> None:
+    if (
+        bool(getattr(args, "use_foundation_backbones", False))
+        and str(getattr(args, "device", "")).startswith("cuda")
+        and int(world_size) == 1
+        and int(getattr(args, "accum_steps", 1)) > 1
+    ):
+        logger.warning(
+            "Single-GPU full foundation training with accum_steps=%s is OOM-prone on ~40 GiB GPUs. "
+            "Prefer accum_steps=1 on one GPU, or move to 2-GPU DDP if you need effective_global_batch>1.",
+            int(args.accum_steps),
+        )
+
+
 def _validate_train_args(args: argparse.Namespace) -> None:
     positive_int_fields = (
         "num_train_steps",
@@ -1889,6 +1908,8 @@ def train(args: argparse.Namespace) -> None:
     try:
         _seed_everything(args.seed, rank)
         is_main = _is_main(rank)
+        if is_main:
+            _warn_single_gpu_foundation_accum_risk(args, world_size=world_size, logger=logging.getLogger())
         output_dir = Path(args.checkpoint_base_dir) / "picf_core" / args.exp_name
         latest_path = output_dir / "latest.pt"
         metrics_path = output_dir / "metrics.jsonl"
