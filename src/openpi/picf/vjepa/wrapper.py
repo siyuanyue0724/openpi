@@ -186,19 +186,32 @@ class Vjepa2VisualEncoder(nn.Module):
             )
         source_hw = (int(clip.shape[1]), int(clip.shape[2]))
         pixel_values = preprocess_video_clip(clip, self.config)
-        if _trainable_vjepa_uses_autocast(trainable=bool(self.trainable and self.training), device=self.device, dtype=self.dtype):
+        use_autocast = _trainable_vjepa_uses_autocast(
+            trainable=bool(self.trainable),
+            device=self.device,
+            dtype=self.dtype,
+        )
+        if use_autocast:
             pixel_values = pixel_values.to(device=self.device)
         else:
             pixel_values = pixel_values.to(device=self.device, dtype=self.dtype)
         video = pixel_values.permute(0, 2, 1, 3, 4).contiguous()
         use_grad = bool(self.trainable and self.training)
+        use_hierarchical = bool(self.trainable)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
-            if _trainable_vjepa_uses_autocast(trainable=use_grad, device=self.device, dtype=self.dtype):
-                with torch.autocast(device_type="cuda", dtype=self.dtype):
+            previous_return_hierarchical = getattr(self.encoder, "return_hierarchical", None)
+            if previous_return_hierarchical is not None:
+                self.encoder.return_hierarchical = bool(use_hierarchical)
+            try:
+                if use_autocast:
+                    with torch.autocast(device_type="cuda", dtype=self.dtype):
+                        tokens = self.encoder(video, training=use_grad)
+                else:
                     tokens = self.encoder(video, training=use_grad)
-            else:
-                tokens = self.encoder(video, training=use_grad)
+            finally:
+                if previous_return_hierarchical is not None:
+                    self.encoder.return_hierarchical = previous_return_hierarchical
             token_grid = tokens.reshape(
                 1,
                 self.config.temporal_tokens,
