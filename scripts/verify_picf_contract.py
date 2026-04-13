@@ -128,7 +128,8 @@ def verify_static_contract() -> list[CheckResult]:
                 attr.startswith("previous.predictive.prediction_cache")
                 or attr.startswith("previous.predictive.global_pred")
                 or attr.startswith("previous.predictive.semantic_tokens")
-                or attr.startswith("previous.predictive.semantic_summary")
+                or attr.startswith("previous.predictive.predictive_query_state")
+                or attr.startswith("previous.predictive.control_query_state")
                 for attr in innovation_attrs
             ),
             detail="Innovation constructor does not read semantic-conditioned cache/global_pred/previous semantic fields.",
@@ -143,7 +144,7 @@ def verify_static_contract() -> list[CheckResult]:
             predictive_source,
             [
                 "physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)",
-                "pred_tokens, _ = self._apply_semantic_reads(",
+                "pred_tokens = self.predictive_semantic_world(",
                 "prediction_cache = self._prediction_cache_from_global(global_pred)",
             ],
         ),
@@ -219,8 +220,8 @@ def verify_regressions() -> list[CheckResult]:
     tests = [
         "src/openpi/picf/core/pipeline_test.py::test_language_is_late_and_does_not_change_current_posterior",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_changes_do_not_pollute_physical_prediction_cache_or_next_innovation",
-        "src/openpi/picf/core/pipeline_test.py::test_semantic_summary_directly_conditions_control_and_semantic_future_readout",
-        "src/openpi/picf/core/pipeline_test.py::test_semantic_summary_alone_can_condition_action_without_cross_reads",
+        "src/openpi/picf/core/pipeline_test.py::test_semantic_tokens_directly_condition_control_and_semantic_future_readout",
+        "src/openpi/picf/core/pipeline_test.py::test_semantic_tokens_alone_can_condition_action_without_cross_reads",
         "src/openpi/picf/core/pipeline_test.py::test_prior_and_context_use_previous_executed_action_not_previous_policy_output",
         "src/openpi/picf/core/pipeline_test.py::test_previous_semantic_conditioned_predictive_state_does_not_feed_next_prior_or_innovation",
         "src/openpi/picf/core/pipeline_test.py::test_previous_physical_prediction_cache_is_the_only_predictive_cache_allowed_to_change_next_innovation",

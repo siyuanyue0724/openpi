@@ -23,9 +23,12 @@ class PicfCoreConfig:
     posterior_layers: int = 2
     predictive_layers: int = 2
     control_layers: int = 2
+    control_query_tokens: int = 1
+    predictive_query_tokens: int = 1
     predictive_semantic_reads: int = 2
     control_semantic_reads: int = 2
     predictive_semantic_dropout_prob: float = 0.1
+    semantic_prefix_dropout_prob: float = 0.0
     attention_heads: int = 8
     query_rounds: int = 2
     crop_radius_m: float = 0.10

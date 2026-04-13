@@ -255,12 +255,10 @@ def test_innovation_keeps_point_error_encoder_in_graph_when_current_point_target
     assert torch.allclose(core.point_error_encoder.weight.grad, torch.zeros_like(core.point_error_encoder.weight.grad))
 
 
-def test_semantic_future_aux_keeps_predictive_cross_read_in_graph(tmp_path: Path) -> None:
+def test_semantic_future_aux_keeps_predictive_semantic_trunk_in_graph(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
     frames[0].tactile = _make_tactile_packet(frames[0].step_id)
-    for layer in core.predictive_semantic_reads:
-        layer.cross_gate.data.fill_(3.0)
     first = core.step(
         frames[0],
         point_features_override=_point_override(core, frames[0]),
@@ -278,7 +276,7 @@ def test_semantic_future_aux_keeps_predictive_cross_read_in_graph(tmp_path: Path
     )
     losses.total.backward()
     assert torch.isfinite(losses.semantic_future_aux)
-    assert core.predictive_semantic_reads[0].attn.out_proj.weight.grad is not None
+    assert core.predictive_semantic_world.layers[0].attn.out_proj.weight.grad is not None
 
 
 def test_alignment_loss_uses_projective_candidates_and_is_finite(tmp_path: Path) -> None:

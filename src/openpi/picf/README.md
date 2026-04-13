@@ -500,33 +500,24 @@ point / visual / tactile / compact context 都先投到统一 hidden size，再�
 
 当前实现状态：已满足。
 
-当前真正进入 downstream 融合的是 `semantic_tokens`：
+当前真正进入 downstream 融合的是 **完整 semantic token stream**：
 
-- control 分支里，world tokens 通过 posterior-late 异宽 cross-attention 读取 `semantic_tokens`
-- predictive 分支里，也是先固定 `physical_prediction_cache`，再去读取 `semantic_tokens`
+- control 分支里，`semantic_tokens` 会在 posterior 固定之后，作为与 posterior/world tokens 同级的 semantic prefix 直接并入 control 主干
+- predictive 分支里，先固定 language-free 的 `physical_prediction_cache`，再把 `semantic_tokens` 作为同级 semantic prefix 并入 semantic-conditioned predictive 主干
 
-`semantic_summary` 当前的语义需要单独说明：
+当前实现已经不再把 `semantic_summary` 当作主路径概念：
 
-- 它仍然不参与 `_posterior_update(...)`
-- 它也不参与 language-free 的 `physical_prediction_cache`
-- 但它现在已经直接注入 control / predictive 的 world token 主路径
-  - control 侧：`control_world_tokens` 会先追加一个 `semantic_summary` token，再进入 semantic late reads
-  - predictive 侧：`physical_pred_tokens` 保持 language-free；随后 semantic-conditioned future readout 会在这组 tokens 上追加 `semantic_summary` token，再进入 semantic late reads
+- `semantic_summary` 不参与 `_posterior_update(...)`
+- `semantic_summary` 不参与 language-free 的 `physical_prediction_cache`
+- `semantic_summary` 也不再承担 control / predictive 的主要语言入口
+- 当前 action / semantic-conditioned future 依赖的是 **token-level posterior-late semantic prefix**
 
-这一步是刻意向 `pi0.5 / pi0.5-sonata` 的“语言先进入主干，再由后续层消化”靠拢：
+这一步是明确向 `pi0.5 / pi0.5-sonata` 的可靠主干靠拢：
 
-- mixed image+text prefix 仍然保留，这本身就是正确设计
-- 但 prompt 的聚合摘要不再只是 bookkeeping，而是会直接条件化 control / predictive 主读出
+- mixed image+text prefix 继续保留，这本身就是正确设计
+- 语言不再被单个 summary bottleneck 压缩后再喂给动作主干
+- semantic token 序列会直接条件化 posterior-late control / predictive 主干
 - 同时 innovation / posterior / physical basis 仍然保持 language-late，不会被当前帧语言信息污染
-
-需要额外说明的是：
-
-- 上面这一节描述的是**当前仓库已经落地的过渡性实现**
-- 它不等于这轮最终目标设计
-- 当前针对 `v29/10000` 的诊断已经说明：
-  - 任务 prompt 对 action 几乎零影响
-  - 同 prompt 跨环境 action 变化也被强烈压缩
-- 因此后续重构不会继续把 `semantic_summary` 作为主路径概念
 
 完整的目标设计、数学约束和文件级实施计划，统一写在：
 [`README_semantic_prefix_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_refactor.md)。
@@ -1251,25 +1242,24 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
     - world query width: `hidden_dim=256`
     - semantic key/value width: `semantic_dim=2048`
     - cross inner width: `semantic_cross_dim=512`
-- 同时仍保留一个 `semantic_summary`
-  - 它由同一批 semantic token 派生
-  - 它不进入 posterior，也不进入 language-free 的 physical prediction cache
-  - 但它现在会直接追加到 control / predictive 的 world token 序列里，作为语言主干条件
-  - 这让当前 PICF 比旧的“纯 late semantic read”更接近 `pi0.5-sonata` 的直接语言条件化方式
+- 当前 downstream 使用的是 **完整 semantic token stream**
+  - `PaliGemma` 文本 hidden states 中所有有效 token 会被保留
+  - `PaliGemma` 图像 hidden states 中所有有效 token 也会被保留
+  - 这些 token 保持 `semantic_dim=2048` 原生宽度
+  - 它们在 posterior 固定之后，会投到 world hidden width，并作为 semantic prefix 直接并入 control / predictive 主干
 - 在 posterior 之后，先形成 world token 流：
   - `posterior.tokens`
   - `innovation_token`
   - `proprio_token`
 - control 路径会再追加：
-  - `semantic_summary_token`
-- 然后由这组 world tokens 去读取：
-  - `semantic_tokens`
+  - `semantic_prefix_tokens`
+  - `control_query_tokens`
 - predictive 分支额外再拼入：
   - `posterior.global_post`
   - `action_cond_token`
 - predictive 分支现在还会显式拆成两份 cache：
   - `physical_prediction_cache`
-    - 只来自 semantic 进入前的 world stream
+    - 只来自 semantic 进入前的 language-free world stream
     - 下一步 innovation **只允许**读取这份 cache
   - `prediction_cache`
     - 来自 world<-semantic cross-attention 之后的 semantic-conditioned future readout

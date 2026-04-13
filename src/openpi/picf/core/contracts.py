@@ -97,16 +97,17 @@ class PicfPosteriorAnchorState:
 @dataclasses.dataclass
 class PicfPredictiveState:
     semantic_tokens: torch.Tensor
-    semantic_summary: torch.Tensor
     innovation_token: torch.Tensor
     innovation_norm: torch.Tensor
     availability: torch.Tensor
     control_tokens: torch.Tensor
+    control_query_state: torch.Tensor
     pooled_state: torch.Tensor
     action: torch.Tensor
     executed_action: torch.Tensor
     physical_global_pred: torch.Tensor
     physical_prediction_cache: PicfPredictionCache
+    predictive_query_state: torch.Tensor
     global_pred: torch.Tensor
     prediction_cache: PicfPredictionCache
 

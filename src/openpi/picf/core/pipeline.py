@@ -91,6 +91,23 @@ def _clip_vector_norm(x: torch.Tensor, *, max_norm: float) -> torch.Tensor:
     return x * scale
 
 
+def _add_role_embedding(tokens: torch.Tensor, embedding: nn.Embedding, role_id: int) -> torch.Tensor:
+    if tokens.shape[0] == 0:
+        return tokens
+    role = embedding.weight[int(role_id)].to(device=tokens.device, dtype=tokens.dtype)
+    return tokens + role[None, :]
+
+
+def _mean_query_state(tokens: torch.Tensor, *, num_query_tokens: int) -> torch.Tensor:
+    count = max(int(num_query_tokens), 1)
+    if tokens.shape[0] < count:
+        raise RuntimeError(
+            "PICF query-token contract violated: "
+            f"requested {count} query tokens from tensor with shape={tuple(tokens.shape)}."
+        )
+    return tokens[-count:].mean(dim=0)
+
+
 def _variance_from_logvar(logvar: torch.Tensor, *, min_var: float, max_var: float) -> torch.Tensor:
     if min_var <= 0.0:
         raise ValueError(f"Expected min_var > 0, got {min_var}.")
@@ -556,7 +573,7 @@ class PaliGemmaSemanticWrapper:
 @dataclasses.dataclass(frozen=True)
 class _SemanticContext:
     tokens: torch.Tensor
-    summary: torch.Tensor
+    prefix_tokens: torch.Tensor
     available: bool
 
 
@@ -659,19 +676,16 @@ class PicfFullCore(nn.Module):
         self.posterior_self = TransformerStack(hidden_dim, heads, self.config.posterior_layers)
         self.posterior_pool = AttentionPool(hidden_dim)
 
-        self.semantic_summary_proj = nn.LazyLinear(hidden_dim)
+        self.semantic_prefix_proj = nn.LazyLinear(hidden_dim)
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
+        self.control_role_embedding = nn.Embedding(5, hidden_dim)
+        self.predictive_physical_role_embedding = nn.Embedding(4, hidden_dim)
+        self.predictive_conditioned_role_embedding = nn.Embedding(3, hidden_dim)
+        self.control_query_tokens = nn.Parameter(torch.zeros((self.config.control_query_tokens, hidden_dim)))
+        self.predictive_query_tokens = nn.Parameter(torch.zeros((self.config.predictive_query_tokens, hidden_dim)))
         self.predictive_world = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
-        self.predictive_semantic_reads = nn.ModuleList(
-            GatedCrossAttentionRead(
-                hidden_dim,
-                self.config.semantic_dim,
-                heads,
-                inner_dim=self.config.semantic_cross_dim,
-            )
-            for _ in range(self.config.predictive_semantic_reads)
-        )
+        self.predictive_semantic_world = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
         self.predictive_pool = AttentionPool(hidden_dim)
 
         self.visual_latent_target_proj = nn.LazyLinear(hidden_dim)
@@ -689,16 +703,6 @@ class PicfFullCore(nn.Module):
         self.innovation_token_proj = nn.Linear(self.config.innovation_dim, hidden_dim)
 
         self.control_world = TransformerStack(hidden_dim, heads, self.config.control_layers)
-        self.control_semantic_reads = nn.ModuleList(
-            GatedCrossAttentionRead(
-                hidden_dim,
-                self.config.semantic_dim,
-                heads,
-                inner_dim=self.config.semantic_cross_dim,
-            )
-            for _ in range(self.config.control_semantic_reads)
-        )
-        self.control_pool = AttentionPool(hidden_dim)
         self.control_state_proj = nn.Linear(hidden_dim, self.config.control_dim)
         self.action_head = nn.Linear(self.config.control_dim, 7)
         self.to(device=self.device, dtype=self.dtype)
@@ -794,7 +798,7 @@ class PicfFullCore(nn.Module):
     def _zero_semantic_context(self) -> _SemanticContext:
         return _SemanticContext(
             tokens=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype),
-            summary=torch.zeros((1, self.config.hidden_dim), device=self.device, dtype=self.dtype),
+            prefix_tokens=torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype),
             available=False,
         )
 
@@ -802,14 +806,10 @@ class PicfFullCore(nn.Module):
         self,
         *,
         tokens_raw: torch.Tensor,
-        summary_raw: torch.Tensor,
     ) -> _SemanticContext:
         if tokens_raw.ndim == 1:
             tokens_raw = tokens_raw[None, :]
-        if summary_raw.ndim == 1:
-            summary_raw = summary_raw[None, :]
         tokens_raw = _to_tensor(tokens_raw, device=self.device, dtype=self.dtype)
-        summary_raw = _to_tensor(summary_raw, device=self.device, dtype=self.dtype)
         if tokens_raw.shape[0] > 0 and int(tokens_raw.shape[-1]) != int(self.config.semantic_dim):
             raise RuntimeError(
                 "Semantic token width mismatch. "
@@ -820,8 +820,12 @@ class PicfFullCore(nn.Module):
             if tokens_raw.shape[0] > 0
             else torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype)
         )
-        semantic_summary = self.semantic_summary_proj(summary_raw)
-        return _SemanticContext(tokens=semantic_tokens, summary=semantic_summary, available=True)
+        semantic_prefix_tokens = (
+            self.semantic_prefix_proj(semantic_tokens)
+            if semantic_tokens.shape[0] > 0
+            else torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype)
+        )
+        return _SemanticContext(tokens=semantic_tokens, prefix_tokens=semantic_prefix_tokens, available=True)
 
     def _semantic_context(
         self,
@@ -834,48 +838,24 @@ class PicfFullCore(nn.Module):
         if semantic_override is None:
             return self._zero_semantic_context()
         if isinstance(semantic_override, PaliGemmaSemanticFeatures):
-            return self._project_semantic_context(
-                tokens_raw=semantic_override.tokens,
-                summary_raw=semantic_override.summary,
-            )
+            return self._project_semantic_context(tokens_raw=semantic_override.tokens)
         if isinstance(semantic_override, torch.Tensor | np.ndarray):
             raw = _to_tensor(semantic_override, device=self.device, dtype=self.dtype)
             raw = raw if raw.ndim == 2 else raw[None, :]
-            return self._project_semantic_context(
-                tokens_raw=raw,
-                summary_raw=raw.mean(dim=0, keepdim=True),
-            )
+            return self._project_semantic_context(tokens_raw=raw)
         if isinstance(semantic_override, dict):
             if "tokens" in semantic_override:
                 tokens_raw = semantic_override["tokens"]
-                summary_raw = semantic_override.get("summary")
-                if summary_raw is None:
-                    summary_raw = _to_tensor(tokens_raw, device=self.device, dtype=self.dtype)
-                    summary_raw = summary_raw.mean(dim=0, keepdim=True) if summary_raw.ndim == 2 else summary_raw[None, :]
-                return self._project_semantic_context(tokens_raw=tokens_raw, summary_raw=summary_raw)
-            raw = self.semantic_wrapper.summarize(**semantic_override)
+                return self._project_semantic_context(tokens_raw=tokens_raw)
+            raise RuntimeError(
+                "PICF semantic override contract now requires token-level semantic inputs. "
+                "Pass PaliGemmaSemanticFeatures or a dict containing 'tokens'."
+            )
         else:
-            raw = self.semantic_wrapper.summarize(outputs=semantic_override)
-        raw = _to_tensor(raw, device=self.device, dtype=self.dtype)
-        raw = raw if raw.ndim == 2 else raw[None, :]
-        return _SemanticContext(
-            tokens=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype),
-            summary=self.semantic_summary_proj(raw),
-            available=True,
-        )
-
-    def _condition_world_tokens_with_semantic_summary(
-        self,
-        world_tokens: torch.Tensor,
-        semantic: _SemanticContext,
-    ) -> torch.Tensor:
-        # PI0/PI0.5 style conditioning keeps language in the main control path.
-        # PICF still uses late semantic reads, but the projected semantic summary
-        # should also enter the control/predictive token stream directly instead of
-        # living only as bookkeeping in the state.
-        if not semantic.available:
-            return world_tokens
-        return torch.cat([world_tokens, semantic.summary], dim=0)
+            raise RuntimeError(
+                "PICF semantic override contract now requires token-level semantic inputs. "
+                "Pass PaliGemmaSemanticFeatures instead of summary-only outputs."
+            )
 
     def _previous_action(self, previous: PicfCoreState | None) -> torch.Tensor:
         if previous is None:
@@ -908,6 +888,14 @@ class PicfFullCore(nn.Module):
             keep[int(torch.randint(semantic_tokens.shape[0], (1,), device=semantic_tokens.device).item())] = True
         scale = keep.to(dtype=semantic_tokens.dtype) / max(1.0 - float(dropout_prob), self.config.epsilon_a)
         return semantic_tokens * scale[:, None]
+
+    def _semantic_prefix_tokens(
+        self,
+        semantic: _SemanticContext,
+        *,
+        dropout_prob: float,
+    ) -> torch.Tensor:
+        return self._semantic_memory(semantic.prefix_tokens, dropout_prob=dropout_prob)
 
     def _apply_semantic_reads(
         self,
@@ -1975,23 +1963,24 @@ class PicfFullCore(nn.Module):
             dtype=self.dtype,
         )
         proprio_token = self.proprio_proj(proprio[None, :])[0]
-        control_world_tokens = torch.cat(
+        semantic_prefix_tokens = self._semantic_prefix_tokens(
+            semantic,
+            dropout_prob=self.config.semantic_prefix_dropout_prob,
+        )
+        control_query_tokens = self.control_query_tokens.to(device=self.device, dtype=self.dtype)
+        control_prefix = torch.cat(
             [
-                posterior.tokens,
-                innovation_token[None, :],
-                proprio_token[None, :],
+                _add_role_embedding(posterior.tokens, self.control_role_embedding, 0),
+                _add_role_embedding(innovation_token[None, :], self.control_role_embedding, 1),
+                _add_role_embedding(proprio_token[None, :], self.control_role_embedding, 2),
+                _add_role_embedding(semantic_prefix_tokens, self.control_role_embedding, 3),
+                _add_role_embedding(control_query_tokens, self.control_role_embedding, 4),
             ],
             dim=0,
         )
-        control_world_tokens = self.control_world(control_world_tokens[None, :])[0]
-        control_world_tokens = self._condition_world_tokens_with_semantic_summary(control_world_tokens, semantic)
-        control_tokens, _ = self._apply_semantic_reads(
-            control_world_tokens,
-            semantic.tokens,
-            reads=self.control_semantic_reads,
-        )
-        pooled_hidden = self.control_pool(control_tokens[None, :])[0]
-        pooled_state = self.control_state_proj(pooled_hidden)
+        control_tokens = self.control_world(control_prefix[None, :])[0]
+        control_query_state = _mean_query_state(control_tokens, num_query_tokens=self.config.control_query_tokens)
+        pooled_state = self.control_state_proj(control_query_state)
         action = self._clip_action(self.action_head(pooled_state))
         executed_action = self._executed_action(observation, action)
 
@@ -2004,37 +1993,53 @@ class PicfFullCore(nn.Module):
             [posterior.global_post, proprio_token, self.action_cond_proj(action_cond[None, :])[0]],
             dim=0,
         )
-        pred_world_tokens = torch.cat([posterior.tokens, pred_tail], dim=0)
+        pred_world_tokens = torch.cat(
+            [
+                _add_role_embedding(posterior.tokens, self.predictive_physical_role_embedding, 0),
+                _add_role_embedding(pred_tail[0:1], self.predictive_physical_role_embedding, 1),
+                _add_role_embedding(pred_tail[1:2], self.predictive_physical_role_embedding, 2),
+                _add_role_embedding(pred_tail[2:3], self.predictive_physical_role_embedding, 3),
+            ],
+            dim=0,
+        )
         # First produce a purely physical predictive basis. This is the only cache
         # allowed to feed the next-step innovation constructor.
         physical_pred_tokens = self.predictive_world(pred_world_tokens[None, :])[0]
         physical_global_pred = self.predictive_pool(physical_pred_tokens[None, :])[0]
         physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)
-        # The physical predictive basis remains language-free so innovation keeps
-        # comparing world-only residuals. Language still needs a direct path into
-        # the semantic-conditioned future readout, so we append the projected
-        # semantic summary after the physical cache is frozen.
-        pred_conditioned_tokens = self._condition_world_tokens_with_semantic_summary(physical_pred_tokens, semantic)
-        pred_tokens, _ = self._apply_semantic_reads(
-            pred_conditioned_tokens,
-            semantic.tokens,
-            reads=self.predictive_semantic_reads,
+        conditioned_semantic_tokens = self._semantic_prefix_tokens(
+            semantic,
             dropout_prob=self.config.predictive_semantic_dropout_prob,
         )
-        global_pred = self.predictive_pool(pred_tokens[None, :])[0]
+        predictive_query_tokens = self.predictive_query_tokens.to(device=self.device, dtype=self.dtype)
+        pred_conditioned_tokens = torch.cat(
+            [
+                _add_role_embedding(physical_pred_tokens, self.predictive_conditioned_role_embedding, 0),
+                _add_role_embedding(conditioned_semantic_tokens, self.predictive_conditioned_role_embedding, 1),
+                _add_role_embedding(predictive_query_tokens, self.predictive_conditioned_role_embedding, 2),
+            ],
+            dim=0,
+        )
+        pred_tokens = self.predictive_semantic_world(pred_conditioned_tokens[None, :])[0]
+        predictive_query_state = _mean_query_state(
+            pred_tokens,
+            num_query_tokens=self.config.predictive_query_tokens,
+        )
+        global_pred = predictive_query_state
         prediction_cache = self._prediction_cache_from_global(global_pred)
         return PicfPredictiveState(
             semantic_tokens=semantic.tokens,
-            semantic_summary=semantic.summary,
             innovation_token=innovation_token,
             innovation_norm=innovation_norm,
             availability=targets_availability,
             control_tokens=control_tokens,
+            control_query_state=control_query_state,
             pooled_state=pooled_state,
             action=action,
             executed_action=executed_action,
             physical_global_pred=physical_global_pred,
             physical_prediction_cache=physical_prediction_cache,
+            predictive_query_state=predictive_query_state,
             global_pred=global_pred,
             prediction_cache=prediction_cache,
         )

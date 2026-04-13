@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import dataclasses
 import faulthandler
+import fnmatch
 import json
 import logging
 import math
@@ -58,6 +59,32 @@ _RETRYABLE_FIRST_STEP_ERRORS = (
     "PICF core requires a valid xyzrgb point cloud on the first control step.",
     "PICF core requires non-empty local xyzrgb support on the first control step.",
     "PICF core requires non-empty local xyzrgb support on window step",
+)
+_COMPAT_ALLOWED_MISSING_KEYS = (
+    "core.semantic_prefix_proj.*",
+    "core.control_role_embedding.*",
+    "core.predictive_physical_role_embedding.*",
+    "core.predictive_conditioned_role_embedding.*",
+    "core.control_query_tokens",
+    "core.predictive_query_tokens",
+    "core.predictive_semantic_world.*",
+    "semantic_prefix_proj.*",
+    "control_role_embedding.*",
+    "predictive_physical_role_embedding.*",
+    "predictive_conditioned_role_embedding.*",
+    "control_query_tokens",
+    "predictive_query_tokens",
+    "predictive_semantic_world.*",
+)
+_COMPAT_ALLOWED_UNEXPECTED_KEYS = (
+    "core.semantic_summary_proj.*",
+    "core.predictive_semantic_reads.*",
+    "core.control_semantic_reads.*",
+    "core.control_pool.*",
+    "semantic_summary_proj.*",
+    "predictive_semantic_reads.*",
+    "control_semantic_reads.*",
+    "control_pool.*",
 )
 
 _DEBUG_INDEX_GUARDS_INSTALLED = False
@@ -616,6 +643,16 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
 
 
 def _normalize_train_args(args: argparse.Namespace) -> None:
+    if getattr(args, "control_query_tokens", None) is None:
+        args.control_query_tokens = int(_SPEC_DEFAULTS.control_query_tokens)
+    if getattr(args, "predictive_query_tokens", None) is None:
+        args.predictive_query_tokens = int(_SPEC_DEFAULTS.predictive_query_tokens)
+    if getattr(args, "semantic_prefix_dropout_prob", None) is None:
+        args.semantic_prefix_dropout_prob = float(_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
+    if getattr(args, "predictive_semantic_reads", None) is None:
+        args.predictive_semantic_reads = int(_SPEC_DEFAULTS.predictive_semantic_reads)
+    if getattr(args, "control_semantic_reads", None) is None:
+        args.control_semantic_reads = int(_SPEC_DEFAULTS.control_semantic_reads)
     if args.warmup_steps is None:
         args.warmup_steps = max(1, int(round(0.02 * float(args.num_train_steps))))
     else:
@@ -697,6 +734,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "posterior_layers",
         "predictive_layers",
         "control_layers",
+        "control_query_tokens",
+        "predictive_query_tokens",
         "predictive_semantic_reads",
         "control_semantic_reads",
         "attention_heads",
@@ -774,6 +813,11 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "predictive_semantic_dropout_prob must be in [0, 1); "
             f"got {args.predictive_semantic_dropout_prob}."
+        )
+    if not (0.0 <= float(args.semantic_prefix_dropout_prob) < 1.0):
+        raise ValueError(
+            "semantic_prefix_dropout_prob must be in [0, 1); "
+            f"got {args.semantic_prefix_dropout_prob}."
         )
     if str(args.device).startswith("cpu") and args.point_backbone == "sonata":
         raise RuntimeError(
@@ -1617,6 +1661,24 @@ def _save_checkpoint(
     )
 
 
+def _matches_compat_pattern(name: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatch(str(name), pattern) for pattern in patterns)
+
+
+def _load_state_dict_picf_compat(module: torch.nn.Module, state_dict: dict[str, Any]) -> tuple[list[str], list[str]]:
+    info = module.load_state_dict(state_dict, strict=False)
+    missing = [key for key in info.missing_keys if not _matches_compat_pattern(key, _COMPAT_ALLOWED_MISSING_KEYS)]
+    unexpected = [
+        key for key in info.unexpected_keys if not _matches_compat_pattern(key, _COMPAT_ALLOWED_UNEXPECTED_KEYS)
+    ]
+    if missing or unexpected:
+        raise RuntimeError(
+            "PICF compatibility checkpoint load failed. "
+            f"missing={missing} unexpected={unexpected}"
+        )
+    return list(info.missing_keys), list(info.unexpected_keys)
+
+
 def _load_checkpoint(
     *,
     path: Path,
@@ -1629,23 +1691,74 @@ def _load_checkpoint(
         model_state = torch.load(path / "model.pt", map_location=device, weights_only=False)
         optimizer_state = torch.load(path / "optimizer.pt", map_location=device, weights_only=False)
         metadata = torch.load(path / "metadata.pt", map_location=device, weights_only=False)
+        optimizer_loaded = True
         try:
             module.load_state_dict(model_state, strict=True)
         except RuntimeError:
-            # Backward compatibility for older PICF checkpoints that only saved core.state_dict().
-            module.core.load_state_dict(model_state, strict=True)
-        optimizer.load_state_dict(optimizer_state)
+            try:
+                missing, unexpected = _load_state_dict_picf_compat(module, model_state)
+                logging.warning(
+                    "Loaded PICF trainer checkpoint with compatibility migration. "
+                    "missing_keys=%s unexpected_keys=%s. Optimizer state will be reinitialized.",
+                    missing,
+                    unexpected,
+                )
+                optimizer_loaded = False
+            except RuntimeError:
+                try:
+                    module.core.load_state_dict(model_state, strict=True)
+                except RuntimeError:
+                    missing, unexpected = _load_state_dict_picf_compat(module.core, model_state)
+                    logging.warning(
+                        "Loaded PICF core-only checkpoint with compatibility migration. "
+                        "missing_keys=%s unexpected_keys=%s. Optimizer state will be reinitialized.",
+                        missing,
+                        unexpected,
+                    )
+                    optimizer_loaded = False
+        if optimizer_loaded:
+            try:
+                optimizer.load_state_dict(optimizer_state)
+            except ValueError:
+                logging.warning(
+                    "Optimizer state dict is incompatible with the current PICF architecture. Reinitializing optimizer."
+                )
         return int(metadata.get("step", 0))
 
     payload = torch.load(path, map_location=device, weights_only=False)
     checkpoint_dir = payload.get("checkpoint_dir")
     if checkpoint_dir is not None and "model" not in payload:
         return _load_checkpoint(path=Path(checkpoint_dir), model=model, optimizer=optimizer, device=device)
+    optimizer_loaded = True
     try:
         module.load_state_dict(payload["model"], strict=True)
     except RuntimeError:
-        module.core.load_state_dict(payload["model"], strict=True)
-    optimizer.load_state_dict(payload["optimizer"])
+        try:
+            missing, unexpected = _load_state_dict_picf_compat(module, payload["model"])
+            logging.warning(
+                "Loaded PICF trainer payload with compatibility migration. "
+                "missing_keys=%s unexpected_keys=%s. Optimizer state will be reinitialized.",
+                missing,
+                unexpected,
+            )
+            optimizer_loaded = False
+        except RuntimeError:
+            try:
+                module.core.load_state_dict(payload["model"], strict=True)
+            except RuntimeError:
+                missing, unexpected = _load_state_dict_picf_compat(module.core, payload["model"])
+                logging.warning(
+                    "Loaded PICF core payload with compatibility migration. "
+                    "missing_keys=%s unexpected_keys=%s. Optimizer state will be reinitialized.",
+                    missing,
+                    unexpected,
+                )
+                optimizer_loaded = False
+    if optimizer_loaded:
+        try:
+            optimizer.load_state_dict(payload["optimizer"])
+        except ValueError:
+            logging.warning("Optimizer payload is incompatible with the current PICF architecture. Reinitializing optimizer.")
     return int(payload.get("step", 0))
 
 
@@ -1718,9 +1831,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         posterior_layers=args.posterior_layers,
         predictive_layers=args.predictive_layers,
         control_layers=args.control_layers,
+        control_query_tokens=args.control_query_tokens,
+        predictive_query_tokens=args.predictive_query_tokens,
         predictive_semantic_reads=args.predictive_semantic_reads,
         control_semantic_reads=args.control_semantic_reads,
         predictive_semantic_dropout_prob=args.predictive_semantic_dropout_prob,
+        semantic_prefix_dropout_prob=args.semantic_prefix_dropout_prob,
         attention_heads=args.attention_heads,
         future_vote_heads=args.future_vote_heads,
         crop_radius_m=float(getattr(args, "crop_radius_m", _SPEC_DEFAULTS.crop_radius_m)),
@@ -2157,7 +2273,7 @@ def train(args: argparse.Namespace) -> None:
                 args.tactile_anchor_prob_on,
             )
             logging.info(
-                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
+                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
                 args.hidden_dim,
                 args.posterior_hidden_dim,
                 args.latent_dim,
@@ -2172,9 +2288,12 @@ def train(args: argparse.Namespace) -> None:
                 args.posterior_layers,
                 args.predictive_layers,
                 args.control_layers,
+                args.control_query_tokens,
+                args.predictive_query_tokens,
                 args.predictive_semantic_reads,
                 args.control_semantic_reads,
                 args.predictive_semantic_dropout_prob,
+                args.semantic_prefix_dropout_prob,
                 args.attention_heads,
                 args.future_vote_heads,
             )
@@ -2649,9 +2768,12 @@ def main() -> None:
     parser.add_argument("--posterior-layers", type=int, default=_SPEC_DEFAULTS.posterior_layers)
     parser.add_argument("--predictive-layers", type=int, default=_SPEC_DEFAULTS.predictive_layers)
     parser.add_argument("--control-layers", type=int, default=_SPEC_DEFAULTS.control_layers)
+    parser.add_argument("--control-query-tokens", type=int, default=_SPEC_DEFAULTS.control_query_tokens)
+    parser.add_argument("--predictive-query-tokens", type=int, default=_SPEC_DEFAULTS.predictive_query_tokens)
     parser.add_argument("--predictive-semantic-reads", type=int, default=_SPEC_DEFAULTS.predictive_semantic_reads)
     parser.add_argument("--control-semantic-reads", type=int, default=_SPEC_DEFAULTS.control_semantic_reads)
     parser.add_argument("--predictive-semantic-dropout-prob", type=float, default=_SPEC_DEFAULTS.predictive_semantic_dropout_prob)
+    parser.add_argument("--semantic-prefix-dropout-prob", type=float, default=_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
     parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)
     parser.add_argument("--future-vote-heads", type=int, default=_SPEC_DEFAULTS.future_vote_heads)
     parser.set_defaults(

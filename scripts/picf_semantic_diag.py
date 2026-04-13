@@ -16,6 +16,7 @@ from scripts.picf_core_train import _apply_foundation_profile
 from scripts.picf_core_train import _build_loss_config
 from scripts.picf_core_train import _build_model
 from scripts.picf_core_train import _CalvinTransitionSource
+from scripts.picf_core_train import _load_state_dict_picf_compat
 from scripts.picf_core_train import _load_tactile_backgrounds_npz
 from scripts.picf_core_train import _materialize_model_parameters
 from scripts.picf_core_train import _PicfWindowTrainer
@@ -38,7 +39,13 @@ def _load_model_only(*, path: Path, model: torch.nn.Module, device: torch.device
     try:
         model.load_state_dict(state, strict=True)
     except RuntimeError:
-        model.core.load_state_dict(state, strict=True)
+        try:
+            _load_state_dict_picf_compat(model, state)
+        except RuntimeError:
+            try:
+                model.core.load_state_dict(state, strict=True)
+            except RuntimeError:
+                _load_state_dict_picf_compat(model.core, state)
     return int(payload.get("step", 0))
 
 
@@ -126,10 +133,12 @@ def _describe_variant(
     return {
         "prompt": prompt,
         "token_count": token_count,
-        "semantic_summary_norm": summary_norm,
         "semantic_tokens_norm": token_norm,
         "control_tokens_norm": float(torch.linalg.norm(output.state.predictive.control_tokens.float()).item()),
+        "control_query_state_norm": float(torch.linalg.norm(output.state.predictive.control_query_state.float()).item()),
+        "predictive_query_state_norm": float(torch.linalg.norm(output.state.predictive.predictive_query_state.float()).item()),
         "pooled_state_norm": float(torch.linalg.norm(output.state.predictive.pooled_state.float()).item()),
+        "posterior_global_norm": float(torch.linalg.norm(output.state.posterior.global_post.float()).item()),
         "action": output.state.predictive.action.detach().cpu().tolist(),
         "physical_global_pred_norm": float(torch.linalg.norm(output.state.predictive.physical_global_pred.float()).item()),
         "global_pred_norm": float(torch.linalg.norm(output.state.predictive.global_pred.float()).item()),
@@ -145,7 +154,10 @@ def _describe_variant(
         "loss_tactile_real": float(losses.tactile_real.item()),
         "loss_point_real": float(losses.point_real.item()),
         **pieces,
+        "semantic_summary_norm": summary_norm,
         "semantic_summary": None if sem is None else sem.summary.detach().cpu(),
+        "posterior_global_post": output.state.posterior.global_post.detach().cpu(),
+        "physical_global_pred": output.state.predictive.physical_global_pred.detach().cpu(),
     }
 
 
@@ -209,10 +221,20 @@ def main() -> None:
     actual_summary = results["actual"].pop("semantic_summary")
     blank_summary = results["blank"].pop("semantic_summary")
     wrong_summary = results["wrong"].pop("semantic_summary")
+    actual_post = results["actual"].pop("posterior_global_post")
+    blank_post = results["blank"].pop("posterior_global_post")
+    wrong_post = results["wrong"].pop("posterior_global_post")
+    actual_phys = results["actual"].pop("physical_global_pred")
+    blank_phys = results["blank"].pop("physical_global_pred")
+    wrong_phys = results["wrong"].pop("physical_global_pred")
     summary = {
         "wrong_window_index": wrong_index,
         "prompt_cosine_actual_blank": _cosine(actual_summary, blank_summary),
         "prompt_cosine_actual_wrong": _cosine(actual_summary, wrong_summary),
+        "posterior_l2_actual_blank": float(torch.linalg.norm((actual_post - blank_post).float()).item()),
+        "posterior_l2_actual_wrong": float(torch.linalg.norm((actual_post - wrong_post).float()).item()),
+        "physical_global_pred_l2_actual_blank": float(torch.linalg.norm((actual_phys - blank_phys).float()).item()),
+        "physical_global_pred_l2_actual_wrong": float(torch.linalg.norm((actual_phys - wrong_phys).float()).item()),
         "action_l2_actual_blank": float(
             torch.linalg.norm(
                 torch.tensor(results["actual"]["action"], dtype=torch.float32)
@@ -225,12 +247,6 @@ def main() -> None:
                 - torch.tensor(results["wrong"]["action"], dtype=torch.float32)
             ).item()
         ),
-        "predictive_semantic_gates": [
-            float(torch.tanh(layer.cross_gate.detach().cpu()).item()) for layer in trainer.core.predictive_semantic_reads
-        ],
-        "control_semantic_gates": [
-            float(torch.tanh(layer.cross_gate.detach().cpu()).item()) for layer in trainer.core.control_semantic_reads
-        ],
     }
     print(json.dumps({"checkpoint_step": step, "window_index": args.window_index, "summary": summary, "variants": results}, indent=2))
 
