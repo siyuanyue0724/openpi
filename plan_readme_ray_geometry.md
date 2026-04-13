@@ -169,7 +169,8 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
   - 文本有效 token
   - 图像有效 token
 - 它们在 current posterior 固定之后，
-  由 world/control stream 通过 posterior-late 异宽 cross-attention 读取
+  先通过 `semantic_prefix_proj` 投到 world hidden width，再作为 posterior-late
+  semantic prefix 直接并入 control / semantic-conditioned predictive 主干
 - 同时仍记录一个 `semantic_summary` 作为聚合诊断量，
   但它不直接参与 downstream 主融合
 
@@ -187,7 +188,8 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
   - `PaliGemma` 保留高宽度 semantic stream
   - `current posterior` 继续保持 language-free
   - `anchor/posterior` 保留独立 world-state stream
-  - 在 posterior 之后，用 world<-semantic 的多层 gated cross-attention 做深融合
+  - 在 posterior 之后，把 semantic tokens 投到 world hidden width，并作为
+    token-level semantic prefix 直接并入 control / predictive 主干
 
 当前已落地的默认参数是：
 
@@ -199,8 +201,8 @@ PICF-JEPA Core v0.4.8 的目标不是在 v0.3.11 的
 - `semantic_dim = 2048`
 - `semantic_cross_dim = 512`
 - `future_hidden_dim = 256`
-- `predictive_semantic_reads = 2`
-- `control_semantic_reads = 2`
+- `predictive_semantic_reads = 2`（兼容保留，当前 semantic-prefix 主路径不再使用）
+- `control_semantic_reads = 2`（兼容保留，当前 semantic-prefix 主路径不再使用）
 
 当前训练脚本的可视化导出 contract 也已经固定：
 

@@ -427,8 +427,10 @@
    - 下一步 innovation **只读取这份 physical prediction cache**
 
 2. **semantic-conditioned future readout**
-   - 在 `physical_prediction_cache` 固定之后，predictive world tokens 才通过异宽 cross-attention 读取 `semantic_tokens`
-   - 读取后的 semantic-conditioned state 再导出：
+   - 在 `physical_prediction_cache` 固定之后，完整 `semantic_tokens` 会先通过 `semantic_prefix_proj`
+     投到 world hidden width，再作为 posterior-late semantic prefix 直接并入
+     semantic-conditioned predictive 主干
+   - 这个 semantic-conditioned state 再导出：
      - `global_pred`
      - `prediction_cache`
    - 这份 cache 用于 future-head 训练读出，但**不是 innovation 的物理比较基底**
@@ -440,7 +442,8 @@
 - `posterior.tokens`
 - `innovation_token`
 - `proprio_token`
-- posterior-late 读取到的 `semantic_tokens`
+- posterior-late `semantic_prefix_tokens`
+- `control_query_tokens`
 
 这就是当前控制路径。
 
@@ -1238,15 +1241,12 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
   - `PaliGemma` 图像 hidden states 中所有有效 token 也会被保留
   - 这些 token 保持 `semantic_dim=2048` 原生宽度
   - 它们不会先被压到 `hidden_dim`
-  - 当前实现改成了 posterior-late 的 **异宽 gated cross-attention**
-    - world query width: `hidden_dim=256`
-    - semantic key/value width: `semantic_dim=2048`
-    - cross inner width: `semantic_cross_dim=512`
 - 当前 downstream 使用的是 **完整 semantic token stream**
   - `PaliGemma` 文本 hidden states 中所有有效 token 会被保留
   - `PaliGemma` 图像 hidden states 中所有有效 token 也会被保留
   - 这些 token 保持 `semantic_dim=2048` 原生宽度
-  - 它们在 posterior 固定之后，会投到 world hidden width，并作为 semantic prefix 直接并入 control / predictive 主干
+  - 它们在 posterior 固定之后，会通过 `semantic_prefix_proj` 投到 world hidden width，
+    并作为 semantic prefix 直接并入 control / predictive 主干
 - 在 posterior 之后，先形成 world token 流：
   - `posterior.tokens`
   - `innovation_token`
@@ -1262,15 +1262,17 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
     - 只来自 semantic 进入前的 language-free world stream
     - 下一步 innovation **只允许**读取这份 cache
   - `prediction_cache`
-    - 来自 world<-semantic cross-attention 之后的 semantic-conditioned future readout
+    - 来自并入 `semantic_prefix_tokens` 之后的 semantic-conditioned future readout
     - 它服务 future head，不反写 posterior / carried prior / innovation base
 - 为降低 future head 走 semantic shortcut 的风险，当前 predictive 分支默认增加：
   - `predictive_semantic_dropout_prob = 0.1`
-  - 它只作用在 predictive semantic memory 上，不作用于 current posterior
+  - 它只作用在 posterior-late semantic prefix token 流上，不作用于 current posterior
 - 这意味着当前实现更接近旧 `pi0.5` 的 full-token PaliGemma 语义能力，同时继续满足：
   - current posterior language-free
   - semantic side path language-late
   - anchor / posterior tokens 与 semantic tokens 在 downstream 是平级流，但不要求预先同宽
+  - `semantic_cross_dim` / `predictive_semantic_reads` / `control_semantic_reads`
+    目前只为 checkpoint / CLI 兼容保留，不再改变当前 semantic-prefix 主路径
 - 2026-04-10 本地复核新增通过：
   - `66 passed` 核心回归
   - CPU 一步训练 smoke

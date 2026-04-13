@@ -2298,6 +2298,10 @@ def train(args: argparse.Namespace) -> None:
                 args.future_vote_heads,
             )
             logging.info(
+                "Semantic-prefix contract: semantic tokens remain width=%s, are projected posterior-late into control/predictive trunks; semantic_cross_dim/predictive_semantic_reads/control_semantic_reads are compatibility fields and do not alter the current forward path.",
+                args.semantic_dim,
+            )
+            logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),

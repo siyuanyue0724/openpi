@@ -183,12 +183,29 @@ Interpretation:
 
 - semantic stream keeps the wide `PaliGemma` token representation
 - world stream remains compact
-- fusion happens through heterogeneous cross-attention
+- posterior-late semantic tokens are projected into `hidden_dim` and then enter
+  control / semantic-conditioned predictive trunks as same-rank prefix tokens
+
+Current compatibility note:
+
+- `semantic_cross_dim`
+- `predictive_semantic_reads`
+- `control_semantic_reads`
+
+are still accepted by configs/checkpoints for migration stability, but they do
+not control the current semantic-prefix forward path.
 
 This contract explicitly rejects the older design:
 
-- full semantic tokens first projected into `hidden_dim`
-- then fused by same-width shared self-attention
+- full semantic tokens or summaries entering the pre-posterior/current-world
+  stream
+
+It allows the current design:
+
+- keep full semantic tokens at width `semantic_dim`
+- fix posterior and physical predictive basis first
+- then project semantic tokens posterior-late into same-width semantic prefixes
+  for control / semantic-conditioned predictive trunks
 
 ## 7. Predictive Split Contract
 
