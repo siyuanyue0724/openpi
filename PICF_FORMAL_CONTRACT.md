@@ -37,7 +37,8 @@ At control step `t`, define:
 - observation:
   - `O_t`
 - semantic context extracted from current observation and prompt:
-  - `S_t = (semantic_tokens_t, semantic_summary_t)`
+  - `S_t = semantic_tokens_t`
+  - optional diagnostic aggregate: `semantic_summary_t`
 - persistent world/posterior state:
   - `P_t = (posterior_t, predictive_t, control_t, meta_t)`
 
@@ -67,6 +68,9 @@ The intended transition order is:
 6. Build current predictive/control readouts:
    - first world-only readout
    - then posterior-late semantic conditioning
+   - semantic tokens may enter the control and semantic-conditioned predictive
+     trunks as token-level prefix inputs, provided posterior and the physical
+     predictive basis are already fixed
 
 In symbols:
 
@@ -132,10 +136,18 @@ It must not read:
 The architecture must not reduce to:
 
 ```text
-posterior || semantic || innovation || proprio -> shared same-width self-attn
+raw current observation tokens || semantic || innovation -> shared pre-posterior writeback stream
 ```
 
-The semantic stream is memory/KV, not a mandatory same-rank writeback stream.
+Semantic may not participate in the current posterior update. After posterior is
+fixed, semantic tokens are allowed to enter downstream control / semantic-
+conditioned predictive trunks as same-rank prefix tokens or read-memory, so long
+as they do not write back into:
+
+- current posterior
+- carried prior
+- `physical_prediction_cache`
+- next-step innovation base
 
 ## 5. Allowed Edges
 
