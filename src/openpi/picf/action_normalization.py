@@ -27,7 +27,9 @@ class PicfActionNormalizer:
 
     @classmethod
     def from_path(cls, path: str | Path, *, mode: ActionNormalizationMode) -> "PicfActionNormalizer":
-        stats = _normalize.load(Path(path).expanduser())
+        resolved = Path(path).expanduser()
+        stats_root = resolved.parent if resolved.is_file() else resolved
+        stats = _normalize.load(stats_root)
         if "actions" not in stats:
             raise KeyError(f"norm_stats at {path!s} does not contain an 'actions' entry.")
         action_stats = stats["actions"]

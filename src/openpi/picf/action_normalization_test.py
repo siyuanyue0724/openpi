@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import numpy as np
@@ -32,3 +33,26 @@ def test_zscore_action_normalizer_roundtrip_tensor() -> None:
     normalized = normalizer.normalize_tensor(action)
     restored = normalizer.unnormalize_tensor(normalized)
     assert torch.allclose(restored, action, atol=1e-5)
+
+
+def test_from_path_accepts_norm_stats_file_path(tmp_path: Path) -> None:
+    stats_dir = tmp_path / "calvin"
+    stats_dir.mkdir(parents=True)
+    payload = {
+        "norm_stats": {
+            "actions": {
+                "mean": [0.0, 1.0],
+                "std": [2.0, 4.0],
+                "q01": [-1.0, -3.0],
+                "q99": [1.0, 5.0],
+            }
+        }
+    }
+    stats_path = stats_dir / "norm_stats.json"
+    stats_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    normalizer = PicfActionNormalizer.from_path(stats_path, mode="quantile")
+    sample = np.asarray([0.25, 0.0], dtype=np.float32)
+    normalized = normalizer.normalize_np(sample)
+    restored = normalizer.unnormalize_np(normalized)
+    np.testing.assert_allclose(restored, sample, atol=1e-5)
