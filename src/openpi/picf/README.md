@@ -15,6 +15,16 @@
 - 哪些总纲条款当前只是“部分落地”
 - 现在应该从哪里继续接训练 / serving / deployment
 
+如果要看这轮针对 language/action collapse 的**精确重构方案**，请直接看：
+[`README_semantic_prefix_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_refactor.md)。
+
+那个文件描述的是：
+
+- 为什么当前 `semantic_summary` 主路径不够强
+- 它与 `pi0.5 / pi0.5-sonata` 的逐文件 dataflow 差异
+- 为什么目标方案必须改成 token-level posterior-late semantic prefix
+- 后续的实施、测试、部署顺序
+
 ## 0. 2026-04-09 严格复核
 
 今天这轮重新按“代码、数学、数据链、交接文档”四条线做了复核。
@@ -508,6 +518,18 @@ point / visual / tactile / compact context 都先投到统一 hidden size，再�
 - mixed image+text prefix 仍然保留，这本身就是正确设计
 - 但 prompt 的聚合摘要不再只是 bookkeeping，而是会直接条件化 control / predictive 主读出
 - 同时 innovation / posterior / physical basis 仍然保持 language-late，不会被当前帧语言信息污染
+
+需要额外说明的是：
+
+- 上面这一节描述的是**当前仓库已经落地的过渡性实现**
+- 它不等于这轮最终目标设计
+- 当前针对 `v29/10000` 的诊断已经说明：
+  - 任务 prompt 对 action 几乎零影响
+  - 同 prompt 跨环境 action 变化也被强烈压缩
+- 因此后续重构不会继续把 `semantic_summary` 作为主路径概念
+
+完整的目标设计、数学约束和文件级实施计划，统一写在：
+[`README_semantic_prefix_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_refactor.md)。
 
 ### 3.4 H4 tactile 与 point future heads 默认预测真实信号
 
