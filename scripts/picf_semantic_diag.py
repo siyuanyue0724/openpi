@@ -17,6 +17,7 @@ from scripts.picf_core_train import _build_loss_config
 from scripts.picf_core_train import _build_model
 from scripts.picf_core_train import _CalvinTransitionSource
 from scripts.picf_core_train import _load_state_dict_picf_compat
+from scripts.picf_core_train import _normalize_train_args
 from scripts.picf_core_train import _load_tactile_backgrounds_npz
 from scripts.picf_core_train import _materialize_model_parameters
 from scripts.picf_core_train import _PicfWindowTrainer
@@ -28,6 +29,7 @@ def _load_args(path: Path) -> argparse.Namespace:
     # Training artifacts already store the fully resolved runtime arguments. Re-running
     # the CLI parsers here is incorrect because fields such as tactile offsets are no
     # longer raw strings at this point.
+    _normalize_train_args(args)
     if bool(getattr(args, "use_foundation_backbones", False)):
         _apply_foundation_profile(args)
     return args
