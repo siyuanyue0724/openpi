@@ -14,9 +14,34 @@ for _path in (_REPO_ROOT, _REPO_ROOT / "src"):
 import picf_core_train as _trainer
 
 
+def _as_sensor_names_arg(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        return ",".join(str(item) for item in value)
+    raise TypeError(f"Unsupported tactile_sensor_names payload: {type(value).__name__}")
+
+
+def _as_sensor_offsets_arg(value: object) -> str:
+    if isinstance(value, str):
+        return value
+    if isinstance(value, (list, tuple)):
+        blocks: list[str] = []
+        for item in value:
+            if not isinstance(item, (list, tuple)) or len(item) != 3:
+                raise TypeError(f"Unsupported tactile_sensor_offsets_m item: {item!r}")
+            blocks.append(",".join(str(float(component)) for component in item))
+        return ";".join(blocks)
+    raise TypeError(f"Unsupported tactile_sensor_offsets_m payload: {type(value).__name__}")
+
+
 def _load_runtime_args(path: Path) -> argparse.Namespace:
     payload = json.loads(path.read_text(encoding="utf-8"))
     args = argparse.Namespace(**payload)
+    if hasattr(args, "tactile_sensor_names"):
+        args.tactile_sensor_names = _as_sensor_names_arg(args.tactile_sensor_names)
+    if hasattr(args, "tactile_sensor_offsets_m"):
+        args.tactile_sensor_offsets_m = _as_sensor_offsets_arg(args.tactile_sensor_offsets_m)
     if bool(getattr(args, "use_foundation_backbones", False)):
         _trainer._apply_foundation_profile(args)
     _trainer._normalize_train_args(args)
