@@ -268,6 +268,27 @@ def test_calvin_transition_source_emits_dynamic_tactile_packet_and_extra_fields(
     right_x = float(frame.tactile.sensors[1].T_sens_to_wrist[0, 3])
     assert left_x == pytest.approx(0.5 * width)
     assert right_x == pytest.approx(-0.5 * width)
+
+
+def test_calvin_transition_source_normalizes_actions_when_requested(tmp_path: Path) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
+
+    class _Normalizer:
+        def normalize_np(self, x):
+            return np.asarray(x, dtype=np.float32) * 0.5
+
+    source = _MODULE._CalvinTransitionSource(
+        str(root),
+        split="training",
+        backend="dir",
+        unroll_steps=1,
+        action_normalizer=_Normalizer(),
+    )
+
+    window = source.window(0)
+    frame = window.frames[0]
+    raw = source.reader.read_npz(frame.step_id, keys=["rel_actions"])["rel_actions"].astype(np.float32)
+    np.testing.assert_allclose(frame.action, raw * 0.5)
     source.close()
 
 
@@ -539,13 +560,19 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
         "loss_visual_latent": torch.tensor(0.01),
         "loss_visual_real": torch.tensor(0.02),
         "loss_tactile_real": torch.tensor(0.03),
+        "loss_tactile_map": torch.tensor(0.011),
+        "loss_tactile_aux": torch.tensor(0.012),
         "loss_point_real": torch.tensor(0.04),
         "loss_semantic_future_aux": torch.tensor(0.17),
+        "loss_physical_aux": torch.tensor(0.051),
         "loss_alignment": torch.tensor(0.05),
         "loss_anchor_pv": torch.tensor(0.06),
         "loss_pv_weak": torch.tensor(0.07),
         "loss_focus_pv": torch.tensor(0.08),
         "loss_pt": torch.tensor(0.09),
+        "physical_aux_budget_scale": torch.tensor(0.8),
+        "semantic_aux_budget_scale": torch.tensor(0.7),
+        "alignment_budget_scale": torch.tensor(0.6),
         "projective_candidate_density": torch.tensor(0.11),
         "tactile_contact_prob_mean": torch.tensor(0.12),
         "tactile_active_rate": torch.tensor(0.13),
@@ -556,6 +583,9 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
 
     assert averages["loss_semantic_future_aux"] == pytest.approx(0.17)
     assert averages["loss_action"] == pytest.approx(0.2)
+    assert averages["loss_tactile_map"] == pytest.approx(0.011)
+    assert averages["loss_tactile_aux"] == pytest.approx(0.012)
+    assert averages["physical_aux_budget_scale"] == pytest.approx(0.8)
     assert averages["tactile_contact_prob_mean"] == pytest.approx(0.12)
 
 
@@ -595,13 +625,19 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
         visual_latent=torch.tensor(0.1),
         visual_real=torch.tensor(0.1),
         tactile_real=torch.tensor(0.1),
+        tactile_map=torch.tensor(0.05),
+        tactile_aux=torch.tensor(0.05),
         point_real=torch.tensor(0.1),
         semantic_future_aux=torch.tensor(0.1),
+        physical_aux=torch.tensor(0.15),
         alignment=torch.tensor(0.1),
         anchor_pv=torch.tensor(0.1),
         pv_weak=torch.tensor(0.1),
         focus_pv=torch.tensor(0.1),
         pt=torch.tensor(0.1),
+        physical_aux_budget_scale=torch.tensor(1.0),
+        semantic_aux_budget_scale=torch.tensor(1.0),
+        alignment_budget_scale=torch.tensor(1.0),
     )
 
     class _SemanticStub(torch.nn.Module):

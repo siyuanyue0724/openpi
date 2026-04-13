@@ -931,10 +931,13 @@ class PicfFullCore(nn.Module):
         )
 
     def _clip_action(self, action: torch.Tensor) -> torch.Tensor:
-        pos = _clip_vector_norm(action[..., :3], max_norm=self.config.max_action_pos_m)
-        rot = _clip_vector_norm(action[..., 3:6], max_norm=self.config.max_action_rot_rad)
-        grip = torch.clamp(action[..., 6:], min=-self.config.max_action_gripper, max=self.config.max_action_gripper)
-        return torch.cat([pos, rot, grip], dim=-1)
+        clip = getattr(self.config, "action_output_clip", None)
+        if clip is None:
+            return action
+        clip_value = float(clip)
+        if clip_value <= 0.0:
+            return action
+        return torch.clamp(action, min=-clip_value, max=clip_value)
 
     def _encode_context_tokens(self, observation: PicfObservation, meta: RuntimeMeta, previous: PicfCoreState | None) -> torch.Tensor:
         proprio = np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1)

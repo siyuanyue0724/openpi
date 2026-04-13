@@ -2,7 +2,9 @@ import argparse
 from pathlib import Path
 import sys
 
+import numpy as np
 import pytest
+import torch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import serve_picf_policy as sut
@@ -122,7 +124,6 @@ def test_load_runtime_args_coerces_sequence_fields(tmp_path, monkeypatch) -> Non
 def test_load_model_state_only_uses_compat_loader_on_shape_mismatch(tmp_path, monkeypatch) -> None:
     ckpt = tmp_path / "5000"
     ckpt.mkdir(parents=True)
-    import torch
 
     torch.save({"step": 123}, ckpt / "metadata.pt")
     torch.save({"bad": torch.tensor([1.0])}, ckpt / "model.pt")
@@ -147,3 +148,55 @@ def test_load_model_state_only_uses_compat_loader_on_shape_mismatch(tmp_path, mo
     step = sut._load_model_state_only(checkpoint_dir=ckpt, model=_DummyModule(), device=torch.device("cpu"))
     assert step == 123
     assert compat_calls == ["_DummyModule"]
+
+
+def test_checkpoint_policy_infer_unnormalizes_actions() -> None:
+    class _DummyPredictive:
+        def __init__(self):
+            self.action = torch.tensor([0.5, -0.5, 0.25, 0.0, 0.0, 0.0, 1.0], dtype=torch.float32)
+
+    class _DummyState:
+        def __init__(self):
+            self.predictive = _DummyPredictive()
+
+    class _DummyOutput:
+        def __init__(self):
+            self.state = _DummyState()
+            self.debug = {}
+
+    class _DummyCore:
+        def step(self, *_args, **_kwargs):
+            return _DummyOutput()
+
+    class _DummyTrainer:
+        def __init__(self):
+            self.core = _DummyCore()
+            self.semantic_encoder = None
+            self.visual_grid = 1
+            self.use_visual_override = False
+
+        def eval(self):
+            return self
+
+    class _DummyNormalizer:
+        def unnormalize_np(self, value: np.ndarray) -> np.ndarray:
+            return value * 2.0
+
+    policy = sut._PicfCheckpointPolicy(
+        _DummyTrainer(),
+        checkpoint_dir=Path("/tmp/fake"),
+        checkpoint_step=100,
+        action_normalizer=_DummyNormalizer(),
+    )
+    obs = {
+        "openpi/reset": True,
+        "prompt": "open the drawer",
+        "observation/image": np.zeros((224, 224, 3), dtype=np.uint8),
+        "observation/depth": np.zeros((224, 224), dtype=np.float32),
+        "observation/state": np.zeros((15,), dtype=np.float32),
+    }
+    result = policy.infer(obs)
+    np.testing.assert_allclose(
+        result["actions"][0],
+        np.array([1.0, -1.0, 0.5, 0.0, 0.0, 0.0, 2.0], dtype=np.float32),
+    )

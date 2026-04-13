@@ -19,6 +19,7 @@ import torch
 from openpi_client import base_policy as _base_policy
 
 import picf_core_train as _trainer
+from openpi.picf.action_normalization import PicfActionNormalizer
 from openpi.picf.contracts import PicfObservation
 from openpi.serving.websocket_policy_server import WebsocketPolicyServer
 
@@ -114,11 +115,13 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         *,
         checkpoint_dir: Path,
         checkpoint_step: int,
+        action_normalizer: PicfActionNormalizer | None,
         frame_dt_s: float = 1.0 / 30.0,
     ) -> None:
         self._trainer = trainer.eval()
         self._core = trainer.core
         self._semantic_encoder = trainer.semantic_encoder
+        self._action_normalizer = action_normalizer
         self._frame_dt_s = float(frame_dt_s)
         self._segment_id = 0
         self._step_id = 0
@@ -181,6 +184,8 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
             )
         self._previous = output.state
         action = output.state.predictive.action.detach().to(device="cpu", dtype=torch.float32).numpy()
+        if self._action_normalizer is not None:
+            action = self._action_normalizer.unnormalize_np(action)
         self._step_id += 1
         return {
             "actions": action[None, :],
@@ -200,6 +205,7 @@ def _build_policy(*, checkpoint_path: Path, device: torch.device) -> _PicfCheckp
         use_visual_override=use_visual_override,
         loss_config=_trainer._build_loss_config(args),
     ).to(device)
+    action_normalizer = _trainer._resolve_action_normalizer(args)
     backgrounds = _trainer._load_tactile_backgrounds_npz(getattr(args, "tactile_backgrounds_path", None))
     source = _trainer._CalvinTransitionSource(
         args.calvin_root,
@@ -213,6 +219,7 @@ def _build_policy(*, checkpoint_path: Path, device: torch.device) -> _PicfCheckp
         tactile_calibration=getattr(args, "tactile_calibration_path", None),
         tactile_backgrounds_by_sensor=backgrounds,
         use_scene_obs=True,
+        action_normalizer=action_normalizer,
     )
     try:
         _trainer._materialize_model_parameters(trainer, source=source, rank=0)
@@ -223,6 +230,7 @@ def _build_policy(*, checkpoint_path: Path, device: torch.device) -> _PicfCheckp
         trainer,
         checkpoint_dir=checkpoint_dir,
         checkpoint_step=checkpoint_step,
+        action_normalizer=action_normalizer,
     )
 
 

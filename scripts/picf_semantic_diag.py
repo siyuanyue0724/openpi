@@ -21,6 +21,7 @@ from scripts.picf_core_train import _normalize_train_args
 from scripts.picf_core_train import _load_tactile_backgrounds_npz
 from scripts.picf_core_train import _materialize_model_parameters
 from scripts.picf_core_train import _PicfWindowTrainer
+from scripts.picf_core_train import _resolve_action_normalizer
 
 
 def _load_args(path: Path) -> argparse.Namespace:
@@ -194,6 +195,7 @@ def main() -> None:
         tactile_calibration=runtime_args.tactile_calibration_path,
         tactile_backgrounds_by_sensor=_load_tactile_backgrounds_npz(runtime_args.tactile_backgrounds_path),
         use_scene_obs=bool(getattr(runtime_args, "use_scene_obs", False)),
+        action_normalizer=_resolve_action_normalizer(runtime_args),
     )
     core, semantic_encoder, use_visual_override = _build_model(runtime_args, device=device)
     trainer = _PicfWindowTrainer(

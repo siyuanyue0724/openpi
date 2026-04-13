@@ -46,6 +46,16 @@ class PicfTransitionLossConfig:
     pt_back_slack_m: float = 0.008
     p_align_on: float = 0.55
     p_align_off: float = 0.35
+    tactile_aux_force_scale: float = 1.0
+    tactile_aux_indent_scale: float = 5e-4
+    tactile_aux_pressure_scale: float = 0.1
+    tactile_aux_pose_scale: float = 0.10
+    tactile_aux_huber_delta: float = 1.0
+    enable_aux_budgeting: bool = True
+    aux_budget_physical_ratio: float = 0.20
+    aux_budget_semantic_ratio: float = 0.10
+    aux_budget_alignment_ratio: float = 0.05
+    aux_budget_floor: float = 0.25
 
 
 @dataclasses.dataclass(frozen=True)
@@ -76,14 +86,20 @@ class PicfTransitionLossBreakdown:
     visual_latent: torch.Tensor
     visual_real: torch.Tensor
     tactile_real: torch.Tensor
+    tactile_map: torch.Tensor
+    tactile_aux: torch.Tensor
     point_real: torch.Tensor
     semantic_future_aux: torch.Tensor
+    physical_aux: torch.Tensor
     alignment: torch.Tensor
     anchor_pv: torch.Tensor
     pv_weak: torch.Tensor
     focus_pv: torch.Tensor
     pt: torch.Tensor
     availability: torch.Tensor
+    physical_aux_budget_scale: torch.Tensor
+    semantic_aux_budget_scale: torch.Tensor
+    alignment_budget_scale: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -95,13 +111,19 @@ class PicfTransitionLossBreakdown:
             "visual_latent": float(self.visual_latent.item()),
             "visual_real": float(self.visual_real.item()),
             "tactile_real": float(self.tactile_real.item()),
+            "tactile_map": float(self.tactile_map.item()),
+            "tactile_aux": float(self.tactile_aux.item()),
             "point_real": float(self.point_real.item()),
             "semantic_future_aux": float(self.semantic_future_aux.item()),
+            "physical_aux": float(self.physical_aux.item()),
             "alignment": float(self.alignment.item()),
             "anchor_pv": float(self.anchor_pv.item()),
             "pv_weak": float(self.pv_weak.item()),
             "focus_pv": float(self.focus_pv.item()),
             "pt": float(self.pt.item()),
+            "physical_aux_budget_scale": float(self.physical_aux_budget_scale.item()),
+            "semantic_aux_budget_scale": float(self.semantic_aux_budget_scale.item()),
+            "alignment_budget_scale": float(self.alignment_budget_scale.item()),
         }
 
 
@@ -200,6 +222,75 @@ def _action_target_tensor(action_target: torch.Tensor | np.ndarray | None, *, de
     elif target.numel() > 7:
         target = target[:7]
     return target
+
+
+def _tactile_split_loss(
+    pred: torch.Tensor | None,
+    target: torch.Tensor | None,
+    *,
+    grid_dim: int,
+    config: PicfTransitionLossConfig,
+    reference: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if pred is None or target is None:
+        zero = _zero_weight_loss(pred, reference)
+        return zero, zero, zero
+    pred_map = pred[:grid_dim]
+    target_map = target[:grid_dim]
+    map_loss = fn.l1_loss(pred_map, target_map)
+    pred_aux = pred[grid_dim:]
+    target_aux = target[grid_dim:]
+    if pred_aux.numel() == 0 or target_aux.numel() == 0:
+        aux_loss = _zero_like(reference)
+        return map_loss, aux_loss, map_loss
+    contact_loss = fn.binary_cross_entropy_with_logits(pred_aux[:1], target_aux[:1])
+    force_scale = max(float(config.tactile_aux_force_scale), 1e-6)
+    indent_scale = max(float(config.tactile_aux_indent_scale), 1e-6)
+    pressure_scale = max(float(config.tactile_aux_pressure_scale), 1e-6)
+    pose_scale = max(float(config.tactile_aux_pose_scale), 1e-6)
+    delta = max(float(config.tactile_aux_huber_delta), 1e-6)
+    scaled_pred = torch.stack(
+        [
+            pred_aux[1] / force_scale,
+            pred_aux[2] / indent_scale,
+            pred_aux[3] / pressure_scale,
+            pred_aux[4],
+            pred_aux[5] / pose_scale,
+            pred_aux[6] / pose_scale,
+            pred_aux[7] / pose_scale,
+        ]
+    )
+    scaled_target = torch.stack(
+        [
+            target_aux[1] / force_scale,
+            target_aux[2] / indent_scale,
+            target_aux[3] / pressure_scale,
+            target_aux[4],
+            target_aux[5] / pose_scale,
+            target_aux[6] / pose_scale,
+            target_aux[7] / pose_scale,
+        ]
+    )
+    aux_reg = fn.huber_loss(scaled_pred, scaled_target, delta=delta, reduction="mean")
+    aux_loss = 0.5 * (contact_loss + aux_reg)
+    total = 0.5 * (map_loss + aux_loss)
+    return map_loss, aux_loss, total
+
+
+def _budgeted_group(
+    loss: torch.Tensor,
+    *,
+    action_loss: torch.Tensor,
+    enabled: bool,
+    ratio: float,
+    floor: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    if not enabled:
+        return loss, torch.ones((), device=loss.device, dtype=loss.dtype)
+    budget_base = torch.clamp(action_loss.detach(), min=float(floor))
+    budget = budget_base * float(ratio)
+    scale = torch.clamp(budget / torch.clamp(loss.detach(), min=1e-6), max=1.0)
+    return loss * scale, scale
 
 
 def _routing_responsibilities(mass: torch.Tensor, *, eps: float) -> torch.Tensor:
@@ -492,6 +583,7 @@ def compute_transition_loss(
     pred_cache = predictive.physical_prediction_cache
     semantic_future_cache = predictive.prediction_cache
     future = extract_future_targets(core, next_observation, visual_map_override=next_visual_map_override)
+    tactile_grid_dim = int(core.config.tactile_real_grid**2)
     alignment = compute_alignment_loss(
         output_t.state,
         config=PicfAlignmentLossConfig(
@@ -551,8 +643,16 @@ def compute_transition_loss(
         pred_available=pred_cache.availability[2],
         target_available=future.availability[2],
     ):
-        tactile_real = fn.l1_loss(pred_cache.tactile_real, future.tactile_real)
+        tactile_map, tactile_aux, tactile_real = _tactile_split_loss(
+            pred_cache.tactile_real,
+            future.tactile_real,
+            grid_dim=tactile_grid_dim,
+            config=cfg,
+            reference=predictive.action,
+        )
     else:
+        tactile_map = _zero_weight_loss(pred_cache.tactile_real, predictive.action)
+        tactile_aux = _zero_weight_loss(pred_cache.tactile_real, predictive.action)
         tactile_real = _zero_weight_loss(pred_cache.tactile_real, predictive.action)
 
     if _branch_is_usable(
@@ -591,7 +691,13 @@ def compute_transition_loss(
         pred_available=semantic_future_cache.availability[2],
         target_available=future.availability[2],
     ):
-        semantic_tactile_real = fn.l1_loss(semantic_future_cache.tactile_real, future.tactile_real)
+        _, _, semantic_tactile_real = _tactile_split_loss(
+            semantic_future_cache.tactile_real,
+            future.tactile_real,
+            grid_dim=tactile_grid_dim,
+            config=cfg,
+            reference=predictive.action,
+        )
     else:
         semantic_tactile_real = _zero_weight_loss(semantic_future_cache.tactile_real, predictive.action)
 
@@ -611,15 +717,41 @@ def compute_transition_loss(
         + (cfg.lambda_tactile_real * semantic_tactile_real)
         + (cfg.lambda_point_real * semantic_point_real)
     )
-
-    total = (
-        action_loss
-        + (cfg.lambda_visual_latent * visual_latent)
+    physical_aux = (
+        (cfg.lambda_visual_latent * visual_latent)
         + (cfg.lambda_visual_real * visual_real)
         + (cfg.lambda_tactile_real * tactile_real)
         + (cfg.lambda_point_real * point_real)
-        + (cfg.lambda_semantic_future_aux * semantic_future_aux)
-        + alignment.total
+    )
+    semantic_group = cfg.lambda_semantic_future_aux * semantic_future_aux
+    alignment_group = alignment.total
+    physical_aux_capped, physical_scale = _budgeted_group(
+        physical_aux,
+        action_loss=action_loss,
+        enabled=bool(cfg.enable_aux_budgeting),
+        ratio=float(cfg.aux_budget_physical_ratio),
+        floor=float(cfg.aux_budget_floor),
+    )
+    semantic_group_capped, semantic_scale = _budgeted_group(
+        semantic_group,
+        action_loss=action_loss,
+        enabled=bool(cfg.enable_aux_budgeting),
+        ratio=float(cfg.aux_budget_semantic_ratio),
+        floor=float(cfg.aux_budget_floor),
+    )
+    alignment_group_capped, alignment_scale = _budgeted_group(
+        alignment_group,
+        action_loss=action_loss,
+        enabled=bool(cfg.enable_aux_budgeting),
+        ratio=float(cfg.aux_budget_alignment_ratio),
+        floor=float(cfg.aux_budget_floor),
+    )
+
+    total = (
+        action_loss
+        + physical_aux_capped
+        + semantic_group_capped
+        + alignment_group_capped
     )
     return PicfTransitionLossBreakdown(
         total=total,
@@ -630,14 +762,20 @@ def compute_transition_loss(
         visual_latent=visual_latent,
         visual_real=visual_real,
         tactile_real=tactile_real,
+        tactile_map=tactile_map,
+        tactile_aux=tactile_aux,
         point_real=point_real,
         semantic_future_aux=semantic_future_aux,
-        alignment=alignment.total,
+        physical_aux=physical_aux,
+        alignment=alignment_group_capped,
         anchor_pv=alignment.anchor_pv,
         pv_weak=alignment.pv_weak,
         focus_pv=alignment.focus_pv,
         pt=alignment.pt,
         availability=future.availability,
+        physical_aux_budget_scale=physical_scale,
+        semantic_aux_budget_scale=semantic_scale,
+        alignment_budget_scale=alignment_scale,
     )
 
 

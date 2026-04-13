@@ -35,6 +35,8 @@ except Exception:  # pragma: no cover - import availability depends on env
     wandb = None
 
 from openpi.picf.anytouch.config import AnyTouchConfig
+from openpi.picf.action_normalization import PicfActionNormalizer
+from openpi.picf.action_normalization import default_calvin_action_norm_stats_path
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.core import PicfCoreConfig
 from openpi.picf.core import PicfFullCore
@@ -545,6 +547,11 @@ def _default_tactile_contact_stats_path() -> str | None:
     return str(candidate) if candidate.is_file() else None
 
 
+def _default_action_norm_stats_path() -> str | None:
+    candidate = default_calvin_action_norm_stats_path()
+    return str(candidate) if candidate.is_file() else None
+
+
 def _default_sonata_checkpoint() -> str | None:
     candidate = Path("src") / "pretrain" / "SpatialLM_Sonata_encoder.pth"
     return str(candidate) if candidate.is_file() else None
@@ -649,6 +656,32 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.predictive_query_tokens = int(_SPEC_DEFAULTS.predictive_query_tokens)
     if getattr(args, "semantic_prefix_dropout_prob", None) is None:
         args.semantic_prefix_dropout_prob = float(_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
+    if getattr(args, "enable_aux_budgeting", None) is None:
+        args.enable_aux_budgeting = True
+    if getattr(args, "aux_budget_physical_ratio", None) is None:
+        args.aux_budget_physical_ratio = 0.20
+    if getattr(args, "aux_budget_semantic_ratio", None) is None:
+        args.aux_budget_semantic_ratio = 0.10
+    if getattr(args, "aux_budget_alignment_ratio", None) is None:
+        args.aux_budget_alignment_ratio = 0.05
+    if getattr(args, "aux_budget_floor", None) is None:
+        args.aux_budget_floor = 0.25
+    if getattr(args, "tactile_aux_force_scale", None) is None:
+        args.tactile_aux_force_scale = 1.0
+    if getattr(args, "tactile_aux_indent_scale", None) is None:
+        args.tactile_aux_indent_scale = 5e-4
+    if getattr(args, "tactile_aux_pressure_scale", None) is None:
+        args.tactile_aux_pressure_scale = 0.1
+    if getattr(args, "action_normalization", None) is None:
+        args.action_normalization = "quantile"
+    if getattr(args, "action_output_clip", None) is not None:
+        args.action_output_clip = float(args.action_output_clip)
+    if getattr(args, "action_normalization", "quantile") != "none" and getattr(args, "action_norm_stats_path", None) is None:
+        args.action_norm_stats_path = _default_action_norm_stats_path()
+    if getattr(args, "tactile_aux_pose_scale", None) is None:
+        args.tactile_aux_pose_scale = float(getattr(args, "crop_radius_m", _SPEC_DEFAULTS.crop_radius_m))
+    if getattr(args, "tactile_aux_huber_delta", None) is None:
+        args.tactile_aux_huber_delta = 1.0
     if getattr(args, "predictive_semantic_reads", None) is None:
         args.predictive_semantic_reads = int(_SPEC_DEFAULTS.predictive_semantic_reads)
     if getattr(args, "control_semantic_reads", None) is None:
@@ -680,6 +713,19 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         # backwards within one optimizer step.
         args.semantic_gradient_checkpointing = False
         args.semantic_gradient_checkpointing_disabled_for_accum = True
+
+
+def _resolve_action_normalizer(args: argparse.Namespace) -> PicfActionNormalizer | None:
+    mode = str(getattr(args, "action_normalization", "quantile"))
+    if mode == "none":
+        return None
+    path = getattr(args, "action_norm_stats_path", None)
+    if path is None:
+        raise FileNotFoundError(
+            "Action normalization requested but no norm_stats path was resolved. "
+            "Pass --action-norm-stats-path or place norm_stats.json under assets/pi05_calvin_sonata/calvin/."
+        )
+    return PicfActionNormalizer.from_path(path, mode=mode)
 
 
 def _warn_single_gpu_foundation_accum_risk(
@@ -757,6 +803,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(f"weight_decay must be >= 0, got {args.weight_decay}.")
     if float(args.grad_clip_norm) < 0.0:
         raise ValueError(f"grad_clip_norm must be >= 0, got {args.grad_clip_norm}.")
+    if getattr(args, "action_output_clip", None) is not None and float(args.action_output_clip) <= 0.0:
+        raise ValueError(f"action_output_clip must be > 0 when provided, got {args.action_output_clip}.")
     if float(args.crop_radius_m) <= 0.0:
         raise ValueError(f"crop_radius_m must be > 0, got {args.crop_radius_m}.")
     if float(args.point_focus_sigma_m) <= 0.0:
@@ -780,6 +828,20 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "lambda_pv_weak",
         "lambda_focus_pv",
         "lambda_pt",
+    ):
+        value = float(getattr(args, name))
+        if value < 0.0:
+            raise ValueError(f"{name} must be >= 0, got {value}.")
+    for name in (
+        "aux_budget_physical_ratio",
+        "aux_budget_semantic_ratio",
+        "aux_budget_alignment_ratio",
+        "aux_budget_floor",
+        "tactile_aux_force_scale",
+        "tactile_aux_indent_scale",
+        "tactile_aux_pressure_scale",
+        "tactile_aux_pose_scale",
+        "tactile_aux_huber_delta",
     ):
         value = float(getattr(args, name))
         if value < 0.0:
@@ -824,6 +886,13 @@ def _validate_train_args(args: argparse.Namespace) -> None:
             "point_backbone=sonata currently requires CUDA. "
             "Use --device cuda or switch to --point-backbone rgb."
         )
+    if str(getattr(args, "action_normalization", "quantile")) != "none":
+        path = getattr(args, "action_norm_stats_path", None)
+        if path is None or not Path(path).expanduser().is_file():
+            raise FileNotFoundError(
+                "Action normalization requires a valid norm_stats.json. "
+                f"Got action_norm_stats_path={path!r}."
+            )
 
 
 def _validate_backbone_args(args: argparse.Namespace) -> None:
@@ -1130,6 +1199,7 @@ class _CalvinTransitionSource:
         tactile_backgrounds_by_sensor: dict[str, np.ndarray] | None = None,
         use_scene_obs: bool = False,
         frame_dt_s: float = 1.0 / 30.0,
+        action_normalizer: PicfActionNormalizer | None = None,
     ) -> None:
         if int(unroll_steps) < 1:
             raise ValueError(f"unroll_steps must be >= 1, got {unroll_steps}")
@@ -1163,6 +1233,7 @@ class _CalvinTransitionSource:
         }
         self.use_scene_obs = bool(use_scene_obs)
         self.frame_dt_s = float(frame_dt_s)
+        self.action_normalizer = action_normalizer
         self.window_index: list[tuple[int, int]] = []
         for segment_id, segment in enumerate(self.segments):
             for step_id in range(segment.start, segment.end - self.unroll_steps):
@@ -1189,6 +1260,9 @@ class _CalvinTransitionSource:
             keys.append("scene_obs")
         frame = self.reader.read_npz(step_id, keys=keys)
         timestamp_s = float(step_id) * self.frame_dt_s
+        action = frame.get("rel_actions")
+        if action is not None and self.action_normalizer is not None:
+            action = self.action_normalizer.normalize_np(action)
         tactile = (
             _calvin_tactile_packet(
                 frame,
@@ -1214,7 +1288,7 @@ class _CalvinTransitionSource:
             rgb_gripper=frame.get("rgb_gripper"),
             scene_obs=frame.get("scene_obs"),
             proprio=frame["robot_obs"],
-            action=frame.get("rel_actions"),
+            action=action,
             tactile=tactile,
         )
 
@@ -1246,13 +1320,19 @@ class _MetricAccumulator:
     loss_visual_latent: float = 0.0
     loss_visual_real: float = 0.0
     loss_tactile_real: float = 0.0
+    loss_tactile_map: float = 0.0
+    loss_tactile_aux: float = 0.0
     loss_point_real: float = 0.0
     loss_semantic_future_aux: float = 0.0
+    loss_physical_aux: float = 0.0
     loss_alignment: float = 0.0
     loss_anchor_pv: float = 0.0
     loss_pv_weak: float = 0.0
     loss_focus_pv: float = 0.0
     loss_pt: float = 0.0
+    physical_aux_budget_scale: float = 0.0
+    semantic_aux_budget_scale: float = 0.0
+    alignment_budget_scale: float = 0.0
     candidate_density: float = 0.0
     tactile_contact_prob_mean: float = 0.0
     tactile_active_rate: float = 0.0
@@ -1274,13 +1354,19 @@ class _MetricAccumulator:
         self.loss_visual_latent += float(losses.visual_latent.item())
         self.loss_visual_real += float(losses.visual_real.item())
         self.loss_tactile_real += float(losses.tactile_real.item())
+        self.loss_tactile_map += float(losses.tactile_map.item())
+        self.loss_tactile_aux += float(losses.tactile_aux.item())
         self.loss_point_real += float(losses.point_real.item())
         self.loss_semantic_future_aux += float(losses.semantic_future_aux.item())
+        self.loss_physical_aux += float(losses.physical_aux.item())
         self.loss_alignment += float(losses.alignment.item())
         self.loss_anchor_pv += float(losses.anchor_pv.item())
         self.loss_pv_weak += float(losses.pv_weak.item())
         self.loss_focus_pv += float(losses.focus_pv.item())
         self.loss_pt += float(losses.pt.item())
+        self.physical_aux_budget_scale += float(losses.physical_aux_budget_scale.item())
+        self.semantic_aux_budget_scale += float(losses.semantic_aux_budget_scale.item())
+        self.alignment_budget_scale += float(losses.alignment_budget_scale.item())
         self.candidate_density += float(candidate_density)
         self.tactile_contact_prob_mean += float(tactile_contact_prob_mean)
         self.tactile_active_rate += float(tactile_active_rate)
@@ -1295,13 +1381,19 @@ class _MetricAccumulator:
         self.loss_visual_latent += float(outputs["loss_visual_latent"].detach().item())
         self.loss_visual_real += float(outputs["loss_visual_real"].detach().item())
         self.loss_tactile_real += float(outputs["loss_tactile_real"].detach().item())
+        self.loss_tactile_map += float(outputs["loss_tactile_map"].detach().item())
+        self.loss_tactile_aux += float(outputs["loss_tactile_aux"].detach().item())
         self.loss_point_real += float(outputs["loss_point_real"].detach().item())
         self.loss_semantic_future_aux += float(outputs["loss_semantic_future_aux"].detach().item())
+        self.loss_physical_aux += float(outputs["loss_physical_aux"].detach().item())
         self.loss_alignment += float(outputs["loss_alignment"].detach().item())
         self.loss_anchor_pv += float(outputs["loss_anchor_pv"].detach().item())
         self.loss_pv_weak += float(outputs["loss_pv_weak"].detach().item())
         self.loss_focus_pv += float(outputs["loss_focus_pv"].detach().item())
         self.loss_pt += float(outputs["loss_pt"].detach().item())
+        self.physical_aux_budget_scale += float(outputs["physical_aux_budget_scale"].detach().item())
+        self.semantic_aux_budget_scale += float(outputs["semantic_aux_budget_scale"].detach().item())
+        self.alignment_budget_scale += float(outputs["alignment_budget_scale"].detach().item())
         self.candidate_density += float(outputs["projective_candidate_density"].detach().item())
         self.tactile_contact_prob_mean += float(outputs.get("tactile_contact_prob_mean", 0.0).detach().item())
         self.tactile_active_rate += float(outputs.get("tactile_active_rate", 0.0).detach().item())
@@ -1318,13 +1410,19 @@ class _MetricAccumulator:
             "loss_visual_latent": self.loss_visual_latent / denom,
             "loss_visual_real": self.loss_visual_real / denom,
             "loss_tactile_real": self.loss_tactile_real / denom,
+            "loss_tactile_map": self.loss_tactile_map / denom,
+            "loss_tactile_aux": self.loss_tactile_aux / denom,
             "loss_point_real": self.loss_point_real / denom,
             "loss_semantic_future_aux": self.loss_semantic_future_aux / denom,
+            "loss_physical_aux": self.loss_physical_aux / denom,
             "loss_alignment": self.loss_alignment / denom,
             "loss_anchor_pv": self.loss_anchor_pv / denom,
             "loss_pv_weak": self.loss_pv_weak / denom,
             "loss_focus_pv": self.loss_focus_pv / denom,
             "loss_pt": self.loss_pt / denom,
+            "physical_aux_budget_scale": self.physical_aux_budget_scale / denom,
+            "semantic_aux_budget_scale": self.semantic_aux_budget_scale / denom,
+            "alignment_budget_scale": self.alignment_budget_scale / denom,
             "projective_candidate_density": self.candidate_density / denom,
             "tactile_contact_prob_mean": self.tactile_contact_prob_mean / denom,
             "tactile_active_rate": self.tactile_active_rate / denom,
@@ -1445,13 +1543,19 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_visual_latent": losses.visual_latent,
                     "loss_visual_real": losses.visual_real,
                     "loss_tactile_real": losses.tactile_real,
+                    "loss_tactile_map": losses.tactile_map,
+                    "loss_tactile_aux": losses.tactile_aux,
                     "loss_point_real": losses.point_real,
                     "loss_semantic_future_aux": losses.semantic_future_aux,
+                    "loss_physical_aux": losses.physical_aux,
                     "loss_alignment": losses.alignment,
                     "loss_anchor_pv": losses.anchor_pv,
                     "loss_pv_weak": losses.pv_weak,
                     "loss_focus_pv": losses.focus_pv,
                     "loss_pt": losses.pt,
+                    "physical_aux_budget_scale": losses.physical_aux_budget_scale,
+                    "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
+                    "alignment_budget_scale": losses.alignment_budget_scale,
                     "projective_candidate_density": candidate_density,
                     "tactile_contact_prob_mean": tactile_contact_prob_mean,
                     "tactile_active_rate": tactile_active_rate,
@@ -1464,13 +1568,19 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_visual_latent"] = metrics["loss_visual_latent"] + losses.visual_latent
                 metrics["loss_visual_real"] = metrics["loss_visual_real"] + losses.visual_real
                 metrics["loss_tactile_real"] = metrics["loss_tactile_real"] + losses.tactile_real
+                metrics["loss_tactile_map"] = metrics["loss_tactile_map"] + losses.tactile_map
+                metrics["loss_tactile_aux"] = metrics["loss_tactile_aux"] + losses.tactile_aux
                 metrics["loss_point_real"] = metrics["loss_point_real"] + losses.point_real
                 metrics["loss_semantic_future_aux"] = metrics["loss_semantic_future_aux"] + losses.semantic_future_aux
+                metrics["loss_physical_aux"] = metrics["loss_physical_aux"] + losses.physical_aux
                 metrics["loss_alignment"] = metrics["loss_alignment"] + losses.alignment
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
                 metrics["loss_focus_pv"] = metrics["loss_focus_pv"] + losses.focus_pv
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
+                metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
+                metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
+                metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
                 metrics["projective_candidate_density"] = metrics["projective_candidate_density"] + candidate_density
                 metrics["tactile_contact_prob_mean"] = metrics["tactile_contact_prob_mean"] + tactile_contact_prob_mean
                 metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + tactile_active_rate
@@ -1488,13 +1598,19 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_visual_latent": metrics["loss_visual_latent"] / denom,
             "loss_visual_real": metrics["loss_visual_real"] / denom,
             "loss_tactile_real": metrics["loss_tactile_real"] / denom,
+            "loss_tactile_map": metrics["loss_tactile_map"] / denom,
+            "loss_tactile_aux": metrics["loss_tactile_aux"] / denom,
             "loss_point_real": metrics["loss_point_real"] / denom,
             "loss_semantic_future_aux": metrics["loss_semantic_future_aux"] / denom,
+            "loss_physical_aux": metrics["loss_physical_aux"] / denom,
             "loss_alignment": metrics["loss_alignment"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
             "loss_focus_pv": metrics["loss_focus_pv"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
+            "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
+            "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
+            "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
             "projective_candidate_density": metrics["projective_candidate_density"] / denom,
             "tactile_contact_prob_mean": metrics["tactile_contact_prob_mean"] / denom,
             "tactile_active_rate": metrics["tactile_active_rate"] / denom,
@@ -1852,6 +1968,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         tactile_anchor_prob_on=float(
             getattr(args, "tactile_anchor_prob_on", _SPEC_DEFAULTS.tactile_anchor_prob_on)
         ),
+        action_output_clip=getattr(args, "action_output_clip", None),
     )
     point_feature_extractor = None
     if args.point_backbone == "sonata":
@@ -1973,6 +2090,16 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         pt_back_slack_m=float(getattr(args, "pt_back_slack_m", 0.008)),
         p_align_on=float(getattr(args, "p_align_on", 0.55)),
         p_align_off=float(getattr(args, "p_align_off", 0.35)),
+        tactile_aux_force_scale=float(getattr(args, "tactile_aux_force_scale", 1.0)),
+        tactile_aux_indent_scale=float(getattr(args, "tactile_aux_indent_scale", 5e-4)),
+        tactile_aux_pressure_scale=float(getattr(args, "tactile_aux_pressure_scale", 0.1)),
+        tactile_aux_pose_scale=float(getattr(args, "tactile_aux_pose_scale", getattr(args, "crop_radius_m", 0.10))),
+        tactile_aux_huber_delta=float(getattr(args, "tactile_aux_huber_delta", 1.0)),
+        enable_aux_budgeting=bool(getattr(args, "enable_aux_budgeting", True)),
+        aux_budget_physical_ratio=float(getattr(args, "aux_budget_physical_ratio", 0.20)),
+        aux_budget_semantic_ratio=float(getattr(args, "aux_budget_semantic_ratio", 0.10)),
+        aux_budget_alignment_ratio=float(getattr(args, "aux_budget_alignment_ratio", 0.05)),
+        aux_budget_floor=float(getattr(args, "aux_budget_floor", 0.25)),
     )
 
 
@@ -2137,6 +2264,7 @@ def train(args: argparse.Namespace) -> None:
     wandb_active = False
     is_main = False
     source: _CalvinTransitionSource | None = None
+    action_normalizer: PicfActionNormalizer | None = None
     pbar: Any = None
     fault_dump_handle: TextIO | None = None
     fault_dump_path: Path | None = None
@@ -2155,6 +2283,7 @@ def train(args: argparse.Namespace) -> None:
         except OSError:
             fault_dump_handle = None
         fault_dump_registered = _register_fault_dump_handler(stream=fault_dump_handle)
+        action_normalizer = _resolve_action_normalizer(args)
         source = _CalvinTransitionSource(
             args.calvin_root,
             split=args.split,
@@ -2166,6 +2295,7 @@ def train(args: argparse.Namespace) -> None:
             tactile_calibration=args.tactile_calibration_path,
             tactile_backgrounds_by_sensor=_load_tactile_backgrounds_npz(args.tactile_backgrounds_path),
             use_scene_obs=bool(args.use_scene_obs),
+            action_normalizer=action_normalizer,
         )
 
         core, semantic_encoder, use_visual_override = _build_model_sequential_across_ranks(
@@ -2271,6 +2401,12 @@ def train(args: argparse.Namespace) -> None:
                 args.p_align_off,
                 args.p_align_on,
                 args.tactile_anchor_prob_on,
+            )
+            logging.info(
+                "Action contract: normalization=%s norm_stats=%s action_output_clip=%s",
+                getattr(args, "action_normalization", "none"),
+                getattr(args, "action_norm_stats_path", None),
+                getattr(args, "action_output_clip", None),
             )
             logging.info(
                 "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
@@ -2673,6 +2809,9 @@ def main() -> None:
     parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--action-normalization", choices=["none", "zscore", "quantile"], default="quantile")
+    parser.add_argument("--action-norm-stats-path", default=None)
+    parser.add_argument("--action-output-clip", type=float, default=None)
     parser.add_argument("--lambda-action-pos", type=float, default=2.0)
     parser.add_argument("--lambda-action-rot", type=float, default=2.0)
     parser.add_argument("--lambda-action-gripper", type=float, default=2.0)
@@ -2685,6 +2824,12 @@ def main() -> None:
     parser.add_argument("--lambda-pv-weak", type=float, default=0.02)
     parser.add_argument("--lambda-focus-pv", type=float, default=0.0)
     parser.add_argument("--lambda-pt", type=float, default=1.0)
+    parser.add_argument("--enable-aux-budgeting", dest="enable_aux_budgeting", action="store_true")
+    parser.add_argument("--disable-aux-budgeting", dest="enable_aux_budgeting", action="store_false")
+    parser.add_argument("--aux-budget-physical-ratio", type=float, default=0.20)
+    parser.add_argument("--aux-budget-semantic-ratio", type=float, default=0.10)
+    parser.add_argument("--aux-budget-alignment-ratio", type=float, default=0.05)
+    parser.add_argument("--aux-budget-floor", type=float, default=0.25)
     parser.add_argument("--tau-pv", type=float, default=0.07)
     parser.add_argument("--tau-pt", type=float, default=0.07)
     parser.add_argument("--tau-route-p", type=float, default=0.1)
@@ -2695,6 +2840,11 @@ def main() -> None:
     parser.add_argument("--pt-back-slack-m", type=float, default=0.008)
     parser.add_argument("--p-align-on", type=float, default=0.55)
     parser.add_argument("--p-align-off", type=float, default=0.35)
+    parser.add_argument("--tactile-aux-force-scale", type=float, default=1.0)
+    parser.add_argument("--tactile-aux-indent-scale", type=float, default=_SPEC_DEFAULTS.tau_indent_m)
+    parser.add_argument("--tactile-aux-pressure-scale", type=float, default=_SPEC_DEFAULTS.tau_tactile_pressure)
+    parser.add_argument("--tactile-aux-pose-scale", type=float, default=None)
+    parser.add_argument("--tactile-aux-huber-delta", type=float, default=1.0)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--project-name", default="openpi")
     parser.add_argument("--wandb-run-name", default=None)
@@ -2783,6 +2933,7 @@ def main() -> None:
     parser.set_defaults(
         wandb_enabled=True,
         progress=True,
+        enable_aux_budgeting=True,
         visual_activation_checkpointing=True,
         semantic_gradient_checkpointing=True,
         semantic_use_gripper=True,

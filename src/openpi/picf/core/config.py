@@ -67,6 +67,7 @@ class PicfCoreConfig:
     max_action_pos_m: float = 0.025
     max_action_rot_rad: float = math.pi / 18.0
     max_action_gripper: float = 1.0
+    action_output_clip: float | None = None
     pointcloud_requires_rgb: bool = True
     visual_real_enabled: bool = True
     language_enabled: bool = True

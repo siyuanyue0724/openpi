@@ -50,6 +50,8 @@ The important internal subsets are:
   - `physical_prediction_cache_t`
 - semantic-conditioned future readout:
   - `prediction_cache_t`
+- internal action-space contract:
+  - normalized `action_t`
 
 ## 3. Transition Order
 
@@ -81,6 +83,14 @@ physical_pred_t = WorldPredict(posterior_t, innovation_t, proprio_t, action_cond
 semantic_pred_t = SemanticRead(physical_pred_t, semantic_tokens_t)
 action_t = ActionRead(posterior_t, innovation_t, proprio_t, semantic_tokens_t)
 ```
+
+The action contract is:
+
+- training-time replay actions are normalized before entering the core
+- the core predicts actions in normalized space
+- serving / evaluation unnormalize actions before environment execution
+- any optional output clipping applies in normalized space, not as a fixed
+  physical-unit bottleneck inside the core
 
 ## 4. Forbidden Edges
 
@@ -239,7 +249,28 @@ Forbidden uses:
 - posterior writeback
 - carried-prior writeback
 
-## 8. Summary Object Contract
+## 8. Loss Budget Contract
+
+The current trainer groups non-action losses into:
+
+- `physical_aux`
+- `semantic_aux`
+- `alignment`
+
+and is allowed to budget-cap those groups against a detached reference derived
+from `action_loss`.
+
+This is allowed by contract because it changes optimizer budgeting, not the
+causal state-transition graph.
+
+The intended effect is:
+
+- `action` remains the dominant optimization target
+- world-model auxiliaries continue to shape the representation
+- but auxiliary groups cannot dominate the total objective purely because of
+  transient raw scale drift on a batch
+
+## 9. Summary Object Contract
 
 `semantic_summary` is a bookkeeping/diagnostic aggregate only.
 

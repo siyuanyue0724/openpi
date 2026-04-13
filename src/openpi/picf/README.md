@@ -581,7 +581,7 @@ innovation 来自：
 - point contract violation
 - sensor sync invalid
 - first-step pointcloud contract check
-- action clipping
+- optional normalized action output clip
 
 其余 anchor/activity/recycle/contact 都是连续量。
 
@@ -618,6 +618,53 @@ innovation 来自：
 对外导出的 `Sigma` 仍然是对角矩阵形式的 `[K, D_z, D_z]`，便于后续接口保持统一。
 
 这点需要明确：
+
+### 4.2 动作空间当前使用 `pi0/pi0_fast_sonata` 风格的 normalized contract
+
+当前实现状态：已满足。
+
+当前 PICF trainer / serve 路径不再直接在模型内部使用 CALVIN 的原始 `rel_actions`
+物理量级，而是：
+
+- 训练数据入口先用 CALVIN `norm_stats.json` 对 action 做 normalize
+- core 在 normalized action space 内部训练
+- serving 返回动作前再做 unnormalize
+- 如需做数值保护，只允许在 normalized action space 里做宽松 `clip`，
+  而不是把内部动作头硬裁到固定 `0.025m / pi/18`
+
+这么做的原因是：
+
+- 标准 `pi0 / pi0_fast_sonata` 训练/推理链本来就是 normalized action contract
+- CALVIN 原始 `rel_actions` 的统计量级明显大于旧 PICF 内部物理单位 clip 上限
+- 如果不先对齐 action contract，而直接上调 `pos/rot` loss 权重，只会把优化更用力地推向一个过小的输出墙
+
+所以当前工程结论是：
+
+- `loss_action_pos / loss_action_rot` 的优先修复项不是“继续加权”
+- 而是先保证 action normalization / unnormalization / internal clip 这一整条链和标准 `pi0/pi0_fast_sonata` 保持一致
+
+### 4.3 auxiliary losses 现在采用分组预算，而不是让所有辅助项自由抢占总损失
+
+当前实现状态：已满足。
+
+当前总损失按三组处理：
+
+- `action`
+- `physical_aux`
+- `semantic_aux`
+- `alignment`
+
+其中：
+
+- tactile real loss 已拆成 `tactile_map + tactile_aux`
+- tactile aux 内部又按 contact / force / indent / pressure / pose 做显式尺度处理
+- `physical_aux / semantic_aux / alignment` 都会相对 detached `action_loss` 做预算上限
+
+这条设计的目的不是“把所有辅助损失都压小”，而是：
+
+- 保证 action 仍然是主导项
+- 防止 point / tactile / semantic / alignment 在某些 batch 上突然喧宾夺主
+- 同时保留 auxiliary 对 world-model 训练的持续牵引
 
 - 这是数学上的近似，不是文档疏漏
 - current fusion 仍然是 information-form，只是 precision 变成 diagonal precision
