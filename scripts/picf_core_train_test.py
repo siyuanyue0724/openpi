@@ -48,14 +48,14 @@ def _base_args() -> argparse.Namespace:
         visual_tubelet_size=2,
         tactile_num_frames=4,
         tactile_stride=2,
-        hidden_dim=256,
-        posterior_hidden_dim=256,
+        hidden_dim=384,
+        posterior_hidden_dim=384,
         latent_dim=112,
-        innovation_dim=256,
-        control_dim=256,
+        innovation_dim=384,
+        control_dim=384,
         semantic_dim=2048,
         semantic_cross_dim=512,
-        future_hidden_dim=256,
+        future_hidden_dim=384,
         persistent_anchors=16,
         observation_anchors=24,
         fusion_layers=4,
@@ -75,6 +75,9 @@ def _base_args() -> argparse.Namespace:
         min_lr=2e-5,
         weight_decay=1e-4,
         grad_clip_norm=1.0,
+        grad_clip_mode="percentile",
+        grad_clip_percentile=75.0,
+        grad_clip_window=100,
         lambda_action_pos=2.0,
         lambda_action_rot=2.0,
         lambda_action_gripper=2.0,
@@ -159,6 +162,19 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     assert args.warmup_steps == 600
 
 
+def test_normalize_train_args_sets_percentile_clip_defaults() -> None:
+    args = _base_args()
+    args.grad_clip_mode = None
+    args.grad_clip_percentile = None
+    args.grad_clip_window = None
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.grad_clip_mode == "percentile"
+    assert args.grad_clip_percentile == pytest.approx(75.0)
+    assert args.grad_clip_window == 100
+
+
 def test_final_tactile_defaults_align_with_current_training_spec() -> None:
     args = _base_args()
     assert args.stride == 4
@@ -180,6 +196,116 @@ def test_normalize_train_args_disables_semantic_gradient_checkpointing_for_accum
 
     assert args.semantic_gradient_checkpointing is False
     assert args.semantic_gradient_checkpointing_disabled_for_accum is True
+
+
+def test_validate_train_args_rejects_invalid_grad_clip_percentile_mode() -> None:
+    args = _base_args()
+    args.grad_clip_mode = "weird"
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="grad_clip_mode"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_rejects_invalid_grad_clip_percentile_range() -> None:
+    args = _base_args()
+    args.grad_clip_mode = "percentile"
+    args.grad_clip_percentile = 125.0
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="grad_clip_percentile"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_rejects_invalid_grad_clip_window() -> None:
+    args = _base_args()
+    args.grad_clip_window = 0
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="grad_clip_window"):
+        _MODULE._validate_train_args(args)
+
+
+def test_grad_clip_controller_percentile_mode_has_no_threshold_until_history_full() -> None:
+    args = _base_args()
+    args.grad_clip_mode = "percentile"
+    args.grad_clip_percentile = 75.0
+    args.grad_clip_window = 4
+    _MODULE._normalize_train_args(args)
+
+    controller = _MODULE._GradClipController.from_args(args)
+
+    assert controller.threshold() is None
+    controller.observe(1.0)
+    controller.observe(2.0)
+    controller.observe(3.0)
+    assert controller.threshold() is None
+    controller.observe(4.0)
+    assert controller.threshold() == pytest.approx(float(np.percentile([1.0, 2.0, 3.0, 4.0], 75.0)))
+
+
+def test_grad_clip_controller_percentile_mode_slides_window() -> None:
+    args = _base_args()
+    args.grad_clip_mode = "percentile"
+    args.grad_clip_percentile = 75.0
+    args.grad_clip_window = 4
+    _MODULE._normalize_train_args(args)
+
+    controller = _MODULE._GradClipController.from_args(args)
+    for value in (1.0, 2.0, 3.0, 4.0, 10.0):
+        controller.observe(value)
+
+    assert controller.history_size() == 4
+    assert list(controller.history) == [2.0, 3.0, 4.0, 10.0]
+    assert controller.threshold() == pytest.approx(float(np.percentile([2.0, 3.0, 4.0, 10.0], 75.0)))
+
+
+def test_grad_clip_controller_state_roundtrip_requires_matching_config() -> None:
+    args = _base_args()
+    args.grad_clip_mode = "percentile"
+    args.grad_clip_percentile = 75.0
+    args.grad_clip_window = 4
+    _MODULE._normalize_train_args(args)
+
+    controller = _MODULE._GradClipController.from_args(args)
+    for value in (1.0, 2.0, 3.0, 4.0):
+        controller.observe(value)
+
+    restored = _MODULE._GradClipController.from_args(args)
+    assert restored.load_state_dict(controller.state_dict()) is True
+    assert list(restored.history) == [1.0, 2.0, 3.0, 4.0]
+
+    mismatched_args = _base_args()
+    mismatched_args.grad_clip_mode = "percentile"
+    mismatched_args.grad_clip_percentile = 90.0
+    mismatched_args.grad_clip_window = 4
+    _MODULE._normalize_train_args(mismatched_args)
+    mismatched = _MODULE._GradClipController.from_args(mismatched_args)
+    assert mismatched.load_state_dict(controller.state_dict()) is False
+
+
+def test_grad_clip_controller_percentile_restore_ignores_fixed_norm() -> None:
+    args = _base_args()
+    args.grad_clip_mode = "percentile"
+    args.grad_clip_percentile = 75.0
+    args.grad_clip_window = 4
+    args.grad_clip_norm = 1.0
+    _MODULE._normalize_train_args(args)
+
+    controller = _MODULE._GradClipController.from_args(args)
+    for value in (1.0, 2.0, 3.0, 4.0):
+        controller.observe(value)
+
+    restored_args = _base_args()
+    restored_args.grad_clip_mode = "percentile"
+    restored_args.grad_clip_percentile = 75.0
+    restored_args.grad_clip_window = 4
+    restored_args.grad_clip_norm = 7.5
+    _MODULE._normalize_train_args(restored_args)
+
+    restored = _MODULE._GradClipController.from_args(restored_args)
+    assert restored.load_state_dict(controller.state_dict()) is True
+    assert list(restored.history) == [1.0, 2.0, 3.0, 4.0]
 
 
 def test_foundation_profile_enables_semantic_and_trainable_backbones() -> None:
@@ -921,6 +1047,14 @@ def test_checkpoint_roundtrip_preserves_trainable_semantic_state(tmp_path: Path)
 
     optimizer = torch.optim.AdamW(trainer.parameters(), lr=1e-3)
     args = argparse.Namespace(dummy=True)
+    clip_args = _base_args()
+    clip_args.grad_clip_mode = "percentile"
+    clip_args.grad_clip_percentile = 75.0
+    clip_args.grad_clip_window = 4
+    _MODULE._normalize_train_args(clip_args)
+    grad_clip_controller = _MODULE._GradClipController.from_args(clip_args)
+    for value in (1.0, 2.0, 3.0, 4.0):
+        grad_clip_controller.observe(value)
     output_dir = tmp_path / "picf_ckpt"
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -930,6 +1064,7 @@ def test_checkpoint_roundtrip_preserves_trainable_semantic_state(tmp_path: Path)
         optimizer=optimizer,
         step=7,
         args=args,
+        grad_clip_controller=grad_clip_controller,
     )
 
     reloaded = torch.nn.Module()
@@ -939,17 +1074,20 @@ def test_checkpoint_roundtrip_preserves_trainable_semantic_state(tmp_path: Path)
         reloaded.core.proj.weight.zero_()
         reloaded.semantic_encoder.weight.zero_()
     reloaded_optimizer = torch.optim.AdamW(reloaded.parameters(), lr=1e-3)
+    reloaded_controller = _MODULE._GradClipController.from_args(clip_args)
 
     step = _MODULE._load_checkpoint(
         path=output_dir / "7",
         model=reloaded,
         optimizer=reloaded_optimizer,
         device=torch.device("cpu"),
+        grad_clip_controller=reloaded_controller,
     )
 
     assert step == 7
     torch.testing.assert_close(reloaded.core.proj.weight, trainer.core.proj.weight)
     torch.testing.assert_close(reloaded.semantic_encoder.weight, trainer.semantic_encoder.weight)
+    assert list(reloaded_controller.history) == [1.0, 2.0, 3.0, 4.0]
 
 
 def test_checkpoint_loader_accepts_legacy_core_only_state(tmp_path: Path) -> None:
@@ -986,11 +1124,90 @@ def test_checkpoint_loader_accepts_legacy_core_only_state(tmp_path: Path) -> Non
     torch.testing.assert_close(reloaded.core.proj.weight, trainer.core.proj.weight)
 
 
+def test_load_state_dict_picf_compat_skips_shape_mismatches_and_keeps_matching_weights() -> None:
+    class _OldCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(3, 2, bias=False)
+
+    class _NewCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(3, 3, bias=False)
+
+    old = torch.nn.Module()
+    old.core = _OldCore()
+    old.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        old.core.proj.weight.fill_(1.25)
+        old.semantic_encoder.weight.fill_(2.5)
+
+    new = torch.nn.Module()
+    new.core = _NewCore()
+    new.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        new.core.proj.weight.zero_()
+        new.semantic_encoder.weight.zero_()
+
+    missing, unexpected, shape_mismatches = _MODULE._load_state_dict_picf_compat(new, old.state_dict())
+
+    assert "core.proj.weight" in missing
+    assert unexpected == []
+    assert any(item.startswith("core.proj.weight: checkpoint_shape=(2, 3) model_shape=(3, 3)") for item in shape_mismatches)
+    torch.testing.assert_close(new.semantic_encoder.weight, old.semantic_encoder.weight)
+    torch.testing.assert_close(new.core.proj.weight, torch.zeros_like(new.core.proj.weight))
+
+
+def test_checkpoint_loader_accepts_shape_mismatched_trainer_state_with_optimizer_reset(tmp_path: Path) -> None:
+    class _OldCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(3, 2, bias=False)
+
+    class _NewCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(3, 3, bias=False)
+
+    trainer = torch.nn.Module()
+    trainer.core = _OldCore()
+    trainer.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        trainer.core.proj.weight.fill_(0.75)
+        trainer.semantic_encoder.weight.fill_(1.75)
+    optimizer = torch.optim.AdamW(trainer.parameters(), lr=1e-3)
+
+    ckpt_dir = tmp_path / "shape_mismatch" / "11"
+    ckpt_dir.mkdir(parents=True, exist_ok=True)
+    torch.save(trainer.state_dict(), ckpt_dir / "model.pt")
+    torch.save(optimizer.state_dict(), ckpt_dir / "optimizer.pt")
+    torch.save({"step": 11, "checkpoint_format": "picf_trainer_v2"}, ckpt_dir / "metadata.pt")
+
+    reloaded = torch.nn.Module()
+    reloaded.core = _NewCore()
+    reloaded.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        reloaded.core.proj.weight.zero_()
+        reloaded.semantic_encoder.weight.zero_()
+    reloaded_optimizer = torch.optim.AdamW(reloaded.parameters(), lr=1e-3)
+
+    step = _MODULE._load_checkpoint(
+        path=ckpt_dir,
+        model=reloaded,
+        optimizer=reloaded_optimizer,
+        device=torch.device("cpu"),
+    )
+
+    assert step == 11
+    torch.testing.assert_close(reloaded.semantic_encoder.weight, trainer.semantic_encoder.weight)
+    torch.testing.assert_close(reloaded.core.proj.weight, torch.zeros_like(reloaded.core.proj.weight))
+
+
 def test_load_checkpoint_sequential_across_ranks_serializes_resume_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, int]] = []
 
-    def fake_load_checkpoint(*, path, model, optimizer, device):
-        del path, model, optimizer, device
+    def fake_load_checkpoint(*, path, model, optimizer, device, grad_clip_controller):
+        del path, model, optimizer, device, grad_clip_controller
         calls.append(("load", 0))
         return 123
 
@@ -1027,8 +1244,8 @@ def test_load_checkpoint_sequential_across_ranks_only_loads_local_rank(monkeypat
     loaded: list[int] = []
     barriers: list[int] = []
 
-    def fake_load_checkpoint(*, path, model, optimizer, device):
-        del path, model, optimizer, device
+    def fake_load_checkpoint(*, path, model, optimizer, device, grad_clip_controller):
+        del path, model, optimizer, device, grad_clip_controller
         loaded.append(1)
         return 456
 

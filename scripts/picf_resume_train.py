@@ -59,6 +59,9 @@ def main() -> None:
     parser.add_argument("--log-interval", type=int, default=None)
     parser.add_argument("--diagnostic-interval", type=int, default=None)
     parser.add_argument("--grad-clip-norm", type=float, default=None)
+    parser.add_argument("--grad-clip-mode", choices=["fixed", "percentile"], default=None)
+    parser.add_argument("--grad-clip-percentile", type=float, default=None)
+    parser.add_argument("--grad-clip-window", type=int, default=None)
     parser.add_argument("--task-anchor-sidecar-enabled", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--legacy-semantic-prefix-enabled", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--task-anchor-queries", type=int, default=None)
@@ -83,6 +86,12 @@ def main() -> None:
         runtime_args.diagnostic_interval = int(args.diagnostic_interval)
     if args.grad_clip_norm is not None:
         runtime_args.grad_clip_norm = float(args.grad_clip_norm)
+    if args.grad_clip_mode is not None:
+        runtime_args.grad_clip_mode = str(args.grad_clip_mode)
+    if args.grad_clip_percentile is not None:
+        runtime_args.grad_clip_percentile = float(args.grad_clip_percentile)
+    if args.grad_clip_window is not None:
+        runtime_args.grad_clip_window = int(args.grad_clip_window)
     if args.task_anchor_sidecar_enabled is not None:
         runtime_args.task_anchor_sidecar_enabled = bool(args.task_anchor_sidecar_enabled)
     if args.legacy_semantic_prefix_enabled is not None:

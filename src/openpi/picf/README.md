@@ -18,6 +18,10 @@
 如果要看当前 task-anchor sidecar 版本的**最终交接说明**，请直接看：
 [`README_task_anchor_sidecar_followthrough.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_task_anchor_sidecar_followthrough.md)。
 
+如果要看当前 **CALVIN dataset / loader / evaluator / rollout validation**
+的最终执行说明，请看：
+[`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)。
+
 那个文件描述的是：
 
 - 当前代码的真实数学边界与架构

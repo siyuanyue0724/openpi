@@ -662,6 +662,18 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
 
 
 def _normalize_train_args(args: argparse.Namespace) -> None:
+    if getattr(args, "grad_clip_mode", None) is None:
+        args.grad_clip_mode = "percentile"
+    else:
+        args.grad_clip_mode = str(args.grad_clip_mode).lower()
+    if getattr(args, "grad_clip_percentile", None) is None:
+        args.grad_clip_percentile = 75.0
+    else:
+        args.grad_clip_percentile = float(args.grad_clip_percentile)
+    if getattr(args, "grad_clip_window", None) is None:
+        args.grad_clip_window = 100
+    else:
+        args.grad_clip_window = int(args.grad_clip_window)
     if getattr(args, "control_query_tokens", None) is None:
         args.control_query_tokens = int(_SPEC_DEFAULTS.control_query_tokens)
     if getattr(args, "predictive_query_tokens", None) is None:
@@ -827,8 +839,20 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(f"min_lr must be <= lr, got min_lr={args.min_lr} lr={args.lr}.")
     if float(args.weight_decay) < 0.0:
         raise ValueError(f"weight_decay must be >= 0, got {args.weight_decay}.")
+    if str(args.grad_clip_mode) not in {"fixed", "percentile"}:
+        raise ValueError(
+            "grad_clip_mode must be one of {'fixed', 'percentile'}, "
+            f"got {args.grad_clip_mode!r}."
+        )
     if float(args.grad_clip_norm) < 0.0:
         raise ValueError(f"grad_clip_norm must be >= 0, got {args.grad_clip_norm}.")
+    if not (0.0 <= float(args.grad_clip_percentile) <= 100.0):
+        raise ValueError(
+            "grad_clip_percentile must be in [0, 100], "
+            f"got {args.grad_clip_percentile}."
+        )
+    if int(args.grad_clip_window) < 1:
+        raise ValueError(f"grad_clip_window must be >= 1, got {args.grad_clip_window}.")
     if getattr(args, "action_output_clip", None) is not None and float(args.action_output_clip) <= 0.0:
         raise ValueError(f"action_output_clip must be > 0 when provided, got {args.action_output_clip}.")
     if float(args.crop_radius_m) <= 0.0:
@@ -1107,6 +1131,76 @@ def _grad_norm(parameters: Iterator[torch.nn.Parameter]) -> float:
         sq_sum += float(torch.sum(grad * grad).item())
         found = True
     return float(math.sqrt(sq_sum)) if found else 0.0
+
+
+@dataclasses.dataclass
+class _GradClipController:
+    mode: str
+    fixed_norm: float
+    percentile: float
+    window: int
+    history: deque[float] = dataclasses.field(default_factory=deque)
+
+    @classmethod
+    def from_args(cls, args: argparse.Namespace) -> "_GradClipController":
+        return cls(
+            mode=str(getattr(args, "grad_clip_mode", "fixed")).lower(),
+            fixed_norm=float(getattr(args, "grad_clip_norm", 0.0)),
+            percentile=float(getattr(args, "grad_clip_percentile", 75.0)),
+            window=int(getattr(args, "grad_clip_window", 100)),
+            history=deque(maxlen=int(getattr(args, "grad_clip_window", 100))),
+        )
+
+    def threshold(self) -> float | None:
+        if self.mode == "fixed":
+            return float(self.fixed_norm) if float(self.fixed_norm) > 0.0 else None
+        if len(self.history) < int(self.window):
+            return None
+        return float(np.percentile(np.asarray(self.history, dtype=np.float32), float(self.percentile)))
+
+    def history_size(self) -> int:
+        return int(len(self.history))
+
+    def observe(self, preclip_grad_norm: float) -> None:
+        self.history.append(float(preclip_grad_norm))
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "mode": str(self.mode),
+            "fixed_norm": float(self.fixed_norm),
+            "percentile": float(self.percentile),
+            "window": int(self.window),
+            "history": [float(value) for value in self.history],
+        }
+
+    def load_state_dict(self, payload: dict[str, Any] | None) -> bool:
+        if not payload:
+            return False
+        payload_mode = str(payload.get("mode", "")).lower()
+        if payload_mode != str(self.mode):
+            return False
+        if int(payload.get("window", -1)) != int(self.window):
+            return False
+        if payload_mode == "percentile":
+            if not math.isclose(
+                float(payload.get("percentile", math.nan)),
+                float(self.percentile),
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                return False
+        elif payload_mode == "fixed":
+            if not math.isclose(
+                float(payload.get("fixed_norm", math.nan)),
+                float(self.fixed_norm),
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                return False
+        self.history.clear()
+        for value in payload.get("history", ()):
+            self.history.append(float(value))
+        return True
 
 
 def _optimizer_param_group_lookup(optimizer: torch.optim.Optimizer | None) -> dict[int, str]:
@@ -1771,6 +1865,7 @@ def _save_checkpoint(
     optimizer: torch.optim.Optimizer,
     step: int,
     args: argparse.Namespace,
+    grad_clip_controller: _GradClipController | None = None,
 ) -> None:
     module = model.module if isinstance(model, DistributedDataParallel) else model
     final_dir = _checkpoint_dir_for_step(output_dir, step)
@@ -1788,6 +1883,7 @@ def _save_checkpoint(
         "args": vars(args),
         "timestamp": time.time(),
         "checkpoint_format": "picf_trainer_v2",
+        "grad_clip_controller": None if grad_clip_controller is None else grad_clip_controller.state_dict(),
     }
     torch.save(metadata, tmp_dir / "metadata.pt")
 
@@ -1855,6 +1951,7 @@ def _load_checkpoint(
     model: _PicfWindowTrainer | DistributedDataParallel,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    grad_clip_controller: _GradClipController | None = None,
 ) -> int:
     module = model.module if isinstance(model, DistributedDataParallel) else model
     if path.is_dir():
@@ -1897,6 +1994,8 @@ def _load_checkpoint(
                 logging.warning(
                     "Optimizer state dict is incompatible with the current PICF architecture. Reinitializing optimizer."
                 )
+        if grad_clip_controller is not None and not grad_clip_controller.load_state_dict(metadata.get("grad_clip_controller")):
+            logging.info("Gradient clip controller state not restored from checkpoint; starting with fresh history.")
         return int(metadata.get("step", 0))
 
     payload = torch.load(path, map_location=device, weights_only=False)
@@ -1937,6 +2036,8 @@ def _load_checkpoint(
             optimizer.load_state_dict(payload["optimizer"])
         except ValueError:
             logging.warning("Optimizer payload is incompatible with the current PICF architecture. Reinitializing optimizer.")
+    if grad_clip_controller is not None and not grad_clip_controller.load_state_dict(payload.get("grad_clip_controller")):
+        logging.info("Gradient clip controller state not restored from payload; starting with fresh history.")
     return int(payload.get("step", 0))
 
 
@@ -1948,6 +2049,7 @@ def _load_checkpoint_sequential_across_ranks(
     device: torch.device,
     rank: int,
     world_size: int,
+    grad_clip_controller: _GradClipController | None = None,
 ) -> int:
     """Avoid shared-filesystem page-read stalls by serializing DDP checkpoint loads.
 
@@ -1956,11 +2058,23 @@ def _load_checkpoint_sequential_across_ranks(
     rank at a time on networked storage.
     """
     if world_size <= 1:
-        return _load_checkpoint(path=path, model=model, optimizer=optimizer, device=device)
+        return _load_checkpoint(
+            path=path,
+            model=model,
+            optimizer=optimizer,
+            device=device,
+            grad_clip_controller=grad_clip_controller,
+        )
     loaded_step = 0
     for load_rank in range(int(world_size)):
         if rank == load_rank:
-            loaded_step = _load_checkpoint(path=path, model=model, optimizer=optimizer, device=device)
+            loaded_step = _load_checkpoint(
+                path=path,
+                model=model,
+                optimizer=optimizer,
+                device=device,
+                grad_clip_controller=grad_clip_controller,
+            )
         _distributed_barrier(use_ddp=True, device=device)
     step_tensor = torch.tensor([int(loaded_step)], device=device, dtype=torch.int64)
     dist.broadcast(step_tensor, src=0)
@@ -2383,6 +2497,7 @@ def train(args: argparse.Namespace) -> None:
         ).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
         optimizer, optimizer_group_info = _build_optimizer(model, args=args)
+        grad_clip_controller = _GradClipController.from_args(args)
         if use_ddp:
             model = DistributedDataParallel(
                 model,
@@ -2408,8 +2523,18 @@ def train(args: argparse.Namespace) -> None:
                 device=device,
                 rank=rank,
                 world_size=world_size,
+                grad_clip_controller=grad_clip_controller,
             )
             logging.info("Resumed from %s at step=%s", resume_path, start_step)
+        if is_main:
+            logging.info(
+                "Gradient clip config: mode=%s fixed_norm=%.4f percentile=%.2f window=%s history_size=%s",
+                grad_clip_controller.mode,
+                float(grad_clip_controller.fixed_norm),
+                float(grad_clip_controller.percentile),
+                int(grad_clip_controller.window),
+                int(grad_clip_controller.history_size()),
+            )
 
         if is_main:
             wandb_active = _init_wandb(
@@ -2425,6 +2550,8 @@ def train(args: argparse.Namespace) -> None:
         interval_start = time.time()
         steps_in_interval = 0
         retried_windows_interval = 0
+        grad_clip_threshold = grad_clip_controller.threshold()
+        grad_clip_applied = False
         recent_windows: deque[dict[str, Any]] = deque(maxlen=4)
         debug_cuda_sync = os.environ.get("OPENPI_DEBUG_CUDA_SYNC", "").strip() not in {"", "0", "false", "False"}
         debug_autograd_anomaly = os.environ.get("OPENPI_DEBUG_AUTOGRAD_ANOMALY", "").strip() not in {"", "0", "false", "False"}
@@ -2755,8 +2882,12 @@ def train(args: argparse.Namespace) -> None:
                     logging.error("Recent tensor index trace before non-finite gradient: %s", _dump_debug_index_trace())
                 raise RuntimeError("Non-finite gradients detected before optimizer step.")
             preclip_local_grad = _grad_norm(model.parameters())
-            if args.grad_clip_norm > 0:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=args.grad_clip_norm)
+            grad_clip_threshold = grad_clip_controller.threshold()
+            grad_clip_applied = bool(
+                grad_clip_threshold is not None and float(preclip_local_grad) > float(grad_clip_threshold)
+            )
+            if grad_clip_applied:
+                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip_threshold))
             if debug_phase_enabled:
                 logging.info("phase step=%s rank=%s grad_clip_sec=%.3f", int(step + 1), rank, time.perf_counter() - clip_start)
             opt_start = time.perf_counter()
@@ -2768,6 +2899,7 @@ def train(args: argparse.Namespace) -> None:
                 if _DEBUG_INDEX_TRACE:
                     logging.error("Recent tensor index trace before non-finite parameter: %s", _dump_debug_index_trace())
                 raise RuntimeError("Non-finite parameters detected after optimizer step.")
+            grad_clip_controller.observe(preclip_local_grad)
             if debug_phase_enabled:
                 logging.info("phase step=%s rank=%s optimizer_step_sec=%.3f", int(step + 1), rank, time.perf_counter() - opt_start)
             steps_in_interval += 1
@@ -2805,6 +2937,11 @@ def train(args: argparse.Namespace) -> None:
                         "lr": float(lr),
                         "preclip_grad_norm": float(preclip_local_grad),
                         "grad_norm": float(local_grad),
+                        "grad_clip_mode": str(grad_clip_controller.mode),
+                        "grad_clip_threshold": 0.0 if grad_clip_threshold is None else float(grad_clip_threshold),
+                        "grad_clip_threshold_ready": bool(grad_clip_threshold is not None),
+                        "grad_clip_applied": bool(grad_clip_applied),
+                        "grad_clip_history_size": int(grad_clip_controller.history_size()),
                         "steps_per_sec": float(steps_in_interval / elapsed),
                         "windows_per_sec": float(metric_accum.num_windows / elapsed),
                         "resampled_empty_first_step_windows": int(retried_windows),
@@ -2826,7 +2963,14 @@ def train(args: argparse.Namespace) -> None:
 
             should_save = ((step + 1) % args.save_interval == 0) or ((step + 1) == args.num_train_steps)
             if is_main and should_save:
-                _save_checkpoint(output_dir=output_dir, model=model, optimizer=optimizer, step=step + 1, args=args)
+                _save_checkpoint(
+                    output_dir=output_dir,
+                    model=model,
+                    optimizer=optimizer,
+                    step=step + 1,
+                    args=args,
+                    grad_clip_controller=grad_clip_controller,
+                )
                 message = f"[picf_core_train] saved checkpoint step={step + 1} -> {_checkpoint_dir_for_step(output_dir, step + 1)}"
                 if pbar is not None:
                     pbar.write(message)
@@ -2878,6 +3022,9 @@ def main() -> None:
     parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
+    parser.add_argument("--grad-clip-mode", choices=["fixed", "percentile"], default="percentile")
+    parser.add_argument("--grad-clip-percentile", type=float, default=75.0)
+    parser.add_argument("--grad-clip-window", type=int, default=100)
     parser.add_argument("--action-normalization", choices=["none", "zscore", "quantile"], default="quantile")
     parser.add_argument("--action-norm-stats-path", default=None)
     parser.add_argument("--action-output-clip", type=float, default=None)

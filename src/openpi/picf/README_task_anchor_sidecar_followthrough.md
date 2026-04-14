@@ -15,6 +15,10 @@ current code, not a future design sketch. It records:
 - the exact deployment switches and commands
 - the current rollout strategy and acceptance gates
 
+For the current CALVIN dataset / evaluator validation workflow, use:
+
+- [CALVIN_VALIDATION_README.md](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+
 It supersedes the previously split sidecar notes:
 
 - `README_task_anchor_sidecar_deployment_plan.md`
@@ -114,6 +118,16 @@ pytest -q src/openpi/picf/core/pipeline_test.py
 pytest -q scripts/picf_core_train_test.py
 pytest -q scripts/picf_resume_train_test.py
 pytest -q scripts/serve_picf_policy_test.py
+pytest -q \
+  src/openpi/picf/core/pipeline_test.py \
+  src/openpi/picf/core/training_test.py \
+  scripts/picf_core_train_test.py \
+  scripts/picf_resume_train_test.py \
+  scripts/serve_picf_policy_test.py \
+  src/openpi/picf/action_normalization_test.py \
+  src/openpi/picf/pointcloud_picf_test.py \
+  src/openpi/picf/paligemma/wrapper_test.py \
+  src/openpi/picf/vjepa/wrapper_test.py
 python scripts/verify_picf_contract.py --skip-full-suite
 python scripts/verify_picf_contract.py
 ```
@@ -121,35 +135,98 @@ python scripts/verify_picf_contract.py
 Observed results:
 
 - `pipeline_test.py`: `37 passed`
-- `picf_core_train_test.py`: `37 passed`
+- `picf_core_train_test.py`: `49 passed`
 - `picf_resume_train_test.py`: `2 passed`
 - `serve_picf_policy_test.py`: `6 passed`
-- combined regression: `82 passed`
-- full contract verifier regression suite: `104 passed`
+- wider local regression: `135 passed`
+- entrypoint regression (`resume + serve + action_normalization`): `11 passed`
+- full contract verifier regression suite: `114 passed`
 - contract verifier summary: `PASS`
 
-Additional sidecar-on smoke run:
+Additional sidecar-on runtime smoke:
 
 ```python
 {
-  'task_anchor_available': True,
-  'task_anchor_tokens_shape': (8, 64),
-  'task_global_shape': (64,),
-  'instruction_shape': (64,),
-  'posterior_mu_shape': (8, 24),
-  'physical_global_pred_shape': (64,),
-  'action_shape': (7,),
-  'loss_total': 1.0121902227401733,
-  'loss_action': 0.7497705221176147,
-  'loss_semantic_future_aux': 8.767021179199219
+  'hidden_dim': 384,
+  'task_anchor_sidecar_enabled': True,
+  'legacy_semantic_prefix_enabled': False,
+  'task_available': True,
+  'task_tokens_shape': (8, 384),
+  'task_global_shape': (384,),
+  'instruction_shape': (384,),
+  'loss_total': 2.5598,
+  'loss_action': 1.9441,
+  'loss_semantic_future_aux': 0.5185,
+  'posterior_mu_diff_prompt': 0.0,
+  'physical_global_pred_diff_prompt': 0.0,
+  'task_tokens_diff_prompt': 31.8046,
+  'task_global_diff_prompt': 11.2446,
+  'instruction_diff_prompt': 9.3210,
+  'action_diff_prompt': 0.0556,
+  'next_posterior_mu_diff_prev_prompt': 0.0,
+  'innovation_token_diff_prev_prompt': 0.0,
+  'next_physical_global_pred_diff_prev_prompt': 0.0
 }
 ```
 
 Interpretation:
 
 - sidecar tokens are produced when enabled
-- physical branch still emits the expected posterior / predictive shapes
-- transition loss computes end-to-end with sidecar enabled
+- prompt changes affect task sidecar and action
+- prompt changes do not affect physical posterior
+- prompt changes do not affect physical predictive state
+- previous semantic-conditioned state still does not affect next innovation
+
+Additional percentile gradient-clip CLI smoke:
+
+```python
+[
+  {
+    'step': 1,
+    'threshold_ready': False,
+    'history_size': 1,
+    'threshold': 0.0,
+    'applied': False,
+  },
+  {
+    'step': 2,
+    'threshold_ready': False,
+    'history_size': 2,
+    'threshold': 0.0,
+    'applied': False,
+  },
+  {
+    'step': 3,
+    'threshold_ready': False,
+    'history_size': 3,
+    'threshold': 0.0,
+    'applied': False,
+  },
+  {
+    'step': 4,
+    'threshold_ready': True,
+    'history_size': 3,
+    'threshold': 75.0669,
+    'applied': False,
+  }
+]
+```
+
+Checkpoint metadata after the same smoke:
+
+```python
+{
+  'controller_mode': 'percentile',
+  'controller_history_len': 3,
+}
+```
+
+Interpretation:
+
+- percentile mode starts with no clipping
+- the threshold only becomes active after the configured history window fills
+- clip history is persisted in checkpoint metadata and restored on resume when
+  configuration matches
 
 
 ## 3.1 What Was Verified On Cloud
@@ -195,19 +272,26 @@ Observed cloud results:
 - contract verifier full regression suite: `104 passed`
 - contract verifier summary: `PASS`
 
-Cloud sidecar-on smoke:
+Cloud sidecar-on runtime smoke:
 
 ```python
 {
-  'task_available': True,
-  'task_tokens_shape': (8, 64),
-  'task_global_shape': (64,),
-  'instruction_shape': (64,),
-  'posterior_mu_shape': (8, 24),
-  'physical_global_pred_shape': (64,),
-  'action_shape': (7,),
+  'hidden_dim': 384,
   'legacy_semantic_prefix_enabled': False,
   'task_anchor_sidecar_enabled': True,
+  'task_available': True,
+  'task_tokens_shape': (8, 384),
+  'task_global_shape': (384,),
+  'instruction_shape': (384,),
+  'posterior_mu_diff_prompt': 0.0,
+  'physical_global_pred_diff_prompt': 0.0,
+  'task_tokens_diff_prompt': 31.8046,
+  'task_global_diff_prompt': 11.2446,
+  'instruction_diff_prompt': 9.3210,
+  'action_diff_prompt': 0.0556,
+  'next_posterior_mu_diff_prev_prompt': 0.0,
+  'innovation_token_diff_prev_prompt': 0.0,
+  'next_physical_global_pred_diff_prev_prompt': 0.0
 }
 ```
 
@@ -231,6 +315,17 @@ Interpretation:
 - `picf_resume_train.py` exposes the required sidecar rollout flags for
   checkpoint-based A/B deployment
 
+Cloud note for the new gradient-clip mode:
+
+- the new percentile gradient-clip mode was fully validated locally, including
+  real CLI training smoke and checkpoint persistence
+- a cloud rerun for this exact change set was attempted on 2026-04-14
+- SSH to `px-cloud1.matpool.com:26593` was reset during banner / key-exchange,
+  so a cloud rerun for the clip-mode change could not be completed in this
+  session
+- therefore the cloud validation above is authoritative for the final sidecar
+  architecture, and the new clip-mode validation is authoritative locally only
+
 
 ## 4. Feature Flags And Their Meaning
 
@@ -238,6 +333,10 @@ Current phase-1 flags live in [config.py](/home/siyuanyue/Documents/openpi/src/o
 
 Flags:
 
+- `grad_clip_mode`
+- `grad_clip_norm`
+- `grad_clip_percentile`
+- `grad_clip_window`
 - `task_anchor_sidecar_enabled`
 - `legacy_semantic_prefix_enabled`
 - `task_anchor_queries`
@@ -248,12 +347,32 @@ Flags:
 
 Recommended phase-1 settings:
 
+- current default trainer behavior:
+  - `grad_clip_mode=percentile`
+  - `grad_clip_percentile=75`
+  - `grad_clip_window=100`
+  - no clipping until the first 100-step history window has filled
+- fixed clipping:
+  - `grad_clip_mode=fixed`
+  - `grad_clip_norm=1.0` or another explicit threshold
+- percentile clipping:
+  - `grad_clip_mode=percentile`
+  - `grad_clip_percentile=75`
+  - `grad_clip_window=100`
+  - clipping stays disabled until the window has filled
 - `task_anchor_sidecar_enabled=true`
 - `legacy_semantic_prefix_enabled=true` for rollback/A-B
 - `legacy_semantic_prefix_enabled=false` for sidecar-only experiments
 
 Meaning by combination:
 
+- `grad_clip_mode=fixed`
+  - use the constant `grad_clip_norm` threshold
+- `grad_clip_mode=percentile`
+  - compute the threshold from the previous sliding window of
+    `preclip_grad_norm`
+  - with `75 / 100`, only the top 25% of recent gradient norms are clipped
+  - no clipping is applied before the history window is full
 - `sidecar=false`, `legacy=true`
   - legacy semantic-prefix behavior
 - `sidecar=true`, `legacy=true`
@@ -263,6 +382,15 @@ Meaning by combination:
 - `sidecar=false`, `legacy=false`
   - semantic is effectively removed from downstream control/predictive trunks
   - useful only as a negative ablation
+
+Current implementation detail:
+
+- percentile clip state is persisted in checkpoint metadata as
+  `metadata['grad_clip_controller']`
+- the history is restored only when
+  `mode / fixed_norm / percentile / window` all match current runtime config
+- hot-switching the clip mode during a live process is not implemented
+- changing clip mode still requires a restart or resume
 
 
 ## 5. Recursive Dataflow
@@ -1122,6 +1250,9 @@ Sidecar-only:
 CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   scripts/picf_core_train.py \
   ...existing args... \
+  --grad-clip-mode percentile \
+  --grad-clip-percentile 75 \
+  --grad-clip-window 100 \
   --task-anchor-sidecar-enabled \
   --no-legacy-semantic-prefix-enabled
 ```
@@ -1150,12 +1281,18 @@ CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
   --resume-checkpoint /path/to/checkpoint_dir \
   --exp-name sidecar_phase1_only \
   --device cuda \
+  --grad-clip-mode percentile \
+  --grad-clip-percentile 75 \
+  --grad-clip-window 100 \
   --task-anchor-sidecar-enabled \
   --no-legacy-semantic-prefix-enabled
 ```
 
 Optional sidecar hyperparameters are also exposed:
 
+- `--grad-clip-mode`
+- `--grad-clip-percentile`
+- `--grad-clip-window`
 - `--task-anchor-queries`
 - `--task-global-queries`
 - `--task-query-layers`

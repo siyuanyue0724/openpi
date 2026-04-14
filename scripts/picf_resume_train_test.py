@@ -39,6 +39,9 @@ def test_load_runtime_args_fills_phase1_sidecar_defaults(tmp_path: Path) -> None
 
     runtime_args = _MODULE._load_runtime_args(args_json)
 
+    assert runtime_args.grad_clip_mode == "percentile"
+    assert runtime_args.grad_clip_percentile == pytest.approx(75.0)
+    assert runtime_args.grad_clip_window == 100
     assert runtime_args.task_anchor_sidecar_enabled is False
     assert runtime_args.legacy_semantic_prefix_enabled is True
     assert runtime_args.task_anchor_queries == 8
@@ -72,6 +75,12 @@ def test_main_applies_sidecar_cli_overrides_before_train(monkeypatch: pytest.Mon
             "sidecar_phase1_cli_test",
             "--device",
             "cpu",
+            "--grad-clip-mode",
+            "percentile",
+            "--grad-clip-percentile",
+            "80",
+            "--grad-clip-window",
+            "32",
             "--task-anchor-sidecar-enabled",
             "--no-legacy-semantic-prefix-enabled",
             "--task-anchor-queries",
@@ -93,6 +102,9 @@ def test_main_applies_sidecar_cli_overrides_before_train(monkeypatch: pytest.Mon
     assert args.resume_checkpoint == "/tmp/checkpoint/10000"
     assert args.exp_name == "sidecar_phase1_cli_test"
     assert args.device == "cpu"
+    assert args.grad_clip_mode == "percentile"
+    assert args.grad_clip_percentile == pytest.approx(80.0)
+    assert args.grad_clip_window == 32
     assert args.task_anchor_sidecar_enabled is True
     assert args.legacy_semantic_prefix_enabled is False
     assert args.task_anchor_queries == 6

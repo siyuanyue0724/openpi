@@ -1,5 +1,15 @@
 CALVIN + openpi(pi0.5_sonata) 训练与评测说明（当前环境版）
 
+【当前入口说明】
+- 这份 `docs/calvin_readme.txt` 现在保留为长期审计与历史记录。
+- 如果你要的是“当前可以直接执行的 CALVIN validation / evaluator / rollout 说明”，请优先看：
+  `/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md`
+- 那份文档只保留当前仍推荐的路径：
+  - dataset / loader validation
+  - PICF current-core smoke / contract gate
+  - sidecar 训练前检查
+  - CALVIN evaluator / video rollout 命令
+
 【2026-04-09 当前 shell 严格复核】
 - 当前对应的 PICF 设计总纲是 `/home/siyuanyue/Documents/openpi/plan_readme_ray_geometry.md` 的 `v0.4.8 / MOVEON`
 - 当前 `.venv` Python 下重新执行：
