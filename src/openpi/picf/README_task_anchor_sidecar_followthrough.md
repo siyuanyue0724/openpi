@@ -960,6 +960,147 @@ runtime regression conditions, including:
 This script is the closest thing in-repo to an executable contract checker for
 the present architecture.
 
+### 7.7 Most recent validation results
+
+The commands above were not just proposed; they were rerun on the current
+single-core + sidecar code.
+
+Local workstation results:
+
+```bash
+pytest -q \
+  src/openpi/picf/core/pipeline_test.py \
+  src/openpi/picf/core/training_test.py \
+  scripts/picf_core_train_test.py \
+  scripts/picf_resume_train_test.py \
+  scripts/serve_picf_policy_test.py \
+  src/openpi/picf/action_normalization_test.py \
+  src/openpi/picf/pointcloud_picf_test.py \
+  src/openpi/picf/paligemma/wrapper_test.py \
+  src/openpi/picf/vjepa/wrapper_test.py
+```
+
+Result:
+
+- `127 passed`
+
+Local executable contract gate:
+
+```bash
+python scripts/verify_picf_contract.py
+```
+
+Result:
+
+- targeted invariance regressions: `11 passed`
+- core regression suite: `106 passed`
+- smoke training check: `PASS`
+- overall summary: `PASS`
+
+Cloud isolated worktree:
+
+- path: `/root/openpi_sync_sidecar_phase1_20260414`
+- note: the cloud worktree initially lagged behind the final local code; the
+  final file set was resynced before the results below were recorded
+
+Cloud broad pytest:
+
+```bash
+cd /root/openpi_sync_sidecar_phase1_20260414
+export PYTHONPATH=$PWD/src
+/root/openpi/.venv/bin/python -m pytest -q \
+  src/openpi/picf/core/pipeline_test.py \
+  src/openpi/picf/core/training_test.py \
+  scripts/picf_core_train_test.py \
+  scripts/picf_resume_train_test.py \
+  scripts/serve_picf_policy_test.py \
+  src/openpi/picf/action_normalization_test.py \
+  src/openpi/picf/pointcloud_picf_test.py \
+  src/openpi/picf/paligemma/wrapper_test.py \
+  src/openpi/picf/vjepa/wrapper_test.py
+```
+
+Result:
+
+- `125 passed`
+
+Cloud executable contract gate:
+
+```bash
+cd /root/openpi_sync_sidecar_phase1_20260414
+export PYTHONPATH=$PWD/src
+/root/openpi/.venv/bin/python scripts/verify_picf_contract.py
+```
+
+Result:
+
+- targeted invariance regressions: `11 passed`
+- core regression suite: `104 passed`
+- smoke training check: `PASS`
+- overall summary: `PASS`
+
+### 7.8 Runtime smoke with sidecar enabled
+
+In addition to pytest/verifier coverage, a direct sidecar-on forward/loss smoke
+was rerun on the current default-width code path.
+
+Configuration:
+
+- `task_anchor_sidecar_enabled=True`
+- `legacy_semantic_prefix_enabled=False`
+- width forced to the current spec defaults (`hidden_dim=384`, heads `8`)
+- current-step prompt changed by swapping synthetic semantic token streams
+- second step fed with `previous=...` from those two different prompt branches
+
+Observed local results on the current code:
+
+- `hidden_dim = 384`
+- `task_available = True`
+- `task_tokens_shape = (8, 384)`
+- `task_global_shape = (384,)`
+- `instruction_shape = (384,)`
+- `loss_total = 1.5750`
+- `loss_action = 1.1667`
+- `loss_semantic_future_aux = 0.5082`
+- `posterior_mu_diff_prompt = 0.0`
+- `physical_global_pred_diff_prompt = 0.0`
+- `task_tokens_diff_prompt = 37.5657`
+- `task_global_diff_prompt = 13.2815`
+- `instruction_diff_prompt = 10.2362`
+- `action_diff_prompt = 0.0872`
+- `next_posterior_mu_diff_prev_prompt = 0.0`
+- `innovation_token_diff_prev_prompt = 0.0`
+- `next_physical_global_pred_diff_prev_prompt = 0.0`
+
+Observed cloud results after resyncing the final file set:
+
+- `hidden_dim = 384`
+- `task_available = True`
+- `task_tokens_shape = (8, 384)`
+- `task_global_shape = (384,)`
+- `instruction_shape = (384,)`
+- `loss_total = 2.5598`
+- `loss_action = 1.9441`
+- `loss_semantic_future_aux = 0.5185`
+- `posterior_mu_diff_prompt = 0.0`
+- `physical_global_pred_diff_prompt = 0.0`
+- `task_tokens_diff_prompt = 31.8046`
+- `task_global_diff_prompt = 11.2446`
+- `instruction_diff_prompt = 9.3210`
+- `action_diff_prompt = 0.0556`
+- `next_posterior_mu_diff_prev_prompt = 0.0`
+- `innovation_token_diff_prev_prompt = 0.0`
+- `next_physical_global_pred_diff_prev_prompt = 0.0`
+
+Interpretation:
+
+- prompt changes do change the sidecar readout and the action readout
+- prompt changes do not change:
+  - physical posterior
+  - physical predictive global state
+  - next-step innovation
+- this is exactly the intended mathematical boundary for the current design
+
 
 ## 8. Concrete Deployment Commands
 
