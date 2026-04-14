@@ -314,6 +314,46 @@ Interpretation:
   physical-core invariants
 - `picf_resume_train.py` exposes the required sidecar rollout flags for
   checkpoint-based A/B deployment
+- missing tactile calibration artifacts on cloud were rebuilt using the full
+  repo script
+  [precompute_tactile_contact_calibration.py](/home/siyuanyue/Documents/openpi/scripts/calvin/precompute_tactile_contact_calibration.py),
+  not with placeholder payloads
+
+Additional cloud training probes completed on `3 x A100 40GB`:
+
+```python
+{
+  'probe': 'accum_steps=4',
+  'effective_global_batch': 12,
+  'save_path': '/mnt/checkpoints/picf_core/picf_core/sidecar_probe_acc4_save1/1',
+  'loss_total': 4.3996,
+  'preclip_grad_norm': 153.9567,
+  'grad_clip_threshold_ready': False,
+  'steps_per_sec': 0.04043,
+  'windows_per_sec': 0.16171,
+  'checkpoint_saved': True,
+}
+{
+  'probe': 'accum_steps=8',
+  'effective_global_batch': 24,
+  'save_path': '/root/checkpoints_probe/picf_core/sidecar_probe_acc8_local/1',
+  'loss_total': 4.4535,
+  'preclip_grad_norm': 123.6511,
+  'grad_clip_threshold_ready': False,
+  'steps_per_sec': 0.02190,
+  'windows_per_sec': 0.17523,
+  'checkpoint_saved': True,
+}
+```
+
+Interpretation:
+
+- the current sidecar code runs correctly on `3 x A100 40GB`
+- percentile clipping behaves as designed: no clipping before the history window
+  is full
+- `accum_steps=4` is the safer larger-batch production start
+- `accum_steps=8` is viable and increases effective global batch further, but
+  optimizer updates are materially slower
 
 Cloud note for the new gradient-clip mode:
 

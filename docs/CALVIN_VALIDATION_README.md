@@ -10,6 +10,7 @@ It covers:
 - dataset and loader validation
 - core / trainer smoke validation
 - sidecar contract validation
+- tactile calibration regeneration
 - checkpoint serving
 - CALVIN evaluator rollout
 
@@ -169,6 +170,30 @@ And ensure the following conceptual invariants remain true:
 
 ## 6. Starting Training
 
+### 6.0 Rebuild tactile calibration if the cloud copy is missing
+
+If these files are missing:
+
+- `tactile_backgrounds.npz`
+- `tactile_contact_stats.json`
+- `tactile_fingertip_calibration.json`
+
+rebuild them with the repo script instead of using placeholders:
+
+```bash
+cd /root/openpi_sync_1e8fd58
+export PYTHONPATH=$PWD/src
+CUDA_VISIBLE_DEVICES=0 /root/openpi/.venv/bin/python \
+  scripts/calvin/precompute_tactile_contact_calibration.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --backend dir \
+  --device cuda \
+  --anytouch-checkpoint-path /root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth \
+  --output-dir /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8
+```
+
+This is the full supported path. Do not fabricate minimal JSON/NPZ stand-ins.
+
 ### 6.1 Fresh training
 
 Sidecar-only current recommended path:
@@ -215,6 +240,50 @@ If you want to be explicit:
 ```bash
 --grad-clip-mode percentile --grad-clip-percentile 75 --grad-clip-window 100
 ```
+
+### 6.4 Tested 3xA100-40GB batch configurations
+
+Current trainer semantics are:
+
+```text
+effective_global_batch = world_size * accum_steps
+```
+
+because per-rank microbatch stays at `1`.
+
+Cloud probes completed on `3 x A100 40GB`:
+
+- `accum_steps=4`:
+  - `effective_global_batch=12`
+  - real 3-GPU DDP step completed
+  - checkpoint save to `/mnt/checkpoints/...` completed
+  - first-step metric:
+    - `loss_total=4.3996`
+    - `preclip_grad_norm=153.9567`
+    - `grad_clip_threshold_ready=false`
+  - optimizer-step throughput:
+    - `steps_per_sec=0.04043`
+  - end-to-end wall time for `1` train step plus checkpoint-on-`/mnt`:
+    - about `166s`
+
+- `accum_steps=8`:
+  - `effective_global_batch=24`
+  - real 3-GPU DDP step completed
+  - checkpoint save completed on local disk path `/root/checkpoints_probe/...`
+  - first-step metric:
+    - `loss_total=4.4535`
+    - `preclip_grad_norm=123.6511`
+    - `grad_clip_threshold_ready=false`
+  - optimizer-step throughput:
+    - `steps_per_sec=0.02190`
+  - end-to-end wall time for `1` train step plus local checkpoint save:
+    - about `360s`
+
+Practical recommendation:
+
+- safest larger-batch production start: `accum_steps=4` -> global batch `12`
+- if you explicitly want a larger batch and accept slower updates: `accum_steps=8` -> global batch `24`
+- `accum_steps>8` was not given the same runtime validation in this pass; do not describe it as tested
 
 ## 7. Serving A Checkpoint
 
