@@ -29,13 +29,6 @@ class PicfCoreConfig:
     control_semantic_reads: int = 2
     predictive_semantic_dropout_prob: float = 0.1
     semantic_prefix_dropout_prob: float = 0.0
-    task_anchor_sidecar_enabled: bool = False
-    legacy_semantic_prefix_enabled: bool = True
-    task_anchor_queries: int = 8
-    task_global_queries: int = 1
-    task_query_layers: int = 1
-    task_query_rounds: int = 2
-    task_anchor_dropout_prob: float = 0.0
     attention_heads: int = 8
     query_rounds: int = 2
     crop_radius_m: float = 0.10

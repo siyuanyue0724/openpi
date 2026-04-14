@@ -20,8 +20,9 @@ from picf_core_train_smoke import run_smoke
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "core" / "pipeline.py"
 README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README.md"
+HANDOFF_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_semantic_prefix_primary_refactor.md"
 PLAN_PATH = REPO_ROOT / "plan_readme_ray_geometry.md"
-CALVIN_README_PATH = REPO_ROOT / "docs" / "calvin_readme.txt"
+CALVIN_README_PATH = REPO_ROOT / "docs" / "CALVIN_VALIDATION_README.md"
 FORMAL_CONTRACT_PATH = REPO_ROOT / "PICF_FORMAL_CONTRACT.md"
 PALIGEMMA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "paligemma" / "wrapper.py"
 
@@ -153,15 +154,24 @@ def verify_static_contract() -> list[CheckResult]:
             step_source,
             [
                 "posterior = self._posterior_update(",
-                "task_anchors = self._build_task_anchors(",
                 "innovation_token, innovation_norm = self._innovation(",
                 "predictive = self._predictive_state(",
             ],
         ),
         CheckResult(
-            name="task_sidecar_reads_full_fused_tokens",
-            ok="token_field.fused_tokens" in _node_source(source, _function_node(tree, "_build_task_anchors")),
-            detail="`_build_task_anchors` reads full fused_tokens directly.",
+            name="task_sidecar_removed_from_pipeline",
+            ok=all(text not in source for text in ("_build_task_anchors(", "task_anchors=", "task_query_tokens")),
+            detail="Task-anchor sidecar path has been removed from the core pipeline.",
+        ),
+        CheckResult(
+            name="control_prefix_uses_full_semantic_prefix_primary",
+            ok="_add_role_embedding(control_semantic_prefix_tokens, self.control_role_embedding, 3)" in predictive_source,
+            detail="`_predictive_state` injects the full semantic prefix directly into the control trunk.",
+        ),
+        CheckResult(
+            name="predictive_conditioned_uses_full_semantic_prefix_primary",
+            ok="_add_role_embedding(conditioned_semantic_prefix_tokens, self.predictive_conditioned_role_embedding, 1)" in predictive_source,
+            detail="`_predictive_state` injects the full semantic prefix directly into the conditioned future trunk.",
         ),
         CheckResult(
             name="control_prefix_includes_explicit_global_post",
@@ -198,7 +208,7 @@ def verify_static_contract() -> list[CheckResult]:
 
 def verify_doc_links() -> list[CheckResult]:
     checks = []
-    for path in (README_PATH, PLAN_PATH, CALVIN_README_PATH):
+    for path in (README_PATH, HANDOFF_README_PATH, PLAN_PATH, CALVIN_README_PATH):
         text = _read(path)
         checks.append(
             CheckResult(
@@ -231,10 +241,9 @@ def verify_regressions() -> list[CheckResult]:
     tests = [
         "src/openpi/picf/core/pipeline_test.py::test_language_is_late_and_does_not_change_current_posterior",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_changes_do_not_pollute_physical_prediction_cache_or_next_innovation",
-        "src/openpi/picf/core/pipeline_test.py::test_task_sidecar_prompt_changes_do_not_change_physical_branch",
-        "src/openpi/picf/core/pipeline_test.py::test_previous_task_sidecar_does_not_change_next_innovation",
-        "src/openpi/picf/core/pipeline_test.py::test_task_sidecar_reads_full_fused_tokens_not_observation_anchors",
+        "src/openpi/picf/core/pipeline_test.py::test_semantic_prefix_prompt_changes_do_not_change_physical_branch_but_do_change_control_and_future",
         "src/openpi/picf/core/pipeline_test.py::test_control_prefix_explicitly_depends_on_global_post",
+        "src/openpi/picf/core/pipeline_test.py::test_full_semantic_prefix_tokens_are_directly_included_in_control_and_future_trunks",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_tokens_directly_condition_control_and_semantic_future_readout",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_tokens_alone_can_condition_action_without_cross_reads",
         "src/openpi/picf/core/pipeline_test.py::test_prior_and_context_use_previous_executed_action_not_previous_policy_output",

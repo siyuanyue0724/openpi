@@ -27,7 +27,6 @@ from openpi.picf.core.contracts import PicfPosteriorAnchorState
 from openpi.picf.core.contracts import PicfPredictionCache
 from openpi.picf.core.contracts import PicfPredictiveState
 from openpi.picf.core.contracts import PicfProjectiveGeometryState
-from openpi.picf.core.contracts import PicfTaskAnchorState
 from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.tactile_contact import contact_prob_with_hysteresis
 from openpi.picf.core.tactile_contact import summarize_contact_context
@@ -678,15 +677,6 @@ class PicfFullCore(nn.Module):
         self.posterior_pool = AttentionPool(hidden_dim)
 
         self.semantic_prefix_proj = nn.LazyLinear(hidden_dim)
-        self.task_query_tokens = nn.Parameter(torch.zeros((self.config.task_anchor_queries, hidden_dim)))
-        self.task_global_query_tokens = nn.Parameter(torch.zeros((self.config.task_global_queries, hidden_dim)))
-        self.task_query_conditioner = nn.ModuleList(
-            CrossAttentionRead(hidden_dim, heads)
-            for _ in range(max(int(self.config.task_query_layers), 1))
-        )
-        self.task_obs_reader = CrossAttentionRead(hidden_dim, heads)
-        self.task_anchor_self = TransformerStack(hidden_dim, heads, max(int(self.config.task_query_layers), 1))
-        self.task_instruction_pool = AttentionPool(hidden_dim)
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
         self.control_role_embedding = nn.Embedding(5, hidden_dim)
@@ -906,118 +896,6 @@ class PicfFullCore(nn.Module):
         dropout_prob: float,
     ) -> torch.Tensor:
         return self._semantic_memory(semantic.prefix_tokens, dropout_prob=dropout_prob)
-
-    def _empty_task_anchor_state(self) -> PicfTaskAnchorState:
-        hidden_dim = self.config.hidden_dim
-        total_queries = int(self.config.task_anchor_queries) + int(self.config.task_global_queries)
-        return PicfTaskAnchorState(
-            conditioned_queries=torch.zeros((total_queries, hidden_dim), device=self.device, dtype=self.dtype),
-            tokens=torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype),
-            global_token=torch.zeros((hidden_dim,), device=self.device, dtype=self.dtype),
-            instruction_token=torch.zeros((hidden_dim,), device=self.device, dtype=self.dtype),
-            point_weights=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
-            routing_mass_point=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
-            routing_mass_visual=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
-            x=torch.zeros((0, 3), device=self.device, dtype=self.dtype),
-            S=torch.zeros((0, 3, 3), device=self.device, dtype=self.dtype),
-            a=torch.zeros((0, 3), device=self.device, dtype=self.dtype),
-            semantic_attention=torch.zeros((total_queries, 0), device=self.device, dtype=self.dtype),
-            fused_attention=torch.zeros((total_queries, 0), device=self.device, dtype=self.dtype),
-            available=False,
-        )
-
-    def _build_task_anchors(
-        self,
-        token_field: PicfTokenFieldState,
-        semantic: _SemanticContext,
-    ) -> PicfTaskAnchorState | None:
-        if not bool(self.config.task_anchor_sidecar_enabled):
-            return None
-        local_queries = int(self.config.task_anchor_queries)
-        global_queries = int(self.config.task_global_queries)
-        total_queries = local_queries + global_queries
-        if total_queries <= 0:
-            return self._empty_task_anchor_state()
-        if token_field.fused_tokens.shape[0] == 0 or not semantic.available or semantic.prefix_tokens.shape[0] == 0:
-            return self._empty_task_anchor_state()
-
-        query_tokens = torch.cat(
-            [
-                self.task_query_tokens.to(device=self.device, dtype=self.dtype),
-                self.task_global_query_tokens.to(device=self.device, dtype=self.dtype),
-            ],
-            dim=0,
-        )[None, :]
-        conditioned = query_tokens
-        semantic_attention = torch.zeros((total_queries, semantic.prefix_tokens.shape[0]), device=self.device, dtype=self.dtype)
-        semantic_memory = self._semantic_memory(
-            semantic.prefix_tokens,
-            dropout_prob=float(getattr(self.config, "task_anchor_dropout_prob", 0.0)),
-        )
-        for layer in self.task_query_conditioner:
-            conditioned, semantic_attention = layer(conditioned, semantic_memory[None, :])
-        instruction_token = self.task_instruction_pool(conditioned)[0]
-
-        fused_attention = torch.zeros((total_queries, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
-        task_queries = conditioned
-        for _ in range(max(int(self.config.task_query_rounds), 1)):
-            task_queries, fused_attention = self.task_obs_reader(task_queries, token_field.fused_tokens[None, :])
-        task_queries = self.task_anchor_self(task_queries)
-        task_tokens_all = task_queries[0]
-        task_tokens = task_tokens_all[:local_queries]
-        task_global = task_tokens_all[local_queries : local_queries + global_queries]
-        global_token = (
-            task_global.mean(dim=0)
-            if task_global.shape[0] > 0
-            else torch.zeros((self.config.hidden_dim,), device=self.device, dtype=self.dtype)
-        )
-
-        point_count = token_field.point_tokens.shape[0]
-        visual_count = token_field.visual_tokens.shape[0]
-        routing_mass_point = fused_attention[:local_queries, :point_count]
-        routing_mass_visual = fused_attention[:local_queries, point_count : point_count + visual_count]
-        if local_queries > 0 and point_count > 0:
-            denom = torch.clamp(routing_mass_point.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
-            point_weights = routing_mass_point / denom
-            x = point_weights @ token_field.point_positions
-            S = _weighted_cov(token_field.point_positions, point_weights, x, self.config)
-            a = _extent_from_cov(S, self.config)
-        else:
-            point_weights = torch.zeros((local_queries, 0), device=self.device, dtype=self.dtype)
-            x = torch.zeros((local_queries, 3), device=self.device, dtype=self.dtype)
-            S = torch.zeros((local_queries, 3, 3), device=self.device, dtype=self.dtype)
-            a = torch.zeros((local_queries, 3), device=self.device, dtype=self.dtype)
-
-        return PicfTaskAnchorState(
-            conditioned_queries=conditioned[0],
-            tokens=task_tokens,
-            global_token=global_token,
-            instruction_token=instruction_token,
-            point_weights=point_weights,
-            routing_mass_point=routing_mass_point,
-            routing_mass_visual=routing_mass_visual,
-            x=x,
-            S=S,
-            a=a,
-            semantic_attention=semantic_attention,
-            fused_attention=fused_attention,
-            available=True,
-        )
-
-    def _apply_semantic_reads(
-        self,
-        world_tokens: torch.Tensor,
-        semantic_tokens: torch.Tensor,
-        *,
-        reads: nn.ModuleList,
-        dropout_prob: float = 0.0,
-    ) -> tuple[torch.Tensor, torch.Tensor | None]:
-        x = world_tokens[None, :]
-        attention = None
-        semantic_memory = self._semantic_memory(semantic_tokens, dropout_prob=dropout_prob)
-        for layer in reads:
-            x, attention = layer(x, semantic_memory[None, :])
-        return x[0], attention
 
     def _prediction_cache_from_global(self, global_state: torch.Tensor) -> PicfPredictionCache:
         return PicfPredictionCache(
@@ -2062,7 +1940,6 @@ class PicfFullCore(nn.Module):
         observation: PicfObservation,
         posterior: PicfPosteriorAnchorState,
         semantic: _SemanticContext,
-        task_anchors: PicfTaskAnchorState | None,
         innovation_token: torch.Tensor,
         innovation_norm: torch.Tensor,
         targets_availability: torch.Tensor,
@@ -2074,35 +1951,18 @@ class PicfFullCore(nn.Module):
             dtype=self.dtype,
         )
         proprio_token = self.proprio_proj(proprio[None, :])[0]
-        semantic_prefix_tokens = self._semantic_prefix_tokens(
+        control_semantic_prefix_tokens = self._semantic_prefix_tokens(
             semantic,
             dropout_prob=self.config.semantic_prefix_dropout_prob,
-        )
-        control_sidecar_tokens = []
-        if task_anchors is not None and task_anchors.available:
-            control_sidecar_tokens.extend(
-                [
-                    task_anchors.tokens,
-                    task_anchors.global_token[None, :],
-                    task_anchors.instruction_token[None, :],
-                ]
-            )
-        if bool(getattr(self.config, "legacy_semantic_prefix_enabled", True)):
-            control_sidecar_tokens.append(semantic_prefix_tokens)
-        control_sidecar_nonempty = [token for token in control_sidecar_tokens if token.shape[0] > 0]
-        control_sidecar = (
-            torch.cat(control_sidecar_nonempty, dim=0)
-            if control_sidecar_nonempty
-            else torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype)
         )
         control_query_tokens = self.control_query_tokens.to(device=self.device, dtype=self.dtype)
         control_prefix = torch.cat(
             [
+                _add_role_embedding(control_semantic_prefix_tokens, self.control_role_embedding, 3),
                 _add_role_embedding(posterior.tokens, self.control_role_embedding, 0),
                 _add_role_embedding(posterior.global_post[None, :], self.control_role_embedding, 0),
                 _add_role_embedding(innovation_token[None, :], self.control_role_embedding, 1),
                 _add_role_embedding(proprio_token[None, :], self.control_role_embedding, 2),
-                _add_role_embedding(control_sidecar, self.control_role_embedding, 3),
                 _add_role_embedding(control_query_tokens, self.control_role_embedding, 4),
             ],
             dim=0,
@@ -2136,33 +1996,15 @@ class PicfFullCore(nn.Module):
         physical_pred_tokens = self.predictive_world(pred_world_tokens[None, :])[0]
         physical_global_pred = self.predictive_pool(physical_pred_tokens[None, :])[0]
         physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)
-        conditioned_sidecar_tokens = []
-        if task_anchors is not None and task_anchors.available:
-            conditioned_sidecar_tokens.extend(
-                [
-                    task_anchors.tokens,
-                    task_anchors.global_token[None, :],
-                    task_anchors.instruction_token[None, :],
-                ]
-            )
-        if bool(getattr(self.config, "legacy_semantic_prefix_enabled", True)):
-            conditioned_sidecar_tokens.append(
-                self._semantic_prefix_tokens(
-                    semantic,
-                    dropout_prob=self.config.predictive_semantic_dropout_prob,
-                )
-            )
-        conditioned_sidecar_nonempty = [token for token in conditioned_sidecar_tokens if token.shape[0] > 0]
-        conditioned_tokens = (
-            torch.cat(conditioned_sidecar_nonempty, dim=0)
-            if conditioned_sidecar_nonempty
-            else torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype)
+        conditioned_semantic_prefix_tokens = self._semantic_prefix_tokens(
+            semantic,
+            dropout_prob=self.config.predictive_semantic_dropout_prob,
         )
         predictive_query_tokens = self.predictive_query_tokens.to(device=self.device, dtype=self.dtype)
         pred_conditioned_tokens = torch.cat(
             [
+                _add_role_embedding(conditioned_semantic_prefix_tokens, self.predictive_conditioned_role_embedding, 1),
                 _add_role_embedding(physical_pred_tokens, self.predictive_conditioned_role_embedding, 0),
-                _add_role_embedding(conditioned_tokens, self.predictive_conditioned_role_embedding, 1),
                 _add_role_embedding(predictive_query_tokens, self.predictive_conditioned_role_embedding, 2),
             ],
             dim=0,
@@ -2244,14 +2086,12 @@ class PicfFullCore(nn.Module):
         token_field = self._build_token_field(observation, frame_context, point_features, visual_map, tactile_bundle, meta, previous)
         observation_anchors = self._build_observation_anchors(token_field)
         posterior = self._posterior_update(previous, observation, observation_anchors)
-        task_anchors = self._build_task_anchors(token_field, semantic)
         current_targets, availability = self._current_targets(observation, frame_context, visual_map)
         innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
         predictive = self._predictive_state(
             observation,
             posterior,
             semantic,
-            task_anchors,
             innovation_token,
             innovation_norm,
             availability,
@@ -2264,7 +2104,6 @@ class PicfFullCore(nn.Module):
             token_field=token_field,
             observation_anchors=observation_anchors,
             posterior=posterior,
-            task_anchors=task_anchors,
             predictive=predictive,
             control=PicfControlState(hold_reason=hold_reason),
             last_prompt=observation.prompt,
@@ -2289,9 +2128,6 @@ class PicfFullCore(nn.Module):
         if observation_anchors.routing_gate_visual.numel() > 0:
             debug["mean_visual_route_gate"] = float(observation_anchors.routing_gate_visual.mean().item())
             debug["mean_visual_route_support"] = float(observation_anchors.routing_support_visual.mean().item())
-        if task_anchors is not None:
-            debug["num_task_anchor_tokens"] = float(task_anchors.tokens.shape[0])
-            debug["task_anchor_available"] = 1.0 if task_anchors.available else 0.0
         if token_field.projective_geometry is not None:
             geom = token_field.projective_geometry
             num_edges = int(geom.projective_candidate_mask.sum().item()) if geom.projective_candidate_mask.numel() > 0 else 0

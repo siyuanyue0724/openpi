@@ -1,39 +1,19 @@
 # CALVIN Validation README
 
-Date: 2026-04-14
-
 This document is the current executable validation guide for CALVIN under the
-present PICF / sidecar codebase. It is intentionally narrower than the large
-historical audit notes in `docs/calvin_readme.txt`.
+present PICF semantic-prefix-primary codebase.
 
-It covers:
-- dataset and loader validation
-- core / trainer smoke validation
-- sidecar contract validation
-- tactile calibration regeneration
-- checkpoint serving
-- CALVIN evaluator rollout
+The canonical architecture handoff is:
 
-It does not try to be a full research log.
+- [`README_semantic_prefix_primary_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_refactor.md)
 
-## 1. Paths And Environments
+The formal contract is:
 
-Local workstation examples in this repo currently use:
-- dataset dir: `/home/siyuanyue/datasets/calvin/dataset/task_ABCD_D`
-- dataset zip: `/home/siyuanyue/datasets/calvin/dataset/task_ABCD_D.zip`
+- [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
 
-Cloud evaluator examples used earlier in this project use:
-- dataset dir: `/mnt/calvin_data/task_ABC_D`
-- CALVIN repo: `/mnt/calvin/calvin_models/calvin_agent`
-- eval env: `micromamba activate calvin38`
+## 1. Dataset / Loader Validation
 
-Use the path set that matches the machine you are on. Do not mix them.
-
-## 2. Dataset / Loader Validation
-
-### 2.1 Dataset structure check
-
-Recommended:
+Directory backend:
 
 ```bash
 python scripts/stageb_calvin_audit.py \
@@ -43,24 +23,7 @@ python scripts/stageb_calvin_audit.py \
   --split validation
 ```
 
-Zip check:
-
-```bash
-python scripts/stageb_calvin_audit.py \
-  --mode dataset \
-  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D.zip \
-  --backend zip \
-  --split validation
-```
-
-What this validates:
-- split exists
-- language annotations are readable
-- episode indexing is sane
-
-### 2.2 Loader check
-
-Recommended:
+Loader validation:
 
 ```bash
 python scripts/stageb_calvin_audit.py \
@@ -72,47 +35,28 @@ python scripts/stageb_calvin_audit.py \
   --num-workers 0
 ```
 
-Zip variant:
+Use the zip backend only if you intentionally want to validate zip loading.
 
-```bash
-python scripts/stageb_calvin_audit.py \
-  --mode loader \
-  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D.zip \
-  --backend zip \
-  --split validation \
-  --batch-size 4 \
-  --num-workers 0
-```
+## 2. Contract Validation
 
-What this validates:
-- batch materialization
-- prompt/state/image/action fields
-- data transform path
-
-## 3. Current PICF Contract Validation
-
-Run the contract verifier before training changes or major deployment:
+Run this before training changes or deployment:
 
 ```bash
 python scripts/verify_picf_contract.py
 ```
 
-Current expected summary:
-- `Targeted Invariance Regressions`: pass
-- `Core Regression Suite`: pass
-- `Smoke Training Check`: pass
-- final summary: `PASS`
+Current contract meaning:
 
-What this validates:
+- semantic does not affect physical observation anchors
 - semantic does not affect physical posterior
 - semantic does not affect `physical_prediction_cache`
 - next innovation reads only `previous.predictive.physical_prediction_cache`
-- sidecar reads full `fused_tokens`
-- control explicitly depends on `posterior.global_post`
+- control and conditioned future directly consume the full semantic prefix
+- `posterior.global_post` explicitly enters control
 
-## 4. Trainer Smoke Validation
+## 3. Trainer Smoke Validation
 
-### 4.1 Minimal local smoke
+CPU smoke:
 
 ```bash
 python scripts/picf_core_train_smoke.py \
@@ -122,17 +66,7 @@ python scripts/picf_core_train_smoke.py \
   --device cpu
 ```
 
-CUDA smoke:
-
-```bash
-python scripts/picf_core_train_smoke.py \
-  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
-  --backend dir \
-  --segment-index 0 \
-  --device cuda
-```
-
-### 4.2 Foundation-backbone smoke
+Foundation-backbone CUDA smoke:
 
 ```bash
 python scripts/picf_core_train_smoke.py \
@@ -144,47 +78,13 @@ python scripts/picf_core_train_smoke.py \
   --use-tactile
 ```
 
-What this validates:
-- one-step `forward + loss + backward + optimizer.step()`
-- V-JEPA / Sonata / AnyTouch / semantic path wiring
-- action normalization path
+## 4. Tactile Calibration
 
-## 5. Sidecar Runtime Validation
-
-Before a real sidecar training run, verify the core with:
+If calibration files are missing, regenerate them with the full supported
+script instead of fabricating placeholders:
 
 ```bash
-python scripts/verify_picf_contract.py --skip-full-suite
-```
-
-And ensure the following conceptual invariants remain true:
-- prompt changes may change:
-  - sidecar outputs
-  - action
-  - conditioned future readout
-- prompt changes must not change:
-  - physical observation anchors
-  - physical posterior
-  - `physical_prediction_cache`
-  - next-step innovation
-
-## 6. Starting Training
-
-### 6.0 Rebuild tactile calibration if the cloud copy is missing
-
-If these files are missing:
-
-- `tactile_backgrounds.npz`
-- `tactile_contact_stats.json`
-- `tactile_fingertip_calibration.json`
-
-rebuild them with the repo script instead of using placeholders:
-
-```bash
-cd /root/openpi_sync_1e8fd58
-export PYTHONPATH=$PWD/src
-CUDA_VISIBLE_DEVICES=0 /root/openpi/.venv/bin/python \
-  scripts/calvin/precompute_tactile_contact_calibration.py \
+python scripts/calvin/precompute_tactile_contact_calibration.py \
   --calvin-root /mnt/calvin_data/task_ABC_D \
   --backend dir \
   --device cuda \
@@ -192,187 +92,68 @@ CUDA_VISIBLE_DEVICES=0 /root/openpi/.venv/bin/python \
   --output-dir /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8
 ```
 
-This is the full supported path. Do not fabricate minimal JSON/NPZ stand-ins.
+Required outputs:
 
-### 6.1 Fresh training
+- `tactile_backgrounds.npz`
+- `tactile_contact_stats.json`
+- `tactile_fingertip_calibration.json`
 
-Sidecar-only current recommended path:
+## 5. Clean Training
+
+The current intended training path is clean-start semantic-prefix-primary.
+
+Do not use:
+
+- sidecar flags
+- sidecar rollout A/B logic
+- old sidecar-primary checkpoints
+
+For the current `4 x A100 40GB` cloud machine, the last safe empirical setting
+was:
+
+- `accum_steps=1`
+- effective global batch `4`
+
+Recommended command:
 
 ```bash
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4 \
   scripts/picf_core_train.py \
-  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
   --backend dir \
+  --checkpoint-base-dir /mnt/checkpoints/picf_core \
   --device cuda \
   --use-foundation-backbones \
   --use-tactile \
-  --task-anchor-sidecar-enabled \
-  --no-legacy-semantic-prefix-enabled
+  --accum-steps 1 \
+  --save-interval 5000 \
+  --grad-clip-mode percentile \
+  --grad-clip-percentile 75 \
+  --grad-clip-window 100 \
+  --visual-checkpoint-path /root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt \
+  --tactile-checkpoint-path /root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth \
+  --tactile-calibration-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_fingertip_calibration.json \
+  --tactile-backgrounds-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_backgrounds.npz \
+  --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
+  --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
+  --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
+  --exp-name picf_semantic_prefix_primary_a4_acc1_pct75_clean_v1
 ```
 
-### 6.2 Resume training
+## 6. Serving / Rollout
 
-```bash
-CUDA_VISIBLE_DEVICES=0,1 torchrun --standalone --nnodes=1 --nproc_per_node=2 \
-  scripts/picf_resume_train.py \
-  --args-json /path/to/args.json \
-  --resume-checkpoint /path/to/checkpoint_dir \
-  --exp-name your_run_name \
-  --device cuda \
-  --task-anchor-sidecar-enabled \
-  --no-legacy-semantic-prefix-enabled
-```
+After training:
 
-### 6.3 Gradient clipping note
+- keep the normalized action contract in trainer / serving aligned
+- use the standard serving entrypoint
+- then run CALVIN evaluator rollouts from the served checkpoint
 
-Current trainer default is:
-- `grad_clip_mode=percentile`
-- `grad_clip_percentile=75`
-- `grad_clip_window=100`
+The serving path must preserve:
 
-So the trainer:
-- does not clip at the beginning
-- starts clipping only after the history window fills
-- clips only the largest 25 percent of recent gradient norms
+- normalized action inside the core
+- unnormalized action at environment execution
 
-If you want to be explicit:
+## 7. Historical Notes
 
-```bash
---grad-clip-mode percentile --grad-clip-percentile 75 --grad-clip-window 100
-```
-
-### 6.4 Tested 3xA100-40GB batch configurations
-
-Current trainer semantics are:
-
-```text
-effective_global_batch = world_size * accum_steps
-```
-
-because per-rank microbatch stays at `1`.
-
-Cloud probes completed on `3 x A100 40GB`:
-
-- `accum_steps=4`:
-  - `effective_global_batch=12`
-  - real 3-GPU DDP step completed
-  - checkpoint save to `/mnt/checkpoints/...` completed
-  - first-step metric:
-    - `loss_total=4.3996`
-    - `preclip_grad_norm=153.9567`
-    - `grad_clip_threshold_ready=false`
-  - optimizer-step throughput:
-    - `steps_per_sec=0.04043`
-  - end-to-end wall time for `1` train step plus checkpoint-on-`/mnt`:
-    - about `166s`
-
-- `accum_steps=8`:
-  - `effective_global_batch=24`
-  - real 3-GPU DDP step completed
-  - checkpoint save completed on local disk path `/root/checkpoints_probe/...`
-  - first-step metric:
-    - `loss_total=4.4535`
-    - `preclip_grad_norm=123.6511`
-    - `grad_clip_threshold_ready=false`
-  - optimizer-step throughput:
-    - `steps_per_sec=0.02190`
-  - end-to-end wall time for `1` train step plus local checkpoint save:
-    - about `360s`
-
-Practical recommendation:
-
-- safest larger-batch production start: `accum_steps=4` -> global batch `12`
-- if you explicitly want a larger batch and accept slower updates: `accum_steps=8` -> global batch `24`
-- `accum_steps>8` was not given the same runtime validation in this pass; do not describe it as tested
-
-## 7. Serving A Checkpoint
-
-Current serving path:
-
-```bash
-python scripts/serve_picf_policy.py \
-  --checkpoint /path/to/checkpoint_dir \
-  --device cuda:0 \
-  --host 0.0.0.0 \
-  --port 8000
-```
-
-What this does:
-- rebuilds runtime args from checkpoint metadata
-- rebuilds the trainer/core
-- restores state with compatibility loading
-- runs the core in normalized action space
-- unnormalizes the action before returning it
-
-## 8. CALVIN Evaluator Rollout
-
-### 8.1 Server terminal
-
-```bash
-python scripts/serve_picf_policy.py \
-  --checkpoint /path/to/checkpoint_dir \
-  --device cuda:0 \
-  --port 8000
-```
-
-### 8.2 Evaluator terminal
-
-Cloud-style example:
-
-```bash
-eval "$(/root/bin/micromamba shell hook -s bash)"
-micromamba activate calvin38
-
-unset DISPLAY
-export PYOPENGL_PLATFORM=egl
-export CUDA_VISIBLE_DEVICES=0
-export EGL_VISIBLE_DEVICES=0
-export OPENPI_SERVER_HOST=127.0.0.1
-export OPENPI_SERVER_PORT=8000
-export OPENPI_EVAL_TAG=custom
-unset CALVIN_SAVE_VIDEO
-unset CALVIN_VIDEO_DIR
-
-cd /mnt/calvin/calvin_models/calvin_agent
-python evaluation/evaluate_policy.py \
-  --dataset_path /mnt/calvin_data/task_ABC_D \
-  --custom_model \
-  --eval_log_dir /mnt/calvin_eval_logs/custom \
-  --device 0
-```
-
-### 8.3 Video rollout variant
-
-```bash
-export CALVIN_SAVE_VIDEO=1
-export CALVIN_VIDEO_DIR=/mnt/calvin_eval_logs/custom/videos
-mkdir -p /mnt/calvin_eval_logs/custom/videos
-```
-
-Then run the same evaluator command.
-
-## 9. Acceptance Checklist
-
-Before calling a training or evaluation setup valid, check all of:
-
-1. Dataset audit passes.
-2. Loader audit passes.
-3. `python scripts/verify_picf_contract.py` passes.
-4. `picf_core_train_smoke.py` passes on the target machine.
-5. If using sidecar:
-   - sidecar enabled
-   - legacy semantic prefix disabled unless you intentionally want rollback
-6. If serving:
-   - checkpoint loads
-   - actions are returned in environment scale, not normalized scale
-7. If evaluating:
-   - evaluator can connect to server
-   - `results.json` is written
-   - video path only appears when `CALVIN_SAVE_VIDEO=1`
-
-## 10. Relationship To Other Docs
-
-- Use this file for current validation and rollout.
-- Use `src/openpi/picf/README_task_anchor_sidecar_followthrough.md` for the
-  full mathematical and dataflow handoff.
-- Use `docs/calvin_readme.txt` only as a long historical audit record.
+`docs/calvin_readme.txt` is now an archive only.
+Use this file for the current validation workflow.

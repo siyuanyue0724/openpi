@@ -64,12 +64,6 @@ _RETRYABLE_FIRST_STEP_ERRORS = (
 )
 _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.semantic_prefix_proj.*",
-    "core.task_query_tokens",
-    "core.task_global_query_tokens",
-    "core.task_query_conditioner.*",
-    "core.task_obs_reader.*",
-    "core.task_anchor_self.*",
-    "core.task_instruction_pool.*",
     "core.control_role_embedding.*",
     "core.predictive_physical_role_embedding.*",
     "core.predictive_conditioned_role_embedding.*",
@@ -77,12 +71,6 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.predictive_query_tokens",
     "core.predictive_semantic_world.*",
     "semantic_prefix_proj.*",
-    "task_query_tokens",
-    "task_global_query_tokens",
-    "task_query_conditioner.*",
-    "task_obs_reader.*",
-    "task_anchor_self.*",
-    "task_instruction_pool.*",
     "control_role_embedding.*",
     "predictive_physical_role_embedding.*",
     "predictive_conditioned_role_embedding.*",
@@ -680,20 +668,6 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.predictive_query_tokens = int(_SPEC_DEFAULTS.predictive_query_tokens)
     if getattr(args, "semantic_prefix_dropout_prob", None) is None:
         args.semantic_prefix_dropout_prob = float(_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
-    if getattr(args, "task_anchor_sidecar_enabled", None) is None:
-        args.task_anchor_sidecar_enabled = bool(_SPEC_DEFAULTS.task_anchor_sidecar_enabled)
-    if getattr(args, "legacy_semantic_prefix_enabled", None) is None:
-        args.legacy_semantic_prefix_enabled = bool(_SPEC_DEFAULTS.legacy_semantic_prefix_enabled)
-    if getattr(args, "task_anchor_queries", None) is None:
-        args.task_anchor_queries = int(_SPEC_DEFAULTS.task_anchor_queries)
-    if getattr(args, "task_global_queries", None) is None:
-        args.task_global_queries = int(_SPEC_DEFAULTS.task_global_queries)
-    if getattr(args, "task_query_layers", None) is None:
-        args.task_query_layers = int(_SPEC_DEFAULTS.task_query_layers)
-    if getattr(args, "task_query_rounds", None) is None:
-        args.task_query_rounds = int(_SPEC_DEFAULTS.task_query_rounds)
-    if getattr(args, "task_anchor_dropout_prob", None) is None:
-        args.task_anchor_dropout_prob = float(_SPEC_DEFAULTS.task_anchor_dropout_prob)
     if getattr(args, "enable_aux_budgeting", None) is None:
         args.enable_aux_budgeting = True
     if getattr(args, "aux_budget_physical_ratio", None) is None:
@@ -2129,13 +2103,6 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         control_semantic_reads=args.control_semantic_reads,
         predictive_semantic_dropout_prob=args.predictive_semantic_dropout_prob,
         semantic_prefix_dropout_prob=args.semantic_prefix_dropout_prob,
-        task_anchor_sidecar_enabled=bool(getattr(args, "task_anchor_sidecar_enabled", _SPEC_DEFAULTS.task_anchor_sidecar_enabled)),
-        legacy_semantic_prefix_enabled=bool(getattr(args, "legacy_semantic_prefix_enabled", _SPEC_DEFAULTS.legacy_semantic_prefix_enabled)),
-        task_anchor_queries=int(getattr(args, "task_anchor_queries", _SPEC_DEFAULTS.task_anchor_queries)),
-        task_global_queries=int(getattr(args, "task_global_queries", _SPEC_DEFAULTS.task_global_queries)),
-        task_query_layers=int(getattr(args, "task_query_layers", _SPEC_DEFAULTS.task_query_layers)),
-        task_query_rounds=int(getattr(args, "task_query_rounds", _SPEC_DEFAULTS.task_query_rounds)),
-        task_anchor_dropout_prob=float(getattr(args, "task_anchor_dropout_prob", _SPEC_DEFAULTS.task_anchor_dropout_prob)),
         attention_heads=args.attention_heads,
         future_vote_heads=args.future_vote_heads,
         crop_radius_m=float(getattr(args, "crop_radius_m", _SPEC_DEFAULTS.crop_radius_m)),
@@ -2630,7 +2597,7 @@ def train(args: argparse.Namespace) -> None:
                 args.future_vote_heads,
             )
             logging.info(
-                "Semantic-prefix contract: semantic tokens remain width=%s, are projected posterior-late into control/predictive trunks; semantic_cross_dim/predictive_semantic_reads/control_semantic_reads are compatibility fields and do not alter the current forward path.",
+                "Semantic-prefix contract: the full PaliGemma token sequence remains width=%s, is projected posterior-late, and enters control / conditioned-future trunks as the primary semantic prefix; posterior/global_post/innovation/proprio are appended after it, while semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not alter the current forward path.",
                 args.semantic_dim,
             )
             logging.info(
@@ -3144,13 +3111,6 @@ def main() -> None:
     parser.add_argument("--control-semantic-reads", type=int, default=_SPEC_DEFAULTS.control_semantic_reads)
     parser.add_argument("--predictive-semantic-dropout-prob", type=float, default=_SPEC_DEFAULTS.predictive_semantic_dropout_prob)
     parser.add_argument("--semantic-prefix-dropout-prob", type=float, default=_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
-    parser.add_argument("--task-anchor-sidecar-enabled", action=argparse.BooleanOptionalAction, default=_SPEC_DEFAULTS.task_anchor_sidecar_enabled)
-    parser.add_argument("--legacy-semantic-prefix-enabled", action=argparse.BooleanOptionalAction, default=_SPEC_DEFAULTS.legacy_semantic_prefix_enabled)
-    parser.add_argument("--task-anchor-queries", type=int, default=_SPEC_DEFAULTS.task_anchor_queries)
-    parser.add_argument("--task-global-queries", type=int, default=_SPEC_DEFAULTS.task_global_queries)
-    parser.add_argument("--task-query-layers", type=int, default=_SPEC_DEFAULTS.task_query_layers)
-    parser.add_argument("--task-query-rounds", type=int, default=_SPEC_DEFAULTS.task_query_rounds)
-    parser.add_argument("--task-anchor-dropout-prob", type=float, default=_SPEC_DEFAULTS.task_anchor_dropout_prob)
     parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)
     parser.add_argument("--future-vote-heads", type=int, default=_SPEC_DEFAULTS.future_vote_heads)
     parser.set_defaults(

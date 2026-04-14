@@ -95,23 +95,6 @@ class PicfPosteriorAnchorState:
 
 
 @dataclasses.dataclass
-class PicfTaskAnchorState:
-    conditioned_queries: torch.Tensor
-    tokens: torch.Tensor
-    global_token: torch.Tensor
-    instruction_token: torch.Tensor
-    point_weights: torch.Tensor
-    routing_mass_point: torch.Tensor
-    routing_mass_visual: torch.Tensor
-    x: torch.Tensor
-    S: torch.Tensor
-    a: torch.Tensor
-    semantic_attention: torch.Tensor
-    fused_attention: torch.Tensor
-    available: bool
-
-
-@dataclasses.dataclass
 class PicfPredictiveState:
     semantic_tokens: torch.Tensor
     innovation_token: torch.Tensor
@@ -141,7 +124,6 @@ class PicfCoreState:
     token_field: PicfTokenFieldState
     observation_anchors: PicfObservationAnchorState
     posterior: PicfPosteriorAnchorState
-    task_anchors: PicfTaskAnchorState | None
     predictive: PicfPredictiveState
     control: PicfControlState
     last_prompt: str | None = None

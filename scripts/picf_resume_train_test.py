@@ -34,7 +34,7 @@ def _write_args_json(path: Path) -> Path:
     return args_json
 
 
-def test_load_runtime_args_fills_phase1_sidecar_defaults(tmp_path: Path) -> None:
+def test_load_runtime_args_fills_grad_clip_defaults(tmp_path: Path) -> None:
     args_json = _write_args_json(tmp_path)
 
     runtime_args = _MODULE._load_runtime_args(args_json)
@@ -42,16 +42,8 @@ def test_load_runtime_args_fills_phase1_sidecar_defaults(tmp_path: Path) -> None
     assert runtime_args.grad_clip_mode == "percentile"
     assert runtime_args.grad_clip_percentile == pytest.approx(75.0)
     assert runtime_args.grad_clip_window == 100
-    assert runtime_args.task_anchor_sidecar_enabled is False
-    assert runtime_args.legacy_semantic_prefix_enabled is True
-    assert runtime_args.task_anchor_queries == 8
-    assert runtime_args.task_global_queries == 1
-    assert runtime_args.task_query_layers == 1
-    assert runtime_args.task_query_rounds == 2
-    assert runtime_args.task_anchor_dropout_prob == pytest.approx(0.0)
 
-
-def test_main_applies_sidecar_cli_overrides_before_train(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_main_applies_resume_cli_overrides_before_train(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     args_json = _write_args_json(tmp_path)
     captured: dict[str, argparse.Namespace] = {}
 
@@ -72,7 +64,7 @@ def test_main_applies_sidecar_cli_overrides_before_train(monkeypatch: pytest.Mon
             "--resume-checkpoint",
             "/tmp/checkpoint/10000",
             "--exp-name",
-            "sidecar_phase1_cli_test",
+            "semantic_prefix_primary_cli_test",
             "--device",
             "cpu",
             "--grad-clip-mode",
@@ -81,18 +73,6 @@ def test_main_applies_sidecar_cli_overrides_before_train(monkeypatch: pytest.Mon
             "80",
             "--grad-clip-window",
             "32",
-            "--task-anchor-sidecar-enabled",
-            "--no-legacy-semantic-prefix-enabled",
-            "--task-anchor-queries",
-            "6",
-            "--task-global-queries",
-            "2",
-            "--task-query-layers",
-            "3",
-            "--task-query-rounds",
-            "4",
-            "--task-anchor-dropout-prob",
-            "0.15",
         ],
     )
 
@@ -100,15 +80,8 @@ def test_main_applies_sidecar_cli_overrides_before_train(monkeypatch: pytest.Mon
 
     args = captured["args"]
     assert args.resume_checkpoint == "/tmp/checkpoint/10000"
-    assert args.exp_name == "sidecar_phase1_cli_test"
+    assert args.exp_name == "semantic_prefix_primary_cli_test"
     assert args.device == "cpu"
     assert args.grad_clip_mode == "percentile"
     assert args.grad_clip_percentile == pytest.approx(80.0)
     assert args.grad_clip_window == 32
-    assert args.task_anchor_sidecar_enabled is True
-    assert args.legacy_semantic_prefix_enabled is False
-    assert args.task_anchor_queries == 6
-    assert args.task_global_queries == 2
-    assert args.task_query_layers == 3
-    assert args.task_query_rounds == 4
-    assert args.task_anchor_dropout_prob == pytest.approx(0.15)
