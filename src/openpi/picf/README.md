@@ -15,15 +15,15 @@
 - 哪些总纲条款当前只是“部分落地”
 - 现在应该从哪里继续接训练 / serving / deployment
 
-如果要看这轮针对 language/action collapse 的**精确重构方案**，请直接看：
-[`README_semantic_prefix_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_refactor.md)。
+如果要看当前 task-anchor sidecar 版本的**最终交接说明**，请直接看：
+[`README_task_anchor_sidecar_followthrough.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_task_anchor_sidecar_followthrough.md)。
 
 那个文件描述的是：
 
-- 为什么当前 `semantic_summary` 主路径不够强
-- 它与 `pi0.5 / pi0.5-sonata` 的逐文件 dataflow 差异
-- 为什么目标方案必须改成 token-level posterior-late semantic prefix
-- 后续的实施、测试、部署顺序
+- 当前代码的真实数学边界与架构
+- 从 replay 到 serving 的递归 dataflow
+- runtime state / loss / invariants 的逐项解释
+- 当前部署方法、测试闸门与 rollout 策略
 
 ## 0. 2026-04-09 严格复核
 
@@ -551,8 +551,7 @@ point / visual / tactile / compact context 都先投到统一 hidden size，再�
 - task queries 再从完整 `fused_tokens` 读取任务相关对象/区域作为 sidecar
 - 同时 innovation / posterior / physical basis 仍然保持 language-late，不会被当前帧语言信息污染
 
-当前 sidecar 方案的实施与部署，统一写在：
-- [`README_task_anchor_sidecar_deployment_plan.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_task_anchor_sidecar_deployment_plan.md)
+当前 sidecar 方案的实施、验证与部署，统一写在：
 - [`README_task_anchor_sidecar_followthrough.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_task_anchor_sidecar_followthrough.md)
 
 ### 3.4 H4 tactile 与 point future heads 默认预测真实信号

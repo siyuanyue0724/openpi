@@ -1,39 +1,50 @@
-# PICF Task-Anchor Sidecar Follow-Through
+# PICF Task-Anchor Sidecar Final Handoff
 
 Date: 2026-04-14
 
-Status: local implementation completed and strict cloud validation completed for
-converged Phase 0 / Phase 1.
+Status: current code audited, local validation completed, and strict cloud
+validation completed for the current single-core + task-sidecar implementation.
 
-This document is a faithful follow-through of the current code, not a future
-design sketch. It records:
+This document is the single final handoff document for the current
+task-anchor-sidecar implementation. It is a faithful follow-through of the
+current code, not a future design sketch. It records:
 
 - what is implemented now
 - what was verified locally and on cloud
 - the recursive dataflow from replay window to loss and serving
 - the exact deployment switches and commands
+- the current rollout strategy and acceptance gates
 
-The corresponding planning document remains:
+It supersedes the previously split sidecar notes:
 
-- [README_task_anchor_sidecar_deployment_plan.md](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_task_anchor_sidecar_deployment_plan.md)
+- `README_task_anchor_sidecar_deployment_plan.md`
+- `README_semantic_prefix_refactor.md`
 
 
 ## 1. Scope
 
-Implemented scope is the user-approved converged Phase 0 / Phase 1 only:
+Implemented scope in current code is:
 
 - keep one language-free physical core
 - do not let semantic affect physical observation-anchor construction
 - do not let semantic affect physical posterior update
 - do not let semantic affect next-step innovation construction
 - add one semantic-guided task-anchor sidecar
-- keep width at `256`
-- keep `attention_heads=8`
+- current default widths are `384`
+- current `attention_heads=8`
 - keep a legacy semantic-prefix rollback switch
 
-Not implemented in this phase:
+What this means in practice:
 
-- width `384`
+- the architecture boundary is still the approved one:
+  - one physical recurrent core
+  - one non-recurrent semantic-guided sidecar
+- but the current repo has already widened the core defaults to `384`
+- so the code is internally self-consistent, but it no longer exactly matches
+  the earlier "Phase 1 stays at 256" planning constraint
+
+Not implemented in current code:
+
 - `attention_heads=12`
 - semantic-conditioned physical anchor selection
 - semantic writeback into physical posterior
@@ -61,8 +72,37 @@ Tests:
 
 Planning / audit docs:
 
-- [README_task_anchor_sidecar_deployment_plan.md](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_task_anchor_sidecar_deployment_plan.md)
 - [picf_full_audit_20260413.md](/tmp/picf_full_audit_20260413.md)
+
+
+## 2.1 Code / plan divergence that must be stated explicitly
+
+The current repo defaults in
+[config.py](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/config.py) are:
+
+- `hidden_dim = 384`
+- `posterior_hidden_dim = 384`
+- `innovation_dim = 384`
+- `control_dim = 384`
+- `future_hidden_dim = 384`
+- `attention_heads = 8`
+
+This is load-bearing because:
+
+- trainer CLI defaults inherit these values
+- model materialization uses these values
+- cloud and local tests that passed were run against this exact width
+
+Therefore the truthful statement is:
+
+- the current code is mathematically and programmatically consistent with
+  `single physical core + semantic-guided sidecar + width 384 + heads 8`
+- it is not literally the same as the earlier planning statement
+  "`Phase 1 first stays at 256`"
+
+If strict adherence to the older planning scope is required, the width defaults
+must be changed back in code before deployment. This document does not hide that
+difference.
 
 
 ## 3. What Was Verified Locally
@@ -131,7 +171,6 @@ tree:
 - `src/openpi/picf/core/contracts.py`
 - `src/openpi/picf/core/pipeline.py`
 - `src/openpi/picf/core/pipeline_test.py`
-- `src/openpi/picf/README_task_anchor_sidecar_deployment_plan.md`
 - `src/openpi/picf/README_task_anchor_sidecar_followthrough.md`
 
 Cloud regression commands that passed:
@@ -298,6 +337,14 @@ Important detail:
   current action during training
 - the recurrent carry is `previous = output.state`
 
+Recurrent interpretation:
+
+- `previous.posterior` is the only persistent world-state carrier
+- `previous.predictive.physical_prediction_cache` is the only legal predictive
+  input to next-step innovation
+- `previous.task_anchors` may be stored in the state for inspection, but they
+  are not part of the recurrent world-model contract
+
 
 ### 5.3 Semantic Input Construction
 
@@ -349,6 +396,34 @@ point features
 
 This produces [PicfTokenFieldState](/home/siyuanyue/Documents/openpi/src/openpi/picf/core/contracts.py).
 
+`PicfTokenFieldState` fields and meanings:
+
+- `point_tokens`
+  - point / geometry tokens after projection
+- `visual_tokens`
+  - CLIP/V-JEPA-derived visual tokens projected to core width
+- `tactile_tokens`
+  - active tactile tokens that survived contact gating
+- `context_tokens`
+  - proprio, previous action, timing, and contact-summary context tokens
+- `fused_tokens`
+  - multimodal field after token fusion; this is the full field both physical
+    anchors and the task sidecar read
+- `point_positions`
+  - point coordinates used for physical anchor geometry summaries
+- `modality_ids`
+  - token modality labels
+- `point_align_embeddings`, `visual_align_embeddings`, `tactile_align_embeddings`
+  - alignment-space projections for geometric/routing losses
+- `tactile_positions_world`, `tactile_normals_world`
+  - world-frame tactile geometry
+- `tactile_contact_gate`, `tactile_contact_prob`, `tactile_anchor_mask`
+  - tactile gating state
+- `fusion_attention_mean`
+  - optional diagnostic mean attention from token fusion
+- `projective_geometry`
+  - point-to-image projective compatibility state used by alignment losses
+
 Key invariant:
 
 - task sidecar reads this full `fused_tokens`
@@ -377,6 +452,23 @@ point_positions
 Produced state:
 
 - `PicfObservationAnchorState`
+
+`PicfObservationAnchorState` fields:
+
+- `seed_indices`
+  - FPS-selected point seeds
+- `tokens`
+  - observation anchor tokens after task-agnostic readout
+- `point_weights`
+  - normalized point attention weights per anchor
+- `routing_mass_point`, `routing_mass_visual`
+  - raw routing attention mass into point/visual subsets
+- `routing_support_point`, `routing_support_visual`
+  - aggregate support mass over tokens
+- `routing_gate_point`, `routing_gate_visual`
+  - gated support statistics used by alignment objectives
+- `x`, `S`, `a`
+  - position, covariance, and extent summaries inferred from point attention
 
 Critical invariant:
 
@@ -409,6 +501,31 @@ previous posterior
 Produced state:
 
 - `PicfPosteriorAnchorState`
+
+`PicfPosteriorAnchorState` fields:
+
+- `h`, `c`
+  - recurrent posterior hidden/cell state
+- `mu`, `Sigma`
+  - latent posterior mean and covariance
+- `x`, `S`, `a`
+  - anchor geometry summary after write
+- `alpha`
+  - anchor activity
+- `contact_prob`
+  - posterior-side contact belief
+- `support_mass`
+  - evidence mass assigned to each persistent anchor
+- `recycle_gate`
+  - how much of each anchor is reset/recycled
+- `binding`
+  - anchor-to-observation assignment matrix
+- `evidence_tokens`
+  - bound observation evidence per persistent anchor
+- `tokens`
+  - persistent anchor tokens used downstream
+- `global_post`
+  - pooled physical global scene token
 
 Critical invariant:
 
@@ -445,6 +562,29 @@ conditioned queries
 Produced state:
 
 - `PicfTaskAnchorState`
+
+`PicfTaskAnchorState` fields:
+
+- `conditioned_queries`
+  - learned task queries after semantic conditioning
+- `tokens`
+  - local task-anchor tokens
+- `global_token`
+  - task-global token read directly from full `fused_tokens`
+- `instruction_token`
+  - pooled query-level instruction token
+- `point_weights`
+  - task-anchor attention over point tokens
+- `routing_mass_point`, `routing_mass_visual`
+  - raw task-anchor routing mass
+- `x`, `S`, `a`
+  - task-anchor geometry summaries
+- `semantic_attention`
+  - attention of learned queries into semantic prefix tokens
+- `fused_attention`
+  - attention of conditioned queries into the full fused token field
+- `available`
+  - whether the sidecar produced usable anchors for this step
 
 Important facts:
 
@@ -608,6 +748,36 @@ Important:
 - `task_anchors` are stored for inspection and current-step downstream use
 - they are not used as recurrent world memory
 
+`PicfPredictiveState` is the main current-step downstream carrier:
+
+- `semantic_tokens`
+  - raw semantic tokens at semantic width, retained for diagnostics
+- `innovation_token`, `innovation_norm`
+  - current-step explicit innovation signal and per-branch norms
+- `availability`
+  - branch availability mask for current targets
+- `control_tokens`
+  - full control trunk token sequence after control transformer
+- `control_query_state`
+  - query-token readout used for control
+- `pooled_state`
+  - projected control query readout passed to action head
+- `action`
+  - normalized current-step action prediction
+- `executed_action`
+  - teacher-forced or observed executed action carried for next-step prior
+- `physical_global_pred`
+  - language-free predictive global token
+- `physical_prediction_cache`
+  - language-free cache used by next-step innovation
+- `predictive_query_state`
+  - semantic-conditioned predictive query readout
+- `global_pred`
+  - alias of `predictive_query_state` in current code; not a separate pooled
+    scene-global variable
+- `prediction_cache`
+  - semantic-conditioned future cache
+
 
 ### 5.13 Loss
 
@@ -647,6 +817,41 @@ Important phase-1 fact:
 - no dedicated task-anchor primary loss was added
 - sidecar learns through existing action and semantic-conditioned future losses
 
+Exact loss formulas from current code:
+
+- action:
+  - `loss_action_pos = L1(action[:3], target[:3])`
+  - `loss_action_rot = L1(action[3:6], target[3:6])`
+  - `loss_action_gripper = L1(action[6:], target[6:])`
+  - `loss_action = lambda_pos * pos + lambda_rot * rot + lambda_gripper * gripper`
+- physical future:
+  - `loss_visual_latent = MSE(physical_cache.visual_latent, future.visual_latent)`
+  - `loss_visual_real = L1(physical_cache.visual_real, future.visual_real)`
+  - `loss_tactile_real = tactile_map + tactile_aux`
+  - `loss_point_real = BCEWithLogits(physical_cache.point_real, future.point_real)`
+- semantic future:
+  - same branch-wise form, but evaluated on `prediction_cache`
+  - aggregated as `loss_semantic_future_aux`
+- alignment:
+  - `loss_anchor_pv`
+  - `loss_pv_weak`
+  - `loss_focus_pv`
+  - `loss_pt`
+
+Budget capping in current code:
+
+- `physical_aux_capped = budget(physical_aux, action_loss, ratio=aux_budget_physical_ratio)`
+- `semantic_group_capped = budget(lambda_semantic_future_aux * semantic_future_aux, action_loss, ratio=aux_budget_semantic_ratio)`
+- `alignment_group_capped = budget(alignment.total, action_loss, ratio=aux_budget_alignment_ratio)`
+- `loss_total = action_loss + physical_aux_capped + semantic_group_capped + alignment_group_capped`
+
+Interpretation:
+
+- action remains the primary optimization target
+- auxiliary branches are allowed to learn
+- but they are not allowed to dominate total gradient budget when action loss is
+  much smaller
+
 
 ### 5.14 Serving
 
@@ -677,6 +882,8 @@ Important:
 - serving now shares the normalized-action contract
 - `picf_resume_train.py` now supports sidecar flags, so sidecar deployments can
   be resumed cleanly without hand-editing `args.json`
+- serving loads model weights with strict load first, then compatibility loader
+  fallback; this matters for sidecar rollouts resumed from older checkpoints
 
 
 ## 6. Invariants That Must Hold
@@ -737,6 +944,21 @@ pytest -q \
   scripts/picf_core_train_test.py \
   scripts/serve_picf_policy_test.py
 ```
+
+### 7.6 What the verifier proves
+
+`python scripts/verify_picf_contract.py` currently checks both static and
+runtime regression conditions, including:
+
+- step order:
+  - `posterior -> task_anchors -> innovation -> predictive`
+- sidecar reads full `fused_tokens`
+- control explicitly includes `posterior.global_post`
+- prompt changes do not change physical branch state
+- previous semantic/task-conditioned branch does not change next innovation
+
+This script is the closest thing in-repo to an executable contract checker for
+the present architecture.
 
 
 ## 8. Concrete Deployment Commands
@@ -803,32 +1025,54 @@ Optional sidecar hyperparameters are also exposed:
 ## 9. Recommended Deployment Order
 
 1. Run the local validation commands in Section 7.
-2. Start with `sidecar=true` and `legacy=true`.
-3. Verify:
+2. Decide whether to deploy the current code exactly as-is, or first revert the
+   width defaults back to `256`.
+3. If deploying current code as-is, note that you are deploying:
+   - sidecar architecture
+   - width `384`
+   - heads `8`
+4. Start with `sidecar=true` and `legacy=true`.
+5. Verify:
    - no physical invariant regressions
    - action prompt sensitivity improves
    - environment sensitivity remains non-trivial
-4. Then run `sidecar=true` and `legacy=false`.
-5. Compare:
+6. Then run `sidecar=true` and `legacy=false`.
+7. Compare:
    - action sensitivity
    - physical invariance
    - training stability
-6. Only after this should width `384` be considered.
+
+Why A/B was recommended:
+
+- this is not a multi-stage training algorithm
+- each run is still a single end-to-end training graph
+- the A/B split is a rollout strategy:
+  - `sidecar=true, legacy=true` checks whether adding the sidecar is safe while
+    retaining the previous semantic path
+  - `sidecar=true, legacy=false` checks whether the sidecar can replace the
+    legacy semantic prefix cleanly
+
+So A/B here means:
+
+- two separate end-to-end training runs for engineering comparison
+- not a mathematically required two-phase optimization procedure
 
 
 ## 10. Current Conclusion
 
 As of this document:
 
-- Phase 0 / Phase 1 is implemented locally
+- the single-core + task-sidecar architecture is implemented locally
 - physical core invariants are preserved
 - task-anchor sidecar is live behind feature flags
 - explicit `global_post` control injection is implemented
 - trainer / serving / contract verification are green
 - resume deployment path supports sidecar flags
+- current code defaults are width `384`, not `256`
 
 The remaining work is experimental rather than structural:
 
 - run sidecar A/B training
 - measure prompt sensitivity and behavior
-- only then consider width `384`
+- decide whether the current width-384 code should be kept, or whether strict
+  Phase-1 scope requires reverting widths to 256 before longer training
