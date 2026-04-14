@@ -59,6 +59,13 @@ def main() -> None:
     parser.add_argument("--log-interval", type=int, default=None)
     parser.add_argument("--diagnostic-interval", type=int, default=None)
     parser.add_argument("--grad-clip-norm", type=float, default=None)
+    parser.add_argument("--task-anchor-sidecar-enabled", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--legacy-semantic-prefix-enabled", action=argparse.BooleanOptionalAction, default=None)
+    parser.add_argument("--task-anchor-queries", type=int, default=None)
+    parser.add_argument("--task-global-queries", type=int, default=None)
+    parser.add_argument("--task-query-layers", type=int, default=None)
+    parser.add_argument("--task-query-rounds", type=int, default=None)
+    parser.add_argument("--task-anchor-dropout-prob", type=float, default=None)
     args = parser.parse_args()
 
     runtime_args = _load_runtime_args(args.args_json)
@@ -76,6 +83,20 @@ def main() -> None:
         runtime_args.diagnostic_interval = int(args.diagnostic_interval)
     if args.grad_clip_norm is not None:
         runtime_args.grad_clip_norm = float(args.grad_clip_norm)
+    if args.task_anchor_sidecar_enabled is not None:
+        runtime_args.task_anchor_sidecar_enabled = bool(args.task_anchor_sidecar_enabled)
+    if args.legacy_semantic_prefix_enabled is not None:
+        runtime_args.legacy_semantic_prefix_enabled = bool(args.legacy_semantic_prefix_enabled)
+    if args.task_anchor_queries is not None:
+        runtime_args.task_anchor_queries = int(args.task_anchor_queries)
+    if args.task_global_queries is not None:
+        runtime_args.task_global_queries = int(args.task_global_queries)
+    if args.task_query_layers is not None:
+        runtime_args.task_query_layers = int(args.task_query_layers)
+    if args.task_query_rounds is not None:
+        runtime_args.task_query_rounds = int(args.task_query_rounds)
+    if args.task_anchor_dropout_prob is not None:
+        runtime_args.task_anchor_dropout_prob = float(args.task_anchor_dropout_prob)
 
     _trainer._normalize_train_args(runtime_args)
     _trainer._validate_train_args(runtime_args)

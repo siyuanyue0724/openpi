@@ -13,7 +13,7 @@ must preserve and the executable tests that currently support those claims.
 This contract covers the current `src/openpi/picf/core` implementation:
 
 - language-late posterior update
-- posterior-late semantic fusion
+- semantic-guided task-anchor sidecar for current-step readout
 - explicit innovation construction
 - split between physical predictive cache and semantic-conditioned future cache
 
@@ -46,6 +46,8 @@ The important internal subsets are:
 
 - physical posterior/world stream:
   - `posterior_t`
+- task-conditioned current-step readout sidecar:
+  - `task_anchors_t`
 - physical predictive basis:
   - `physical_prediction_cache_t`
 - semantic-conditioned future readout:
@@ -63,25 +65,29 @@ The intended transition order is:
    - `P_{t-1}`
    - `O_t`
    - current observation anchors
-4. Build current targets.
-5. Build current innovation by comparing:
+4. Build current task-anchor sidecar using:
+   - current fused token field
+   - current semantic tokens
+5. Build current targets.
+6. Build current innovation by comparing:
    - current true targets
    - `physical_prediction_cache_{t-1}`
-6. Build current predictive/control readouts:
+7. Build current predictive/control readouts:
    - first world-only readout
-   - then posterior-late semantic conditioning
-   - semantic tokens may enter the control and semantic-conditioned predictive
-     trunks as token-level prefix inputs, provided posterior and the physical
-     predictive basis are already fixed
+   - then posterior-late task-conditioned readout
+   - the sidecar may read current semantic tokens and current fused observation
+     tokens, provided it does not write back into the physical posterior or the
+     physical predictive basis
 
 In symbols:
 
 ```text
 posterior_t = PosteriorUpdate(P_{t-1}, O_t, anchors_t)
+task_anchors_t = TaskAnchorRead(token_field_t, semantic_tokens_t)
 innovation_t = Innovation(physical_prediction_cache_{t-1}, targets_t)
 physical_pred_t = WorldPredict(posterior_t, innovation_t, proprio_t, action_cond_t)
-semantic_pred_t = SemanticRead(physical_pred_t, semantic_tokens_t)
-action_t = ActionRead(posterior_t, innovation_t, proprio_t, semantic_tokens_t)
+semantic_pred_t = SemanticRead(physical_pred_t, task_anchors_t)
+action_t = ActionRead(posterior_t, task_anchors_t, innovation_t, proprio_t)
 ```
 
 The action contract is:
@@ -114,6 +120,12 @@ Equivalent statement:
 ```text
 posterior_t ⟂ semantic_t | (P_{t-1}, O_t, anchors_t)
 ```
+
+The stronger current-phase statement is:
+
+- semantic may not affect `_build_observation_anchors(...)`
+- semantic may not affect `_posterior_update(...)`
+- semantic may only affect the separate task-anchor readout sidecar
 
 ### F2. No semantic writeback into carried prior
 
@@ -150,14 +162,24 @@ raw current observation tokens || semantic || innovation -> shared pre-posterior
 ```
 
 Semantic may not participate in the current posterior update. After posterior is
-fixed, semantic tokens are allowed to enter downstream control / semantic-
-conditioned predictive trunks as same-rank prefix tokens or read-memory, so long
-as they do not write back into:
+fixed, task-conditioned readout tokens are allowed to enter downstream control /
+semantic-conditioned predictive trunks, so long as they do not write back into:
 
 - current posterior
 - carried prior
 - `physical_prediction_cache`
 - next-step innovation base
+
+### F5. Task-anchor sidecar is not a second recurrent world-state machine
+
+The sidecar must not become a second recurrent physical core.
+
+Forbidden uses:
+
+- task-anchor state as input to next posterior update
+- task-anchor state as input to next innovation
+- task-anchor state as input to carried prior construction
+- task-anchor state as input to `physical_prediction_cache`
 
 ## 5. Allowed Edges
 
@@ -167,10 +189,22 @@ These edges are intentionally allowed.
 
 Current semantic memory may affect:
 
+- current task-anchor readout
 - current action readout
 - current semantic-conditioned future readout
 
 provided that posterior is already fixed.
+
+### A1b. Task-anchor sidecar may read the full fused token field
+
+The sidecar is allowed to read:
+
+- current `token_field.fused_tokens`
+- current semantic tokens
+
+It is not restricted to the physical observation anchors, because its purpose is
+to preserve task-relevant evidence that may not survive the task-agnostic
+physical anchor bottleneck.
 
 ### A2. Previous physical prediction cache must affect current innovation
 
@@ -186,15 +220,20 @@ the current innovation is allowed, and generally expected, to change.
 Current intended widths are:
 
 - `semantic_dim = 2048`
-- `hidden_dim = 256`
+- `hidden_dim = 384`
 - `semantic_cross_dim = 512`
 
 Interpretation:
 
 - semantic stream keeps the wide `PaliGemma` token representation
 - world stream remains compact
-- posterior-late semantic tokens are projected into `hidden_dim` and then enter
-  control / semantic-conditioned predictive trunks as same-rank prefix tokens
+- semantic-conditioned task queries are projected/read into compact
+  `hidden_dim` task-anchor tokens
+- control / semantic-conditioned predictive trunks then consume:
+  - physical posterior tokens
+  - explicit physical global summary
+  - task-anchor sidecar tokens
+  - optional legacy semantic prefix tokens behind a rollback flag
 
 Current compatibility note:
 
@@ -203,7 +242,7 @@ Current compatibility note:
 - `control_semantic_reads`
 
 are still accepted by configs/checkpoints for migration stability, but they do
-not control the current semantic-prefix forward path.
+not control the current sidecar forward path.
 
 This contract explicitly rejects the older design:
 
@@ -213,9 +252,11 @@ This contract explicitly rejects the older design:
 It allows the current design:
 
 - keep full semantic tokens at width `semantic_dim`
-- fix posterior and physical predictive basis first
-- then project semantic tokens posterior-late into same-width semantic prefixes
-  for control / semantic-conditioned predictive trunks
+- keep the physical posterior and physical predictive basis language-free
+- let semantic condition a current-step task-anchor sidecar that reads the full
+  fused token field
+- let control / semantic-conditioned predictive trunks read that sidecar after
+  the physical core has already been fixed
 
 ## 7. Predictive Split Contract
 
@@ -233,6 +274,7 @@ Allowed uses:
 Forbidden uses:
 
 - semantic writeback into it after creation
+- task-anchor sidecar writeback into it after creation
 
 ### 7.2 Semantic-conditioned future readout
 
@@ -242,6 +284,7 @@ Allowed uses:
 
 - future-head supervision
 - diagnostic comparison against the physical branch
+- reading current task-anchor sidecar tokens / optional legacy semantic prefix
 
 Forbidden uses:
 
@@ -302,6 +345,8 @@ Important implementation anchors:
   - `src/openpi/picf/core/pipeline.py`
 - predictive split:
   - `src/openpi/picf/core/pipeline.py`
+- task-anchor sidecar:
+  - `src/openpi/picf/core/pipeline.py`
 - state dataclasses:
   - `src/openpi/picf/core/contracts.py`
 
@@ -324,6 +369,10 @@ The following tests are part of the practical support for this contract.
 - previous executed action, not previous policy output, drives prior/context
 - previous semantic-conditioned predictive state does not feed next prior or innovation
 - previous physical prediction cache does feed next innovation
+- task-anchor sidecar changes do not alter current physical posterior
+- previous task-anchor sidecar state does not alter next innovation
+- task-anchor sidecar reads full `fused_tokens`, not physical observation anchors
+- control path explicitly depends on `posterior.global_post`
 
 Primary test file:
 
@@ -336,6 +385,7 @@ pytest -q \
   src/openpi/picf/core/pipeline_test.py \
   src/openpi/picf/core/training_test.py \
   scripts/picf_core_train_test.py \
+  scripts/picf_resume_train_test.py \
   src/openpi/picf/paligemma/wrapper_test.py
 ```
 
@@ -377,6 +427,6 @@ The following are still outside the current formalized guarantee.
 - machine-checked proof artifact
 - proof that current training converges to the intended causal use of state
 - proof that semantic shortcutting is impossible under all optimization paths
-- proof that `hidden_dim=256` is capacity-optimal
+- proof that `hidden_dim=384` is capacity-optimal
 
 Those are future proof obligations, not current contract violations.

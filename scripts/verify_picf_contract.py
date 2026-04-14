@@ -153,9 +153,20 @@ def verify_static_contract() -> list[CheckResult]:
             step_source,
             [
                 "posterior = self._posterior_update(",
+                "task_anchors = self._build_task_anchors(",
                 "innovation_token, innovation_norm = self._innovation(",
                 "predictive = self._predictive_state(",
             ],
+        ),
+        CheckResult(
+            name="task_sidecar_reads_full_fused_tokens",
+            ok="token_field.fused_tokens" in _node_source(source, _function_node(tree, "_build_task_anchors")),
+            detail="`_build_task_anchors` reads full fused_tokens directly.",
+        ),
+        CheckResult(
+            name="control_prefix_includes_explicit_global_post",
+            ok="_add_role_embedding(posterior.global_post[None, :], self.control_role_embedding, 0)" in predictive_source,
+            detail="`_predictive_state` explicitly injects posterior.global_post into control tokens.",
         ),
         CheckResult(
             name="legacy_boolean_advanced_indexing_removed_from_pipeline",
@@ -220,6 +231,10 @@ def verify_regressions() -> list[CheckResult]:
     tests = [
         "src/openpi/picf/core/pipeline_test.py::test_language_is_late_and_does_not_change_current_posterior",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_changes_do_not_pollute_physical_prediction_cache_or_next_innovation",
+        "src/openpi/picf/core/pipeline_test.py::test_task_sidecar_prompt_changes_do_not_change_physical_branch",
+        "src/openpi/picf/core/pipeline_test.py::test_previous_task_sidecar_does_not_change_next_innovation",
+        "src/openpi/picf/core/pipeline_test.py::test_task_sidecar_reads_full_fused_tokens_not_observation_anchors",
+        "src/openpi/picf/core/pipeline_test.py::test_control_prefix_explicitly_depends_on_global_post",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_tokens_directly_condition_control_and_semantic_future_readout",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_tokens_alone_can_condition_action_without_cross_reads",
         "src/openpi/picf/core/pipeline_test.py::test_prior_and_context_use_previous_executed_action_not_previous_policy_output",
@@ -240,6 +255,7 @@ def verify_full_core_suite() -> list[CheckResult]:
                 "src/openpi/picf/core/pipeline_test.py",
                 "src/openpi/picf/core/training_test.py",
                 "scripts/picf_core_train_test.py",
+                "scripts/picf_resume_train_test.py",
                 "src/openpi/picf/paligemma/wrapper_test.py",
             ]
         )

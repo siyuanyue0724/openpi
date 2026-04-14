@@ -99,14 +99,14 @@
     - 单卡 `dir + cuda + --use-foundation-backbones --use-tactile --num-train-steps 30000 --log-interval 1 --save-interval 1`
     - 运行时通过 `timeout` 提前截断，但已真实跑到 `step=57`
     - `args.json` 明确记录：
-      - `hidden_dim=256`
-      - `posterior_hidden_dim=256`
+      - `hidden_dim=384`
+      - `posterior_hidden_dim=384`
       - `latent_dim=112`
-      - `innovation_dim=256`
-      - `control_dim=256`
+      - `innovation_dim=384`
+      - `control_dim=384`
       - `semantic_dim=2048`
       - `semantic_cross_dim=512`
-      - `future_hidden_dim=256`
+      - `future_hidden_dim=384`
       - `persistent_anchors=16`
       - `observation_anchors=24`
       - `attention_heads=8`
@@ -124,7 +124,7 @@
   - 云机默认正式配置双卡 DDP：
     - `torchrun --standalone --nnodes=1 --nproc_per_node=2 ... --num-train-steps 1`
     - `args.json` 同样记录 spec 默认结构：
-      - `hidden_dim=256`
+      - `hidden_dim=384`
       - `latent_dim=112`
       - `persistent_anchors=16`
       - `observation_anchors=24`
@@ -427,9 +427,17 @@
    - 下一步 innovation **只读取这份 physical prediction cache**
 
 2. **semantic-conditioned future readout**
-   - 在 `physical_prediction_cache` 固定之后，完整 `semantic_tokens` 会先通过 `semantic_prefix_proj`
-     投到 world hidden width，再作为 posterior-late semantic prefix 直接并入
+   - 在 `physical_prediction_cache` 固定之后，当前实现优先走
+     **semantic-guided task-anchor sidecar**：
+     - semantic tokens 先 condition 一组 task queries
+     - conditioned queries 再从完整 `fused_tokens` 读取：
+       - `task_anchor_tokens`
+       - `task_global_token`
+       - `instruction_token`
+   - 这些 sidecar tokens 再作为 posterior-late 的任务读取工作集并入
      semantic-conditioned predictive 主干
+   - 旧的 raw `semantic_prefix_tokens` 路径仍然存在，但只作为
+     `legacy_semantic_prefix_enabled` 的回退开关，不再是默认的唯一语义入口
    - 这个 semantic-conditioned state 再导出：
      - `global_pred`
      - `prediction_cache`
@@ -440,9 +448,14 @@
 动作头读取的是：
 
 - `posterior.tokens`
+- `posterior.global_post`
 - `innovation_token`
 - `proprio_token`
-- posterior-late `semantic_prefix_tokens`
+- posterior-late task sidecar tokens：
+  - `task_anchor_tokens`
+  - `task_global_token`
+  - `instruction_token`
+- 可选 legacy `semantic_prefix_tokens`
 - `control_query_tokens`
 
 这就是当前控制路径。
@@ -499,31 +512,48 @@ point / visual / tactile / compact context 都先投到统一 hidden size，再�
 
 而不是把强 pairwise `L_pv` 当主力。
 
-### 3.3 H3 语言只在 posterior 之后进入 predictive stage
+### 3.3 H3 语言只在 posterior 之后进入 predictive / task-readout stage
 
 当前实现状态：已满足。
 
-当前真正进入 downstream 融合的是 **完整 semantic token stream**：
+当前真正进入 downstream 融合的是 **posterior-late 的 sidecar 读取结果**：
 
-- control 分支里，`semantic_tokens` 会在 posterior 固定之后，作为与 posterior/world tokens 同级的 semantic prefix 直接并入 control 主干
-- predictive 分支里，先固定 language-free 的 `physical_prediction_cache`，再把 `semantic_tokens` 作为同级 semantic prefix 并入 semantic-conditioned predictive 主干
+- control 分支里，posterior 固定之后，semantic 会先 condition task queries，
+  再从完整 `fused_tokens` 读出：
+  - `task_anchor_tokens`
+  - `task_global_token`
+  - `instruction_token`
+  然后与：
+  - `posterior.tokens`
+  - `posterior.global_post`
+  - `innovation_token`
+  - `proprio_token`
+  - `control_query_tokens`
+  一起进入 control 主干
+- predictive 分支里，先固定 language-free 的 `physical_prediction_cache`，
+  再把同一套 task sidecar tokens 并入 semantic-conditioned predictive 主干
+- 旧的 raw semantic prefix 仍然可以通过 feature flag 参与 downstream，
+  但它现在是 rollback path，不再是默认唯一入口
 
 当前实现已经不再把 `semantic_summary` 当作主路径概念：
 
 - `semantic_summary` 不参与 `_posterior_update(...)`
 - `semantic_summary` 不参与 language-free 的 `physical_prediction_cache`
 - `semantic_summary` 也不再承担 control / predictive 的主要语言入口
-- 当前 action / semantic-conditioned future 依赖的是 **token-level posterior-late semantic prefix**
+- 当前 action / semantic-conditioned future 依赖的是
+  **token-level posterior-late task sidecar**
 
 这一步是明确向 `pi0.5 / pi0.5-sonata` 的可靠主干靠拢：
 
 - mixed image+text prefix 继续保留，这本身就是正确设计
 - 语言不再被单个 summary bottleneck 压缩后再喂给动作主干
-- semantic token 序列会直接条件化 posterior-late control / predictive 主干
+- semantic 不直接改写 physical posterior，而是负责 condition task queries
+- task queries 再从完整 `fused_tokens` 读取任务相关对象/区域作为 sidecar
 - 同时 innovation / posterior / physical basis 仍然保持 language-late，不会被当前帧语言信息污染
 
-完整的目标设计、数学约束和文件级实施计划，统一写在：
-[`README_semantic_prefix_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_refactor.md)。
+当前 sidecar 方案的实施与部署，统一写在：
+- [`README_task_anchor_sidecar_deployment_plan.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_task_anchor_sidecar_deployment_plan.md)
+- [`README_task_anchor_sidecar_followthrough.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_task_anchor_sidecar_followthrough.md)
 
 ### 3.4 H4 tactile 与 point future heads 默认预测真实信号
 
@@ -1022,14 +1052,14 @@ README 里不能把它写成“裸 V-JEPA pooled dim 直接监督”。
 - 长期 trainer 的 core 结构默认值现在直接对齐 `PicfCoreConfig` / v0.4.8 spec：
   - `persistent_anchors=16`
   - `observation_anchors=24`
-  - `hidden_dim=256`
-  - `posterior_hidden_dim=256`
+  - `hidden_dim=384`
+  - `posterior_hidden_dim=384`
   - `latent_dim=112`
-  - `innovation_dim=256`
-  - `control_dim=256`
+  - `innovation_dim=384`
+  - `control_dim=384`
   - `semantic_dim=2048`
   - `semantic_cross_dim=512`
-  - `future_hidden_dim=256`
+  - `future_hidden_dim=384`
   - `fusion_layers=4`
   - `posterior_layers=2`
   - `predictive_layers=2`
