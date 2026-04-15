@@ -1,11 +1,11 @@
 # CALVIN Validation README
 
 This document is the current executable validation guide for CALVIN under the
-present PICF semantic-prefix-primary 2048-width codebase.
+present PICF semantic-prefix-primary mixed-width codebase.
 
 The canonical architecture handoff is:
 
-- [`README_semantic_prefix_primary_2048_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_2048_refactor.md)
+- [`README_semantic_prefix_primary_mixedwidth_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_mixedwidth_refactor.md)
 
 The formal contract is:
 
@@ -53,6 +53,9 @@ Current contract meaning:
 - next innovation reads only `previous.predictive.physical_prediction_cache`
 - control and conditioned future directly consume the full semantic prefix at
   native width `2048`
+- the physical core remains width `512`
+- physical posterior / innovation / physical predictive tokens are up-projected
+  into the semantic-width trunks
 - `posterior.global_post` explicitly enters control
 
 ## 3. Trainer Smoke Validation
@@ -101,31 +104,17 @@ Required outputs:
 
 ## 5. Clean Training
 
-The current intended training path is clean-start semantic-prefix-primary at
-native width `2048`.
+The current intended training path is clean-start semantic-prefix-primary with:
+
+- semantic width `2048`
+- physical core width `512`
 
 Do not use:
 
 - sidecar flags
 - sidecar rollout A/B logic
 - old sidecar-primary checkpoints
-
-For the current `4 x A100 40GB` cloud machine, the last safe empirical setting
-for the older 384-width model was:
-
-- `accum_steps=1`
-- effective global batch `4`
-
-For the current native-2048 refactor, the clean cloud trial
-
-- `4 x A100 40GB`
-- `accum_steps=1`
-- `save_interval=5000`
-- percentile clip `75 / 100`
-
-was code-correct but not hardware-feasible: it OOMed at the first optimizer
-step while trying to allocate an additional `64 MiB` with roughly `38.48 GiB`
-already allocated on a `39.49 GiB` card.
+- the obsolete full-core-2048 launch path
 
 Recommended command:
 
@@ -150,11 +139,10 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4
   --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
   --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
   --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
-  --exp-name picf_semantic_prefix_primary_2048_a4_acc1_pct75_clean_v1
+  --exp-name picf_semantic_prefix_primary_mixedwidth_a4_acc1_pct75_clean_v1
 ```
 
-This command is the verified clean-start launch path for the 2048 refactor, but
-it is not currently expected to finish on `4 x A100 40GB`.
+This is the current clean-start launch path for the mixed-width refactor.
 
 ## 6. Serving / Rollout
 

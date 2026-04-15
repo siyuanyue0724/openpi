@@ -628,6 +628,7 @@ class PicfFullCore(nn.Module):
             self.tactile_encoder = AnyTouch2TactileEncoder(self.tactile_config) if self.tactile_config is not None else None
 
         hidden_dim = self.config.hidden_dim
+        semantic_trunk_dim = self.config.semantic_dim
         heads = self.config.attention_heads
         self.modality_embedding = nn.Embedding(4, hidden_dim)
         self.point_token_proj = nn.LazyLinear(hidden_dim)
@@ -676,20 +677,21 @@ class PicfFullCore(nn.Module):
         self.posterior_self = TransformerStack(hidden_dim, heads, self.config.posterior_layers)
         self.posterior_pool = AttentionPool(hidden_dim)
 
-        self.semantic_prefix_proj = (
-            nn.Identity()
-            if int(self.config.semantic_dim) == int(hidden_dim)
-            else nn.LazyLinear(hidden_dim)
-        )
+        self.semantic_prefix_proj = nn.Identity()
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
-        self.control_role_embedding = nn.Embedding(5, hidden_dim)
+        self.posterior_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
+        self.global_post_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
+        self.innovation_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
+        self.proprio_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
+        self.control_role_embedding = nn.Embedding(5, semantic_trunk_dim)
         self.predictive_physical_role_embedding = nn.Embedding(4, hidden_dim)
-        self.predictive_conditioned_role_embedding = nn.Embedding(3, hidden_dim)
-        self.control_query_tokens = nn.Parameter(torch.zeros((self.config.control_query_tokens, hidden_dim)))
-        self.predictive_query_tokens = nn.Parameter(torch.zeros((self.config.predictive_query_tokens, hidden_dim)))
+        self.physical_pred_to_conditioned_proj = nn.LazyLinear(semantic_trunk_dim)
+        self.predictive_conditioned_role_embedding = nn.Embedding(3, semantic_trunk_dim)
+        self.control_query_tokens = nn.Parameter(torch.zeros((self.config.control_query_tokens, semantic_trunk_dim)))
+        self.predictive_query_tokens = nn.Parameter(torch.zeros((self.config.predictive_query_tokens, semantic_trunk_dim)))
         self.predictive_world = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
-        self.predictive_semantic_world = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
+        self.predictive_semantic_world = TransformerStack(semantic_trunk_dim, heads, self.config.predictive_layers)
         self.predictive_pool = AttentionPool(hidden_dim)
 
         self.visual_latent_target_proj = nn.LazyLinear(hidden_dim)
@@ -706,8 +708,9 @@ class PicfFullCore(nn.Module):
         self.innovation_proj = nn.LazyLinear(self.config.innovation_dim)
         self.innovation_token_proj = nn.Linear(self.config.innovation_dim, hidden_dim)
 
-        self.control_world = TransformerStack(hidden_dim, heads, self.config.control_layers)
-        self.control_state_proj = nn.Linear(hidden_dim, self.config.control_dim)
+        self.control_world = TransformerStack(semantic_trunk_dim, heads, self.config.control_layers)
+        self.control_state_proj = nn.Linear(semantic_trunk_dim, self.config.control_dim)
+        self.predictive_state_proj = nn.Linear(semantic_trunk_dim, hidden_dim)
         self.action_head = nn.Linear(self.config.control_dim, 7)
         self.to(device=self.device, dtype=self.dtype)
 
@@ -802,7 +805,7 @@ class PicfFullCore(nn.Module):
     def _zero_semantic_context(self) -> _SemanticContext:
         return _SemanticContext(
             tokens=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype),
-            prefix_tokens=torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype),
+            prefix_tokens=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype),
             available=False,
         )
 
@@ -827,7 +830,7 @@ class PicfFullCore(nn.Module):
         semantic_prefix_tokens = (
             self.semantic_prefix_proj(semantic_tokens)
             if semantic_tokens.shape[0] > 0
-            else torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype)
+            else torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype)
         )
         return _SemanticContext(tokens=semantic_tokens, prefix_tokens=semantic_prefix_tokens, available=True)
 
@@ -1959,14 +1962,18 @@ class PicfFullCore(nn.Module):
             semantic,
             dropout_prob=self.config.semantic_prefix_dropout_prob,
         )
+        control_posterior_tokens = self.posterior_to_control_proj(posterior.tokens)
+        control_global_post = self.global_post_to_control_proj(posterior.global_post[None, :])
+        control_innovation_token = self.innovation_to_control_proj(innovation_token[None, :])
+        control_proprio_token = self.proprio_to_control_proj(proprio_token[None, :])
         control_query_tokens = self.control_query_tokens.to(device=self.device, dtype=self.dtype)
         control_prefix = torch.cat(
             [
                 _add_role_embedding(control_semantic_prefix_tokens, self.control_role_embedding, 3),
-                _add_role_embedding(posterior.tokens, self.control_role_embedding, 0),
-                _add_role_embedding(posterior.global_post[None, :], self.control_role_embedding, 0),
-                _add_role_embedding(innovation_token[None, :], self.control_role_embedding, 1),
-                _add_role_embedding(proprio_token[None, :], self.control_role_embedding, 2),
+                _add_role_embedding(control_posterior_tokens, self.control_role_embedding, 0),
+                _add_role_embedding(control_global_post, self.control_role_embedding, 0),
+                _add_role_embedding(control_innovation_token, self.control_role_embedding, 1),
+                _add_role_embedding(control_proprio_token, self.control_role_embedding, 2),
                 _add_role_embedding(control_query_tokens, self.control_role_embedding, 4),
             ],
             dim=0,
@@ -2004,11 +2011,12 @@ class PicfFullCore(nn.Module):
             semantic,
             dropout_prob=self.config.predictive_semantic_dropout_prob,
         )
+        conditioned_physical_pred_tokens = self.physical_pred_to_conditioned_proj(physical_pred_tokens)
         predictive_query_tokens = self.predictive_query_tokens.to(device=self.device, dtype=self.dtype)
         pred_conditioned_tokens = torch.cat(
             [
                 _add_role_embedding(conditioned_semantic_prefix_tokens, self.predictive_conditioned_role_embedding, 1),
-                _add_role_embedding(physical_pred_tokens, self.predictive_conditioned_role_embedding, 0),
+                _add_role_embedding(conditioned_physical_pred_tokens, self.predictive_conditioned_role_embedding, 0),
                 _add_role_embedding(predictive_query_tokens, self.predictive_conditioned_role_embedding, 2),
             ],
             dim=0,
@@ -2018,7 +2026,7 @@ class PicfFullCore(nn.Module):
             pred_tokens,
             num_query_tokens=self.config.predictive_query_tokens,
         )
-        global_pred = predictive_query_state
+        global_pred = self.predictive_state_proj(predictive_query_state)
         prediction_cache = self._prediction_cache_from_global(global_pred)
         return PicfPredictiveState(
             semantic_tokens=semantic.tokens,

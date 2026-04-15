@@ -64,19 +64,31 @@ _RETRYABLE_FIRST_STEP_ERRORS = (
 )
 _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.semantic_prefix_proj.*",
+    "core.posterior_to_control_proj.*",
+    "core.global_post_to_control_proj.*",
+    "core.innovation_to_control_proj.*",
+    "core.proprio_to_control_proj.*",
     "core.control_role_embedding.*",
     "core.predictive_physical_role_embedding.*",
+    "core.physical_pred_to_conditioned_proj.*",
     "core.predictive_conditioned_role_embedding.*",
     "core.control_query_tokens",
     "core.predictive_query_tokens",
     "core.predictive_semantic_world.*",
+    "core.predictive_state_proj.*",
     "semantic_prefix_proj.*",
+    "posterior_to_control_proj.*",
+    "global_post_to_control_proj.*",
+    "innovation_to_control_proj.*",
+    "proprio_to_control_proj.*",
     "control_role_embedding.*",
     "predictive_physical_role_embedding.*",
+    "physical_pred_to_conditioned_proj.*",
     "predictive_conditioned_role_embedding.*",
     "control_query_tokens",
     "predictive_query_tokens",
     "predictive_semantic_world.*",
+    "predictive_state_proj.*",
 )
 _COMPAT_ALLOWED_UNEXPECTED_KEYS = (
     "core.semantic_summary_proj.*",
@@ -889,6 +901,11 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "hidden_dim must be divisible by attention_heads; "
             f"got hidden_dim={args.hidden_dim} attention_heads={args.attention_heads}."
+        )
+    if int(args.semantic_dim) % int(args.attention_heads) != 0:
+        raise ValueError(
+            "semantic_dim must be divisible by attention_heads; "
+            f"got semantic_dim={args.semantic_dim} attention_heads={args.attention_heads}."
         )
     if int(args.semantic_cross_dim) % int(args.attention_heads) != 0:
         raise ValueError(
@@ -2596,15 +2613,9 @@ def train(args: argparse.Namespace) -> None:
                 args.attention_heads,
                 args.future_vote_heads,
             )
-            semantic_projection_mode = (
-                "identity"
-                if int(args.semantic_dim) == int(args.hidden_dim)
-                else f"linear({args.semantic_dim}->{args.hidden_dim})"
-            )
             logging.info(
-                "Semantic-prefix contract: the full PaliGemma token sequence remains width=%s, enters control / conditioned-future trunks as the primary semantic prefix, and uses semantic_prefix_proj=%s; posterior/global_post/innovation/proprio are appended after it, while semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not alter the current forward path.",
+                "Semantic-prefix contract: the full PaliGemma token sequence remains width=%s, enters semantic-width control / conditioned-future trunks as the primary semantic prefix, semantic_prefix_proj=identity, and physical posterior/global_post/innovation/proprio/physical_pred are up-projected into those trunks; semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not alter the current forward path.",
                 args.semantic_dim,
-                semantic_projection_mode,
             )
             logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",

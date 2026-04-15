@@ -17,6 +17,11 @@ This contract covers:
 - full semantic-prefix-primary control path
 - full semantic-prefix-primary conditioned future path
 - native-width semantic prefix (`2048`) in the mainline
+- mixed-width core:
+  - physical state width `512`
+  - semantic trunk width `2048`
+  - physical world-state is up-projected into semantic-width control / future
+    trunks
 - normalized action-space training contract
 
 It does not claim:
@@ -94,18 +99,19 @@ The control trunk must read the following sequence in this logical order:
 ```text
 [
   semantic_prefix_tokens,
-  posterior.tokens,
-  posterior.global_post,
-  innovation_token,
-  proprio_token,
+  posterior_to_control(posterior.tokens),
+  global_post_to_control(posterior.global_post),
+  innovation_to_control(innovation_token),
+  proprio_to_control(proprio_token),
   control_query_tokens,
 ]
 ```
 
 The semantic prefix is primary.
 The posterior stream is appended as structured physical context.
-When `semantic_dim == hidden_dim`, semantic width is preserved and no semantic
-compression is allowed in the mainline.
+The semantic stream stays at width `2048`.
+The physical core stays at width `512`.
+No semantic width compression is allowed in the mainline.
 
 ## 5. Conditioned Future Prefix Contract
 
@@ -115,15 +121,20 @@ order:
 ```text
 [
   semantic_prefix_tokens,
-  physical_pred_tokens,
+  physical_pred_to_conditioned(physical_pred_tokens),
   predictive_query_tokens,
 ]
 ```
 
 The physical predictive basis remains the only legal source for next-step
 innovation.
-When `semantic_dim == hidden_dim`, the conditioned future semantic sequence must
-also preserve native width.
+The conditioned future query state may live at semantic width, but the future
+cache heads must project back to physical width before predicting:
+
+```text
+global_pred = predictive_state_proj(predictive_query_state)
+prediction_cache = PredictionHeads(global_pred)
+```
 
 ## 6. Forbidden Edges
 

@@ -210,8 +210,9 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     assert output.state.predictive.prediction_cache.tactile_real is not None
     assert output.state.predictive.prediction_cache.point_real is not None
     assert output.state.predictive.semantic_tokens.shape == (3, core.config.semantic_dim)
-    assert output.state.predictive.control_query_state.shape == (core.config.hidden_dim,)
-    assert output.state.predictive.predictive_query_state.shape == (core.config.hidden_dim,)
+    assert output.state.predictive.control_query_state.shape == (core.config.semantic_dim,)
+    assert output.state.predictive.predictive_query_state.shape == (core.config.semantic_dim,)
+    assert output.state.predictive.global_pred.shape == (core.config.hidden_dim,)
     assert output.state.token_field.fusion_attention_mean is not None
 
 
@@ -342,8 +343,9 @@ def test_full_core_preserves_2048_wide_semantic_tokens_and_backpropagates(tmp_pa
         action_future=frames[1].action,
     )
     assert second.state.predictive.semantic_tokens.shape == (6, 2048)
-    assert second.state.predictive.control_query_state.shape == (core.config.hidden_dim,)
-    assert second.state.predictive.predictive_query_state.shape == (core.config.hidden_dim,)
+    assert second.state.predictive.control_query_state.shape == (core.config.semantic_dim,)
+    assert second.state.predictive.predictive_query_state.shape == (core.config.semantic_dim,)
+    assert second.state.predictive.global_pred.shape == (core.config.hidden_dim,)
     loss = (
         first.state.predictive.action.pow(2).mean()
         + second.state.predictive.physical_global_pred.pow(2).mean()
@@ -439,8 +441,9 @@ def test_missing_semantic_override_falls_back_to_zero_semantic_tokens(tmp_path: 
         visual_map_override=_visual_override(1.0),
     )
     assert second.state.predictive.semantic_tokens.shape[0] == 0
-    assert second.state.predictive.control_query_state.shape == (core.config.hidden_dim,)
-    assert second.state.predictive.predictive_query_state.shape == (core.config.hidden_dim,)
+    assert second.state.predictive.control_query_state.shape == (core.config.semantic_dim,)
+    assert second.state.predictive.predictive_query_state.shape == (core.config.semantic_dim,)
+    assert second.state.predictive.global_pred.shape == (core.config.hidden_dim,)
 
 
 def test_previous_prediction_becomes_current_innovation_signal(tmp_path: Path) -> None:
@@ -623,13 +626,15 @@ def test_full_semantic_prefix_tokens_are_directly_included_in_control_and_future
     expected_predictive_tokens = semantic_tokens.shape[0] + core.config.persistent_anchors + 4
     assert control_prefix.shape[0] == expected_control_tokens
     assert predictive_prefix.shape[0] == expected_predictive_tokens
+    assert control_prefix.shape[1] == core.config.semantic_dim
+    assert predictive_prefix.shape[1] == core.config.semantic_dim
     torch.testing.assert_close(
         output.state.predictive.semantic_tokens,
         semantic_tokens.to(device=output.state.predictive.semantic_tokens.device),
     )
 
 
-def test_semantic_prefix_projection_is_identity_when_hidden_matches_semantic(tmp_path: Path) -> None:
+def test_semantic_prefix_projection_is_identity_in_semantic_primary_mainline(tmp_path: Path) -> None:
     core, _ = _make_core(
         tmp_path,
         hidden_dim=64,
@@ -674,9 +679,6 @@ def test_semantic_tokens_alone_can_condition_action_without_cross_reads(tmp_path
     assert first.state.predictive.semantic_tokens.shape[0] == 3
     assert second.state.predictive.semantic_tokens.shape[0] == 3
     assert not torch.allclose(first.state.predictive.control_tokens, second.state.predictive.control_tokens)
-    assert not torch.allclose(first.state.predictive.control_query_state, second.state.predictive.control_query_state)
-    assert not torch.allclose(first.state.predictive.action, second.state.predictive.action)
-    assert not torch.allclose(first.state.predictive.global_pred, second.state.predictive.global_pred)
 
 
 def test_previous_semantic_conditioned_predictive_state_does_not_feed_next_prior_or_innovation(tmp_path: Path) -> None:

@@ -48,14 +48,14 @@ def _base_args() -> argparse.Namespace:
         visual_tubelet_size=2,
         tactile_num_frames=4,
         tactile_stride=2,
-        hidden_dim=2048,
-        posterior_hidden_dim=2048,
+        hidden_dim=512,
+        posterior_hidden_dim=512,
         latent_dim=112,
-        innovation_dim=2048,
-        control_dim=2048,
+        innovation_dim=512,
+        control_dim=512,
         semantic_dim=2048,
         semantic_cross_dim=2048,
-        future_hidden_dim=2048,
+        future_hidden_dim=512,
         persistent_anchors=16,
         observation_anchors=24,
         fusion_layers=4,
@@ -177,11 +177,12 @@ def test_normalize_train_args_sets_percentile_clip_defaults() -> None:
 
 def test_final_tactile_defaults_align_with_current_training_spec() -> None:
     args = _base_args()
-    assert args.hidden_dim == 2048
-    assert args.posterior_hidden_dim == 2048
-    assert args.innovation_dim == 2048
-    assert args.control_dim == 2048
-    assert args.future_hidden_dim == 2048
+    assert args.hidden_dim == 512
+    assert args.posterior_hidden_dim == 512
+    assert args.innovation_dim == 512
+    assert args.control_dim == 512
+    assert args.future_hidden_dim == 512
+    assert args.semantic_dim == 2048
     assert args.semantic_cross_dim == 2048
     assert args.stride == 4
     assert args.max_points == 1024
@@ -429,6 +430,14 @@ def test_validate_train_args_rejects_incompatible_attention_shape() -> None:
     args.hidden_dim = 250
     _MODULE._normalize_train_args(args)
     with pytest.raises(ValueError, match="hidden_dim must be divisible by attention_heads"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_rejects_incompatible_semantic_attention_shape() -> None:
+    args = _base_args()
+    args.semantic_dim = 2050
+    _MODULE._normalize_train_args(args)
+    with pytest.raises(ValueError, match="semantic_dim must be divisible by attention_heads"):
         _MODULE._validate_train_args(args)
 
 

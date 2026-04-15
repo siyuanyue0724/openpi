@@ -21,7 +21,7 @@ from openpi.picf.core.config import PicfCoreConfig
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "core" / "pipeline.py"
 README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README.md"
-HANDOFF_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_semantic_prefix_primary_2048_refactor.md"
+HANDOFF_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_semantic_prefix_primary_mixedwidth_refactor.md"
 PLAN_PATH = REPO_ROOT / "plan_readme_ray_geometry.md"
 CALVIN_README_PATH = REPO_ROOT / "docs" / "CALVIN_VALIDATION_README.md"
 FORMAL_CONTRACT_PATH = REPO_ROOT / "PICF_FORMAL_CONTRACT.md"
@@ -171,23 +171,42 @@ def verify_static_contract() -> list[CheckResult]:
             detail="`_predictive_state` injects the full semantic prefix directly into the control trunk.",
         ),
         CheckResult(
+            name="control_prefix_upprojects_physical_world_tokens",
+            ok=all(
+                text in predictive_source
+                for text in (
+                    "control_posterior_tokens = self.posterior_to_control_proj(posterior.tokens)",
+                    "control_global_post = self.global_post_to_control_proj(posterior.global_post[None, :])",
+                    "control_innovation_token = self.innovation_to_control_proj(innovation_token[None, :])",
+                    "control_proprio_token = self.proprio_to_control_proj(proprio_token[None, :])",
+                )
+            ),
+            detail="Physical posterior/global_post/innovation/proprio are up-projected into the semantic-width control trunk.",
+        ),
+        CheckResult(
             name="predictive_conditioned_uses_full_semantic_prefix_primary",
             ok="_add_role_embedding(conditioned_semantic_prefix_tokens, self.predictive_conditioned_role_embedding, 1)" in predictive_source,
             detail="`_predictive_state` injects the full semantic prefix directly into the conditioned future trunk.",
         ),
         CheckResult(
-            name="default_core_widths_are_2048",
-            ok=all(
-                int(value) == 2048
-                for value in (
-                    defaults.hidden_dim,
-                    defaults.posterior_hidden_dim,
-                    defaults.innovation_dim,
-                    defaults.control_dim,
-                    defaults.semantic_dim,
-                    defaults.semantic_cross_dim,
-                    defaults.future_hidden_dim,
-                )
+            name="predictive_conditioned_upprojects_physical_pred_tokens",
+            ok=(
+                "conditioned_physical_pred_tokens = self.physical_pred_to_conditioned_proj(physical_pred_tokens)" in predictive_source
+                and "_add_role_embedding(conditioned_physical_pred_tokens, self.predictive_conditioned_role_embedding, 0)" in predictive_source
+                and "global_pred = self.predictive_state_proj(predictive_query_state)" in predictive_source
+            ),
+            detail="Conditioned future trunk consumes up-projected physical prediction tokens and projects the semantic-width query state back to the physical cache width.",
+        ),
+        CheckResult(
+            name="default_core_widths_are_mixed_512_phys_2048_semantic",
+            ok=(
+                int(defaults.hidden_dim) == 512
+                and int(defaults.posterior_hidden_dim) == 512
+                and int(defaults.innovation_dim) == 512
+                and int(defaults.control_dim) == 512
+                and int(defaults.future_hidden_dim) == 512
+                and int(defaults.semantic_dim) == 2048
+                and int(defaults.semantic_cross_dim) == 2048
             ),
             detail=(
                 "Default core widths are "
@@ -198,14 +217,14 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
-            name="semantic_prefix_projection_is_identity_at_default_width",
-            ok="nn.Identity()" in source and int(defaults.hidden_dim) == int(defaults.semantic_dim),
-            detail="The mainline semantic prefix projection is identity when hidden_dim equals semantic_dim.",
+            name="semantic_prefix_projection_is_identity_in_mainline",
+            ok="self.semantic_prefix_proj = nn.Identity()" in source,
+            detail="The mainline semantic prefix projection is identity because semantic tokens remain native-width.",
         ),
         CheckResult(
             name="control_prefix_includes_explicit_global_post",
-            ok="_add_role_embedding(posterior.global_post[None, :], self.control_role_embedding, 0)" in predictive_source,
-            detail="`_predictive_state` explicitly injects posterior.global_post into control tokens.",
+            ok="control_global_post = self.global_post_to_control_proj(posterior.global_post[None, :])" in predictive_source,
+            detail="`_predictive_state` explicitly injects posterior.global_post into control tokens via up-projection.",
         ),
         CheckResult(
             name="legacy_boolean_advanced_indexing_removed_from_pipeline",
