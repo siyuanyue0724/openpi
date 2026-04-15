@@ -30,6 +30,11 @@ from torch.nn.parameter import UninitializedParameter
 import tqdm.auto as tqdm
 
 try:
+    from torch.distributed.optim import ZeroRedundancyOptimizer
+except Exception:  # pragma: no cover - depends on torch distributed build
+    ZeroRedundancyOptimizer = None
+
+try:
     import wandb
 except Exception:  # pragma: no cover - import availability depends on env
     wandb = None
@@ -666,6 +671,9 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.grad_clip_mode = "percentile"
     else:
         args.grad_clip_mode = str(args.grad_clip_mode).lower()
+    args.optimizer_sharding = str(getattr(args, "optimizer_sharding", "none")).lower()
+    optimizer_checkpoint_mode = str(getattr(args, "optimizer_checkpoint_mode", "auto")).lower().replace("-", "_")
+    args.optimizer_checkpoint_mode = optimizer_checkpoint_mode
     if getattr(args, "grad_clip_percentile", None) is None:
         args.grad_clip_percentile = 75.0
     else:
@@ -829,6 +837,16 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "grad_clip_mode must be one of {'fixed', 'percentile'}, "
             f"got {args.grad_clip_mode!r}."
+        )
+    if str(args.optimizer_sharding) not in {"none", "zero1"}:
+        raise ValueError(
+            "optimizer_sharding must be one of {'none', 'zero1'}, "
+            f"got {args.optimizer_sharding!r}."
+        )
+    if str(args.optimizer_checkpoint_mode) not in {"auto", "full", "model_only"}:
+        raise ValueError(
+            "optimizer_checkpoint_mode must be one of {'auto', 'full', 'model-only'}, "
+            f"got {args.optimizer_checkpoint_mode!r}."
         )
     if float(args.grad_clip_norm) < 0.0:
         raise ValueError(f"grad_clip_norm must be >= 0, got {args.grad_clip_norm}.")
@@ -1819,6 +1837,50 @@ def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
         group["lr"] = lr * scale
 
 
+class _OptimizerCollection:
+    """Small optimizer facade used when Zero-1 needs dtype-partitioned optimizers."""
+
+    def __init__(self, optimizers: list[torch.optim.Optimizer]) -> None:
+        if not optimizers:
+            raise ValueError("_OptimizerCollection requires at least one optimizer.")
+        self.optimizers = list(optimizers)
+        self._refresh_param_groups()
+
+    def _refresh_param_groups(self) -> None:
+        self.param_groups = [group for optimizer in self.optimizers for group in optimizer.param_groups]
+
+    def zero_grad(self, *args: Any, **kwargs: Any) -> None:
+        for optimizer in self.optimizers:
+            optimizer.zero_grad(*args, **kwargs)
+
+    def step(self, *args: Any, **kwargs: Any) -> list[Any]:
+        return [optimizer.step(*args, **kwargs) for optimizer in self.optimizers]
+
+    def consolidate_state_dict(self, *, to: int = 0) -> None:
+        for optimizer in self.optimizers:
+            consolidate = getattr(optimizer, "consolidate_state_dict", None)
+            if callable(consolidate):
+                consolidate(to=to)
+
+    def state_dict(self) -> dict[str, Any]:
+        return {
+            "format": "picf_optimizer_collection_v1",
+            "optimizers": [optimizer.state_dict() for optimizer in self.optimizers],
+        }
+
+    def load_state_dict(self, state_dict: dict[str, Any]) -> None:
+        if state_dict.get("format") != "picf_optimizer_collection_v1":
+            raise ValueError("Optimizer checkpoint is not a PICF optimizer collection.")
+        optimizer_states = state_dict.get("optimizers")
+        if not isinstance(optimizer_states, list) or len(optimizer_states) != len(self.optimizers):
+            raise ValueError(
+                "Optimizer collection checkpoint does not match the current dtype-partitioned optimizer layout."
+            )
+        for optimizer, optimizer_state in zip(self.optimizers, optimizer_states, strict=True):
+            optimizer.load_state_dict(optimizer_state)
+        self._refresh_param_groups()
+
+
 def _checkpoint_dir_for_step(output_dir: Path, step: int) -> Path:
     return output_dir / f"{int(step)}"
 
@@ -1849,6 +1911,17 @@ def _resolve_resume_path(*, output_dir: Path, latest_path: Path) -> Path | None:
     return latest_path
 
 
+def _should_save_optimizer_state(*, args: argparse.Namespace) -> bool:
+    mode = str(getattr(args, "optimizer_checkpoint_mode", "auto")).lower().replace("-", "_")
+    if mode == "full":
+        return True
+    if mode == "model_only":
+        return False
+    if mode != "auto":
+        raise ValueError(f"Unsupported optimizer checkpoint mode: {mode!r}.")
+    return str(getattr(args, "optimizer_sharding", "none")).lower() != "zero1"
+
+
 def _save_checkpoint(
     *,
     output_dir: Path,
@@ -1857,6 +1930,7 @@ def _save_checkpoint(
     step: int,
     args: argparse.Namespace,
     grad_clip_controller: _GradClipController | None = None,
+    save_optimizer_state: bool = True,
 ) -> None:
     module = model.module if isinstance(model, DistributedDataParallel) else model
     final_dir = _checkpoint_dir_for_step(output_dir, step)
@@ -1868,12 +1942,15 @@ def _save_checkpoint(
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
     torch.save(module.state_dict(), tmp_dir / "model.pt")
-    torch.save(optimizer.state_dict(), tmp_dir / "optimizer.pt")
+    if save_optimizer_state:
+        torch.save(optimizer.state_dict(), tmp_dir / "optimizer.pt")
     metadata = {
         "step": int(step),
         "args": vars(args),
         "timestamp": time.time(),
         "checkpoint_format": "picf_trainer_v2",
+        "optimizer_state_saved": bool(save_optimizer_state),
+        "optimizer_checkpoint_mode": str(getattr(args, "optimizer_checkpoint_mode", "auto")),
         "grad_clip_controller": None if grad_clip_controller is None else grad_clip_controller.state_dict(),
     }
     torch.save(metadata, tmp_dir / "metadata.pt")
@@ -1888,6 +1965,26 @@ def _save_checkpoint(
         },
         latest_path,
     )
+
+
+def _consolidate_optimizer_state_for_checkpoint(
+    optimizer: torch.optim.Optimizer,
+    *,
+    rank: int,
+) -> None:
+    """Gather sharded optimizer state onto rank 0 before checkpointing.
+
+    ZeroRedundancyOptimizer shards Adam moments across ranks.  Its
+    `consolidate_state_dict(to=0)` call is collective, so every rank must enter
+    it before rank 0 calls `state_dict()` in `_save_checkpoint`.
+    """
+    consolidate = getattr(optimizer, "consolidate_state_dict", None)
+    if not callable(consolidate):
+        return
+    consolidate(to=0)
+    if int(rank) == 0 and callable(getattr(optimizer, "state_dict", None)):
+        # Fail here, before writing model.pt, if consolidation was incomplete.
+        optimizer.state_dict()
 
 
 def _matches_compat_pattern(name: str, patterns: tuple[str, ...]) -> bool:
@@ -1947,9 +2044,14 @@ def _load_checkpoint(
     module = model.module if isinstance(model, DistributedDataParallel) else model
     if path.is_dir():
         model_state = torch.load(path / "model.pt", map_location=device, weights_only=False)
-        optimizer_state = torch.load(path / "optimizer.pt", map_location=device, weights_only=False)
         metadata = torch.load(path / "metadata.pt", map_location=device, weights_only=False)
-        optimizer_loaded = True
+        optimizer_path = path / "optimizer.pt"
+        optimizer_state = (
+            torch.load(optimizer_path, map_location=device, weights_only=False)
+            if optimizer_path.exists()
+            else None
+        )
+        optimizer_loaded = optimizer_state is not None
         try:
             module.load_state_dict(model_state, strict=True)
         except RuntimeError:
@@ -1985,6 +2087,8 @@ def _load_checkpoint(
                 logging.warning(
                     "Optimizer state dict is incompatible with the current PICF architecture. Reinitializing optimizer."
                 )
+        else:
+            logging.info("No optimizer state found in checkpoint %s; optimizer will be reinitialized.", path)
         if grad_clip_controller is not None and not grad_clip_controller.load_state_dict(metadata.get("grad_clip_controller")):
             logging.info("Gradient clip controller state not restored from checkpoint; starting with fresh history.")
         return int(metadata.get("step", 0))
@@ -2022,11 +2126,14 @@ def _load_checkpoint(
                     shape_mismatches,
                 )
                 optimizer_loaded = False
-    if optimizer_loaded:
+    optimizer_payload = payload.get("optimizer")
+    if optimizer_loaded and optimizer_payload is not None:
         try:
-            optimizer.load_state_dict(payload["optimizer"])
+            optimizer.load_state_dict(optimizer_payload)
         except ValueError:
             logging.warning("Optimizer payload is incompatible with the current PICF architecture. Reinitializing optimizer.")
+    elif optimizer_loaded:
+        logging.info("No optimizer payload found in checkpoint; optimizer will be reinitialized.")
     if grad_clip_controller is not None and not grad_clip_controller.load_state_dict(payload.get("grad_clip_controller")):
         logging.info("Gradient clip controller state not restored from payload; starting with fresh history.")
     return int(payload.get("step", 0))
@@ -2337,6 +2444,36 @@ def _collect_trainable_params(module: torch.nn.Module | None) -> list[torch.nn.P
     return [param for param in module.parameters() if getattr(param, "requires_grad", False)]
 
 
+def _split_optimizer_groups_by_dense_type(groups: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
+    """Partition param groups by tensor type for ZeroRedundancyOptimizer.
+
+    PyTorch ZeroRedundancyOptimizer rejects a single optimizer containing both
+    CUDA float32 and CUDA bfloat16 parameters.  Splitting by `param.type()`
+    preserves each group's lr scale while keeping every ZRO instance
+    homogeneous.
+    """
+    partitions: dict[str, list[dict[str, Any]]] = {}
+    order: list[str] = []
+    for group in groups:
+        params_by_type: dict[str, list[torch.nn.Parameter]] = {}
+        type_order: list[str] = []
+        for param in group["params"]:
+            tensor_type = str(param.type())
+            if tensor_type not in params_by_type:
+                params_by_type[tensor_type] = []
+                type_order.append(tensor_type)
+            params_by_type[tensor_type].append(param)
+        for tensor_type in type_order:
+            if tensor_type not in partitions:
+                partitions[tensor_type] = []
+                order.append(tensor_type)
+            split_group = {key: value for key, value in group.items() if key != "params"}
+            split_group["params"] = params_by_type[tensor_type]
+            split_group["dense_type"] = tensor_type
+            partitions[tensor_type].append(split_group)
+    return [(tensor_type, partitions[tensor_type]) for tensor_type in order]
+
+
 def _build_optimizer(
     model: _PicfWindowTrainer,
     *,
@@ -2384,20 +2521,42 @@ def _build_optimizer(
     _append_group("picf_core", core_params, 1.0)
     if not groups:
         raise RuntimeError("No trainable parameters found for optimizer; check backbone and semantic trainability settings.")
-    optimizer = torch.optim.AdamW(
-        groups,
-        lr=args.lr,
-        betas=(0.9, 0.95),
-        weight_decay=args.weight_decay,
-    )
+    optimizer_sharding = str(getattr(args, "optimizer_sharding", "none")).lower()
+    if optimizer_sharding == "zero1":
+        if not (dist.is_available() and dist.is_initialized() and dist.get_world_size() > 1):
+            raise RuntimeError("optimizer_sharding=zero1 requires an initialized multi-rank distributed process group.")
+        if ZeroRedundancyOptimizer is None:
+            raise RuntimeError("optimizer_sharding=zero1 requires torch.distributed.optim.ZeroRedundancyOptimizer.")
+        partitioned_groups = _split_optimizer_groups_by_dense_type(groups)
+        zero_optimizers = [
+            ZeroRedundancyOptimizer(
+                dtype_groups,
+                optimizer_class=torch.optim.AdamW,
+                lr=args.lr,
+                betas=(0.9, 0.95),
+                weight_decay=args.weight_decay,
+            )
+            for _dense_type, dtype_groups in partitioned_groups
+        ]
+        optimizer = zero_optimizers[0] if len(zero_optimizers) == 1 else _OptimizerCollection(zero_optimizers)
+    else:
+        optimizer = torch.optim.AdamW(
+            groups,
+            lr=args.lr,
+            betas=(0.9, 0.95),
+            weight_decay=args.weight_decay,
+        )
+    reported_groups = optimizer.param_groups if optimizer_sharding == "zero1" else groups
     group_info = [
         {
             "name": group.get("name", f"group_{idx}"),
             "lr": float(group["lr"]),
             "lr_scale": float(group.get("lr_scale", 1.0)),
             "num_params": int(sum(_safe_numel(param) for param in group["params"])),
+            "optimizer_sharding": optimizer_sharding,
+            "dense_type": group.get("dense_type"),
         }
-        for idx, group in enumerate(groups)
+        for idx, group in enumerate(reported_groups)
     ]
     return optimizer, group_info
 
@@ -2561,7 +2720,7 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s wandb=%s",
+                "Training config: world_size=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s wandb=%s",
                 world_size,
                 args.accum_steps,
                 effective_global_batch,
@@ -2570,6 +2729,8 @@ def train(args: argparse.Namespace) -> None:
                 args.min_lr,
                 args.warmup_steps,
                 args.save_interval,
+                args.optimizer_sharding,
+                args.optimizer_checkpoint_mode,
                 bool(args.wandb_enabled and args.wandb_mode != "disabled"),
             )
             logging.info(
@@ -2666,10 +2827,11 @@ def train(args: argparse.Namespace) -> None:
                     logging.info("Fault dump path: %s", fault_dump_path)
                 for group in optimizer_group_info:
                     logging.info(
-                        "Optimizer group: name=%s lr=%s num_params=%s",
+                        "Optimizer group: name=%s lr=%s num_params=%s sharding=%s",
                         group["name"],
                         group["lr"],
                         group["num_params"],
+                        group.get("optimizer_sharding", "none"),
                     )
 
         for step in range(start_step, args.num_train_steps):
@@ -2946,23 +3108,27 @@ def train(args: argparse.Namespace) -> None:
                 retried_windows_interval = 0
 
             should_save = ((step + 1) % args.save_interval == 0) or ((step + 1) == args.num_train_steps)
-            if is_main and should_save:
-                _save_checkpoint(
-                    output_dir=output_dir,
-                    model=model,
-                    optimizer=optimizer,
-                    step=step + 1,
-                    args=args,
-                    grad_clip_controller=grad_clip_controller,
-                )
-                message = f"[picf_core_train] saved checkpoint step={step + 1} -> {_checkpoint_dir_for_step(output_dir, step + 1)}"
-                if pbar is not None:
-                    pbar.write(message)
-                else:
-                    print(message, flush=True)
-                if wandb_active:
-                    wandb.log({"checkpoint_step": int(step + 1)}, step=int(step + 1))
             if should_save:
+                save_optimizer_state = _should_save_optimizer_state(args=args)
+                if save_optimizer_state:
+                    _consolidate_optimizer_state_for_checkpoint(optimizer, rank=rank)
+                if is_main:
+                    _save_checkpoint(
+                        output_dir=output_dir,
+                        model=model,
+                        optimizer=optimizer,
+                        step=step + 1,
+                        args=args,
+                        grad_clip_controller=grad_clip_controller,
+                        save_optimizer_state=save_optimizer_state,
+                    )
+                    message = f"[picf_core_train] saved checkpoint step={step + 1} -> {_checkpoint_dir_for_step(output_dir, step + 1)}"
+                    if pbar is not None:
+                        pbar.write(message)
+                    else:
+                        print(message, flush=True)
+                    if wandb_active:
+                        wandb.log({"checkpoint_step": int(step + 1)}, step=int(step + 1))
                 _distributed_barrier(use_ddp=use_ddp, device=device)
 
     finally:
@@ -3005,6 +3171,24 @@ def main() -> None:
     parser.add_argument("--min-lr", type=float, default=2e-5)
     parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--optimizer-sharding",
+        choices=["none", "zero1"],
+        default="none",
+        help=(
+            "Optimizer state sharding mode. 'zero1' uses PyTorch ZeroRedundancyOptimizer "
+            "to shard AdamW moments across DDP ranks without freezing or changing model capacity."
+        ),
+    )
+    parser.add_argument(
+        "--optimizer-checkpoint-mode",
+        choices=["auto", "full", "model-only"],
+        default="auto",
+        help=(
+            "Optimizer checkpoint policy. 'auto' saves full optimizer state for ordinary AdamW "
+            "and model-only checkpoints for zero1, avoiding expensive full-state consolidation."
+        ),
+    )
     parser.add_argument("--grad-clip-norm", type=float, default=1.0)
     parser.add_argument("--grad-clip-mode", choices=["fixed", "percentile"], default="percentile")
     parser.add_argument("--grad-clip-percentile", type=float, default=75.0)

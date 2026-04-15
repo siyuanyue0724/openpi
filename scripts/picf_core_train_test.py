@@ -74,6 +74,8 @@ def _base_args() -> argparse.Namespace:
         lr=2e-4,
         min_lr=2e-5,
         weight_decay=1e-4,
+        optimizer_sharding="none",
+        optimizer_checkpoint_mode="auto",
         grad_clip_norm=1.0,
         grad_clip_mode="percentile",
         grad_clip_percentile=75.0,
@@ -547,6 +549,94 @@ def test_build_optimizer_preserves_foundation_lr_scales() -> None:
     assert name_to_scale["tactile_backbone"] == pytest.approx(0.25)
     assert name_to_scale["semantic_backbone"] == pytest.approx(0.25)
     assert name_to_scale["picf_core"] == pytest.approx(1.0)
+    assert {item["optimizer_sharding"] for item in group_info} == {"none"}
+
+
+def test_build_optimizer_rejects_zero1_without_initialized_distributed(monkeypatch: pytest.MonkeyPatch) -> None:
+    trainer = torch.nn.Module()
+    trainer.core = types.SimpleNamespace(
+        point_feature_extractor=torch.nn.Linear(3, 4, bias=False),
+        visual_encoder=None,
+        tactile_encoder=None,
+    )
+    trainer.semantic_encoder = None
+    args = _base_args()
+    args.optimizer_sharding = "zero1"
+
+    monkeypatch.setattr(_MODULE.dist, "is_available", lambda: True)
+    monkeypatch.setattr(_MODULE.dist, "is_initialized", lambda: False)
+
+    with pytest.raises(RuntimeError, match="optimizer_sharding=zero1 requires an initialized multi-rank"):
+        _MODULE._build_optimizer(trainer, args=args)
+
+
+def test_split_optimizer_groups_by_dense_type_preserves_group_metadata() -> None:
+    fp32 = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
+    bf16 = torch.nn.Parameter(torch.ones(3, dtype=torch.bfloat16))
+    groups = [
+        {
+            "name": "mixed",
+            "params": [fp32, bf16],
+            "lr": 0.01,
+            "lr_scale": 0.25,
+        }
+    ]
+
+    partitions = _MODULE._split_optimizer_groups_by_dense_type(groups)
+
+    assert [dense_type for dense_type, _groups in partitions] == [str(fp32.type()), str(bf16.type())]
+    assert [part_groups[0]["params"] for _dense_type, part_groups in partitions] == [[fp32], [bf16]]
+    assert [part_groups[0]["name"] for _dense_type, part_groups in partitions] == ["mixed", "mixed"]
+    assert [part_groups[0]["lr_scale"] for _dense_type, part_groups in partitions] == [0.25, 0.25]
+    assert [part_groups[0]["dense_type"] for _dense_type, part_groups in partitions] == [
+        str(fp32.type()),
+        str(bf16.type()),
+    ]
+
+
+def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:
+    param_a = torch.nn.Parameter(torch.tensor([1.0]))
+    param_b = torch.nn.Parameter(torch.tensor([2.0]))
+    opt_a = torch.optim.SGD([{"params": [param_a], "lr": 0.1, "lr_scale": 1.0}], lr=0.1)
+    opt_b = torch.optim.SGD([{"params": [param_b], "lr": 0.01, "lr_scale": 0.1}], lr=0.01)
+    collection = _MODULE._OptimizerCollection([opt_a, opt_b])
+
+    assert collection.param_groups == opt_a.param_groups + opt_b.param_groups
+    _MODULE._set_optimizer_lr(collection, 0.2)
+    assert opt_a.param_groups[0]["lr"] == pytest.approx(0.2)
+    assert opt_b.param_groups[0]["lr"] == pytest.approx(0.02)
+
+    state = collection.state_dict()
+    restored = _MODULE._OptimizerCollection(
+        [
+            torch.optim.SGD([{"params": [torch.nn.Parameter(torch.tensor([3.0]))], "lr": 1.0, "lr_scale": 1.0}], lr=1.0),
+            torch.optim.SGD([{"params": [torch.nn.Parameter(torch.tensor([4.0]))], "lr": 1.0, "lr_scale": 0.1}], lr=1.0),
+        ]
+    )
+    restored.load_state_dict(state)
+    assert len(restored.param_groups) == 2
+    assert restored.state_dict()["format"] == "picf_optimizer_collection_v1"
+
+
+def test_consolidate_optimizer_state_for_checkpoint_is_collective_on_zero_style_optimizer() -> None:
+    class _FakeShardedOptimizer:
+        def __init__(self) -> None:
+            self.calls: list[tuple[str, int | None]] = []
+
+        def consolidate_state_dict(self, *, to: int) -> None:
+            self.calls.append(("consolidate", int(to)))
+
+        def state_dict(self) -> dict[str, object]:
+            self.calls.append(("state_dict", None))
+            return {}
+
+    rank0 = _FakeShardedOptimizer()
+    _MODULE._consolidate_optimizer_state_for_checkpoint(rank0, rank=0)
+    assert rank0.calls == [("consolidate", 0), ("state_dict", None)]
+
+    rank1 = _FakeShardedOptimizer()
+    _MODULE._consolidate_optimizer_state_for_checkpoint(rank1, rank=1)
+    assert rank1.calls == [("consolidate", 0)]
 
 
 def test_build_optimizer_reports_zero_num_params_for_uninitialized_lazy_modules() -> None:
@@ -1103,6 +1193,55 @@ def test_checkpoint_roundtrip_preserves_trainable_semantic_state(tmp_path: Path)
     torch.testing.assert_close(reloaded.core.proj.weight, trainer.core.proj.weight)
     torch.testing.assert_close(reloaded.semantic_encoder.weight, trainer.semantic_encoder.weight)
     assert list(reloaded_controller.history) == [1.0, 2.0, 3.0, 4.0]
+
+
+def test_model_only_checkpoint_roundtrip_reinitializes_optimizer(tmp_path: Path) -> None:
+    class _DummyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(3, 2, bias=False)
+
+    trainer = torch.nn.Module()
+    trainer.core = _DummyCore()
+    trainer.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        trainer.core.proj.weight.fill_(0.75)
+        trainer.semantic_encoder.weight.fill_(1.25)
+
+    optimizer = torch.optim.AdamW(trainer.parameters(), lr=1e-3)
+    args = argparse.Namespace(optimizer_checkpoint_mode="model_only")
+    output_dir = tmp_path / "picf_model_only_ckpt"
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    _MODULE._save_checkpoint(
+        output_dir=output_dir,
+        model=trainer,
+        optimizer=optimizer,
+        step=11,
+        args=args,
+        save_optimizer_state=False,
+    )
+
+    ckpt_dir = output_dir / "11"
+    assert (ckpt_dir / "model.pt").exists()
+    assert not (ckpt_dir / "optimizer.pt").exists()
+    metadata = torch.load(ckpt_dir / "metadata.pt", map_location="cpu", weights_only=False)
+    assert metadata["optimizer_state_saved"] is False
+
+    reloaded = torch.nn.Module()
+    reloaded.core = _DummyCore()
+    reloaded.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    reloaded_optimizer = torch.optim.AdamW(reloaded.parameters(), lr=1e-3)
+    step = _MODULE._load_checkpoint(
+        path=ckpt_dir,
+        model=reloaded,
+        optimizer=reloaded_optimizer,
+        device=torch.device("cpu"),
+    )
+
+    assert step == 11
+    torch.testing.assert_close(reloaded.core.proj.weight, trainer.core.proj.weight)
+    torch.testing.assert_close(reloaded.semantic_encoder.weight, trainer.semantic_encoder.weight)
 
 
 def test_checkpoint_loader_accepts_legacy_core_only_state(tmp_path: Path) -> None:
