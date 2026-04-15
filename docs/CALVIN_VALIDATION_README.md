@@ -111,10 +111,21 @@ Do not use:
 - old sidecar-primary checkpoints
 
 For the current `4 x A100 40GB` cloud machine, the last safe empirical setting
-was:
+for the older 384-width model was:
 
 - `accum_steps=1`
 - effective global batch `4`
+
+For the current native-2048 refactor, the clean cloud trial
+
+- `4 x A100 40GB`
+- `accum_steps=1`
+- `save_interval=5000`
+- percentile clip `75 / 100`
+
+was code-correct but not hardware-feasible: it OOMed at the first optimizer
+step while trying to allocate an additional `64 MiB` with roughly `38.48 GiB`
+already allocated on a `39.49 GiB` card.
 
 Recommended command:
 
@@ -141,6 +152,9 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4
   --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
   --exp-name picf_semantic_prefix_primary_2048_a4_acc1_pct75_clean_v1
 ```
+
+This command is the verified clean-start launch path for the 2048 refactor, but
+it is not currently expected to finish on `4 x A100 40GB`.
 
 ## 6. Serving / Rollout
 

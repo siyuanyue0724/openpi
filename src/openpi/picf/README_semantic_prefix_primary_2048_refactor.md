@@ -444,21 +444,40 @@ The verifier now points at this document as the canonical handoff and checks:
 Latest local verification after the 2048 refactor:
 
 - wide pytest suite:
-  - `134 passed`
+  - `135 passed`
 - `python scripts/verify_picf_contract.py`:
   - static checks: `PASS`
   - targeted invariance regressions: `10 passed`
-  - core regression suite: `113 passed`
+  - core regression suite: `114 passed`
   - smoke training check: `PASS`
 
 Latest cloud verification after syncing the 2048 refactor:
 
 - key pytest suite:
-  - `91 passed`
+  - `92 passed`
 - `python scripts/verify_picf_contract.py --skip-smoke`:
   - static checks: `PASS`
   - targeted invariance regressions: `10 passed`
-  - core regression suite: `113 passed`
+  - core regression suite: `114 passed`
+
+Latest cloud clean training trial on `4 x A100 40GB`:
+
+- launch mode:
+  - clean start
+  - `accum_steps=1`
+  - `save_interval=5000`
+  - percentile grad clipping `75/100`
+- outcome:
+  - model initialization completed serially across ranks
+  - run reached optimizer state allocation
+  - first optimizer step failed with CUDA OOM
+  - observed failure:
+    - `torch.OutOfMemoryError: Tried to allocate 64.00 MiB`
+    - failure occurred with roughly `38.48 GiB` already allocated on a `39.49 GiB` card
+
+So the 2048-width implementation is code-correct and test-clean, but it is not
+currently trainable on `4 x A100 40GB` with the full foundation stack at
+`accum_steps=1`.
 
 ## 12. Clean Training Deployment
 
@@ -476,9 +495,9 @@ python scripts/calvin/precompute_tactile_contact_calibration.py \
   --output-dir /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8
 ```
 
-### 12.2 Clean 4-card start
+### 12.2 Clean 4-card trial result
 
-The requested launch mode for this refactor is:
+The requested cloud trial for this refactor was:
 
 - clean start
 - `4 x A100 40GB`
@@ -488,7 +507,10 @@ The requested launch mode for this refactor is:
   - window `100`
   - percentile `75`
 
-### 12.3 Recommended clean training command
+That exact configuration is not currently viable on this hardware. The run
+fails at the first optimizer step with CUDA OOM after serial model build.
+
+### 12.3 Trial command used
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4 \
@@ -525,3 +547,6 @@ The current mainline is now:
 - language-free physical posterior / innovation contract
 
 This is the version that should be treated as the current PICF spec.
+It is mathematically and script-level validated, but the full 2048-width clean
+training configuration currently exceeds the practical memory budget of the
+tested `4 x A100 40GB` machine.
