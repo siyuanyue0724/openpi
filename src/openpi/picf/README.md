@@ -2,7 +2,7 @@
 
 The current canonical PICF handoff and deployment document is:
 
-- [`README_semantic_prefix_primary_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_refactor.md)
+- [`README_semantic_prefix_primary_2048_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_2048_refactor.md)
 
 The current CALVIN validation and rollout document is:
 
@@ -17,8 +17,9 @@ The current formal contract is:
 PICF now uses a language-free physical core together with a full
 semantic-prefix-primary control and conditioned-future path. The physical
 posterior, physical predictive cache, and next-step innovation remain
-language-free. The full projected PaliGemma token sequence enters the control
-and conditioned-future trunks directly, while `posterior.tokens` and
-`posterior.global_post` are appended as structured world-state context.
+language-free. The full PaliGemma token sequence now enters the control and
+conditioned-future trunks at the native `2048` width, while `posterior.tokens`
+and `posterior.global_post` are appended as structured world-state context.
 
-Do not use the obsolete sidecar-primary notes as the current spec.
+Do not use the obsolete sidecar-primary notes or the earlier 384-width
+semantic-prefix notes as the current spec.

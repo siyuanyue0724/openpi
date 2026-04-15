@@ -676,7 +676,11 @@ class PicfFullCore(nn.Module):
         self.posterior_self = TransformerStack(hidden_dim, heads, self.config.posterior_layers)
         self.posterior_pool = AttentionPool(hidden_dim)
 
-        self.semantic_prefix_proj = nn.LazyLinear(hidden_dim)
+        self.semantic_prefix_proj = (
+            nn.Identity()
+            if int(self.config.semantic_dim) == int(hidden_dim)
+            else nn.LazyLinear(hidden_dim)
+        )
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
         self.control_role_embedding = nn.Embedding(5, hidden_dim)

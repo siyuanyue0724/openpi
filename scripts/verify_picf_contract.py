@@ -15,12 +15,13 @@ if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
 from picf_core_train_smoke import run_smoke
+from openpi.picf.core.config import PicfCoreConfig
 
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "core" / "pipeline.py"
 README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README.md"
-HANDOFF_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_semantic_prefix_primary_refactor.md"
+HANDOFF_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_semantic_prefix_primary_2048_refactor.md"
 PLAN_PATH = REPO_ROOT / "plan_readme_ray_geometry.md"
 CALVIN_README_PATH = REPO_ROOT / "docs" / "CALVIN_VALIDATION_README.md"
 FORMAL_CONTRACT_PATH = REPO_ROOT / "PICF_FORMAL_CONTRACT.md"
@@ -94,6 +95,7 @@ def verify_static_contract() -> list[CheckResult]:
     source = _read(PIPELINE_PATH)
     wrapper_source = _read(PALIGEMMA_WRAPPER_PATH)
     tree = ast.parse(source)
+    defaults = PicfCoreConfig()
 
     posterior_node = _function_node(tree, "_posterior_update")
     posterior_attrs = _attribute_strings(posterior_node)
@@ -172,6 +174,33 @@ def verify_static_contract() -> list[CheckResult]:
             name="predictive_conditioned_uses_full_semantic_prefix_primary",
             ok="_add_role_embedding(conditioned_semantic_prefix_tokens, self.predictive_conditioned_role_embedding, 1)" in predictive_source,
             detail="`_predictive_state` injects the full semantic prefix directly into the conditioned future trunk.",
+        ),
+        CheckResult(
+            name="default_core_widths_are_2048",
+            ok=all(
+                int(value) == 2048
+                for value in (
+                    defaults.hidden_dim,
+                    defaults.posterior_hidden_dim,
+                    defaults.innovation_dim,
+                    defaults.control_dim,
+                    defaults.semantic_dim,
+                    defaults.semantic_cross_dim,
+                    defaults.future_hidden_dim,
+                )
+            ),
+            detail=(
+                "Default core widths are "
+                f"hidden={defaults.hidden_dim} posterior_hidden={defaults.posterior_hidden_dim} "
+                f"innovation={defaults.innovation_dim} control={defaults.control_dim} "
+                f"semantic={defaults.semantic_dim} semantic_cross={defaults.semantic_cross_dim} "
+                f"future_hidden={defaults.future_hidden_dim}."
+            ),
+        ),
+        CheckResult(
+            name="semantic_prefix_projection_is_identity_at_default_width",
+            ok="nn.Identity()" in source and int(defaults.hidden_dim) == int(defaults.semantic_dim),
+            detail="The mainline semantic prefix projection is identity when hidden_dim equals semantic_dim.",
         ),
         CheckResult(
             name="control_prefix_includes_explicit_global_post",

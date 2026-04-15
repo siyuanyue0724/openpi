@@ -16,6 +16,7 @@ This contract covers:
 - explicit innovation construction from previous physical predictive cache
 - full semantic-prefix-primary control path
 - full semantic-prefix-primary conditioned future path
+- native-width semantic prefix (`2048`) in the mainline
 - normalized action-space training contract
 
 It does not claim:
@@ -103,6 +104,8 @@ The control trunk must read the following sequence in this logical order:
 
 The semantic prefix is primary.
 The posterior stream is appended as structured physical context.
+When `semantic_dim == hidden_dim`, semantic width is preserved and no semantic
+compression is allowed in the mainline.
 
 ## 5. Conditioned Future Prefix Contract
 
@@ -119,6 +122,8 @@ order:
 
 The physical predictive basis remains the only legal source for next-step
 innovation.
+When `semantic_dim == hidden_dim`, the conditioned future semantic sequence must
+also preserve native width.
 
 ## 6. Forbidden Edges
 

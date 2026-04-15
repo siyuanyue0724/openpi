@@ -2596,9 +2596,15 @@ def train(args: argparse.Namespace) -> None:
                 args.attention_heads,
                 args.future_vote_heads,
             )
+            semantic_projection_mode = (
+                "identity"
+                if int(args.semantic_dim) == int(args.hidden_dim)
+                else f"linear({args.semantic_dim}->{args.hidden_dim})"
+            )
             logging.info(
-                "Semantic-prefix contract: the full PaliGemma token sequence remains width=%s, is projected posterior-late, and enters control / conditioned-future trunks as the primary semantic prefix; posterior/global_post/innovation/proprio are appended after it, while semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not alter the current forward path.",
+                "Semantic-prefix contract: the full PaliGemma token sequence remains width=%s, enters control / conditioned-future trunks as the primary semantic prefix, and uses semantic_prefix_proj=%s; posterior/global_post/innovation/proprio are appended after it, while semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not alter the current forward path.",
                 args.semantic_dim,
+                semantic_projection_mode,
             )
             logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",

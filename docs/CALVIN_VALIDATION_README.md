@@ -1,11 +1,11 @@
 # CALVIN Validation README
 
 This document is the current executable validation guide for CALVIN under the
-present PICF semantic-prefix-primary codebase.
+present PICF semantic-prefix-primary 2048-width codebase.
 
 The canonical architecture handoff is:
 
-- [`README_semantic_prefix_primary_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_refactor.md)
+- [`README_semantic_prefix_primary_2048_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_2048_refactor.md)
 
 The formal contract is:
 
@@ -51,7 +51,8 @@ Current contract meaning:
 - semantic does not affect physical posterior
 - semantic does not affect `physical_prediction_cache`
 - next innovation reads only `previous.predictive.physical_prediction_cache`
-- control and conditioned future directly consume the full semantic prefix
+- control and conditioned future directly consume the full semantic prefix at
+  native width `2048`
 - `posterior.global_post` explicitly enters control
 
 ## 3. Trainer Smoke Validation
@@ -100,7 +101,8 @@ Required outputs:
 
 ## 5. Clean Training
 
-The current intended training path is clean-start semantic-prefix-primary.
+The current intended training path is clean-start semantic-prefix-primary at
+native width `2048`.
 
 Do not use:
 
@@ -137,7 +139,7 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4
   --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
   --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
   --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
-  --exp-name picf_semantic_prefix_primary_a4_acc1_pct75_clean_v1
+  --exp-name picf_semantic_prefix_primary_2048_a4_acc1_pct75_clean_v1
 ```
 
 ## 6. Serving / Rollout

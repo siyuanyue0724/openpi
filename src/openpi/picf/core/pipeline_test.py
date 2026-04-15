@@ -629,6 +629,25 @@ def test_full_semantic_prefix_tokens_are_directly_included_in_control_and_future
     )
 
 
+def test_semantic_prefix_projection_is_identity_when_hidden_matches_semantic(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        hidden_dim=64,
+        posterior_hidden_dim=64,
+        innovation_dim=64,
+        control_dim=64,
+        semantic_dim=64,
+        semantic_cross_dim=64,
+        future_hidden_dim=64,
+        attention_heads=4,
+    )
+    assert isinstance(core.semantic_prefix_proj, torch.nn.Identity)
+    semantic_tokens = torch.randn((5, core.config.semantic_dim), dtype=torch.float32)
+    context = core._project_semantic_context(tokens_raw=semantic_tokens)
+    torch.testing.assert_close(context.tokens, semantic_tokens.to(device=context.tokens.device))
+    torch.testing.assert_close(context.prefix_tokens, semantic_tokens.to(device=context.prefix_tokens.device))
+
+
 def test_semantic_tokens_alone_can_condition_action_without_cross_reads(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
