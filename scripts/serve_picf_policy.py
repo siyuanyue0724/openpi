@@ -182,6 +182,19 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
                 semantic_override=semantic_override,
                 action_future=None,
             )
+            if (
+                semantic_override is not None
+                and bool(getattr(self._semantic_encoder, "supports_pi0_action_generation", lambda: False)())
+            ):
+                action_chunk = self._semantic_encoder.sample_action_chunk(
+                    semantic_override,
+                    extra_prefix_tokens=output.state.predictive.action_condition_tokens,
+                )
+                output.state.predictive = self._core.refresh_predictive_state_for_action(
+                    observation,
+                    output.state,
+                    action_future=action_chunk,
+                )
         self._previous = output.state
         action = output.state.predictive.action.detach().to(device="cpu", dtype=torch.float32).numpy()
         if self._action_normalizer is not None:

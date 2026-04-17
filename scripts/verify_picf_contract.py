@@ -21,11 +21,12 @@ from openpi.picf.core.config import PicfCoreConfig
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "core" / "pipeline.py"
 README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README.md"
-HANDOFF_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_semantic_prefix_primary_mixedwidth_refactor.md"
-PLAN_PATH = REPO_ROOT / "plan_readme_ray_geometry.md"
+V21_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_v2.1.md"
 CALVIN_README_PATH = REPO_ROOT / "docs" / "CALVIN_VALIDATION_README.md"
 FORMAL_CONTRACT_PATH = REPO_ROOT / "PICF_FORMAL_CONTRACT.md"
 PALIGEMMA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "paligemma" / "wrapper.py"
+TRAINER_SCRIPT_PATH = REPO_ROOT / "scripts" / "picf_core_train.py"
+SERVE_SCRIPT_PATH = REPO_ROOT / "scripts" / "serve_picf_policy.py"
 
 
 @dataclass
@@ -94,6 +95,8 @@ def _call_order(source: str, func_source: str, call_texts: list[str]) -> CheckRe
 def verify_static_contract() -> list[CheckResult]:
     source = _read(PIPELINE_PATH)
     wrapper_source = _read(PALIGEMMA_WRAPPER_PATH)
+    trainer_source = _read(TRAINER_SCRIPT_PATH)
+    serve_source = _read(SERVE_SCRIPT_PATH)
     tree = ast.parse(source)
     defaults = PicfCoreConfig()
 
@@ -110,11 +113,37 @@ def verify_static_contract() -> list[CheckResult]:
 
     predictive_node = _function_node(tree, "_predictive_state")
     predictive_source = _node_source(source, predictive_node)
+    current_targets_node = _function_node(tree, "_current_targets")
+    current_targets_source = _node_source(source, current_targets_node)
 
     step_node = _function_node(tree, "step")
     step_source = _node_source(source, step_node)
 
     checks = [
+        CheckResult(
+            name="paligemma_wrapper_restores_pi05_expert_stack",
+            ok=(
+                "PaliGemmaWithExpertModel" in wrapper_source
+                and "self.paligemma_with_expert = self._build_paligemma_with_expert(" in wrapper_source
+                and "self.action_in_proj = nn.Linear(self.model_action_dim" in wrapper_source
+                and "self.time_mlp_in = nn.Linear(" in wrapper_source
+            ),
+            detail="PICF semantic wrapper restores the PI0.5 expert stack and suffix action projections.",
+        ),
+        CheckResult(
+            name="paligemma_tokenization_injects_state_into_prompt",
+            ok="self.tokenizer.tokenize(str(prompt), state=state)" in wrapper_source,
+            detail="PICF semantic tokenization injects robot state back into the PI0.5 prompt path.",
+        ),
+        CheckResult(
+            name="paligemma_flow_training_recovers_denoised_chunk_not_velocity",
+            ok=(
+                "def _recover_flow_target(" in wrapper_source
+                and "predicted_chunk = _recover_flow_target(x_t, v_t, time_expanded).detach()" in wrapper_source
+                and '"predicted_chunk": predicted_chunk[0]' in wrapper_source
+            ),
+            detail="PI0.5 flow training recovers the denoised chunk estimate x_t - t * v_t instead of treating velocity as the action chunk.",
+        ),
         CheckResult(
             name="posterior_update_excludes_semantic",
             ok="semantic" not in posterior_source and not any("semantic" in attr for attr in posterior_attrs),
@@ -164,6 +193,81 @@ def verify_static_contract() -> list[CheckResult]:
             name="task_sidecar_removed_from_pipeline",
             ok=all(text not in source for text in ("_build_task_anchors(", "task_anchors=", "task_query_tokens")),
             detail="Task-anchor sidecar path has been removed from the core pipeline.",
+        ),
+        CheckResult(
+            name="live_visual_native_first_competition_path",
+            ok=(
+                "return _to_tensor(fmap.current_map(use_last_two_mean=self.visual_config.use_last_two_mean), device=self.device, dtype=self.dtype)"
+                in source
+                and "all_tokens = torch.cat([point_tokens, tactile_tokens_active, context_tokens], dim=0)" in source
+                and "queries, visual_weights = self.visual_native_reread(queries, dense_memory.visual_payload[None, :])" in source
+                and "queries, attn_public = self.obs_reader(queries, token_field.fused_tokens[None, :])" in source
+            ),
+            detail=(
+                "Live PICF observation competition is now visual-native-first: native V-JEPA payload is re-read "
+                "before the public fused point/tactile/context path."
+            ),
+        ),
+        CheckResult(
+            name="live_visual_native_reread_is_active_in_posterior",
+            ok=(
+                "self.visual_native_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)" in source
+                and "dense_memory.visual_payload" in posterior_source
+                and "visual_read, _ = self.visual_native_reread(" in posterior_source
+            ),
+            detail="Live PICF posterior now re-reads native visual payload after anchor competition.",
+        ),
+        CheckResult(
+            name="live_visual_innovation_uses_native_latent_probes",
+            ok=(
+                "self.visual_latent_queries = nn.Parameter(" in source
+                and "def _visual_latent_target(" in source
+                and 'targets["visual_latent"] = self._visual_latent_target(dense_memory)' in current_targets_source
+            ),
+            detail="Live PICF visual innovation target now uses latent probes read from native current-step V-JEPA payload.",
+        ),
+        CheckResult(
+            name="live_anytouch_public_path_uses_group_routing_proposals",
+            ok=all(
+                text in source
+                for text in (
+                    "sensor.pooled_feature.to(device=self.device, dtype=self.dtype)",
+                    "self.tactile_group_route_queries = nn.Parameter(torch.zeros((self.config.tactile_group_proposals, hidden_dim)))",
+                    "route_tokens, _ = self.tactile_route_reread(route_queries, dense_group[None, :])",
+                    "tactile_group_ids = torch.cat(proposal_group_ids, dim=0)",
+                )
+            ),
+            detail=(
+                "Live PICF tactile public routing now uses pooled sensor proposals plus multi-proposal group routing; "
+                "ownership stays group-level via tactile_group_ids."
+            ),
+        ),
+        CheckResult(
+            name="live_tactile_group_winner_read_is_active_in_posterior",
+            ok=(
+                "routing_mass_tactile" in source
+                and "dense_memory.tactile_group_tokens" in posterior_source
+                and "tactile_read, _ = self.tactile_native_reread(" in posterior_source
+            ),
+            detail="Live PICF posterior now uses tactile group routing plus winner-read over full dense tactile tokens.",
+        ),
+        CheckResult(
+            name="live_tactile_innovation_uses_dense_latent_plus_map_and_aux",
+            ok=(
+                "self.tactile_latent_queries = nn.Parameter(" in source
+                and "def _tactile_latent_target(" in source
+                and 'targets["tactile_real"] = torch.cat([tactile_latent, tactile_base, aux_full], dim=0)' in current_targets_source
+            ),
+            detail="Live PICF tactile innovation target now combines dense tactile latent probes with coarse tactile map and tactile auxiliaries.",
+        ),
+        CheckResult(
+            name="live_point_innovation_uses_native_latent_probes_plus_occupancy",
+            ok=(
+                "self.point_latent_queries = nn.Parameter(" in source
+                and "def _point_latent_target(" in source
+                and 'targets["point_real"] = torch.cat([point_latent, occ.reshape(-1)], dim=0)' in current_targets_source
+            ),
+            detail="Live PICF point innovation target now combines native point latent probes with coarse occupancy.",
         ),
         CheckResult(
             name="control_prefix_uses_full_semantic_prefix_primary",
@@ -227,6 +331,36 @@ def verify_static_contract() -> list[CheckResult]:
             detail="`_predictive_state` explicitly injects posterior.global_post into control tokens via up-projection.",
         ),
         CheckResult(
+            name="trainer_primary_action_loss_uses_pi05_flow",
+            ok=(
+                "compute_action_flow_loss(" in trainer_source
+                and "action_condition_tokens=output.state.predictive.action_condition_tokens" not in trainer_source
+                and 'extra_prefix_tokens=output.state.predictive.action_condition_tokens' in trainer_source
+            ),
+            detail="PICF trainer uses PI0.5 flow-matching loss with PICF conditioning tokens as the primary action objective.",
+        ),
+        CheckResult(
+            name="serve_primary_action_path_uses_pi05_denoise_sampler",
+            ok=(
+                "sample_action_chunk(" in serve_source
+                and "refresh_predictive_state_for_action(" in serve_source
+                and "action_chunk[:7]" not in serve_source
+            ),
+            detail=(
+                "PICF serving path uses the PI0.5-style denoise sampler and then refreshes "
+                "the predictive cache with the sampled action chunk."
+            ),
+        ),
+        CheckResult(
+            name="core_no_longer_uses_direct_7d_action_head",
+            ok=(
+                "self.action_head = nn.Linear(self.config.control_dim, 7)" not in source
+                and "action = self._clip_action(self.action_head(pooled_state))" not in predictive_source
+                and "action, action_chunk = self._default_predictive_action(action_future)" in predictive_source
+            ),
+            detail="Core no longer uses a direct trainable 7D head; trainer/serve rely on the restored PI0.5 action path and core uses only a non-trainable default action placeholder when needed.",
+        ),
+        CheckResult(
             name="legacy_boolean_advanced_indexing_removed_from_pipeline",
             ok=all(
                 text not in source
@@ -256,7 +390,7 @@ def verify_static_contract() -> list[CheckResult]:
 
 def verify_doc_links() -> list[CheckResult]:
     checks = []
-    for path in (README_PATH, HANDOFF_README_PATH, PLAN_PATH, CALVIN_README_PATH):
+    for path in (README_PATH, V21_README_PATH, CALVIN_README_PATH):
         text = _read(path)
         checks.append(
             CheckResult(
@@ -265,6 +399,22 @@ def verify_doc_links() -> list[CheckResult]:
                 detail=f"{path.name} references PICF_FORMAL_CONTRACT.md",
             )
         )
+    v21_text = _read(V21_README_PATH)
+    checks.append(
+        CheckResult(
+            name="doc_set_restricted_to_three_persistent_docs",
+            ok=all(
+                needle in v21_text
+                for needle in (
+                    "maintained PICF document set is intentionally limited to 3 persistent",
+                    "README_v2.1.md",
+                    "PICF_FORMAL_CONTRACT.md",
+                    "CALVIN_VALIDATION_README.md",
+                )
+            ),
+            detail="README_v2.1 explicitly restricts the maintained PICF document set to 3 files.",
+        )
+    )
     checks.append(
         CheckResult(
             name="formal_contract_exists",
@@ -354,7 +504,7 @@ def verify_smoke() -> list[CheckResult]:
             sonata_stage_name="base",
             sonata_dtype="float32",
         )
-    ok = float(result["loss_total"]) > 0.0 and float(result["action_grad_norm"]) > 0.0
+    ok = float(result["loss_total"]) > 0.0 and float(result["point_grad_norm"]) > 0.0
     return [
         CheckResult(
             name="picf_core_train_smoke",

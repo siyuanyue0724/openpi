@@ -37,6 +37,7 @@ def _base_args() -> argparse.Namespace:
         accum_steps=1,
         max_empty_window_retries=32,
         unroll_steps=2,
+        action_horizon=1,
         stride=4,
         max_points=1024,
         crop_radius_m=0.10,
@@ -424,6 +425,26 @@ def test_calvin_transition_source_normalizes_actions_when_requested(tmp_path: Pa
     frame = window.frames[0]
     raw = source.reader.read_npz(frame.step_id, keys=["rel_actions"])["rel_actions"].astype(np.float32)
     np.testing.assert_allclose(frame.action, raw * 0.5)
+    source.close()
+
+
+def test_calvin_transition_source_emits_action_chunk_when_action_horizon_requested(tmp_path: Path) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
+
+    source = _MODULE._CalvinTransitionSource(
+        str(root),
+        split="training",
+        backend="dir",
+        unroll_steps=1,
+        action_horizon=3,
+    )
+
+    window = source.window(0)
+    frame = window.frames[0]
+
+    assert frame.action_chunk is not None
+    assert frame.action_chunk.ndim == 2
+    assert frame.action_chunk.shape[0] == 3
     source.close()
 
 

@@ -1,15 +1,28 @@
 # CALVIN Validation README
 
 This document is the current executable validation guide for CALVIN under the
-present PICF semantic-prefix-primary mixed-width codebase.
+present PICF codebase.
 
-The canonical architecture handoff is:
+The canonical architecture and deployment handoff is:
 
-- [`README_semantic_prefix_primary_mixedwidth_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_mixedwidth_refactor.md)
+- [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
 
 The formal contract is:
 
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
+
+Important status note:
+
+- `README_v2.1.md` is the canonical deployed architecture and deployment
+  document
+- `PICF_FORMAL_CONTRACT.md` records the current live-code contract that existing
+  regression tests enforce
+- these two documents are expected to stay synchronized; the former is broader,
+  the latter is the concise executable contract
+- the maintained PICF document set is intentionally limited to:
+  - `src/openpi/picf/README_v2.1.md`
+  - `PICF_FORMAL_CONTRACT.md`
+  - `docs/CALVIN_VALIDATION_README.md`
 
 ## 1. Dataset / Loader Validation
 
@@ -45,18 +58,35 @@ Run this before training changes or deployment:
 python scripts/verify_picf_contract.py
 ```
 
-Current contract meaning:
+Current live-code contract meaning:
 
+- semantic wrapper restores the PI0.5 expert path and injects robot state back
+  into the prompt path
+- trainer primary action loss uses PI0.5 flow matching, and the training-time
+  denoised chunk estimate is recovered as `x_t - t * v_t`
+- serving primary action path uses the PI0.5 denoise sampler and refreshes the
+  predictive cache with the sampled action chunk
 - semantic does not affect physical observation anchors
 - semantic does not affect physical posterior
 - semantic does not affect `physical_prediction_cache`
 - next innovation reads only `previous.predictive.physical_prediction_cache`
+- live observation competition now uses native-first visual routing
+- live tactile public routing now uses group-level proposal competition with
+  winner-read over dense tactile group memory
+- live visual innovation targets include denser native-V-JEPA latent probes
+- live tactile innovation targets include dense tactile latent probes in
+  addition to tactile map and auxiliaries
+- live point innovation targets include native point latent probes in addition
+  to occupancy
 - control and conditioned future directly consume the full semantic prefix at
   native width `2048`
 - the physical core remains width `512`
 - physical posterior / innovation / physical predictive tokens are up-projected
   into the semantic-width trunks
 - `posterior.global_post` explicitly enters control
+- core no longer uses a direct trainable `7D` action head
+
+This section describes the deployed live baseline.
 
 ## 3. Trainer Smoke Validation
 
@@ -102,21 +132,14 @@ Required outputs:
 - `tactile_contact_stats.json`
 - `tactile_fingertip_calibration.json`
 
-## 5. Clean Training
+## 5. Historical Baseline Training Command
 
-The current intended training path is clean-start semantic-prefix-primary with:
+The command below is preserved as a historical baseline for the current
+semantic-prefix-primary mixed-width implementation.
 
-- semantic width `2048`
-- physical core width `512`
+It is **not** the recommended canonical launch command for current deployment.
 
-Do not use:
-
-- sidecar flags
-- sidecar rollout A/B logic
-- old sidecar-primary checkpoints
-- the obsolete full-core-2048 launch path
-
-Recommended command:
+Historical command:
 
 ```bash
 CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4 \
@@ -142,7 +165,8 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4
   --exp-name picf_semantic_prefix_primary_mixedwidth_a4_acc1_pct75_clean_v1
 ```
 
-This is the current clean-start launch path for the mixed-width refactor.
+This is a preserved historical launch path from before the fully restored
+PI0.5-action-stack deployment.
 
 ## 6. Serving / Rollout
 
@@ -159,5 +183,5 @@ The serving path must preserve:
 
 ## 7. Historical Notes
 
-`docs/calvin_readme.txt` is now an archive only.
+Older CALVIN README fragments have been retired.
 Use this file for the current validation workflow.

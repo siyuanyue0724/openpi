@@ -228,6 +228,7 @@ def _tactile_split_loss(
     pred: torch.Tensor | None,
     target: torch.Tensor | None,
     *,
+    latent_dim: int,
     grid_dim: int,
     config: PicfTransitionLossConfig,
     reference: torch.Tensor,
@@ -235,14 +236,20 @@ def _tactile_split_loss(
     if pred is None or target is None:
         zero = _zero_weight_loss(pred, reference)
         return zero, zero, zero
-    pred_map = pred[:grid_dim]
-    target_map = target[:grid_dim]
+    latent_dim = max(int(latent_dim), 0)
+    pred_latent = pred[:latent_dim]
+    target_latent = target[:latent_dim]
+    latent_loss = fn.mse_loss(pred_latent, target_latent) if latent_dim > 0 else _zero_like(reference)
+    pred_map = pred[latent_dim : latent_dim + grid_dim]
+    target_map = target[latent_dim : latent_dim + grid_dim]
     map_loss = fn.l1_loss(pred_map, target_map)
-    pred_aux = pred[grid_dim:]
-    target_aux = target[grid_dim:]
+    pred_aux = pred[latent_dim + grid_dim :]
+    target_aux = target[latent_dim + grid_dim :]
     if pred_aux.numel() == 0 or target_aux.numel() == 0:
         aux_loss = _zero_like(reference)
-        return map_loss, aux_loss, map_loss
+        nonzero_terms = [latent_loss, map_loss]
+        total = torch.stack(nonzero_terms).mean()
+        return map_loss, aux_loss, total
     contact_loss = fn.binary_cross_entropy_with_logits(pred_aux[:1], target_aux[:1])
     force_scale = max(float(config.tactile_aux_force_scale), 1e-6)
     indent_scale = max(float(config.tactile_aux_indent_scale), 1e-6)
@@ -273,8 +280,27 @@ def _tactile_split_loss(
     )
     aux_reg = fn.huber_loss(scaled_pred, scaled_target, delta=delta, reduction="mean")
     aux_loss = 0.5 * (contact_loss + aux_reg)
-    total = 0.5 * (map_loss + aux_loss)
+    total = torch.stack([latent_loss, map_loss, aux_loss]).mean()
     return map_loss, aux_loss, total
+
+
+def _point_split_loss(
+    pred: torch.Tensor | None,
+    target: torch.Tensor | None,
+    *,
+    latent_dim: int,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    if pred is None or target is None:
+        return _zero_weight_loss(pred, reference)
+    latent_dim = max(int(latent_dim), 0)
+    pred_latent = pred[:latent_dim]
+    target_latent = target[:latent_dim]
+    latent_loss = fn.mse_loss(pred_latent, target_latent) if latent_dim > 0 else _zero_like(reference)
+    pred_occ = pred[latent_dim:]
+    target_occ = target[latent_dim:]
+    occ_loss = fn.binary_cross_entropy_with_logits(pred_occ, target_occ)
+    return torch.stack([latent_loss, occ_loss]).mean()
 
 
 def _budgeted_group(
@@ -352,6 +378,7 @@ def _point_tactile_alignment(
     tactile_prob = token_field.tactile_contact_prob
     tactile_gate = token_field.tactile_contact_gate
     tactile_normals = token_field.tactile_normals_world
+    tactile_group_ids = token_field.tactile_group_ids
     zero = token_field.fused_tokens.new_zeros(())
     if point_embed.shape[0] == 0 or tactile_embed.shape[0] == 0 or point_positions.shape[0] == 0 or tactile_positions.shape[0] == 0:
         return _zero_weight_sum(zero, point_embed, tactile_embed)
@@ -367,8 +394,27 @@ def _point_tactile_alignment(
             f"tactile_embed.shape[0]={int(tactile_embed.shape[0])} "
             f"!= tactile_positions.shape[0]={int(tactile_positions.shape[0])}"
         )
+    if tactile_prob is not None and tactile_prob.numel() != tactile_embed.shape[0]:
+        if (
+            tactile_group_ids is not None
+            and tactile_group_ids.numel() == tactile_embed.shape[0]
+            and tactile_prob.numel() > 0
+            and int(tactile_group_ids.max().item()) < int(tactile_prob.numel())
+        ):
+            tactile_prob = tactile_prob.index_select(0, tactile_group_ids)
+        else:
+            tactile_prob = None
     if tactile_prob is None or tactile_prob.numel() != tactile_embed.shape[0]:
-        tactile_prob = tactile_gate
+        if (
+            tactile_gate is not None
+            and tactile_group_ids is not None
+            and tactile_group_ids.numel() == tactile_embed.shape[0]
+            and tactile_gate.numel() > 0
+            and int(tactile_group_ids.max().item()) < int(tactile_gate.numel())
+        ):
+            tactile_prob = tactile_gate.index_select(0, tactile_group_ids)
+        else:
+            tactile_prob = tactile_gate
     if tactile_prob is None or tactile_prob.numel() != tactile_embed.shape[0]:
         tactile_prob = torch.ones((tactile_embed.shape[0],), device=tactile_embed.device, dtype=tactile_embed.dtype)
     tau_pt = max(float(config.tau_pt), eps)
@@ -535,10 +581,18 @@ def compute_alignment_loss(
     fusion_attention = token_field.fusion_attention_mean
     point_count = token_field.point_tokens.shape[0]
     visual_count = token_field.visual_tokens.shape[0]
-    if fusion_attention is not None and point_count > 0 and visual_count > 0:
-        pv_attention = fusion_attention[point_count : point_count + visual_count, :point_count]
+    public_visual_indices = torch.nonzero(token_field.modality_ids == 1, as_tuple=False).squeeze(-1)
+    public_point_indices = torch.nonzero(token_field.modality_ids == 0, as_tuple=False).squeeze(-1)
+    if (
+        fusion_attention is not None
+        and point_count > 0
+        and visual_count > 0
+        and public_visual_indices.numel() > 0
+        and public_point_indices.numel() > 0
+    ):
+        pv_attention = fusion_attention.index_select(0, public_visual_indices).index_select(1, public_point_indices)
         focus_losses = []
-        for u in range(visual_count):
+        for u in range(min(int(visual_count), int(pv_attention.shape[0]))):
             focus_weight = candidate_weight[:, u]
             if float(focus_weight.sum().item()) <= 0.0:
                 continue
@@ -577,6 +631,10 @@ def compute_transition_loss(
     action_target: torch.Tensor | np.ndarray | None,
     next_visual_map_override: torch.Tensor | np.ndarray | None = None,
     config: PicfTransitionLossConfig | None = None,
+    action_loss_override: torch.Tensor | None = None,
+    action_pos_override: torch.Tensor | None = None,
+    action_rot_override: torch.Tensor | None = None,
+    action_gripper_override: torch.Tensor | None = None,
 ) -> PicfTransitionLossBreakdown:
     cfg = config or PicfTransitionLossConfig()
     predictive = output_t.state.predictive
@@ -598,24 +656,30 @@ def compute_transition_loss(
         ),
     )
 
-    action_target_t = _action_target_tensor(
-        action_target,
-        device=predictive.action.device,
-        dtype=predictive.action.dtype,
-    )
-    if action_target_t is None:
-        action_pos = _zero_weight_loss(predictive.action[:3], predictive.action)
-        action_rot = _zero_weight_loss(predictive.action[3:6], predictive.action)
-        action_gripper = _zero_weight_loss(predictive.action[6:], predictive.action)
+    if action_loss_override is not None:
+        action_pos = action_pos_override if action_pos_override is not None else action_loss_override
+        action_rot = action_rot_override if action_rot_override is not None else action_loss_override
+        action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_override
+        action_loss = action_loss_override
     else:
-        action_pos = fn.l1_loss(predictive.action[:3], action_target_t[:3])
-        action_rot = fn.l1_loss(predictive.action[3:6], action_target_t[3:6])
-        action_gripper = fn.l1_loss(predictive.action[6:], action_target_t[6:])
-    action_loss = (
-        (cfg.lambda_action_pos * action_pos)
-        + (cfg.lambda_action_rot * action_rot)
-        + (cfg.lambda_action_gripper * action_gripper)
-    )
+        action_target_t = _action_target_tensor(
+            action_target,
+            device=predictive.action.device,
+            dtype=predictive.action.dtype,
+        )
+        if action_target_t is None:
+            action_pos = _zero_weight_loss(predictive.action[:3], predictive.action)
+            action_rot = _zero_weight_loss(predictive.action[3:6], predictive.action)
+            action_gripper = _zero_weight_loss(predictive.action[6:], predictive.action)
+        else:
+            action_pos = fn.l1_loss(predictive.action[:3], action_target_t[:3])
+            action_rot = fn.l1_loss(predictive.action[3:6], action_target_t[3:6])
+            action_gripper = fn.l1_loss(predictive.action[6:], action_target_t[6:])
+        action_loss = (
+            (cfg.lambda_action_pos * action_pos)
+            + (cfg.lambda_action_rot * action_rot)
+            + (cfg.lambda_action_gripper * action_gripper)
+        )
 
     if _branch_is_usable(
         pred=pred_cache.visual_latent,
@@ -646,6 +710,7 @@ def compute_transition_loss(
         tactile_map, tactile_aux, tactile_real = _tactile_split_loss(
             pred_cache.tactile_real,
             future.tactile_real,
+            latent_dim=int(core.config.tactile_latent_dim),
             grid_dim=tactile_grid_dim,
             config=cfg,
             reference=predictive.action,
@@ -661,7 +726,12 @@ def compute_transition_loss(
         pred_available=pred_cache.availability[3],
         target_available=future.availability[3],
     ):
-        point_real = fn.binary_cross_entropy_with_logits(pred_cache.point_real, future.point_real)
+        point_real = _point_split_loss(
+            pred_cache.point_real,
+            future.point_real,
+            latent_dim=int(core.config.point_latent_dim),
+            reference=predictive.action,
+        )
     else:
         point_real = _zero_weight_loss(pred_cache.point_real, predictive.action)
 
@@ -694,6 +764,7 @@ def compute_transition_loss(
         _, _, semantic_tactile_real = _tactile_split_loss(
             semantic_future_cache.tactile_real,
             future.tactile_real,
+            latent_dim=int(core.config.tactile_latent_dim),
             grid_dim=tactile_grid_dim,
             config=cfg,
             reference=predictive.action,
@@ -707,7 +778,12 @@ def compute_transition_loss(
         pred_available=semantic_future_cache.availability[3],
         target_available=future.availability[3],
     ):
-        semantic_point_real = fn.binary_cross_entropy_with_logits(semantic_future_cache.point_real, future.point_real)
+        semantic_point_real = _point_split_loss(
+            semantic_future_cache.point_real,
+            future.point_real,
+            latent_dim=int(core.config.point_latent_dim),
+            reference=predictive.action,
+        )
     else:
         semantic_point_real = _zero_weight_loss(semantic_future_cache.point_real, predictive.action)
 

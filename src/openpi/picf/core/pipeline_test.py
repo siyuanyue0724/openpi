@@ -216,6 +216,29 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     assert output.state.token_field.fusion_attention_mean is not None
 
 
+def test_refresh_predictive_state_for_action_rebuilds_cache_from_supplied_action(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frame = next(iter(replay))
+    frame.tactile = _make_tactile_packet(frame.step_id)
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+    action_chunk = torch.full((1, 32), 0.25, dtype=torch.float32)
+    refreshed = core.refresh_predictive_state_for_action(frame, output.state, action_future=action_chunk)
+    assert refreshed.action_chunk is not None
+    assert refreshed.action_chunk.shape == (1, 32)
+    assert torch.allclose(
+        refreshed.action,
+        torch.full((7,), 0.25, dtype=torch.float32, device=refreshed.action.device),
+    )
+    assert refreshed.executed_action.shape == (7,)
+    assert refreshed.physical_prediction_cache.visual_latent is not None
+    assert refreshed.physical_prediction_cache.tactile_real is not None
+
+
 def test_tactile_tokens_only_enter_fusion_when_pseudo_contact_is_active(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
@@ -244,7 +267,7 @@ def test_tactile_tokens_only_enter_fusion_when_pseudo_contact_is_active(tmp_path
 
     assert second.state.token_field.tactile_tokens_all is not None
     assert second.state.token_field.tactile_tokens_all.shape[0] == 2
-    assert second.state.token_field.tactile_tokens.shape[0] == 2
+    assert second.state.token_field.tactile_tokens.shape[0] == 2 * core.config.tactile_group_proposals
     assert second.state.token_field.tactile_anchor_mask is not None
     assert bool(torch.all(second.state.token_field.tactile_anchor_mask).item())
 
@@ -347,13 +370,13 @@ def test_full_core_preserves_2048_wide_semantic_tokens_and_backpropagates(tmp_pa
     assert second.state.predictive.predictive_query_state.shape == (core.config.semantic_dim,)
     assert second.state.predictive.global_pred.shape == (core.config.hidden_dim,)
     loss = (
-        first.state.predictive.action.pow(2).mean()
+        first.state.predictive.pooled_state.pow(2).mean()
         + second.state.predictive.physical_global_pred.pow(2).mean()
         + second.state.predictive.global_pred.pow(2).mean()
     )
     core.zero_grad(set_to_none=True)
     loss.backward()
-    assert core.action_head.weight.grad is not None
+    assert core.control_state_proj.weight.grad is not None
     assert core.predictive_pool.score.weight.grad is not None
 
 
@@ -421,7 +444,6 @@ def test_semantic_prefix_prompt_changes_do_not_change_physical_branch_but_do_cha
         second.state.predictive.physical_prediction_cache.point_real,
     )
     assert not torch.allclose(first.state.predictive.control_query_state, second.state.predictive.control_query_state)
-    assert not torch.allclose(first.state.predictive.action, second.state.predictive.action)
     assert not torch.allclose(first.state.predictive.global_pred, second.state.predictive.global_pred)
 
 
@@ -551,7 +573,6 @@ def test_semantic_tokens_directly_condition_control_and_semantic_future_readout(
     assert not torch.allclose(first.state.predictive.control_query_state, second.state.predictive.control_query_state)
     assert not torch.allclose(first.state.predictive.predictive_query_state, second.state.predictive.predictive_query_state)
     assert not torch.allclose(first.state.predictive.pooled_state, second.state.predictive.pooled_state)
-    assert not torch.allclose(first.state.predictive.action, second.state.predictive.action)
     assert not torch.allclose(first.state.predictive.global_pred, second.state.predictive.global_pred)
 
 
@@ -1266,9 +1287,12 @@ def test_extract_targets_tactile_real_is_summary_head_not_per_sensor_reconstruct
     targets, availability = core.extract_targets(frame, visual_map_override=_visual_override(1.0))
     tactile_real = targets["tactile_real"]
     assert tactile_real is not None
-    base_dim = core.config.tactile_real_grid**2
-    tactile_base = tactile_real[:base_dim]
-    tactile_aux = tactile_real[base_dim:]
+    latent_dim = core.config.tactile_latent_dim
+    base_dim = core.config.tactile_map_dim
+    tactile_latent = tactile_real[:latent_dim]
+    tactile_base = tactile_real[latent_dim : latent_dim + base_dim]
+    tactile_aux = tactile_real[latent_dim + base_dim :]
+    assert tactile_latent.shape[0] == latent_dim
     assert tactile_aux.shape[0] == core.config.tactile_aux_dim
     torch.testing.assert_close(tactile_base, torch.full_like(tactile_base, 0.5), atol=1e-6, rtol=0.0)
     assert float(tactile_aux[4].item()) == pytest.approx(0.5, abs=1e-6)

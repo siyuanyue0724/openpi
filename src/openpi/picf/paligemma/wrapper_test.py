@@ -8,6 +8,7 @@ from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
 from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
 from openpi.picf.paligemma.wrapper import _masked_position_ids
+from openpi.picf.paligemma.wrapper import _recover_flow_target
 from openpi.picf.paligemma.wrapper import _repair_missing_tied_embeddings
 from openpi.picf.paligemma.wrapper import _take_valid_prefix_tokens
 from openpi.picf.paligemma.wrapper import _Pi0PaliGemmaSemanticEncoder
@@ -164,6 +165,19 @@ def test_masked_position_ids_keep_valid_positions_and_zero_pad() -> None:
         position_ids,
         torch.tensor([[0, 1, 2, 0, 0], [0, 0, 1, 0, 0]], dtype=torch.int64),
     )
+
+
+def test_recover_flow_target_inverts_pi05_training_parameterization() -> None:
+    target = torch.tensor([[[0.2, -0.1], [0.4, 0.3]]], dtype=torch.float32)
+    noise = torch.tensor([[[1.0, -0.5], [0.7, 0.8]]], dtype=torch.float32)
+    time = torch.tensor([0.25], dtype=torch.float32)
+    time_expanded = time[:, None, None]
+    x_t = time_expanded * noise + (1.0 - time_expanded) * target
+    u_t = noise - target
+
+    recovered = _recover_flow_target(x_t, u_t, time_expanded)
+
+    torch.testing.assert_close(recovered, target)
 
 
 def test_take_valid_prefix_tokens_uses_right_padded_prefix_slice() -> None:

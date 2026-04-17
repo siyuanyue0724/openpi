@@ -41,6 +41,7 @@ class PicfTokenFieldState:
     tactile_contact_gate: torch.Tensor
     tactile_tokens_all: torch.Tensor | None = None
     tactile_tokens_active: torch.Tensor | None = None
+    tactile_group_ids: torch.Tensor | None = None
     tactile_contact_prob: torch.Tensor | None = None
     tactile_anchor_mask: torch.Tensor | None = None
     tactile_normals_world: torch.Tensor | None = None
@@ -64,6 +65,9 @@ class PicfObservationAnchorState:
     x: torch.Tensor
     S: torch.Tensor
     a: torch.Tensor
+    routing_mass_tactile: torch.Tensor | None = None
+    routing_support_tactile: torch.Tensor | None = None
+    routing_gate_tactile: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -101,9 +105,11 @@ class PicfPredictiveState:
     innovation_norm: torch.Tensor
     availability: torch.Tensor
     control_tokens: torch.Tensor
+    action_condition_tokens: torch.Tensor | None
     control_query_state: torch.Tensor
     pooled_state: torch.Tensor
     action: torch.Tensor
+    action_chunk: torch.Tensor | None
     executed_action: torch.Tensor
     physical_global_pred: torch.Tensor
     physical_prediction_cache: PicfPredictionCache

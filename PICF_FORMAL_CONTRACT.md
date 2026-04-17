@@ -1,10 +1,41 @@
 # PICF Formal Contract
 
-This document records the intended transition contract for the current PICF
+This document records the intended transition contract for the current live PICF
 core implementation.
 
-It is the durable specification for the present codebase, not a temporary
+It is the durable specification for the present live codebase, not a temporary
 experiment note.
+
+Status note:
+
+- this file describes the current executable contract enforced by the current
+  regression suite
+- the canonical deployed architecture record is
+  `src/openpi/picf/README_v2.1.md`
+- the maintained PICF document set is limited to:
+  - `src/openpi/picf/README_v2.1.md`
+  - `PICF_FORMAL_CONTRACT.md`
+  - `docs/CALVIN_VALIDATION_README.md`
+- these documents are expected to stay synchronized; this file is the concise
+  executable contract, while `README_v2.1.md` remains the broader deployment
+  and handoff document
+- current live code has now restored the PI0.5 expert/state-in-prompt path at
+  the semantic wrapper + trainer/serve level
+- current live code now recovers the training-time denoised PI0.5 chunk
+  estimate as `x_t - t * v_t` instead of misreading the predicted velocity as
+  an action chunk
+- current live code now refreshes the serve-time predictive cache after the
+  PI0.5 sampler emits an action chunk, so next-step innovation no longer trails
+  an already-overridden action at the policy boundary
+- current live code now also performs:
+  - native visual reread in posterior
+  - tactile group winner-read in posterior
+  - denser visual innovation target construction from native V-JEPA payload
+  - denser tactile innovation target construction from tactile latent probes
+  - denser point innovation target construction from point latent probes plus
+    occupancy
+- current live code no longer retains the old direct trainable `7D`
+  compatibility head inside `PicfFullCore._predictive_state`
 
 ## 1. Scope
 

@@ -487,6 +487,50 @@ class GatedCrossAttentionRead(nn.Module):
         return output, mean_weights
 
 
+class LazyCrossAttentionRead(nn.Module):
+    def __init__(self, query_dim: int, *, inner_dim: int):
+        super().__init__()
+        self.query_norm = nn.LayerNorm(query_dim)
+        self.query_proj = nn.Linear(query_dim, inner_dim)
+        self.key_proj = nn.LazyLinear(inner_dim)
+        self.value_proj = nn.LazyLinear(query_dim)
+        self.cross_gate = nn.Parameter(torch.zeros(()))
+        self.ff_norm = nn.LayerNorm(query_dim)
+        self.ff = nn.Sequential(
+            nn.Linear(query_dim, inner_dim),
+            nn.GELU(),
+            nn.Linear(inner_dim, query_dim),
+        )
+        nn.init.zeros_(self.ff[-1].weight)
+        nn.init.zeros_(self.ff[-1].bias)
+
+    def forward(
+        self,
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        *,
+        attn_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if keys.shape[1] == 0:
+            weights = torch.zeros((queries.shape[0], queries.shape[1], 0), device=queries.device, dtype=queries.dtype)
+            return queries, weights
+        query_in = self.query_proj(self.query_norm(queries))
+        key_in = self.key_proj(fn.layer_norm(keys, (keys.shape[-1],)))
+        value_in = self.value_proj(fn.layer_norm(keys, (keys.shape[-1],)))
+        logits = torch.matmul(query_in, key_in.transpose(-2, -1)) / math.sqrt(max(query_in.shape[-1], 1))
+        if attn_bias is not None:
+            if attn_bias.ndim == 2:
+                logits = logits + attn_bias[None, :, :]
+            else:
+                logits = logits + attn_bias
+        weights = torch.softmax(logits, dim=-1)
+        attn_out = torch.matmul(weights, value_in)
+        gate = torch.tanh(self.cross_gate)
+        output = queries + (gate * attn_out)
+        output = output + (gate * self.ff(self.ff_norm(output)))
+        return output, weights
+
+
 class WorldLatentFusionStack(nn.Module):
     def __init__(
         self,
@@ -575,6 +619,13 @@ class _SemanticContext:
     tokens: torch.Tensor
     prefix_tokens: torch.Tensor
     available: bool
+
+
+@dataclasses.dataclass(frozen=True)
+class _StepDenseMemory:
+    point_payload: torch.Tensor
+    visual_payload: torch.Tensor
+    tactile_group_tokens: tuple[torch.Tensor, ...]
 
 
 class PicfFullCore(nn.Module):
@@ -694,8 +745,10 @@ class PicfFullCore(nn.Module):
         self.predictive_semantic_world = TransformerStack(semantic_trunk_dim, heads, self.config.predictive_layers)
         self.predictive_pool = AttentionPool(hidden_dim)
 
-        self.visual_latent_target_proj = nn.LazyLinear(hidden_dim)
-        self.visual_latent_head = nn.Linear(hidden_dim, hidden_dim)
+        self.visual_latent_queries = nn.Parameter(torch.zeros((self.config.visual_latent_tokens, hidden_dim)))
+        self.tactile_latent_queries = nn.Parameter(torch.zeros((self.config.tactile_latent_tokens, hidden_dim)))
+        self.point_latent_queries = nn.Parameter(torch.zeros((self.config.point_latent_tokens, hidden_dim)))
+        self.visual_latent_head = nn.Linear(hidden_dim, self.config.visual_latent_dim)
         self.visual_real_head = nn.Linear(hidden_dim, self.config.visual_real_dim)
         self.tactile_real_head = nn.Linear(hidden_dim, self.config.tactile_real_dim)
         self.point_real_head = nn.Linear(hidden_dim, self.config.point_real_dim)
@@ -707,11 +760,23 @@ class PicfFullCore(nn.Module):
         self.point_error_encoder = nn.LazyLinear(branch_dim)
         self.innovation_proj = nn.LazyLinear(self.config.innovation_dim)
         self.innovation_token_proj = nn.Linear(self.config.innovation_dim, hidden_dim)
+        self.visual_native_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.tactile_native_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.point_native_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.tactile_group_route_queries = nn.Parameter(torch.zeros((self.config.tactile_group_proposals, hidden_dim)))
+        self.tactile_route_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.evidence_delta = nn.Sequential(
+            nn.LazyLinear(hidden_dim),
+            nn.GELU(),
+            nn.Linear(hidden_dim, hidden_dim),
+        )
+        nn.init.zeros_(self.evidence_delta[-1].weight)
+        nn.init.zeros_(self.evidence_delta[-1].bias)
+        self.evidence_gate = nn.LazyLinear(hidden_dim)
 
         self.control_world = TransformerStack(semantic_trunk_dim, heads, self.config.control_layers)
         self.control_state_proj = nn.Linear(semantic_trunk_dim, self.config.control_dim)
         self.predictive_state_proj = nn.Linear(semantic_trunk_dim, hidden_dim)
-        self.action_head = nn.Linear(self.config.control_dim, 7)
         self.to(device=self.device, dtype=self.dtype)
 
     def _build_runtime_meta(self, observation: PicfObservation, previous: RuntimeMeta | None) -> RuntimeMeta:
@@ -882,6 +947,21 @@ class PicfFullCore(nn.Module):
             action = action[:7]
         return action
 
+    def _default_predictive_action(
+        self,
+        action_future: torch.Tensor | np.ndarray | None,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if action_future is None:
+            return torch.zeros((7,), device=self.device, dtype=self.dtype), None
+        action_tensor = _to_tensor(action_future, device=self.device, dtype=self.dtype)
+        action_chunk = action_tensor if action_tensor.ndim > 1 else action_tensor[None, :]
+        action = action_chunk[0]
+        if action.numel() < 7:
+            action = fn.pad(action, (0, 7 - action.numel()))
+        elif action.numel() > 7:
+            action = action[:7]
+        return self._clip_action(action), action_chunk
+
     def _semantic_memory(
         self,
         semantic_tokens: torch.Tensor,
@@ -921,6 +1001,32 @@ class PicfFullCore(nn.Module):
                 dtype=self.dtype,
             ),
         )
+
+    def _visual_latent_target(self, dense_memory: _StepDenseMemory) -> torch.Tensor | None:
+        if dense_memory.visual_payload.numel() == 0:
+            return None
+        queries = self.visual_latent_queries.to(device=self.device, dtype=self.dtype)[None, :]
+        payload = dense_memory.visual_payload[None, :]
+        visual_latent, _ = self.visual_native_reread(queries, payload)
+        return visual_latent[0].reshape(-1)
+
+    def _tactile_latent_target(self, dense_memory: _StepDenseMemory) -> torch.Tensor | None:
+        if not dense_memory.tactile_group_tokens:
+            return None
+        payload = torch.cat(tuple(token for token in dense_memory.tactile_group_tokens if token.numel() > 0), dim=0)
+        if payload.numel() == 0:
+            return None
+        queries = self.tactile_latent_queries.to(device=self.device, dtype=self.dtype)[None, :]
+        tactile_latent, _ = self.tactile_native_reread(queries, payload[None, :])
+        return tactile_latent[0].reshape(-1)
+
+    def _point_latent_target(self, dense_memory: _StepDenseMemory) -> torch.Tensor | None:
+        if dense_memory.point_payload.numel() == 0:
+            return None
+        queries = self.point_latent_queries.to(device=self.device, dtype=self.dtype)[None, :]
+        payload = dense_memory.point_payload[None, :]
+        point_latent, _ = self.point_native_reread(queries, payload)
+        return point_latent[0].reshape(-1)
 
     def _clip_action(self, action: torch.Tensor) -> torch.Tensor:
         clip = getattr(self.config, "action_output_clip", None)
@@ -1236,7 +1342,7 @@ class PicfFullCore(nn.Module):
         tactile_bundle: AnyTouchFeatureBundle | None,
         meta: RuntimeMeta,
         previous: PicfCoreState | None,
-    ) -> PicfTokenFieldState:
+    ) -> tuple[PicfTokenFieldState, _StepDenseMemory]:
         hidden_dim = self.config.hidden_dim
         point_tokens = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
         point_positions = torch.zeros((0, 3), device=self.device, dtype=self.dtype)
@@ -1252,6 +1358,10 @@ class PicfFullCore(nn.Module):
         tactile_anchor_mask = torch.zeros((0,), device=self.device, dtype=torch.bool)
         tactile_contact_score = torch.zeros((0,), device=self.device, dtype=self.dtype)
         tactile_contact_score_ema = torch.zeros((0,), device=self.device, dtype=self.dtype)
+        tactile_group_ids = torch.zeros((0,), device=self.device, dtype=torch.long)
+        visual_payload = torch.zeros((0, 0), device=self.device, dtype=self.dtype)
+        point_payload = torch.zeros((0, 0), device=self.device, dtype=self.dtype)
+        tactile_group_tokens: tuple[torch.Tensor, ...] = ()
         visual_hw: tuple[int, int] | None = None
         if visual_map is not None and visual_map.numel() > 0:
             visual_hw = (int(visual_map.shape[0]), int(visual_map.shape[1]))
@@ -1275,6 +1385,15 @@ class PicfFullCore(nn.Module):
                 ],
                 dim=-1,
             )
+            point_payload = torch.cat(
+                [
+                    point_positions,
+                    _to_tensor(frame_context.colors, device=self.device, dtype=self.dtype),
+                    _point_pe(point_positions, self.config),
+                    proj_features,
+                ],
+                dim=-1,
+            )
             point_tokens = self.point_token_proj(point_token_in) + self.modality_embedding.weight[0][None, :]
             point_align_embeddings = _normalize_tensor(self.point_align_proj(point_tokens), eps=self.config.epsilon_residual)
 
@@ -1288,6 +1407,7 @@ class PicfFullCore(nn.Module):
                 cam = _to_tensor(self.camera_model.W_T_C, device=self.device, dtype=self.dtype)
                 cam_pose = torch.cat([cam[:3, 3], rot6d(cam[:3, :3])], dim=-1)[None, :]
             flat_map = visual_map.reshape(-1, visual_map.shape[-1])
+            visual_payload = flat_map
             ray_features = self._visual_ray_features(projective_geometry, source_hw=(int(observation.rgb_static.shape[0]), int(observation.rgb_static.shape[1])))
             visual_in = torch.cat([flat_map, grid, cam_pose.expand(flat_map.shape[0], -1), ray_features], dim=-1)
             visual_tokens = self.visual_token_proj(visual_in) + self.modality_embedding.weight[1][None, :]
@@ -1298,6 +1418,7 @@ class PicfFullCore(nn.Module):
             encoded = []
             positions = []
             normals = []
+            dense_tokens_all: list[torch.Tensor] = []
             sensor_names = sorted(tactile_bundle.sensors)
             for sensor_name in sensor_names:
                 sensor = tactile_bundle.sensors[sensor_name]
@@ -1314,6 +1435,7 @@ class PicfFullCore(nn.Module):
                 encoded.append(sensor_in)
                 positions.append(sensor_pose_world[:3, 3])
                 normals.append(_normalize_tensor(sensor_pose_world[:3, 0], eps=self.config.epsilon_residual))
+                dense_tokens_all.append(sensor.tokens.to(device=self.device, dtype=self.dtype))
             tactile_tokens_all = self.tactile_token_proj(torch.stack(encoded, dim=0)) + self.modality_embedding.weight[2][None, :]
             tactile_align_embeddings = _normalize_tensor(self.tactile_align_proj(tactile_tokens_all), eps=self.config.epsilon_residual)
             tactile_positions_world = torch.stack(positions, dim=0)
@@ -1389,7 +1511,40 @@ class PicfFullCore(nn.Module):
                 tactile_contact_score = contact_scores
                 tactile_contact_gate = tactile_contact_active.to(dtype=self.dtype)
                 tactile_anchor_mask = tactile_contact_prob >= float(self.config.tactile_anchor_prob_on)
-            tactile_tokens_active = tactile_tokens_all[tactile_anchor_mask]
+            active_indices = torch.nonzero(tactile_anchor_mask, as_tuple=False).squeeze(-1)
+            tactile_group_tokens = tuple(dense_tokens_all[int(index.item())] for index in active_indices)
+            if active_indices.numel() > 0:
+                proposal_tokens = []
+                proposal_align = []
+                proposal_positions = []
+                proposal_normals = []
+                proposal_group_ids = []
+                for group_local_index, sensor_index in enumerate(active_indices.tolist()):
+                    dense_group = dense_tokens_all[sensor_index]
+                    base_token = tactile_tokens_all[sensor_index]
+                    route_queries = (
+                        self.tactile_group_route_queries.to(device=self.device, dtype=self.dtype)[None, :]
+                        + base_token[None, None, :]
+                    )
+                    route_tokens, _ = self.tactile_route_reread(route_queries, dense_group[None, :])
+                    route_tokens = route_tokens[0]
+                    proposal_tokens.append(route_tokens)
+                    proposal_align.append(_normalize_tensor(self.tactile_align_proj(route_tokens), eps=self.config.epsilon_residual))
+                    proposal_positions.append(tactile_positions_world[sensor_index][None, :].expand(route_tokens.shape[0], -1))
+                    proposal_normals.append(tactile_normals_world[sensor_index][None, :].expand(route_tokens.shape[0], -1))
+                    proposal_group_ids.append(
+                        torch.full(
+                            (route_tokens.shape[0],),
+                            int(group_local_index),
+                            device=self.device,
+                            dtype=torch.long,
+                        )
+                    )
+                tactile_tokens_active = torch.cat(proposal_tokens, dim=0)
+                tactile_align_embeddings = torch.cat(proposal_align, dim=0)
+                tactile_positions_world = torch.cat(proposal_positions, dim=0)
+                tactile_normals_world = torch.cat(proposal_normals, dim=0)
+                tactile_group_ids = torch.cat(proposal_group_ids, dim=0)
             tactile_tokens = tactile_tokens_active
 
         context_tokens = self._encode_context_tokens(observation, meta, previous) + self.modality_embedding.weight[3][None, :]
@@ -1397,18 +1552,12 @@ class PicfFullCore(nn.Module):
             summarize_contact_context(tactile_contact_prob, tactile_anchor_mask)[None, :]
         ) + self.modality_embedding.weight[3][None, :]
         context_tokens = torch.cat([context_tokens, contact_context], dim=0)
-        all_tokens = torch.cat([point_tokens, visual_tokens, tactile_tokens_active, context_tokens], dim=0)
+        all_tokens = torch.cat([point_tokens, tactile_tokens_active, context_tokens], dim=0)
         fusion_attention_mean = None
         if all_tokens.shape[0] > 0:
-            fusion_bias = self._fusion_projective_bias(
-                projective_geometry=projective_geometry,
-                point_count=point_tokens.shape[0],
-                visual_count=visual_tokens.shape[0],
-                total_tokens=all_tokens.shape[0],
-            )
             fused, fusion_attention_mean = self.token_fusion(
                 all_tokens[None, :],
-                attn_bias=fusion_bias,
+                attn_bias=None,
                 return_attention=True,
             )
             fused = fused[0]
@@ -1417,13 +1566,12 @@ class PicfFullCore(nn.Module):
         modality_ids = torch.cat(
             [
                 torch.zeros((point_tokens.shape[0],), device=self.device, dtype=torch.long),
-                torch.ones((visual_tokens.shape[0],), device=self.device, dtype=torch.long),
                 torch.full((tactile_tokens_active.shape[0],), 2, device=self.device, dtype=torch.long),
                 torch.full((context_tokens.shape[0],), 3, device=self.device, dtype=torch.long),
             ],
             dim=0,
         )
-        return PicfTokenFieldState(
+        token_field = PicfTokenFieldState(
             point_tokens=point_tokens,
             visual_tokens=visual_tokens,
             tactile_tokens=tactile_tokens,
@@ -1438,6 +1586,7 @@ class PicfFullCore(nn.Module):
             tactile_contact_gate=tactile_contact_gate,
             tactile_tokens_all=tactile_tokens_all,
             tactile_tokens_active=tactile_tokens_active,
+            tactile_group_ids=tactile_group_ids,
             tactile_contact_prob=tactile_contact_prob,
             tactile_anchor_mask=tactile_anchor_mask,
             tactile_normals_world=tactile_normals_world,
@@ -1446,12 +1595,29 @@ class PicfFullCore(nn.Module):
             fusion_attention_mean=fusion_attention_mean,
             projective_geometry=projective_geometry,
         )
+        dense_memory = _StepDenseMemory(
+            point_payload=point_payload,
+            visual_payload=visual_payload,
+            tactile_group_tokens=tactile_group_tokens,
+        )
+        return token_field, dense_memory
 
-    def _build_observation_anchors(self, token_field: PicfTokenFieldState) -> PicfObservationAnchorState:
+    def _build_observation_anchors(
+        self,
+        token_field: PicfTokenFieldState,
+        dense_memory: _StepDenseMemory | None = None,
+    ) -> PicfObservationAnchorState:
+        if dense_memory is None:
+            dense_memory = _StepDenseMemory(
+                point_payload=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
+                visual_payload=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
+                tactile_group_tokens=(),
+            )
         n_obs = self.config.observation_anchors
         hidden_dim = self.config.hidden_dim
         point_count = token_field.point_tokens.shape[0]
-        visual_count = token_field.visual_tokens.shape[0]
+        visual_count = dense_memory.visual_payload.shape[0]
+        tactile_count = token_field.tactile_tokens.shape[0]
         seed_indices = torch.full((n_obs,), -1, device=self.device, dtype=torch.long)
         queries = torch.zeros((1, n_obs, hidden_dim), device=self.device, dtype=self.dtype)
         if point_count > 0:
@@ -1466,14 +1632,30 @@ class PicfFullCore(nn.Module):
                     )
             seed_indices[: chosen.shape[0]] = chosen
             queries[0, : chosen.shape[0]] = token_field.point_tokens[chosen]
-        attn = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
+        attn_public = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
+        attn_visual = torch.zeros((n_obs, visual_count), device=self.device, dtype=self.dtype)
         for _ in range(max(self.config.query_rounds, 1)):
-            queries, attn = self.obs_reader(queries, token_field.fused_tokens[None, :])
+            if visual_count > 0:
+                queries, visual_weights = self.visual_native_reread(queries, dense_memory.visual_payload[None, :])
+                attn_visual = visual_weights[0]
+            queries, attn_public = self.obs_reader(queries, token_field.fused_tokens[None, :])
         obs_tokens = self.obs_self(queries)[0]
-        routing_mass_point = attn[:, :point_count]
-        routing_mass_visual = attn[:, point_count : point_count + visual_count]
+        routing_mass_point = attn_public[:, :point_count]
+        routing_mass_visual = attn_visual
+        routing_mass_tactile_token = attn_public[:, point_count : point_count + tactile_count]
+        if tactile_count > 0 and token_field.tactile_group_ids is not None and token_field.tactile_group_ids.numel() == tactile_count:
+            tactile_group_count = len(dense_memory.tactile_group_tokens)
+            routing_mass_tactile = torch.zeros((n_obs, tactile_group_count), device=self.device, dtype=self.dtype)
+            routing_mass_tactile.scatter_add_(
+                1,
+                token_field.tactile_group_ids[None, :].expand(n_obs, -1),
+                routing_mass_tactile_token,
+            )
+        else:
+            routing_mass_tactile = routing_mass_tactile_token
         routing_support_point = routing_mass_point.sum(dim=0) if point_count > 0 else torch.zeros((0,), device=self.device, dtype=self.dtype)
         routing_support_visual = routing_mass_visual.sum(dim=0) if visual_count > 0 else torch.zeros((0,), device=self.device, dtype=self.dtype)
+        routing_support_tactile = routing_mass_tactile.sum(dim=0) if tactile_count > 0 else torch.zeros((0,), device=self.device, dtype=self.dtype)
         routing_gate_point = (
             routing_support_point / torch.clamp(routing_support_point + self.config.tau_route_p, min=self.config.epsilon_a)
             if point_count > 0
@@ -1482,6 +1664,11 @@ class PicfFullCore(nn.Module):
         routing_gate_visual = (
             routing_support_visual / torch.clamp(routing_support_visual + self.config.tau_route_v, min=self.config.epsilon_a)
             if visual_count > 0
+            else torch.zeros((0,), device=self.device, dtype=self.dtype)
+        )
+        routing_gate_tactile = (
+            routing_support_tactile / torch.clamp(routing_support_tactile + self.config.tau_route_v, min=self.config.epsilon_a)
+            if tactile_count > 0
             else torch.zeros((0,), device=self.device, dtype=self.dtype)
         )
         if point_count > 0:
@@ -1508,6 +1695,9 @@ class PicfFullCore(nn.Module):
             x=x,
             S=S,
             a=a,
+            routing_mass_tactile=routing_mass_tactile,
+            routing_support_tactile=routing_support_tactile,
+            routing_gate_tactile=routing_gate_tactile,
         )
 
     def _initial_persistent(self) -> tuple[torch.Tensor, ...]:
@@ -1588,12 +1778,108 @@ class PicfFullCore(nn.Module):
         maha = torch.sum((delta**2) / torch.clamp(S_diag[:, None, :] + (self.config.bind_sigma_m**2), min=self.config.epsilon_s), dim=-1)
         return (self.config.lambda_bind_hidden * hidden_score) - (self.config.lambda_bind_geom * maha)
 
+    def _gather_topk_native_candidates(
+        self,
+        payload: torch.Tensor,
+        weights: torch.Tensor,
+        *,
+        topk: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        k = weights.shape[0]
+        if payload.shape[0] == 0 or weights.shape[1] == 0 or topk <= 0:
+            return (
+                torch.zeros((k, 0, payload.shape[-1] if payload.ndim == 2 else 0), device=self.device, dtype=self.dtype),
+                torch.zeros((k, 1, 0), device=self.device, dtype=self.dtype),
+            )
+        select_k = min(int(topk), int(weights.shape[1]))
+        top_values, top_indices = torch.topk(weights, k=select_k, dim=-1)
+        candidates = payload[top_indices]
+        bias = torch.log(torch.clamp(top_values, min=self.config.epsilon_a))[:, None, :]
+        return candidates, bias
+
+    def _gather_tactile_group_candidates(
+        self,
+        dense_groups: tuple[torch.Tensor, ...],
+        weights: torch.Tensor,
+        *,
+        top_groups: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        k = weights.shape[0]
+        if len(dense_groups) == 0 or weights.shape[1] == 0 or top_groups <= 0:
+            return (
+                torch.zeros((k, 0, 0), device=self.device, dtype=self.dtype),
+                torch.zeros((k, 1, 0), device=self.device, dtype=self.dtype),
+            )
+        top_values, top_indices = torch.topk(weights, k=min(int(top_groups), len(dense_groups)), dim=-1)
+        sequences: list[torch.Tensor] = []
+        biases: list[torch.Tensor] = []
+        max_len = 0
+        feature_dim = int(dense_groups[0].shape[-1])
+        for anchor_index in range(k):
+            pieces = []
+            piece_biases = []
+            for value, group_index in zip(top_values[anchor_index], top_indices[anchor_index]):
+                dense = dense_groups[int(group_index.item())]
+                pieces.append(dense)
+                piece_biases.append(
+                    torch.full(
+                        (dense.shape[0],),
+                        float(torch.log(torch.clamp(value, min=self.config.epsilon_a)).item()),
+                        device=self.device,
+                        dtype=self.dtype,
+                    )
+                )
+            seq = torch.cat(pieces, dim=0) if pieces else torch.zeros((0, feature_dim), device=self.device, dtype=self.dtype)
+            bias = torch.cat(piece_biases, dim=0) if piece_biases else torch.zeros((0,), device=self.device, dtype=self.dtype)
+            sequences.append(seq)
+            biases.append(bias)
+            max_len = max(max_len, int(seq.shape[0]))
+        padded = torch.zeros((k, max_len, feature_dim), device=self.device, dtype=self.dtype)
+        padded_bias = torch.full((k, 1, max_len), float("-inf"), device=self.device, dtype=self.dtype)
+        for anchor_index, (seq, bias) in enumerate(zip(sequences, biases)):
+            if seq.shape[0] == 0:
+                continue
+            padded[anchor_index, : seq.shape[0]] = seq
+            padded_bias[anchor_index, 0, : bias.shape[0]] = bias
+        return padded, padded_bias
+
+    def _fuse_measurement_evidence(
+        self,
+        obs_evidence: torch.Tensor,
+        visual_evidence: torch.Tensor,
+        tactile_evidence: torch.Tensor,
+        support_mass: torch.Tensor,
+    ) -> torch.Tensor:
+        has_visual = (visual_evidence.abs().sum(dim=-1, keepdim=True) > 0.0).to(dtype=self.dtype)
+        has_tactile = (tactile_evidence.abs().sum(dim=-1, keepdim=True) > 0.0).to(dtype=self.dtype)
+        joint_in = torch.cat(
+            [
+                obs_evidence,
+                visual_evidence,
+                tactile_evidence,
+                support_mass[:, None],
+                has_visual,
+                has_tactile,
+            ],
+            dim=-1,
+        )
+        delta = self.evidence_delta(joint_in)
+        gate = torch.sigmoid(self.evidence_gate(joint_in))
+        return obs_evidence + (gate * delta)
+
     def _posterior_update(
         self,
         previous: PicfCoreState | None,
         observation: PicfObservation,
         obs_anchors: PicfObservationAnchorState,
+        dense_memory: _StepDenseMemory | None = None,
     ) -> PicfPosteriorAnchorState:
+        if dense_memory is None:
+            dense_memory = _StepDenseMemory(
+                point_payload=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
+                visual_payload=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
+                tactile_group_tokens=(),
+            )
         h_prior, c_prior, mu_prior, var_prior, x_prior, S_prior, a_prior, alpha_prior = self._current_prior(previous, observation)
         bind_logits = self._binding_logits(h_prior, x_prior, S_prior, obs_anchors)
         binding_raw = self._sinkhorn_dustbin(bind_logits)
@@ -1659,6 +1945,45 @@ class PicfFullCore(nn.Module):
             bias = self.config.lambda_bind_prior * torch.log(torch.clamp(binding[:-1], min=self.config.epsilon_a))
         evidence_tokens, _ = self.anchor_reader(query, obs_anchors.tokens[None, :], attn_bias=bias)
         evidence_tokens = evidence_tokens[0]
+        binding_cond = binding_support / torch.clamp(support_mass[:, None], min=self.config.epsilon_a)
+        visual_evidence = torch.zeros_like(evidence_tokens)
+        if dense_memory.visual_payload.numel() > 0 and obs_anchors.routing_mass_visual.shape[1] > 0:
+            visual_weights = binding_cond @ obs_anchors.routing_mass_visual
+            visual_candidates, visual_bias = self._gather_topk_native_candidates(
+                dense_memory.visual_payload,
+                visual_weights,
+                topk=self.config.visual_reread_topk,
+            )
+            visual_read, _ = self.visual_native_reread(
+                evidence_tokens[:, None, :],
+                visual_candidates,
+                attn_bias=visual_bias,
+            )
+            visual_evidence = visual_read[:, 0, :]
+        tactile_evidence = torch.zeros_like(evidence_tokens)
+        if (
+            dense_memory.tactile_group_tokens
+            and obs_anchors.routing_mass_tactile is not None
+            and obs_anchors.routing_mass_tactile.shape[1] > 0
+        ):
+            tactile_weights = binding_cond @ obs_anchors.routing_mass_tactile
+            tactile_candidates, tactile_bias = self._gather_tactile_group_candidates(
+                dense_memory.tactile_group_tokens,
+                tactile_weights,
+                top_groups=self.config.tactile_reread_groups,
+            )
+            tactile_read, _ = self.tactile_native_reread(
+                evidence_tokens[:, None, :],
+                tactile_candidates,
+                attn_bias=tactile_bias,
+            )
+            tactile_evidence = tactile_read[:, 0, :]
+        evidence_tokens = self._fuse_measurement_evidence(
+            evidence_tokens,
+            visual_evidence,
+            tactile_evidence,
+            support_mass,
+        )
         if obs_anchors.tokens.shape[0] > 0:
             denom = torch.clamp(support_mass[:, None], min=self.config.epsilon_a)
             x_obs = (binding[:-1] @ obs_anchors.x) / denom
@@ -1772,6 +2097,7 @@ class PicfFullCore(nn.Module):
         observation: PicfObservation,
         frame_context: PointFrameContext | None,
         visual_map: torch.Tensor | None,
+        dense_memory: _StepDenseMemory,
     ) -> tuple[dict[str, torch.Tensor | None], torch.Tensor]:
         targets: dict[str, torch.Tensor | None] = {
             "visual_latent": None,
@@ -1781,8 +2107,7 @@ class PicfFullCore(nn.Module):
         }
         availability = torch.zeros((4,), device=self.device, dtype=self.dtype)
         if visual_map is not None and visual_map.numel() > 0:
-            pooled = visual_map.mean(dim=(0, 1))
-            targets["visual_latent"] = self.visual_latent_target_proj(pooled[None, :])[0]
+            targets["visual_latent"] = self._visual_latent_target(dense_memory)
             availability[0] = 1.0
         rgb = _to_tensor(np.asarray(observation.rgb_static, dtype=np.float32) / 255.0, device=self.device, dtype=self.dtype)
         if rgb.numel() > 0 and self.config.visual_real_enabled:
@@ -1801,6 +2126,7 @@ class PicfFullCore(nn.Module):
                 tactile_maps.append(pooled.reshape(-1))
             if tactile_maps:
                 tactile_base = torch.stack(tactile_maps, dim=0).mean(dim=0)
+                tactile_latent = self._tactile_latent_target(dense_memory)
                 contact_pose = _to_tensor(observation.contact_pose if observation.contact_pose is not None else np.eye(4, dtype=np.float32), device=self.device, dtype=self.dtype)
                 pose_world = _to_tensor(observation.G_t, device=self.device, dtype=self.dtype) @ contact_pose
                 force = _to_tensor(observation.force_vec if observation.force_vec is not None else np.zeros((3,), dtype=np.float32), device=self.device, dtype=self.dtype)
@@ -1828,10 +2154,13 @@ class PicfFullCore(nn.Module):
                 )
                 pose_aux = pose_world[:3, 3]
                 aux_full = torch.cat([aux, pose_aux], dim=0)
-                targets["tactile_real"] = torch.cat([tactile_base, aux_full], dim=0)
+                if tactile_latent is None:
+                    tactile_latent = torch.zeros((self.config.tactile_latent_dim,), device=self.device, dtype=self.dtype)
+                targets["tactile_real"] = torch.cat([tactile_latent, tactile_base, aux_full], dim=0)
                 availability[2] = 1.0
         if frame_context is not None and frame_context.points_local.shape[0] > 0:
             points = _to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype)
+            point_latent = self._point_latent_target(dense_memory)
             center = _to_tensor(observation.G_t[:3, 3], device=self.device, dtype=self.dtype)
             rel = torch.clamp((points - center[None, :]) / max(self.config.crop_radius_m, 1e-6), min=-0.999, max=0.999)
             grid = ((rel + 1.0) * 0.5 * self.config.point_real_grid).long()
@@ -1841,7 +2170,9 @@ class PicfFullCore(nn.Module):
             _assert_index_tensor_bounds(grid[:, 2], size=self.config.point_real_grid, name="point_real.grid_z")
             occ = torch.zeros((self.config.point_real_grid, self.config.point_real_grid, self.config.point_real_grid), device=self.device, dtype=self.dtype)
             occ[grid[:, 0], grid[:, 1], grid[:, 2]] = 1.0
-            targets["point_real"] = occ.reshape(-1)
+            if point_latent is None:
+                point_latent = torch.zeros((self.config.point_latent_dim,), device=self.device, dtype=self.dtype)
+            targets["point_real"] = torch.cat([point_latent, occ.reshape(-1)], dim=0)
             availability[3] = 1.0
         return targets, availability
 
@@ -1873,6 +2204,7 @@ class PicfFullCore(nn.Module):
             )
         meta = self._build_runtime_meta(observation, observation.runtime_meta)
         frame_context = self._point_subset(observation) if meta.point_contract_ok else None
+        point_features = self._extract_point_features(frame_context, None) if frame_context is not None else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
         clip_snapshot = None
         if visual_map_override is None and self.clip_buffer is not None:
             clip_snapshot = self.clip_buffer.snapshot()
@@ -1881,7 +2213,46 @@ class PicfFullCore(nn.Module):
         finally:
             if clip_snapshot is not None and self.clip_buffer is not None:
                 self.clip_buffer.restore(clip_snapshot)
-        return self._current_targets(observation, frame_context, visual_map)
+        tactile_bundle = self._tactile_features(observation, meta)
+        point_payload = torch.zeros((0, 0), device=self.device, dtype=self.dtype)
+        visual_payload = (
+            visual_map.reshape(-1, visual_map.shape[-1])
+            if visual_map is not None and visual_map.numel() > 0
+            else torch.zeros((0, 0), device=self.device, dtype=self.dtype)
+        )
+        if frame_context is not None:
+            projective_geometry = self._build_projective_geometry(
+                observation=observation,
+                point_positions=_to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype),
+                visual_hw=None if visual_map is None or visual_map.numel() == 0 else (int(visual_map.shape[0]), int(visual_map.shape[1])),
+            )
+            proj_features = self._point_projection_features(
+                projective_geometry,
+                source_hw=(int(observation.rgb_static.shape[0]), int(observation.rgb_static.shape[1])),
+            )
+            point_positions = _to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype)
+            point_payload = torch.cat(
+                [
+                    point_positions,
+                    _to_tensor(frame_context.colors, device=self.device, dtype=self.dtype),
+                    _point_pe(point_positions, self.config),
+                    proj_features,
+                ],
+                dim=-1,
+            )
+        tactile_group_tokens: tuple[torch.Tensor, ...] = ()
+        if tactile_bundle is not None and tactile_bundle.sensors:
+            tactile_group_tokens = tuple(
+                sensor.tokens.to(device=self.device, dtype=self.dtype)
+                for sensor in tactile_bundle.sensors.values()
+                if sensor.tokens.numel() > 0
+            )
+        dense_memory = _StepDenseMemory(
+            point_payload=point_payload,
+            visual_payload=visual_payload,
+            tactile_group_tokens=tactile_group_tokens,
+        )
+        return self._current_targets(observation, frame_context, visual_map, dense_memory)
 
     def _standardized_residual(self, target: torch.Tensor, pred: torch.Tensor) -> torch.Tensor:
         residual = target - pred
@@ -1967,6 +2338,17 @@ class PicfFullCore(nn.Module):
         control_innovation_token = self.innovation_to_control_proj(innovation_token[None, :])
         control_proprio_token = self.proprio_to_control_proj(proprio_token[None, :])
         control_query_tokens = self.control_query_tokens.to(device=self.device, dtype=self.dtype)
+        action_condition_prefix = torch.cat(
+            [
+                _add_role_embedding(control_posterior_tokens, self.control_role_embedding, 0),
+                _add_role_embedding(control_global_post, self.control_role_embedding, 0),
+                _add_role_embedding(control_innovation_token, self.control_role_embedding, 1),
+                _add_role_embedding(control_proprio_token, self.control_role_embedding, 2),
+                _add_role_embedding(control_query_tokens, self.control_role_embedding, 4),
+            ],
+            dim=0,
+        )
+        action_condition_tokens = self.control_world(action_condition_prefix[None, :])[0]
         control_prefix = torch.cat(
             [
                 _add_role_embedding(control_semantic_prefix_tokens, self.control_role_embedding, 3),
@@ -1981,7 +2363,7 @@ class PicfFullCore(nn.Module):
         control_tokens = self.control_world(control_prefix[None, :])[0]
         control_query_state = _mean_query_state(control_tokens, num_query_tokens=self.config.control_query_tokens)
         pooled_state = self.control_state_proj(control_query_state)
-        action = self._clip_action(self.action_head(pooled_state))
+        action, action_chunk = self._default_predictive_action(action_future)
         executed_action = self._executed_action(observation, action)
 
         if action_future is not None:
@@ -2034,9 +2416,11 @@ class PicfFullCore(nn.Module):
             innovation_norm=innovation_norm,
             availability=targets_availability,
             control_tokens=control_tokens,
+            action_condition_tokens=action_condition_tokens,
             control_query_state=control_query_state,
             pooled_state=pooled_state,
             action=action,
+            action_chunk=action_chunk,
             executed_action=executed_action,
             physical_global_pred=physical_global_pred,
             physical_prediction_cache=physical_prediction_cache,
@@ -2044,6 +2428,36 @@ class PicfFullCore(nn.Module):
             global_pred=global_pred,
             prediction_cache=prediction_cache,
         )
+
+    def refresh_predictive_state_for_action(
+        self,
+        observation: PicfObservation,
+        state: PicfCoreState,
+        *,
+        action_future: torch.Tensor | np.ndarray,
+    ) -> PicfPredictiveState:
+        action_tensor = _to_tensor(action_future, device=self.device, dtype=self.dtype)
+        action_tensor = action_tensor if action_tensor.ndim > 1 else action_tensor[None, :]
+        action_for_cache = action_tensor[:, :7]
+        semantic = self._project_semantic_context(tokens_raw=state.predictive.semantic_tokens)
+        predictive = self._predictive_state(
+            observation,
+            posterior=state.posterior,
+            semantic=semantic,
+            innovation_token=state.predictive.innovation_token,
+            innovation_norm=state.predictive.innovation_norm,
+            targets_availability=state.predictive.availability,
+            action_future=action_for_cache,
+        )
+        action_7d = action_tensor[0]
+        if action_7d.numel() < 7:
+            action_7d = fn.pad(action_7d, (0, 7 - action_7d.numel()))
+        elif action_7d.numel() > 7:
+            action_7d = action_7d[:7]
+        predictive.action = action_7d
+        predictive.action_chunk = action_tensor
+        predictive.executed_action = self._executed_action(observation, predictive.action)
+        return predictive
 
     def _hold_reason(self, meta: RuntimeMeta, posterior: PicfPosteriorAnchorState, innovation_token: torch.Tensor) -> str | None:
         if not meta.point_contract_ok:
@@ -2095,10 +2509,10 @@ class PicfFullCore(nn.Module):
         visual_map = self._visual_map(observation, visual_map_override, meta)
         tactile_bundle = self._tactile_features(observation, meta)
         semantic = self._semantic_context(observation, previous, semantic_override)
-        token_field = self._build_token_field(observation, frame_context, point_features, visual_map, tactile_bundle, meta, previous)
-        observation_anchors = self._build_observation_anchors(token_field)
-        posterior = self._posterior_update(previous, observation, observation_anchors)
-        current_targets, availability = self._current_targets(observation, frame_context, visual_map)
+        token_field, dense_memory = self._build_token_field(observation, frame_context, point_features, visual_map, tactile_bundle, meta, previous)
+        observation_anchors = self._build_observation_anchors(token_field, dense_memory)
+        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory)
+        current_targets, availability = self._current_targets(observation, frame_context, visual_map, dense_memory)
         innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
         predictive = self._predictive_state(
             observation,

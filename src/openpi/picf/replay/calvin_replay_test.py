@@ -58,6 +58,17 @@ def test_calvin_replay_can_emit_explicit_action_proprio_and_tactile_packet(tmp_p
     assert np.isclose(right_x, -0.5 * float(first.robot_obs[6]), atol=1e-6)
 
 
+def test_calvin_replay_emits_action_chunk_when_horizon_requested(tmp_path: Path) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "action_chunk_case", make_zip=False)
+
+    frames = list(CalvinSequentialReplay(root, backend="dir", segment_indices=[0], action_horizon=3))
+
+    assert frames
+    assert frames[0].action_chunk is not None
+    assert frames[0].action_chunk.ndim == 2
+    assert frames[0].action_chunk.shape[0] == 3
+
+
 def test_calvin_replay_use_tactile_fails_fast_when_dataset_lacks_tactile_fields(tmp_path: Path) -> None:
     root = Path(build_mini_calvin_dataset(tmp_path / "strict_case", make_zip=False))
     episode_path = root / "training" / "episode_0000000.npz"

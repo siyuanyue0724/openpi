@@ -52,8 +52,11 @@ class PicfCoreConfig:
     visual_stale_s: float = 0.15
     tactile_stale_s: float = 0.05
     visual_real_grid: int = 4
+    visual_latent_tokens: int = 8
     tactile_real_grid: int = 4
+    tactile_latent_tokens: int = 4
     point_real_grid: int = 4
+    point_latent_tokens: int = 8
     tactile_aux_dim: int = 8
     tau_force_n: float = 1.0
     tau_indent_m: float = 5e-4
@@ -64,6 +67,7 @@ class PicfCoreConfig:
     tactile_contact_temperature: float = 0.02
     tactile_contact_ema_beta: float = 0.8
     tactile_anchor_prob_on: float = 0.8
+    tactile_group_proposals: int = 2
     max_action_pos_m: float = 0.025
     max_action_rot_rad: float = math.pi / 18.0
     max_action_gripper: float = 1.0
@@ -80,18 +84,40 @@ class PicfCoreConfig:
     projective_bias_scale: float = 0.25
     tau_route_p: float = 0.1
     tau_route_v: float = 0.1
+    visual_reread_topk: int = 32
+    tactile_reread_groups: int = 2
+
+    @property
+    def point_occ_dim(self) -> int:
+        return self.point_real_grid**3
+
+    @property
+    def point_latent_dim(self) -> int:
+        return self.point_latent_tokens * self.hidden_dim
 
     @property
     def point_real_dim(self) -> int:
-        return self.point_real_grid**3
+        return self.point_latent_dim + self.point_occ_dim
+
+    @property
+    def visual_latent_dim(self) -> int:
+        return self.visual_latent_tokens * self.hidden_dim
 
     @property
     def visual_real_dim(self) -> int:
         return 3 * (self.visual_real_grid**2)
 
     @property
+    def tactile_map_dim(self) -> int:
+        return self.tactile_real_grid**2
+
+    @property
+    def tactile_latent_dim(self) -> int:
+        return self.tactile_latent_tokens * self.hidden_dim
+
+    @property
     def tactile_real_dim(self) -> int:
-        return (self.tactile_real_grid**2) + self.tactile_aux_dim
+        return self.tactile_latent_dim + self.tactile_map_dim + self.tactile_aux_dim
 
     @property
     def a_min_m(self) -> tuple[float, float, float]:

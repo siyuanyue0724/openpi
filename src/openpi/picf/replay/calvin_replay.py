@@ -111,6 +111,30 @@ def _calvin_tactile_packet(
     return PicfTactilePacket(sensors=tuple(sensors), background_rgb_by_sensor=background_rgb_by_sensor)
 
 
+def _load_action_chunk(
+    reader,
+    *,
+    step_id: int,
+    segment_end: int,
+    action_horizon: int,
+    current_action: np.ndarray | None = None,
+    action_key: str = "rel_actions",
+) -> np.ndarray | None:
+    if int(action_horizon) <= 1:
+        return None
+    if current_action is None:
+        current = reader.read_npz(step_id, keys=[action_key])[action_key]
+    else:
+        current = np.asarray(current_action, dtype=np.float32)
+    actions = [np.asarray(current, dtype=np.float32)]
+    last = actions[0]
+    for future_step in range(step_id + 1, step_id + int(action_horizon)):
+        if future_step < int(segment_end):
+            last = np.asarray(reader.read_npz(future_step, keys=[action_key])[action_key], dtype=np.float32)
+        actions.append(last)
+    return np.stack(actions, axis=0)
+
+
 class CalvinSequentialReplay:
     """Replay CALVIN segments sequentially for scaffold state continuity."""
 
@@ -120,6 +144,7 @@ class CalvinSequentialReplay:
         *,
         split: str = "training",
         backend: str = "zip",
+        action_horizon: int = 1,
         use_wrist_rgb: bool = True,
         use_tactile: bool = False,
         frame_dt_s: float = 1.0 / 30.0,
@@ -130,10 +155,12 @@ class CalvinSequentialReplay:
         tactile_backgrounds_by_sensor: dict[str, np.ndarray] | None = None,
         use_scene_obs: bool = False,
     ):
+        if int(action_horizon) < 1:
+            raise ValueError(f"action_horizon must be >= 1, got {action_horizon}")
         self._dataset = CalvinLangSegmentDataset(
             root=root,
             split=split,
-            action_horizon=1,
+            action_horizon=int(action_horizon),
             backend=backend,
             use_wrist_rgb=use_wrist_rgb,
             sample_within_segment=False,
@@ -143,6 +170,7 @@ class CalvinSequentialReplay:
         self._use_wrist_rgb = bool(use_wrist_rgb)
         self._use_tactile = bool(use_tactile)
         self._frame_dt_s = float(frame_dt_s)
+        self._action_horizon = int(action_horizon)
         self._segment_indices = list(segment_indices) if segment_indices is not None else list(range(len(self._segments)))
         self._tactile_sensor_names = tuple(tactile_sensor_names)
         calibration_payload = tactile_calibration
@@ -171,6 +199,13 @@ class CalvinSequentialReplay:
                     keys.append("scene_obs")
                 frame = self._reader.read_npz(step_id, keys=keys)
                 timestamp_s = float(step_id) * self._frame_dt_s
+                action_chunk = _load_action_chunk(
+                    self._reader,
+                    step_id=step_id,
+                    segment_end=segment.end,
+                    action_horizon=self._action_horizon,
+                    current_action=frame.get("rel_actions"),
+                )
                 yield PicfObservation(
                     rgb_static=frame["rgb_static"],
                     depth_static=frame["depth_static"],
@@ -185,6 +220,7 @@ class CalvinSequentialReplay:
                     scene_obs=frame.get("scene_obs"),
                     proprio=frame["robot_obs"],
                     action=frame.get("rel_actions"),
+                    action_chunk=action_chunk,
                     tactile=(
                         _calvin_tactile_packet(
                             frame,

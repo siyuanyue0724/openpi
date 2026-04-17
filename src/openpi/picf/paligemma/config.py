@@ -18,3 +18,8 @@ class PaliGemmaSemanticConfig:
     gradient_checkpointing: bool = True
     include_gripper_image: bool = True
     max_length: int = 256
+    pi05: bool = True
+    action_dim: int = 32
+    action_horizon: int = 16
+    denoise_steps: int = 10
+    inject_state_into_prompt: bool = True

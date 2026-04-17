@@ -1,27 +1,15 @@
-# PICF README
+# PICF Entry
 
-The current canonical PICF handoff and deployment document is:
+This file is only a directory entry.
 
-- [`README_semantic_prefix_primary_mixedwidth_refactor.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_semantic_prefix_primary_mixedwidth_refactor.md)
+The maintained PICF document set is limited to these 3 files:
 
-The current CALVIN validation and rollout document is:
+1. [`README_v2.1.md`](./README_v2.1.md)
+   The canonical deployed architecture, implementation tracker, and handoff
+   document.
+2. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
+   The executable live-code contract enforced by regression tests.
+3. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+   The runtime, training, rollout, and validation workflow.
 
-- [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
-
-The current formal contract is:
-
-- [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
-
-## Current One-Paragraph Summary
-
-PICF now uses a language-free physical core together with a full
-semantic-prefix-primary control and conditioned-future path. The physical
-posterior, physical predictive cache, and next-step innovation remain
-language-free. The full PaliGemma token sequence now enters semantic-width
-(`2048`) control and conditioned-future trunks directly, while the physical
-world-state family remains width `512` and is appended through explicit
-up-projections from `posterior.tokens`, `posterior.global_post`, innovation,
-and proprio.
-
-Do not use the obsolete sidecar-primary notes or the earlier full-core-2048
-notes as the current spec.
+Do not treat this entry file as a fourth maintained design document.

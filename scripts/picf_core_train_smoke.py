@@ -346,7 +346,6 @@ def run_smoke(
         next_visual_map_override=next_visual,
     )
     losses.total.backward()
-    action_grad_norm = float(core.action_head.weight.grad.norm().item()) if core.action_head.weight.grad is not None else 0.0
     point_grad_norm = float(core.point_real_head.weight.grad.norm().item()) if core.point_real_head.weight.grad is not None else 0.0
     optimizer.step()
 
@@ -380,7 +379,6 @@ def run_smoke(
         "availability_visual_real": float(losses.availability[1].item()),
         "availability_tactile_real": float(losses.availability[2].item()),
         "availability_point_real": float(losses.availability[3].item()),
-        "action_grad_norm": action_grad_norm,
         "point_grad_norm": point_grad_norm,
         "visual_mode": visual_mode,
         "tactile_mode": tactile_mode,

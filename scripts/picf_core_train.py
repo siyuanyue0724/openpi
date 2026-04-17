@@ -1312,6 +1312,30 @@ class _TransitionWindow:
     frames: tuple[PicfObservation, ...]
 
 
+def _load_action_chunk(
+    reader,
+    *,
+    step_id: int,
+    segment_end: int,
+    action_horizon: int,
+    current_action: np.ndarray | None = None,
+    action_key: str = "rel_actions",
+) -> np.ndarray | None:
+    if int(action_horizon) <= 1:
+        return None
+    if current_action is None:
+        current = reader.read_npz(step_id, keys=[action_key])[action_key]
+    else:
+        current = np.asarray(current_action, dtype=np.float32)
+    actions = [np.asarray(current, dtype=np.float32)]
+    last = actions[0]
+    for future_step in range(step_id + 1, step_id + int(action_horizon)):
+        if future_step < int(segment_end):
+            last = np.asarray(reader.read_npz(future_step, keys=[action_key])[action_key], dtype=np.float32)
+        actions.append(last)
+    return np.stack(actions, axis=0)
+
+
 class _CalvinTransitionSource:
     def __init__(
         self,
@@ -1320,6 +1344,7 @@ class _CalvinTransitionSource:
         split: str,
         backend: str,
         unroll_steps: int,
+        action_horizon: int = 1,
         use_wrist_rgb: bool = True,
         use_tactile: bool = False,
         tactile_sensor_names: tuple[str, ...] = _DEFAULT_TACTILE_SENSOR_NAMES,
@@ -1332,10 +1357,12 @@ class _CalvinTransitionSource:
     ) -> None:
         if int(unroll_steps) < 1:
             raise ValueError(f"unroll_steps must be >= 1, got {unroll_steps}")
+        if int(action_horizon) < 1:
+            raise ValueError(f"action_horizon must be >= 1, got {action_horizon}")
         self.dataset = CalvinLangSegmentDataset(
             root=root,
             split=split,
-            action_horizon=1,
+            action_horizon=int(action_horizon),
             backend=backend,
             use_wrist_rgb=use_wrist_rgb,
             sample_within_segment=False,
@@ -1345,6 +1372,7 @@ class _CalvinTransitionSource:
         self.split = split
         self.backend = backend
         self.unroll_steps = int(unroll_steps)
+        self.action_horizon = int(action_horizon)
         self.use_wrist_rgb = bool(use_wrist_rgb)
         self.use_tactile = bool(use_tactile)
         self.tactile_sensor_names = tuple(tactile_sensor_names)
@@ -1365,11 +1393,13 @@ class _CalvinTransitionSource:
         self.action_normalizer = action_normalizer
         self.window_index: list[tuple[int, int]] = []
         for segment_id, segment in enumerate(self.segments):
-            for step_id in range(segment.start, segment.end - self.unroll_steps):
+            max_start_exclusive = segment.end - (self.unroll_steps + self.action_horizon - 1)
+            for step_id in range(segment.start, max_start_exclusive):
                 self.window_index.append((segment_id, step_id))
         if not self.window_index:
             raise RuntimeError(
-                f"No valid CALVIN transition windows found for split={split}, backend={backend}, unroll_steps={unroll_steps}."
+                "No valid CALVIN transition windows found for "
+                f"split={split}, backend={backend}, unroll_steps={unroll_steps}, action_horizon={action_horizon}."
             )
 
     def __len__(self) -> int:
@@ -1390,8 +1420,17 @@ class _CalvinTransitionSource:
         frame = self.reader.read_npz(step_id, keys=keys)
         timestamp_s = float(step_id) * self.frame_dt_s
         action = frame.get("rel_actions")
+        action_chunk = _load_action_chunk(
+            self.reader,
+            step_id=step_id,
+            segment_end=segment.end,
+            action_horizon=self.action_horizon,
+            current_action=action,
+        )
         if action is not None and self.action_normalizer is not None:
             action = self.action_normalizer.normalize_np(action)
+        if action_chunk is not None and self.action_normalizer is not None:
+            action_chunk = self.action_normalizer.normalize_np(action_chunk)
         tactile = (
             _calvin_tactile_packet(
                 frame,
@@ -1418,6 +1457,7 @@ class _CalvinTransitionSource:
             scene_obs=frame.get("scene_obs"),
             proprio=frame["robot_obs"],
             action=action,
+            action_chunk=action_chunk,
             tactile=tactile,
         )
 
@@ -1621,6 +1661,21 @@ class _PicfWindowTrainer(torch.nn.Module):
                     index,
                     time.perf_counter() - step_start,
                 )
+            flow_override: dict[str, torch.Tensor] | None = None
+            if (
+                semantic_override is not None
+                and self.semantic_encoder is not None
+                and bool(getattr(self.semantic_encoder, "supports_pi0_action_generation", lambda: False)())
+            ):
+                action_chunk_target = current.action_chunk if current.action_chunk is not None else current.action
+                if action_chunk_target is not None:
+                    flow_override = self.semantic_encoder.compute_action_flow_loss(
+                        semantic_override,
+                        extra_prefix_tokens=output.state.predictive.action_condition_tokens,
+                        action_chunk_target=action_chunk_target,
+                    )
+                    output.state.predictive.action = flow_override["predicted_action"]
+                    output.state.predictive.action_chunk = flow_override["predicted_chunk"]
             if capture_visual_diagnostics:
                 physical_visual_real = output.state.predictive.physical_prediction_cache.visual_real
                 semantic_visual_real = output.state.predictive.prediction_cache.visual_real
@@ -1638,6 +1693,10 @@ class _PicfWindowTrainer(torch.nn.Module):
                 action_target=current.action,
                 next_visual_map_override=next_visual,
                 config=self.loss_config,
+                action_loss_override=None if flow_override is None else flow_override["total"],
+                action_pos_override=None if flow_override is None else flow_override["action_pos"],
+                action_rot_override=None if flow_override is None else flow_override["action_rot"],
+                action_gripper_override=None if flow_override is None else flow_override["action_gripper"],
             )
             if debug_phase_label is not None:
                 logging.info(
@@ -2323,6 +2382,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 gradient_checkpointing=bool(args.semantic_gradient_checkpointing),
                 include_gripper_image=bool(args.semantic_use_gripper),
                 max_length=args.semantic_max_length,
+                action_horizon=int(args.action_horizon),
             )
         )
     else:
@@ -2615,6 +2675,7 @@ def train(args: argparse.Namespace) -> None:
             split=args.split,
             backend=args.backend,
             unroll_steps=args.unroll_steps,
+            action_horizon=args.action_horizon,
             use_tactile=bool(args.use_tactile),
             tactile_sensor_names=args.tactile_sensor_names,
             tactile_sensor_offsets_m=args.tactile_sensor_offsets_m,
@@ -3162,6 +3223,15 @@ def main() -> None:
     parser.add_argument("--accum-steps", type=int, default=1)
     parser.add_argument("--max-empty-window-retries", type=int, default=32)
     parser.add_argument("--unroll-steps", type=int, default=2)
+    parser.add_argument(
+        "--action-horizon",
+        type=int,
+        default=1,
+        help=(
+            "Dataset action horizon to request from CALVIN. "
+            "This affects `PicfObservation.action_chunk` construction and valid window start indices."
+        ),
+    )
     parser.add_argument("--stride", type=int, default=4)
     parser.add_argument("--max-points", type=int, default=1024)
     parser.add_argument("--crop-radius-m", type=float, default=0.10)

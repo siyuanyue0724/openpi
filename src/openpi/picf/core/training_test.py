@@ -191,7 +191,6 @@ def test_transition_loss_closes_one_step_future_supervision_and_backward(tmp_pat
     assert losses.availability.tolist() == [1.0, 1.0, 1.0, 1.0]
     assert torch.isfinite(losses.semantic_future_aux)
     losses.total.backward()
-    assert core.action_head.weight.grad is not None
     assert core.point_real_head.weight.grad is not None
     assert core.visual_latent_head.weight.grad is not None
 
@@ -250,7 +249,7 @@ def test_innovation_keeps_point_error_encoder_in_graph_when_current_point_target
         semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
         action_future=pointless_current.action,
     )
-    second.state.predictive.action.sum().backward()
+    second.state.predictive.innovation_token.sum().backward()
     assert core.point_error_encoder.weight.grad is not None
     assert torch.allclose(core.point_error_encoder.weight.grad, torch.zeros_like(core.point_error_encoder.weight.grad))
 
@@ -585,7 +584,7 @@ def test_alignment_loss_point_tactile_branch_uses_pseudo_contact_from_tactile_hi
     gate = second.state.token_field.tactile_contact_gate
     assert gate.shape[0] == 2
     assert torch.all(gate > 0.0)
-    assert second.state.token_field.tactile_tokens.shape[0] == 2
+    assert second.state.token_field.tactile_tokens.shape[0] == 2 * core.config.tactile_group_proposals
     alignment = compute_alignment_loss(second.state, config=PicfAlignmentLossConfig(lambda_pt=1.0))
     assert torch.isfinite(alignment.pt)
     assert alignment.pt > 0.0

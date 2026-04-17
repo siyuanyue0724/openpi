@@ -200,3 +200,75 @@ def test_checkpoint_policy_infer_unnormalizes_actions() -> None:
         result["actions"][0],
         np.array([1.0, -1.0, 0.5, 0.0, 0.0, 0.0, 2.0], dtype=np.float32),
     )
+
+
+def test_checkpoint_policy_refreshes_predictive_state_after_pi05_sampling() -> None:
+    sampled = torch.arange(32, dtype=torch.float32).reshape(1, 32)
+
+    class _DummyPredictive:
+        def __init__(self):
+            self.action = torch.zeros((7,), dtype=torch.float32)
+            self.action_condition_tokens = torch.ones((2, 8), dtype=torch.float32)
+
+    class _DummyState:
+        def __init__(self):
+            self.predictive = _DummyPredictive()
+
+    class _DummyOutput:
+        def __init__(self):
+            self.state = _DummyState()
+            self.debug = {}
+
+    class _DummyCore:
+        def __init__(self):
+            self.refreshed_with = None
+
+        def step(self, *_args, **_kwargs):
+            return _DummyOutput()
+
+        def refresh_predictive_state_for_action(self, _observation, state, *, action_future):
+            self.refreshed_with = np.asarray(action_future)
+            predictive = state.predictive
+            predictive.action = torch.as_tensor(action_future[0, :7], dtype=torch.float32)
+            predictive.action_chunk = torch.as_tensor(action_future, dtype=torch.float32)
+            predictive.executed_action = predictive.action.clone()
+            return predictive
+
+    class _DummySemanticEncoder:
+        def encode_observation(self, _observation):
+            return object()
+
+        def supports_pi0_action_generation(self):
+            return True
+
+        def sample_action_chunk(self, semantic_override, *, extra_prefix_tokens):
+            assert semantic_override is not None
+            assert extra_prefix_tokens.shape == (2, 8)
+            return sampled
+
+    class _DummyTrainer:
+        def __init__(self):
+            self.core = _DummyCore()
+            self.semantic_encoder = _DummySemanticEncoder()
+            self.visual_grid = 1
+            self.use_visual_override = False
+
+        def eval(self):
+            return self
+
+    policy = sut._PicfCheckpointPolicy(
+        _DummyTrainer(),
+        checkpoint_dir=Path("/tmp/fake"),
+        checkpoint_step=100,
+        action_normalizer=None,
+    )
+    obs = {
+        "openpi/reset": True,
+        "prompt": "push the block",
+        "observation/image": np.zeros((224, 224, 3), dtype=np.uint8),
+        "observation/depth": np.zeros((224, 224), dtype=np.float32),
+        "observation/state": np.zeros((15,), dtype=np.float32),
+    }
+    result = policy.infer(obs)
+    np.testing.assert_allclose(policy._trainer.core.refreshed_with, sampled.numpy())
+    np.testing.assert_allclose(result["actions"][0], sampled.numpy()[0, :7])

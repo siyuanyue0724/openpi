@@ -122,6 +122,7 @@ class PicfObservation:
     G_t: np.ndarray | None = None
     proprio: np.ndarray | None = None
     action: np.ndarray | None = None
+    action_chunk: np.ndarray | None = None
     contact_pose: np.ndarray | None = None
     force_vec: np.ndarray | None = None
     indent_depth_m: float | None = None
@@ -144,6 +145,13 @@ class PicfObservation:
             self.proprio = np.asarray(self.proprio, dtype=np.float32).reshape(-1)
         if self.action is not None:
             self.action = np.asarray(self.action, dtype=np.float32).reshape(-1)
+        if self.action_chunk is not None:
+            action_chunk = np.asarray(self.action_chunk, dtype=np.float32)
+            if action_chunk.ndim == 1:
+                action_chunk = action_chunk[None, :]
+            elif action_chunk.ndim != 2:
+                raise ValueError(f"action_chunk must have shape (H, A) or (A,), got {action_chunk.shape}")
+            self.action_chunk = action_chunk
         if self.contact_pose is not None:
             self.contact_pose = np.asarray(self.contact_pose, dtype=np.float32)
             if self.contact_pose.shape != (4, 4):
