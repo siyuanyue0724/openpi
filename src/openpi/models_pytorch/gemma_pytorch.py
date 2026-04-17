@@ -3,8 +3,6 @@ from typing import Literal
 
 import torch
 from torch import nn
-from transformers import GemmaForCausalLM
-from transformers import PaliGemmaForConditionalGeneration
 from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.gemma import modeling_gemma
 
@@ -20,6 +18,14 @@ class PaliGemmaWithExpertModel(nn.Module):
         if use_adarms is None:
             use_adarms = [False, False]
         super().__init__()
+
+        # Import the live transformers classes at construction time rather than
+        # binding them at module import time. PICF/PI0 may activate the
+        # `transformers_replace` overlay just before constructing this model;
+        # lazy import keeps Gemma/PaliGemma aligned with that runtime-patched
+        # namespace, including AdARMS-enabled layernorm modules.
+        from transformers import GemmaForCausalLM as RuntimeGemmaForCausalLM
+        from transformers import PaliGemmaForConditionalGeneration as RuntimePaliGemmaForConditionalGeneration
 
         vlm_config_hf = CONFIG_MAPPING["paligemma"]()
         vlm_config_hf._vocab_size = 257152  # noqa: SLF001
@@ -58,8 +64,8 @@ class PaliGemmaWithExpertModel(nn.Module):
             adarms_cond_dim=action_expert_config.width if use_adarms[1] else None,
         )
 
-        self.paligemma = PaliGemmaForConditionalGeneration(config=vlm_config_hf)
-        self.gemma_expert = GemmaForCausalLM(config=action_expert_config_hf)
+        self.paligemma = RuntimePaliGemmaForConditionalGeneration(config=vlm_config_hf)
+        self.gemma_expert = RuntimeGemmaForCausalLM(config=action_expert_config_hf)
         self.gemma_expert.model.embed_tokens = None
 
         self.to_bfloat16_for_selected_params(precision)

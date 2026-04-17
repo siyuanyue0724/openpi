@@ -5,6 +5,7 @@ import torch
 
 from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import merge_image_features_dense
 from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import replace_oov_image_tokens
+from openpi.models_pytorch.pi0_pytorch import _ensure_transformers_replace_is_ready
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
 from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
 from openpi.picf.paligemma.wrapper import _masked_position_ids
@@ -223,3 +224,19 @@ def test_merge_image_features_dense_matches_special_image_slots() -> None:
             dtype=torch.float32,
         ),
     )
+
+
+def test_build_paligemma_with_expert_uses_runtime_patched_gemma_classes() -> None:
+    _ensure_transformers_replace_is_ready()
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    model = _Pi0PaliGemmaSemanticEncoder._build_paligemma_with_expert(
+        encoder,
+        paligemma_variant="dummy",
+        action_expert_variant="dummy",
+        precision="float32",
+        pi05=True,
+    )
+
+    layer = model.gemma_expert.model.layers[0]
+    assert hasattr(layer.input_layernorm, "dense")
+    assert hasattr(layer.post_attention_layernorm, "dense")
