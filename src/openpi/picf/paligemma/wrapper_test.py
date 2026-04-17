@@ -5,6 +5,7 @@ import torch
 
 from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import merge_image_features_dense
 from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import replace_oov_image_tokens
+from openpi.models_pytorch.gemma_pytorch import _gated_residual
 from openpi.models_pytorch.pi0_pytorch import _ensure_transformers_replace_is_ready
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
 from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
@@ -240,3 +241,13 @@ def test_build_paligemma_with_expert_uses_runtime_patched_gemma_classes() -> Non
     layer = model.gemma_expert.model.layers[0]
     assert hasattr(layer.input_layernorm, "dense")
     assert hasattr(layer.post_attention_layernorm, "dense")
+
+
+def test_gated_residual_compat_fallback_matches_pi05_semantics() -> None:
+    x = torch.tensor([[1.0, 2.0]], dtype=torch.float32)
+    y = torch.tensor([[3.0, 4.0]], dtype=torch.float32)
+    gate = torch.tensor([[0.5, 2.0]], dtype=torch.float32)
+
+    got = _gated_residual(x, y, gate)
+
+    torch.testing.assert_close(got, x + y * gate)

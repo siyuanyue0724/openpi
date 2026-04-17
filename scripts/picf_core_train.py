@@ -2469,7 +2469,56 @@ def _materialize_model_parameters(
                 dtype=core.dtype,
             )
             _ = core.tactile_error_encoder(tactile_error_in)
+        if isinstance(core.visual_error_encoder.weight, UninitializedParameter):
+            visual_error_in = torch.zeros(
+                (1, 3 * core.config.hidden_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = core.visual_error_encoder(visual_error_in)
+        if isinstance(core.visual_real_error_encoder.weight, UninitializedParameter):
+            visual_real_error_in = torch.zeros(
+                (1, 3 * core.config.visual_real_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = core.visual_real_error_encoder(visual_real_error_in)
+        if isinstance(core.point_error_encoder.weight, UninitializedParameter):
+            point_error_in = torch.zeros(
+                (1, 3 * core.config.point_real_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = core.point_error_encoder(point_error_in)
+        if isinstance(core.innovation_proj.weight, UninitializedParameter):
+            branch_dim = max(core.config.hidden_dim // 4, 32)
+            innovation_in = torch.zeros(
+                (1, (4 * branch_dim) + 4),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = core.innovation_proj(innovation_in)
+        if isinstance(core.tactile_route_reread.key_proj.weight, UninitializedParameter):
+            dummy_queries = torch.zeros(
+                (1, core.config.tactile_group_proposals, core.config.hidden_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            dummy_keys = torch.zeros(
+                (1, 1, core.config.hidden_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = core.tactile_route_reread(dummy_queries, dummy_keys)
     model.zero_grad(set_to_none=True)
+    remaining_uninitialized = [
+        name for name, param in model.named_parameters() if isinstance(param, UninitializedParameter)
+    ]
+    if remaining_uninitialized:
+        raise RuntimeError(
+            "Uninitialized parameters remain after warmup materialization: "
+            + ", ".join(sorted(remaining_uninitialized))
+        )
     if not was_training:
         model.eval()
 
@@ -2518,6 +2567,12 @@ def _split_optimizer_groups_by_dense_type(groups: list[dict[str, Any]]) -> list[
         params_by_type: dict[str, list[torch.nn.Parameter]] = {}
         type_order: list[str] = []
         for param in group["params"]:
+            if isinstance(param, UninitializedParameter):
+                # Lazy modules that remain dormant after warmup should not
+                # participate in ZeRO dtype partitioning. They already report
+                # zero params in optimizer metadata and excluding them keeps
+                # the sharded optimizer path aligned with the non-sharded path.
+                continue
             tensor_type = str(param.type())
             if tensor_type not in params_by_type:
                 params_by_type[tensor_type] = []

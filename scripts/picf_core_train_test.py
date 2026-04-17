@@ -615,6 +615,24 @@ def test_split_optimizer_groups_by_dense_type_preserves_group_metadata() -> None
     ]
 
 
+def test_split_optimizer_groups_by_dense_type_skips_uninitialized_params() -> None:
+    fp32 = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
+    lazy = torch.nn.LazyLinear(4, bias=False).weight
+    groups = [
+        {
+            "name": "mixed",
+            "params": [lazy, fp32],
+            "lr": 0.01,
+            "lr_scale": 0.25,
+        }
+    ]
+
+    partitions = _MODULE._split_optimizer_groups_by_dense_type(groups)
+
+    assert [dense_type for dense_type, _groups in partitions] == [str(fp32.type())]
+    assert partitions[0][1][0]["params"] == [fp32]
+
+
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:
     param_a = torch.nn.Parameter(torch.tensor([1.0]))
     param_b = torch.nn.Parameter(torch.tensor([2.0]))

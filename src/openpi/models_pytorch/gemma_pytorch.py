@@ -7,6 +7,26 @@ from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.gemma import modeling_gemma
 
 
+def _gated_residual(x: torch.Tensor | None, y: torch.Tensor | None, gate: torch.Tensor | None) -> torch.Tensor | None:
+    """Compat wrapper for Gemma's private gated residual helper.
+
+    Newer/older `transformers` builds do not consistently expose
+    `modeling_gemma._gated_residual`. PI0.5 relies on the exact gated residual
+    semantics, so keep the behavior local and use the upstream helper only when
+    it is actually present.
+    """
+    helper = getattr(modeling_gemma, "_gated_residual", None)
+    if helper is not None:
+        return helper(x, y, gate)
+    if x is None and y is None:
+        return None
+    if x is None or y is None:
+        return x if x is not None else y
+    if gate is None:
+        return x + y
+    return x + y * gate
+
+
 class PaliGemmaWithExpertModel(nn.Module):
     def __init__(
         self,
@@ -232,7 +252,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                     out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
 
                     # first residual
-                    out_emb = modeling_gemma._gated_residual(hidden_states, out_emb, gates[i])  # noqa: SLF001
+                    out_emb = _gated_residual(hidden_states, out_emb, gates[i])
                     after_first_residual = out_emb.clone()
                     out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
                     # Convert to bfloat16 if the next layer (mlp) uses bfloat16
@@ -241,7 +261,7 @@ class PaliGemmaWithExpertModel(nn.Module):
 
                     out_emb = layer.mlp(out_emb)
                     # second residual
-                    out_emb = modeling_gemma._gated_residual(after_first_residual, out_emb, gate)  # noqa: SLF001
+                    out_emb = _gated_residual(after_first_residual, out_emb, gate)
                     outputs_embeds.append(out_emb)
                     start_pos = end_pos
 
