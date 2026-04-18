@@ -176,6 +176,50 @@ class _ZeroSemanticEncoder(torch.nn.Module):
         return torch.zeros((1, self.dim), dtype=torch.float32)
 
 
+@dataclasses.dataclass(frozen=True)
+class _DistributedRuntimeEnv:
+    torch_distributed_debug: str
+    torch_distributed_debug_source: str
+    allow_torch_distributed_debug_detail: bool
+    torch_nccl_enable_monitoring: str | None
+    torch_nccl_heartbeat_timeout_sec: str | None
+
+
+def _env_flag(name: str) -> bool:
+    return os.environ.get(name, "").strip().lower() not in {"", "0", "false", "no", "off"}
+
+
+def _configure_distributed_runtime_env(*, world_size: int, rank: int) -> _DistributedRuntimeEnv:
+    requested_raw = os.environ.get("TORCH_DISTRIBUTED_DEBUG", "").strip()
+    requested = requested_raw.upper()
+    allow_detail = _env_flag("OPENPI_ALLOW_TORCH_DISTRIBUTED_DEBUG_DETAIL")
+    applied = requested
+    source = "inherited"
+
+    if int(world_size) > 1:
+        if not requested:
+            applied = "INFO"
+            os.environ["TORCH_DISTRIBUTED_DEBUG"] = applied
+            source = "defaulted_for_ddp"
+        elif requested == "DETAIL" and not allow_detail:
+            raise RuntimeError(
+                "DDP runtime guard: TORCH_DISTRIBUTED_DEBUG=DETAIL is not allowed by default. "
+                "DETAIL is reserved for explicit distributed-runtime debugging because it can destabilize "
+                "standalone TCPStore/NCCL tracing. Set OPENPI_ALLOW_TORCH_DISTRIBUTED_DEBUG_DETAIL=1 to override."
+            )
+        else:
+            os.environ["TORCH_DISTRIBUTED_DEBUG"] = requested
+            applied = requested
+
+    return _DistributedRuntimeEnv(
+        torch_distributed_debug=applied or os.environ.get("TORCH_DISTRIBUTED_DEBUG", "").strip().upper(),
+        torch_distributed_debug_source=source,
+        allow_torch_distributed_debug_detail=allow_detail,
+        torch_nccl_enable_monitoring=os.environ.get("TORCH_NCCL_ENABLE_MONITORING"),
+        torch_nccl_heartbeat_timeout_sec=os.environ.get("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"),
+    )
+
+
 def _register_fault_dump_handler(*, stream: TextIO | None = None) -> bool:
     """Register SIGUSR1 -> faulthandler stack dump for live hang diagnosis."""
     if not hasattr(signal, "SIGUSR1"):
@@ -1106,11 +1150,15 @@ def _validate_backbone_args(args: argparse.Namespace) -> None:
             )
 
 
-def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.device]:
+def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.device, _DistributedRuntimeEnv]:
     world_size = int(os.environ.get("WORLD_SIZE", "1"))
     rank = int(os.environ.get("RANK", "0"))
-    local_rank = int(os.environ.get("LOCAL_RANK", "0"))
     use_ddp = world_size > 1
+    runtime_env = _configure_distributed_runtime_env(world_size=world_size, rank=rank)
+    local_rank_env = os.environ.get("LOCAL_RANK")
+    if use_ddp and local_rank_env is None:
+        raise RuntimeError("LOCAL_RANK must be set when running under DDP (use torchrun or set LOCAL_RANK per process).")
+    local_rank = int(local_rank_env or "0")
     if str(requested_device).startswith("cuda"):
         if not torch.cuda.is_available():
             raise RuntimeError(f"Requested device={requested_device!r}, but CUDA is not available.")
@@ -1127,8 +1175,8 @@ def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.dev
         device = torch.device("cpu")
     if use_ddp and not dist.is_initialized():
         backend = "nccl" if device.type == "cuda" else "gloo"
-        dist.init_process_group(backend=backend)
-    return use_ddp, rank, world_size, device
+        dist.init_process_group(backend=backend, init_method="env://")
+    return use_ddp, rank, world_size, device, runtime_env
 
 
 def _cleanup_distributed() -> None:
@@ -2786,7 +2834,7 @@ def _init_wandb(*, args: argparse.Namespace, output_dir: Path, resuming: bool, e
 
 
 def train(args: argparse.Namespace) -> None:
-    use_ddp, rank, world_size, device = _setup_distributed(args.device)
+    use_ddp, rank, world_size, device, runtime_env = _setup_distributed(args.device)
     wandb_active = False
     is_main = False
     source: _CalvinTransitionSource | None = None
@@ -2799,6 +2847,16 @@ def train(args: argparse.Namespace) -> None:
         is_main = _is_main(rank)
         if is_main:
             _warn_single_gpu_foundation_accum_risk(args, world_size=world_size, logger=logging.getLogger())
+            logging.info(
+                "Distributed runtime env: world_size=%s torch_distributed_debug=%s source=%s allow_detail=%s "
+                "torch_nccl_enable_monitoring=%s torch_nccl_heartbeat_timeout_sec=%s",
+                world_size,
+                runtime_env.torch_distributed_debug or None,
+                runtime_env.torch_distributed_debug_source,
+                runtime_env.allow_torch_distributed_debug_detail,
+                runtime_env.torch_nccl_enable_monitoring,
+                runtime_env.torch_nccl_heartbeat_timeout_sec,
+            )
         output_dir = Path(args.checkpoint_base_dir) / "picf_core" / args.exp_name
         latest_path = output_dir / "latest.pt"
         metrics_path = output_dir / "metrics.jsonl"

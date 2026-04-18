@@ -4,6 +4,7 @@ import argparse
 import dataclasses
 import importlib.util
 import math
+import os
 import types
 from pathlib import Path
 import sys
@@ -206,6 +207,73 @@ def test_normalize_train_args_disables_semantic_gradient_checkpointing_for_accum
 
     assert args.semantic_gradient_checkpointing is False
     assert args.semantic_gradient_checkpointing_disabled_for_accum is True
+
+
+def test_setup_distributed_defaults_torch_distributed_debug_to_info_for_ddp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.delenv("TORCH_DISTRIBUTED_DEBUG", raising=False)
+    monkeypatch.delenv("OPENPI_ALLOW_TORCH_DISTRIBUTED_DEBUG_DETAIL", raising=False)
+    monkeypatch.setattr(_MODULE.dist, "is_initialized", lambda: False)
+    init_calls: list[tuple[str, str | None]] = []
+    monkeypatch.setattr(
+        _MODULE.dist,
+        "init_process_group",
+        lambda backend, init_method=None: init_calls.append((backend, init_method)),
+    )
+
+    use_ddp, rank, world_size, device, runtime_env = _MODULE._setup_distributed("cpu")
+
+    assert use_ddp is True
+    assert rank == 0
+    assert world_size == 4
+    assert device.type == "cpu"
+    assert os.environ["TORCH_DISTRIBUTED_DEBUG"] == "INFO"
+    assert runtime_env.torch_distributed_debug == "INFO"
+    assert runtime_env.torch_distributed_debug_source == "defaulted_for_ddp"
+    assert init_calls == [("gloo", "env://")]
+
+
+def test_setup_distributed_rejects_detail_without_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("TORCH_DISTRIBUTED_DEBUG", "DETAIL")
+    monkeypatch.delenv("OPENPI_ALLOW_TORCH_DISTRIBUTED_DEBUG_DETAIL", raising=False)
+    monkeypatch.setattr(_MODULE.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(_MODULE.dist, "init_process_group", lambda backend, init_method=None: None)
+
+    with pytest.raises(RuntimeError, match="TORCH_DISTRIBUTED_DEBUG=DETAIL is not allowed by default"):
+        _MODULE._setup_distributed("cpu")
+
+
+def test_setup_distributed_preserves_detail_with_explicit_opt_in(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.setenv("LOCAL_RANK", "0")
+    monkeypatch.setenv("TORCH_DISTRIBUTED_DEBUG", "DETAIL")
+    monkeypatch.setenv("OPENPI_ALLOW_TORCH_DISTRIBUTED_DEBUG_DETAIL", "1")
+    monkeypatch.setattr(_MODULE.dist, "is_initialized", lambda: False)
+    monkeypatch.setattr(_MODULE.dist, "init_process_group", lambda backend, init_method=None: None)
+
+    _use_ddp, _rank, _world_size, _device, runtime_env = _MODULE._setup_distributed("cpu")
+
+    assert os.environ["TORCH_DISTRIBUTED_DEBUG"] == "DETAIL"
+    assert runtime_env.torch_distributed_debug == "DETAIL"
+    assert runtime_env.allow_torch_distributed_debug_detail is True
+    assert runtime_env.torch_distributed_debug_source == "inherited"
+
+
+def test_setup_distributed_requires_local_rank_for_ddp(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("WORLD_SIZE", "4")
+    monkeypatch.setenv("RANK", "0")
+    monkeypatch.delenv("LOCAL_RANK", raising=False)
+
+    with pytest.raises(RuntimeError, match="LOCAL_RANK must be set"):
+        _MODULE._setup_distributed("cpu")
 
 
 def test_validate_train_args_rejects_invalid_grad_clip_percentile_mode() -> None:

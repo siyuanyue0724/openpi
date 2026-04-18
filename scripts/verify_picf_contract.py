@@ -455,6 +455,20 @@ def verify_static_contract() -> list[CheckResult]:
             detail="PICF trainer now uses the unified policy interface for action/control integration.",
         ),
         CheckResult(
+            name="trainer_ddp_runtime_guard_rejects_detail_debug_by_default",
+            ok=(
+                "def _configure_distributed_runtime_env(" in trainer_source
+                and "DDP runtime guard: TORCH_DISTRIBUTED_DEBUG=DETAIL is not allowed by default." in trainer_source
+                and 'applied = "INFO"' in trainer_source
+                and "OPENPI_ALLOW_TORCH_DISTRIBUTED_DEBUG_DETAIL" in trainer_source
+                and "LOCAL_RANK must be set when running under DDP" in trainer_source
+            ),
+            detail=(
+                "PICF trainer hardens multi-rank startup by defaulting TORCH_DISTRIBUTED_DEBUG to INFO, "
+                "rejecting DETAIL unless it is explicitly opted into, and failing fast when LOCAL_RANK is missing."
+            ),
+        ),
+        CheckResult(
             name="serve_primary_action_path_uses_policy_act",
             ok=(
                 "self._policy = getattr(trainer, \"policy\", PicfPi05Policy(" in serve_source

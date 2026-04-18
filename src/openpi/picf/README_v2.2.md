@@ -1458,6 +1458,19 @@ Retain:
 These are already validated runtime guards and remain in trainer/runtime
 scope after policy unification.
 
+Additional trainer runtime rule:
+
+- in multi-rank runs, `scripts/picf_core_train.py` must not silently inherit
+  `TORCH_DISTRIBUTED_DEBUG=DETAIL` as the default runtime mode
+- DDP startup now defaults `TORCH_DISTRIBUTED_DEBUG` to `INFO`
+- if `TORCH_DISTRIBUTED_DEBUG=DETAIL` is present under DDP, the trainer
+  fails fast at startup unless
+  `OPENPI_ALLOW_TORCH_DISTRIBUTED_DEBUG_DETAIL=1` is explicitly set
+- this guard exists because DETAIL-level TCPStore/NCCL trace traffic can
+  destabilize standalone multi-rank bring-up and produce misleading
+  `Broken pipe` heartbeat noise even while training continues
+- DDP launch also fails fast if `LOCAL_RANK` is missing
+
 ### 7.7 `scripts/serve_picf_policy.py`
 
 Serving no longer treats this manual sequence as the deployed action path:

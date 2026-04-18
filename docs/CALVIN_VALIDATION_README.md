@@ -172,6 +172,17 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4
 This is a preserved historical launch path from before the fully restored
 PI0.5-action-stack deployment.
 
+Distributed runtime note for current multi-rank bring-up:
+
+- do not use `TORCH_DISTRIBUTED_DEBUG=DETAIL` as the default 4-GPU training
+  setting
+- current `scripts/picf_core_train.py` defaults DDP startup to
+  `TORCH_DISTRIBUTED_DEBUG=INFO`
+- if the environment injects `TORCH_DISTRIBUTED_DEBUG=DETAIL`, the trainer
+  fails fast unless
+  `OPENPI_ALLOW_TORCH_DISTRIBUTED_DEBUG_DETAIL=1` is explicitly set
+- reserve DETAIL for targeted distributed-runtime debugging only
+
 ## 6. Serving / Rollout
 
 After training:
