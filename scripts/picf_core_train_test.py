@@ -883,6 +883,7 @@ def test_fsdp_wrap_recursively_splits_mixed_dtype_subtrees_on_cpu() -> None:
             self.block = torch.nn.Linear(4, 4, bias=False).to(torch.bfloat16)
             self.norm = torch.nn.LayerNorm(4).float()
             self.head = torch.nn.Linear(4, 4).float()
+            self.position_ids = torch.nn.Parameter(torch.arange(4, dtype=torch.int64), requires_grad=False)
 
         def forward(self, inputs: torch.Tensor) -> torch.Tensor:
             x = self.patch(inputs.float())
@@ -923,6 +924,8 @@ def test_fsdp_wrap_recursively_splits_mixed_dtype_subtrees_on_cpu() -> None:
         unwrapped = _MODULE._unwrap_training_model(wrapped)
         nested_semantic_wrappers = [m for m in unwrapped.semantic_encoder.modules() if _MODULE._is_fsdp_model(m)]
         assert nested_semantic_wrappers, "mixed-dtype semantic encoder should be recursively split into nested FSDP wrappers"
+        assert "position_ids" not in dict(unwrapped.semantic_encoder.named_parameters())
+        assert "position_ids" in dict(unwrapped.semantic_encoder.named_buffers())
 
         optimizer = torch.optim.AdamW(wrapped.parameters(), lr=1e-3)
         loss = wrapped(torch.randn(2, 4))

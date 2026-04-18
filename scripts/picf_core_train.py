@@ -1251,12 +1251,24 @@ def _fsdp_sharded_child_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Mo
     return children
 
 
-def _collect_trainable_params_excluding_nested_fsdp(module: torch.nn.Module) -> list[torch.nn.Parameter]:
-    params = [param for param in module.parameters(recurse=False) if bool(getattr(param, "requires_grad", False))]
+def _promote_non_trainable_nonfloating_params_to_buffers(module: torch.nn.Module) -> None:
+    for name, param in list(module.named_parameters(recurse=False)):
+        if bool(getattr(param, "requires_grad", False)):
+            continue
+        if torch.is_floating_point(param) or torch.is_complex(param):
+            continue
+        delattr(module, name)
+        module.register_buffer(name, param.detach(), persistent=True)
+    for child in module.children():
+        _promote_non_trainable_nonfloating_params_to_buffers(child)
+
+
+def _collect_fsdp_managed_params_excluding_nested_fsdp(module: torch.nn.Module) -> list[torch.nn.Parameter]:
+    params = list(module.parameters(recurse=False))
     for child in module.children():
         if _is_fsdp_model(child):
             continue
-        params.extend(_collect_trainable_params_excluding_nested_fsdp(child))
+        params.extend(_collect_fsdp_managed_params_excluding_nested_fsdp(child))
     return params
 
 
@@ -1270,12 +1282,14 @@ def _fsdp_wrap_uniform_dtype_subtrees(
     if FullyShardedDataParallel is None:
         raise RuntimeError("training_strategy=fsdp_full_shard requires torch.distributed.fsdp to be available.")
 
+    _promote_non_trainable_nonfloating_params_to_buffers(module)
+
     for child_name, child in list(module.named_children()):
         wrapped_child = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
         if wrapped_child is not child:
             setattr(module, child_name, wrapped_child)
 
-    remaining_params = _collect_trainable_params_excluding_nested_fsdp(module)
+    remaining_params = _collect_fsdp_managed_params_excluding_nested_fsdp(module)
     if not remaining_params:
         return module
 
@@ -1302,7 +1316,7 @@ def _fsdp_wrap_uniform_dtype_subtrees(
         if _is_fsdp_model(child):
             continue
         child_dtypes = {
-            param.dtype for param in _collect_trainable_params_excluding_nested_fsdp(child)
+            param.dtype for param in _collect_fsdp_managed_params_excluding_nested_fsdp(child)
         }
         if len(child_dtypes) > 1:
             unresolved_children.append(
