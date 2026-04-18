@@ -1284,11 +1284,6 @@ def _fsdp_wrap_uniform_dtype_subtrees(
 
     _promote_non_trainable_nonfloating_params_to_buffers(module)
 
-    for child_name, child in list(module.named_children()):
-        wrapped_child = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
-        if wrapped_child is not child:
-            setattr(module, child_name, wrapped_child)
-
     remaining_params = _collect_fsdp_managed_params_excluding_nested_fsdp(module)
     if not remaining_params:
         return module
@@ -1302,6 +1297,15 @@ def _fsdp_wrap_uniform_dtype_subtrees(
             use_orig_params=True,
             limit_all_gathers=True,
         )
+
+    for child_name, child in list(module.named_children()):
+        wrapped_child = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
+        if wrapped_child is not child:
+            setattr(module, child_name, wrapped_child)
+
+    remaining_params = _collect_fsdp_managed_params_excluding_nested_fsdp(module)
+    if not remaining_params:
+        return module
 
     direct_params = [param for param in module.parameters(recurse=False) if bool(getattr(param, "requires_grad", False))]
     direct_dtypes = {param.dtype for param in direct_params}

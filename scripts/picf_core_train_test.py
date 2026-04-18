@@ -933,6 +933,29 @@ def test_fsdp_wrap_recursively_splits_mixed_dtype_subtrees_on_cpu() -> None:
         optimizer.step()
 
 
+def test_fsdp_wrap_keeps_uniform_subtrees_at_single_boundary_on_cpu() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _UniformNestedModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inner = torch.nn.Sequential(
+                torch.nn.Linear(4, 4),
+                torch.nn.ReLU(),
+                torch.nn.Linear(4, 4),
+            )
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.inner(inputs)
+
+    with _single_rank_process_group():
+        module = _UniformNestedModule()
+        wrapped = _MODULE._fsdp_wrap_uniform_dtype_subtrees(module, device=torch.device("cpu"))
+        assert _MODULE._is_fsdp_model(wrapped)
+        assert not any(_MODULE._is_fsdp_model(child) for child in wrapped.module.children())
+
+
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:
     param_a = torch.nn.Parameter(torch.tensor([1.0]))
     param_b = torch.nn.Parameter(torch.tensor([2.0]))
