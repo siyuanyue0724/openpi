@@ -872,6 +872,64 @@ def test_fsdp_wrap_and_checkpoint_roundtrip_on_cpu(tmp_path: Path) -> None:
             torch.testing.assert_close(reloaded_state[key], original_state[key])
 
 
+def test_fsdp_wrap_recursively_splits_mixed_dtype_subtrees_on_cpu() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _MixedSemanticEncoder(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.patch = torch.nn.Linear(4, 4).float()
+            self.block = torch.nn.Linear(4, 4, bias=False).to(torch.bfloat16)
+            self.norm = torch.nn.LayerNorm(4).float()
+            self.head = torch.nn.Linear(4, 4).float()
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            x = self.patch(inputs.float())
+            y = self.block(x.to(torch.bfloat16)).to(torch.float32)
+            x = self.norm(x + y)
+            return self.head(x)
+
+    class _TinyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.point_feature_extractor = torch.nn.Linear(4, 4)
+            self.visual_encoder = torch.nn.Linear(4, 4)
+            self.tactile_encoder = torch.nn.Linear(4, 4)
+            self.head = torch.nn.Linear(4, 2)
+
+    class _TinyTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = _TinyCore()
+            self.semantic_encoder = _MixedSemanticEncoder()
+            self.policy = types.SimpleNamespace(semantic_encoder=self.semantic_encoder)
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            hidden = self.core.point_feature_extractor(inputs)
+            hidden = self.core.visual_encoder(hidden)
+            hidden = self.core.tactile_encoder(hidden)
+            hidden = self.semantic_encoder(hidden)
+            return self.core.head(hidden).sum()
+
+    args = _base_args()
+    args.training_strategy = "fsdp_full_shard"
+    args.optimizer_sharding = "none"
+
+    with _single_rank_process_group():
+        trainer = _TinyTrainer()
+        wrapped = _MODULE._wrap_model_for_training_strategy(trainer, args=args, device=torch.device("cpu"))
+        assert _MODULE._is_fsdp_model(wrapped)
+        unwrapped = _MODULE._unwrap_training_model(wrapped)
+        nested_semantic_wrappers = [m for m in unwrapped.semantic_encoder.modules() if _MODULE._is_fsdp_model(m)]
+        assert nested_semantic_wrappers, "mixed-dtype semantic encoder should be recursively split into nested FSDP wrappers"
+
+        optimizer = torch.optim.AdamW(wrapped.parameters(), lr=1e-3)
+        loss = wrapped(torch.randn(2, 4))
+        loss.backward()
+        optimizer.step()
+
+
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:
     param_a = torch.nn.Parameter(torch.tensor([1.0]))
     param_b = torch.nn.Parameter(torch.tensor([2.0]))

@@ -1251,6 +1251,72 @@ def _fsdp_sharded_child_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Mo
     return children
 
 
+def _collect_trainable_params_excluding_nested_fsdp(module: torch.nn.Module) -> list[torch.nn.Parameter]:
+    params = [param for param in module.parameters(recurse=False) if bool(getattr(param, "requires_grad", False))]
+    for child in module.children():
+        if _is_fsdp_model(child):
+            continue
+        params.extend(_collect_trainable_params_excluding_nested_fsdp(child))
+    return params
+
+
+def _fsdp_wrap_uniform_dtype_subtrees(
+    module: torch.nn.Module,
+    *,
+    device: torch.device,
+) -> torch.nn.Module:
+    if _is_fsdp_model(module):
+        return module
+    if FullyShardedDataParallel is None:
+        raise RuntimeError("training_strategy=fsdp_full_shard requires torch.distributed.fsdp to be available.")
+
+    for child_name, child in list(module.named_children()):
+        wrapped_child = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
+        if wrapped_child is not child:
+            setattr(module, child_name, wrapped_child)
+
+    remaining_params = _collect_trainable_params_excluding_nested_fsdp(module)
+    if not remaining_params:
+        return module
+
+    remaining_dtypes = {param.dtype for param in remaining_params}
+    if len(remaining_dtypes) == 1:
+        return FullyShardedDataParallel(
+            module,
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            device_id=_fsdp_device_id(device),
+            use_orig_params=True,
+            limit_all_gathers=True,
+        )
+
+    direct_params = [param for param in module.parameters(recurse=False) if bool(getattr(param, "requires_grad", False))]
+    direct_dtypes = {param.dtype for param in direct_params}
+    if len(direct_dtypes) > 1:
+        raise RuntimeError(
+            "FSDP wrapping requires uniform trainable parameter dtype inside a single module, "
+            f"but {type(module).__name__} has direct trainable params with dtypes={sorted(str(dtype) for dtype in direct_dtypes)}."
+        )
+
+    unresolved_children: list[str] = []
+    for child_name, child in module.named_children():
+        if _is_fsdp_model(child):
+            continue
+        child_dtypes = {
+            param.dtype for param in _collect_trainable_params_excluding_nested_fsdp(child)
+        }
+        if len(child_dtypes) > 1:
+            unresolved_children.append(
+                f"{child_name}:{type(child).__name__}:{sorted(str(dtype) for dtype in child_dtypes)}"
+            )
+    if unresolved_children:
+        raise RuntimeError(
+            "Unable to recursively split a mixed-dtype subtree for FSDP wrapping. "
+            f"module={type(module).__name__} unresolved_children={unresolved_children}"
+        )
+
+    return module
+
+
 def _wrap_model_for_training_strategy(
     model: "_PicfWindowTrainer",
     *,
@@ -1262,15 +1328,8 @@ def _wrap_model_for_training_strategy(
     if FullyShardedDataParallel is None:
         raise RuntimeError("training_strategy=fsdp_full_shard requires torch.distributed.fsdp to be available.")
     child_modules = _fsdp_sharded_child_modules(model)
-    device_id = _fsdp_device_id(device)
     for child in child_modules:
-        wrapped = FullyShardedDataParallel(
-            child,
-            sharding_strategy=ShardingStrategy.FULL_SHARD,
-            device_id=device_id,
-            use_orig_params=True,
-            limit_all_gathers=True,
-        )
+        wrapped = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
         if child is model.semantic_encoder:
             model.semantic_encoder = wrapped
             model.policy.semantic_encoder = wrapped
@@ -1283,7 +1342,7 @@ def _wrap_model_for_training_strategy(
     return FullyShardedDataParallel(
         model,
         sharding_strategy=ShardingStrategy.FULL_SHARD,
-        device_id=device_id,
+        device_id=_fsdp_device_id(device),
         use_orig_params=True,
         limit_all_gathers=True,
     )
