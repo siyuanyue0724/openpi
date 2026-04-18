@@ -4,11 +4,16 @@ import argparse
 import dataclasses
 import json
 from pathlib import Path
+import sys
 from typing import Any
 
 import torch
 import torch.nn.functional as fn
 
+if __package__ in (None, ""):
+    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from openpi.picf.policy import PicfPi05Policy
 from openpi.picf.core.training import _branch_is_usable
 from openpi.picf.core.training import compute_transition_loss
 from openpi.picf.core.training import extract_future_targets
@@ -22,6 +27,7 @@ from scripts.picf_core_train import _load_tactile_backgrounds_npz
 from scripts.picf_core_train import _materialize_model_parameters
 from scripts.picf_core_train import _PicfWindowTrainer
 from scripts.picf_core_train import _resolve_action_normalizer
+from scripts.picf_core_train import _rgb_visual_override
 
 
 def _load_args(path: Path) -> argparse.Namespace:
@@ -106,24 +112,25 @@ def _describe_variant(
 ) -> dict[str, Any]:
     current = dataclasses.replace(window.frames[0], prompt=prompt, reset_scaffold=True)
     nxt = dataclasses.replace(window.frames[1], reset_scaffold=False)
-    semantic_override = None
-    if trainer.semantic_encoder is not None:
-        semantic_override = trainer.semantic_encoder.encode_observation(current)
-    output = trainer.core.step(
+    current_visual = _rgb_visual_override(current.rgb_static, grid=trainer.visual_grid) if trainer.use_visual_override else None
+    next_visual = _rgb_visual_override(nxt.rgb_static, grid=trainer.visual_grid) if trainer.use_visual_override else None
+    policy = getattr(trainer, "policy", PicfPi05Policy(core=trainer.core, semantic_encoder=trainer.semantic_encoder))
+    result = policy.forward_train_transition(
         current,
         previous=None,
-        semantic_override=semantic_override,
-        action_future=current.action,
+        visual_map_override=current_visual,
     )
+    output = result.output
     losses = compute_transition_loss(
         trainer.core,
         output,
         nxt,
         action_target=current.action,
+        next_visual_map_override=next_visual,
         config=trainer.loss_config,
     )
     future = extract_future_targets(trainer.core, nxt)
-    sem = semantic_override
+    sem = result.semantic_override
     if sem is None:
         token_count = 0
         summary_norm = 0.0
@@ -137,10 +144,10 @@ def _describe_variant(
         "prompt": prompt,
         "token_count": token_count,
         "semantic_tokens_norm": token_norm,
-        "control_tokens_norm": float(torch.linalg.norm(output.state.predictive.control_tokens.float()).item()),
-        "control_query_state_norm": float(torch.linalg.norm(output.state.predictive.control_query_state.float()).item()),
+        "conditioned_control_tokens_norm": float(torch.linalg.norm(output.state.conditioned_control.tokens.float()).item()),
+        "conditioned_control_query_state_norm": float(torch.linalg.norm(output.state.conditioned_control.query_state.float()).item()),
+        "pi_prefix_tokens_norm": float(torch.linalg.norm(output.state.conditioned_control.pi_prefix_tokens.float()).item()),
         "predictive_query_state_norm": float(torch.linalg.norm(output.state.predictive.predictive_query_state.float()).item()),
-        "pooled_state_norm": float(torch.linalg.norm(output.state.predictive.pooled_state.float()).item()),
         "posterior_global_norm": float(torch.linalg.norm(output.state.posterior.global_post.float()).item()),
         "action": output.state.predictive.action.detach().cpu().tolist(),
         "physical_global_pred_norm": float(torch.linalg.norm(output.state.predictive.physical_global_pred.float()).item()),

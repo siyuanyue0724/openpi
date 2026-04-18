@@ -195,6 +195,42 @@ def test_transition_loss_closes_one_step_future_supervision_and_backward(tmp_pat
     assert core.visual_latent_head.weight.grad is not None
 
 
+def test_transition_loss_reports_effective_budgeted_terms_consistently(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, pose_shift=0.01)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+    )
+    torch.testing.assert_close(
+        losses.action_active7,
+        ((3.0 * losses.action_pos) + (3.0 * losses.action_rot) + losses.action_gripper) / 7.0,
+    )
+    torch.testing.assert_close(
+        losses.total,
+        losses.action + losses.physical_aux_capped + losses.semantic_group_capped + losses.alignment,
+    )
+    torch.testing.assert_close(
+        losses.total_minus_action,
+        losses.physical_aux_capped + losses.semantic_group_capped + losses.alignment,
+    )
+    assert torch.isfinite(losses.physical_aux_capped)
+    assert torch.isfinite(losses.semantic_group_capped)
+    assert torch.isfinite(losses.alignment_raw)
+
+
 def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_unavailable(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]

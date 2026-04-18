@@ -22,11 +22,13 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 PIPELINE_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "core" / "pipeline.py"
 README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README.md"
 V21_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_v2.1.md"
+V22_README_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "README_v2.2.md"
 CALVIN_README_PATH = REPO_ROOT / "docs" / "CALVIN_VALIDATION_README.md"
 FORMAL_CONTRACT_PATH = REPO_ROOT / "PICF_FORMAL_CONTRACT.md"
 PALIGEMMA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "paligemma" / "wrapper.py"
 TRAINER_SCRIPT_PATH = REPO_ROOT / "scripts" / "picf_core_train.py"
 SERVE_SCRIPT_PATH = REPO_ROOT / "scripts" / "serve_picf_policy.py"
+POLICY_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "policy.py"
 
 
 @dataclass
@@ -97,6 +99,7 @@ def verify_static_contract() -> list[CheckResult]:
     wrapper_source = _read(PALIGEMMA_WRAPPER_PATH)
     trainer_source = _read(TRAINER_SCRIPT_PATH)
     serve_source = _read(SERVE_SCRIPT_PATH)
+    policy_source = _read(POLICY_PATH)
     tree = ast.parse(source)
     defaults = PicfCoreConfig()
 
@@ -111,10 +114,29 @@ def verify_static_contract() -> list[CheckResult]:
     prev_action_node = _function_node(tree, "_previous_action")
     prev_action_source = _node_source(source, prev_action_node)
 
+    public_memory_node = _function_node(tree, "_build_public_read_memory")
+    public_memory_source = _node_source(source, public_memory_node)
+
+    task_readout_node = _function_node(tree, "_build_task_readout")
+    task_readout_source = _node_source(source, task_readout_node)
+    task_readout_attrs = _attribute_strings(task_readout_node)
+
+    conditioned_control_node = _function_node(tree, "_build_conditioned_control_state")
+    conditioned_control_source = _node_source(source, conditioned_control_node)
+
+    conditioned_predictive_node = _function_node(tree, "_build_conditioned_predictive_cache")
+    conditioned_predictive_source = _node_source(source, conditioned_predictive_node)
+
+    observe_node = _function_node(tree, "observe_step")
+    observe_source = _node_source(source, observe_node)
+
     predictive_node = _function_node(tree, "_predictive_state")
     predictive_source = _node_source(source, predictive_node)
     current_targets_node = _function_node(tree, "_current_targets")
     current_targets_source = _node_source(source, current_targets_node)
+
+    finalize_node = _function_node(tree, "finalize_with_action")
+    finalize_source = _node_source(source, finalize_node)
 
     step_node = _function_node(tree, "step")
     step_source = _node_source(source, step_node)
@@ -167,32 +189,120 @@ def verify_static_contract() -> list[CheckResult]:
             detail="Innovation constructor does not read semantic-conditioned cache/global_pred/previous semantic fields.",
         ),
         CheckResult(
+            name="task_query_conditioner_gate_is_live",
+            ok="gate_init=1.0" in source and "self.task_query_conditioner = GatedCrossAttentionRead(" in source,
+            detail="Task-query conditioner is initialized with a live cross gate instead of the dormant default.",
+        ),
+        CheckResult(
+            name="public_read_memory_uses_fused_tokens_plus_visual_tokens",
+            ok=(
+                "token_field.fused_tokens" in public_memory_source
+                and "token_field.visual_tokens" in public_memory_source
+                and "token_field.point_tokens" not in public_memory_source
+                and "token_field.tactile_tokens_active" not in public_memory_source
+                and "token_field.context_tokens" not in public_memory_source
+            ),
+            detail="Public task-readout memory is defined as fused public tokens plus explicit visual tokens.",
+        ),
+        CheckResult(
+            name="task_readout_reads_current_observation_memory_only",
+            ok="posterior" not in task_readout_source and not any("posterior" in attr for attr in task_readout_attrs),
+            detail="Task readout does not directly consume posterior state.",
+        ),
+        CheckResult(
+            name="task_readout_uses_public_memory_and_private_dense_rereads",
+            ok=all(
+                text in task_readout_source
+                for text in (
+                    "public_read_memory = self._build_public_read_memory(token_field)",
+                    "dense_memory.visual_payload",
+                    "dense_memory.tactile_group_tokens",
+                    "dense_memory.point_payload",
+                )
+            ),
+            detail="Task readout consumes public fused/visual memory plus private dense visual/tactile/point payloads.",
+        ),
+        CheckResult(
+            name="task_readout_derives_point_and_tactile_routing_from_fused_attention",
+            ok=all(
+                text in task_readout_source
+                for text in (
+                    "point_public_attention = fused_attention[:, :point_count]",
+                    "tactile_public_attention = fused_attention[:, point_count : point_count + tactile_count]",
+                )
+            ),
+            detail="Task readout derives point/tactile routing from fused public attention instead of rereading raw public point/tactile streams.",
+        ),
+        CheckResult(
+            name="conditioned_control_state_is_single_canonical_route",
+            ok=all(
+                text in conditioned_control_source
+                for text in (
+                    "base_tokens = torch.cat(",
+                    "task_tokens = torch.cat(",
+                    "control_tokens = self.control_world(control_prefix[None, :])[0]",
+                    "pi_prefix_tokens, _ = self.pi_prefix_reader(",
+                    "future_condition_tokens, _ = self.future_condition_reader(",
+                )
+            )
+            and "semantic.prefix_tokens" not in conditioned_control_source,
+            detail="Control semantics are unified into a single conditioned-control trunk without raw semantic-prefix injection.",
+        ),
+        CheckResult(
+            name="conditioned_predictive_cache_is_token_level_from_physical_pred_and_future_condition",
+            ok=all(
+                text in conditioned_predictive_source
+                for text in (
+                    "conditioned_physical_pred_tokens = self.physical_pred_to_conditioned_proj(physical_pred_tokens)",
+                    "_add_role_embedding(conditioned_physical_pred_tokens, self.predictive_conditioned_role_embedding, 0)",
+                    "_add_role_embedding(future_condition_tokens, self.predictive_conditioned_role_embedding, 1)",
+                    "pred_tokens = self.predictive_semantic_world(pred_conditioned_tokens[None, :])[0]",
+                )
+            )
+            and all(
+                text not in conditioned_predictive_source
+                for text in (
+                    "semantic.prefix_tokens",
+                    "semantic.tokens",
+                    "semantic_override",
+                    "conditioned_semantic_prefix_tokens",
+                )
+            ),
+            detail="Conditioned future cache is built from physical predictive token sequence plus future-condition tokens only.",
+        ),
+        CheckResult(
             name="previous_action_prefers_executed_action",
             ok='getattr(previous.predictive, "executed_action", None)' in prev_action_source and "previous.predictive.action" in prev_action_source,
             detail="`_previous_action` uses executed_action first, action as fallback.",
         ),
         _call_order(
             source,
-            predictive_source,
+            observe_source,
             [
-                "physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)",
-                "pred_tokens = self.predictive_semantic_world(",
-                "prediction_cache = self._prediction_cache_from_global(global_pred)",
+                "posterior = self._posterior_update(",
+                "innovation_token, innovation_norm = self._innovation(",
+                "task_readout = self._build_task_readout(",
+                "conditioned_control = self._build_conditioned_control_state(",
             ],
         ),
         _call_order(
             source,
-            step_source,
+            predictive_source,
             [
-                "posterior = self._posterior_update(",
-                "innovation_token, innovation_norm = self._innovation(",
-                "predictive = self._predictive_state(",
+                "physical_pred_tokens, physical_global_pred, physical_prediction_cache = self._build_physical_predictive_basis(",
+                "predictive_query_state, global_pred, prediction_cache = self._build_conditioned_predictive_cache(",
             ],
         ),
         CheckResult(
-            name="task_sidecar_removed_from_pipeline",
-            ok=all(text not in source for text in ("_build_task_anchors(", "task_anchors=", "task_query_tokens")),
-            detail="Task-anchor sidecar path has been removed from the core pipeline.",
+            name="step_is_compat_wrapper_over_observe_and_finalize",
+            ok=all(
+                text in step_source
+                for text in (
+                    "observed = self.observe_step(",
+                    "return self.finalize_with_action(",
+                )
+            ),
+            detail="Core step is now only a compatibility wrapper over observe/finalize.",
         ),
         CheckResult(
             name="live_visual_native_first_competition_path",
@@ -270,34 +380,27 @@ def verify_static_contract() -> list[CheckResult]:
             detail="Live PICF point innovation target now combines native point latent probes with coarse occupancy.",
         ),
         CheckResult(
-            name="control_prefix_uses_full_semantic_prefix_primary",
-            ok="_add_role_embedding(control_semantic_prefix_tokens, self.control_role_embedding, 3)" in predictive_source,
-            detail="`_predictive_state` injects the full semantic prefix directly into the control trunk.",
-        ),
-        CheckResult(
-            name="control_prefix_upprojects_physical_world_tokens",
+            name="conditioned_control_upprojects_physical_and_task_tokens",
             ok=all(
-                text in predictive_source
+                text in conditioned_control_source
                 for text in (
                     "control_posterior_tokens = self.posterior_to_control_proj(posterior.tokens)",
                     "control_global_post = self.global_post_to_control_proj(posterior.global_post[None, :])",
                     "control_innovation_token = self.innovation_to_control_proj(innovation_token[None, :])",
                     "control_proprio_token = self.proprio_to_control_proj(proprio_token[None, :])",
+                    "task_local_tokens = self.task_to_control_proj(task_readout.local_tokens)",
+                    "task_global_token = self.task_global_to_control_proj(task_readout.global_token[None, :])",
+                    "self.instruction_to_control_proj(task_readout.instruction_tokens)",
                 )
             ),
-            detail="Physical posterior/global_post/innovation/proprio are up-projected into the semantic-width control trunk.",
-        ),
-        CheckResult(
-            name="predictive_conditioned_uses_full_semantic_prefix_primary",
-            ok="_add_role_embedding(conditioned_semantic_prefix_tokens, self.predictive_conditioned_role_embedding, 1)" in predictive_source,
-            detail="`_predictive_state` injects the full semantic prefix directly into the conditioned future trunk.",
+            detail="Conditioned control trunk consumes up-projected physical base tokens and task-readout tokens.",
         ),
         CheckResult(
             name="predictive_conditioned_upprojects_physical_pred_tokens",
             ok=(
-                "conditioned_physical_pred_tokens = self.physical_pred_to_conditioned_proj(physical_pred_tokens)" in predictive_source
-                and "_add_role_embedding(conditioned_physical_pred_tokens, self.predictive_conditioned_role_embedding, 0)" in predictive_source
-                and "global_pred = self.predictive_state_proj(predictive_query_state)" in predictive_source
+                "conditioned_physical_pred_tokens = self.physical_pred_to_conditioned_proj(physical_pred_tokens)" in conditioned_predictive_source
+                and "_add_role_embedding(conditioned_physical_pred_tokens, self.predictive_conditioned_role_embedding, 0)" in conditioned_predictive_source
+                and "global_pred = self.predictive_state_proj(predictive_query_state)" in conditioned_predictive_source
             ),
             detail="Conditioned future trunk consumes up-projected physical prediction tokens and projects the semantic-width query state back to the physical cache width.",
         ),
@@ -327,29 +430,56 @@ def verify_static_contract() -> list[CheckResult]:
         ),
         CheckResult(
             name="control_prefix_includes_explicit_global_post",
-            ok="control_global_post = self.global_post_to_control_proj(posterior.global_post[None, :])" in predictive_source,
-            detail="`_predictive_state` explicitly injects posterior.global_post into control tokens via up-projection.",
+            ok="control_global_post = self.global_post_to_control_proj(posterior.global_post[None, :])" in conditioned_control_source,
+            detail="Conditioned control tokens explicitly include posterior.global_post via up-projection.",
         ),
         CheckResult(
-            name="trainer_primary_action_loss_uses_pi05_flow",
+            name="policy_object_unifies_train_and_serve_interfaces",
             ok=(
-                "compute_action_flow_loss(" in trainer_source
-                and "action_condition_tokens=output.state.predictive.action_condition_tokens" not in trainer_source
-                and 'extra_prefix_tokens=output.state.predictive.action_condition_tokens' in trainer_source
+                "class PicfPi05Policy:" in policy_source
+                and "class PicfPolicyTrainResult:" in policy_source
+                and "class PicfPolicyActResult:" in policy_source
+                and "def forward_train_transition(" in policy_source
+                and "def act(" in policy_source
             ),
-            detail="PICF trainer uses PI0.5 flow-matching loss with PICF conditioning tokens as the primary action objective.",
+            detail="PicfPi05Policy exists as the unified exported policy interface with typed result objects.",
         ),
         CheckResult(
-            name="serve_primary_action_path_uses_pi05_denoise_sampler",
+            name="trainer_primary_action_loss_uses_policy_and_pi05_flow",
             ok=(
-                "sample_action_chunk(" in serve_source
-                and "refresh_predictive_state_for_action(" in serve_source
-                and "action_chunk[:7]" not in serve_source
+                "self.policy = PicfPi05Policy(" in trainer_source
+                and "policy_forward = self.policy.forward_train_transition(" in trainer_source
+                and "output = policy_forward.output" in trainer_source
+                and "flow_override = policy_forward.flow_override" in trainer_source
+            ),
+            detail="PICF trainer now uses the unified policy interface for action/control integration.",
+        ),
+        CheckResult(
+            name="serve_primary_action_path_uses_policy_act",
+            ok=(
+                "self._policy = getattr(trainer, \"policy\", PicfPi05Policy(" in serve_source
+                and "act_result = self._policy.act(" in serve_source
+                and "output = act_result.output" in serve_source
+                and "refresh_predictive_state_for_action(" not in serve_source
             ),
             detail=(
-                "PICF serving path uses the PI0.5-style denoise sampler and then refreshes "
-                "the predictive cache with the sampled action chunk."
+                "PICF serving path now delegates action generation and predictive finalization to PicfPi05Policy.act."
             ),
+        ),
+        CheckResult(
+            name="policy_act_requires_pi05_action_generator_on_new_path",
+            ok="self._require_action_generation()" in policy_source and "observed = self.core.observe_step(" in policy_source,
+            detail="The v2.2 policy requires a PI0.5 action generator before running the new observe/sample/finalize path.",
+        ),
+        CheckResult(
+            name="policy_training_resolves_teacher_forced_action_future_explicitly",
+            ok=(
+                "def _teacher_forced_action_future(" in policy_source
+                and "if observation.action is not None:" in policy_source
+                and "if action_chunk_target is not None:" in policy_source
+                and "action_future=self._teacher_forced_action_future(" in policy_source
+            ),
+            detail="Policy training path resolves teacher-forced executed action explicitly from observation.action first, then action_chunk_target.",
         ),
         CheckResult(
             name="core_no_longer_uses_direct_7d_action_head",
@@ -390,7 +520,7 @@ def verify_static_contract() -> list[CheckResult]:
 
 def verify_doc_links() -> list[CheckResult]:
     checks = []
-    for path in (README_PATH, V21_README_PATH, CALVIN_README_PATH):
+    for path in (README_PATH, V21_README_PATH, V22_README_PATH, CALVIN_README_PATH):
         text = _read(path)
         checks.append(
             CheckResult(
@@ -399,20 +529,83 @@ def verify_doc_links() -> list[CheckResult]:
                 detail=f"{path.name} references PICF_FORMAL_CONTRACT.md",
             )
         )
+    readme_text = _read(README_PATH)
     v21_text = _read(V21_README_PATH)
+    v22_text = _read(V22_README_PATH)
+    calvin_text = _read(CALVIN_README_PATH)
+    formal_text = _read(FORMAL_CONTRACT_PATH)
     checks.append(
         CheckResult(
-            name="doc_set_restricted_to_three_persistent_docs",
+            name="readme_entry_points_to_v22_as_current_and_v21_as_historical",
+            ok=all(
+                needle in readme_text
+                for needle in (
+                    "README_v2.2.md",
+                    "current local v2.2 architecture record",
+                    "README_v2.1.md",
+                    "Historical v2.1 deployment record",
+                )
+            ),
+            detail="README entry points to v2.2 as current-live and v2.1 as historical.",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="readme_v21_is_marked_historical",
             ok=all(
                 needle in v21_text
                 for needle in (
-                    "maintained PICF document set is intentionally limited to 3 persistent",
-                    "README_v2.1.md",
-                    "PICF_FORMAL_CONTRACT.md",
-                    "CALVIN_VALIDATION_README.md",
+                    "archived v2.1 deployment record",
+                    "current live local architecture record",
+                    "README_v2.2.md",
                 )
             ),
-            detail="README_v2.1 explicitly restricts the maintained PICF document set to 3 files.",
+            detail="README_v2.1 is now explicitly marked as historical context.",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="readme_v22_records_contract_rewrite_scope",
+            ok=all(
+                needle in v22_text
+                for needle in (
+                    "current local v2.2 architecture record",
+                    "contract rewrite",
+                    "one exported policy object",
+                    "one canonical conditioned control state `C_t`",
+                    "one final action path",
+                )
+            ),
+            detail="README_v2.2 records the one-shot v2.2 contract rewrite scope.",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="readme_v22_records_corrected_public_read_memory_and_future_contract",
+            ok=all(
+                needle in v22_text
+                for needle in (
+                    "public_read_memory = [fused_tokens, visual_tokens]",
+                    "_build_task_readout(...)",
+                    "must not take `posterior` as a direct input",
+                    "K_t^{cond} = P_cond(H_t^{phys_pred}, C_t^{future})",
+                )
+            ),
+            detail="README_v2.2 captures the corrected public-read/task-readout/conditioned-future contract.",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="calvin_validation_points_to_v22_current_live_docs",
+            ok=all(
+                needle in calvin_text
+                for needle in (
+                    "README_v2.2.md",
+                    "current local architecture and deployment document",
+                    "README_v2.1.md` is retained only as the archived pre-v2.2 deployment record",
+                )
+            ),
+            detail="CALVIN validation README now points to v2.2 as the current-live deployment document.",
         )
     )
     checks.append(
@@ -420,6 +613,22 @@ def verify_doc_links() -> list[CheckResult]:
             name="formal_contract_exists",
             ok=FORMAL_CONTRACT_PATH.is_file(),
             detail=f"{FORMAL_CONTRACT_PATH} exists",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="formal_contract_records_current_v22_control_and_future_contract",
+            ok=all(
+                needle in formal_text
+                for needle in (
+                    "current local",
+                    "v2.2 PICF codebase",
+                    "public read memory",
+                    "one canonical conditioned control state",
+                    "K_t^{cond} = P_cond(H_t^{phys_pred}, C_t^{future})",
+                )
+            ),
+            detail="Formal contract records the current v2.2 public-read / conditioned-control / conditioned-future semantics.",
         )
     )
     return checks
@@ -441,7 +650,7 @@ def verify_regressions() -> list[CheckResult]:
         "src/openpi/picf/core/pipeline_test.py::test_semantic_changes_do_not_pollute_physical_prediction_cache_or_next_innovation",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_prefix_prompt_changes_do_not_change_physical_branch_but_do_change_control_and_future",
         "src/openpi/picf/core/pipeline_test.py::test_control_prefix_explicitly_depends_on_global_post",
-        "src/openpi/picf/core/pipeline_test.py::test_full_semantic_prefix_tokens_are_directly_included_in_control_and_future_trunks",
+        "src/openpi/picf/core/pipeline_test.py::test_control_and_future_trunks_consume_task_readout_and_not_raw_semantic_prefix",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_tokens_directly_condition_control_and_semantic_future_readout",
         "src/openpi/picf/core/pipeline_test.py::test_semantic_tokens_alone_can_condition_action_without_cross_reads",
         "src/openpi/picf/core/pipeline_test.py::test_prior_and_context_use_previous_executed_action_not_previous_policy_output",
@@ -461,8 +670,10 @@ def verify_full_core_suite() -> list[CheckResult]:
                 "-q",
                 "src/openpi/picf/core/pipeline_test.py",
                 "src/openpi/picf/core/training_test.py",
+                "src/openpi/picf/policy_test.py",
                 "scripts/picf_core_train_test.py",
                 "scripts/picf_resume_train_test.py",
+                "scripts/serve_picf_policy_test.py",
                 "src/openpi/picf/paligemma/wrapper_test.py",
             ]
         )
@@ -504,7 +715,17 @@ def verify_smoke() -> list[CheckResult]:
             sonata_stage_name="base",
             sonata_dtype="float32",
         )
-    ok = float(result["loss_total"]) > 0.0 and float(result["point_grad_norm"]) > 0.0
+    ok = all(
+        (
+            bool(result["policy_path_used"]),
+            bool(result["flow_override_used"]),
+            bool(result["conditioned_control_present"]),
+            bool(result["pi_prefix_tokens_present"]),
+            bool(result["predictive_action_chunk_present"]),
+            float(result["loss_total"]) > 0.0,
+            float(result["point_grad_norm"]) > 0.0,
+        )
+    )
     return [
         CheckResult(
             name="picf_core_train_smoke",

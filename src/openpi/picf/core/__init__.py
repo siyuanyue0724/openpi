@@ -7,6 +7,8 @@ from openpi.picf.core.contracts import PicfPosteriorAnchorState
 from openpi.picf.core.contracts import PicfPredictionCache
 from openpi.picf.core.contracts import PicfPredictiveState
 from openpi.picf.core.contracts import PicfProjectiveGeometryState
+from openpi.picf.core.contracts import PicfTaskReadoutState
+from openpi.picf.core.contracts import PicfConditionedControlState
 from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.pipeline import PaliGemmaSemanticWrapper
 from openpi.picf.core.pipeline import PicfFullCore
@@ -26,6 +28,7 @@ __all__ = [
     "PicfAlignmentLossConfig",
     "PicfFutureTargets",
     "PicfControlState",
+    "PicfConditionedControlState",
     "PicfCoreConfig",
     "PicfCoreOutput",
     "PicfCoreState",
@@ -35,6 +38,7 @@ __all__ = [
     "PicfPredictionCache",
     "PicfPredictiveState",
     "PicfProjectiveGeometryState",
+    "PicfTaskReadoutState",
     "PicfTransitionLossBreakdown",
     "PicfTransitionLossConfig",
     "PicfTokenFieldState",

@@ -5,7 +5,7 @@ present PICF codebase.
 
 The canonical architecture and deployment handoff is:
 
-- [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
+- [`README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md)
 
 The formal contract is:
 
@@ -13,14 +13,12 @@ The formal contract is:
 
 Important status note:
 
-- `README_v2.1.md` is the canonical deployed architecture and deployment
-  document
+- `README_v2.2.md` is the current local architecture and deployment document
 - `PICF_FORMAL_CONTRACT.md` records the current live-code contract that existing
   regression tests enforce
-- these two documents are expected to stay synchronized; the former is broader,
-  the latter is the concise executable contract
-- the maintained PICF document set is intentionally limited to:
-  - `src/openpi/picf/README_v2.1.md`
+- `README_v2.1.md` is retained only as the archived pre-v2.2 deployment record
+- the current active document set is:
+  - `src/openpi/picf/README_v2.2.md`
   - `PICF_FORMAL_CONTRACT.md`
   - `docs/CALVIN_VALIDATION_README.md`
 
@@ -70,6 +68,13 @@ Current live-code contract meaning:
 - semantic does not affect physical posterior
 - semantic does not affect `physical_prediction_cache`
 - next innovation reads only `previous.predictive.physical_prediction_cache`
+- semantic enters the core only through current-step task readout
+- public task-readout memory is `fused_tokens + visual_tokens`
+- task readout rereads private dense visual / tactile / point payloads
+- the core now builds one canonical conditioned control state `C_t`
+- PI0.5 action conditioning uses `C_t^{pi}` derived from `C_t`
+- conditioned future now uses token-level physical predictive tokens plus
+  future-condition tokens, not the raw semantic prefix
 - live observation competition now uses native-first visual routing
 - live tactile public routing now uses group-level proposal competition with
   winner-read over dense tactile group memory
@@ -78,12 +83,11 @@ Current live-code contract meaning:
   addition to tactile map and auxiliaries
 - live point innovation targets include native point latent probes in addition
   to occupancy
-- control and conditioned future directly consume the full semantic prefix at
-  native width `2048`
-- the physical core remains width `512`
+- the physical core remains width `512`, while the conditioned control/future
+  trunks remain semantic-width `2048`
 - physical posterior / innovation / physical predictive tokens are up-projected
-  into the semantic-width trunks
-- `posterior.global_post` explicitly enters control
+  into the semantic-width conditioned-control / conditioned-future trunks
+- `posterior.global_post` explicitly enters conditioned control
 - core no longer uses a direct trainable `7D` action head
 
 This section describes the deployed live baseline.
@@ -134,7 +138,7 @@ Required outputs:
 
 ## 5. Historical Baseline Training Command
 
-The command below is preserved as a historical baseline for the current
+The command below is preserved as a historical baseline from the pre-v2.2
 semantic-prefix-primary mixed-width implementation.
 
 It is **not** the recommended canonical launch command for current deployment.

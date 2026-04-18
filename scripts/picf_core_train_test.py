@@ -633,6 +633,21 @@ def test_split_optimizer_groups_by_dense_type_skips_uninitialized_params() -> No
     assert partitions[0][1][0]["params"] == [fp32]
 
 
+def test_infer_tactile_dense_dim_prefers_anytouch_native_hidden_size() -> None:
+    vision_cfg = types.SimpleNamespace(hidden_size=768)
+    tactile_model = types.SimpleNamespace(config=types.SimpleNamespace(vision_config=vision_cfg))
+    tactile_encoder = types.SimpleNamespace(model=tactile_model)
+    core = types.SimpleNamespace(tactile_encoder=tactile_encoder)
+
+    assert _MODULE._infer_tactile_dense_dim(core) == 768
+
+
+def test_infer_tactile_dense_dim_falls_back_to_default() -> None:
+    core = types.SimpleNamespace(tactile_encoder=None)
+
+    assert _MODULE._infer_tactile_dense_dim(core) == 768
+
+
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:
     param_a = torch.nn.Parameter(torch.tensor([1.0]))
     param_b = torch.nn.Parameter(torch.tensor([2.0]))
@@ -824,6 +839,7 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
     outputs = {
         "loss_total": torch.tensor(1.0),
         "loss_action": torch.tensor(0.2),
+        "loss_action_active7": torch.tensor(0.07),
         "loss_action_pos": torch.tensor(0.05),
         "loss_action_rot": torch.tensor(0.06),
         "loss_action_gripper": torch.tensor(0.09),
@@ -834,8 +850,13 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
         "loss_tactile_aux": torch.tensor(0.012),
         "loss_point_real": torch.tensor(0.04),
         "loss_semantic_future_aux": torch.tensor(0.17),
+        "loss_semantic_group_raw": torch.tensor(0.0425),
+        "loss_semantic_group_capped": torch.tensor(0.02),
         "loss_physical_aux": torch.tensor(0.051),
+        "loss_physical_aux_capped": torch.tensor(0.03),
         "loss_alignment": torch.tensor(0.05),
+        "loss_alignment_raw": torch.tensor(0.055),
+        "loss_total_minus_action": torch.tensor(0.8),
         "loss_anchor_pv": torch.tensor(0.06),
         "loss_pv_weak": torch.tensor(0.07),
         "loss_focus_pv": torch.tensor(0.08),
@@ -853,8 +874,12 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
 
     assert averages["loss_semantic_future_aux"] == pytest.approx(0.17)
     assert averages["loss_action"] == pytest.approx(0.2)
+    assert averages["loss_action_active7"] == pytest.approx(0.07)
     assert averages["loss_tactile_map"] == pytest.approx(0.011)
     assert averages["loss_tactile_aux"] == pytest.approx(0.012)
+    assert averages["loss_semantic_group_capped"] == pytest.approx(0.02)
+    assert averages["loss_physical_aux_capped"] == pytest.approx(0.03)
+    assert averages["loss_total_minus_action"] == pytest.approx(0.8)
     assert averages["physical_aux_budget_scale"] == pytest.approx(0.8)
     assert averages["tactile_contact_prob_mean"] == pytest.approx(0.12)
 
@@ -889,6 +914,7 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
     dummy_losses = types.SimpleNamespace(
         total=torch.tensor(1.0),
         action=torch.tensor(0.1),
+        action_active7=torch.tensor(0.04),
         action_pos=torch.tensor(0.03),
         action_rot=torch.tensor(0.04),
         action_gripper=torch.tensor(0.03),
@@ -899,8 +925,13 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
         tactile_aux=torch.tensor(0.05),
         point_real=torch.tensor(0.1),
         semantic_future_aux=torch.tensor(0.1),
+        semantic_group_raw=torch.tensor(0.025),
+        semantic_group_capped=torch.tensor(0.02),
         physical_aux=torch.tensor(0.15),
+        physical_aux_capped=torch.tensor(0.03),
         alignment=torch.tensor(0.1),
+        alignment_raw=torch.tensor(0.11),
+        total_minus_action=torch.tensor(0.9),
         anchor_pv=torch.tensor(0.1),
         pv_weak=torch.tensor(0.1),
         focus_pv=torch.tensor(0.1),

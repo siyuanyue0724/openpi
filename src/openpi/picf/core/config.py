@@ -25,6 +25,14 @@ class PicfCoreConfig:
     control_layers: int = 2
     control_query_tokens: int = 1
     predictive_query_tokens: int = 1
+    task_local_queries: int = 8
+    task_global_queries: int = 1
+    task_instruction_queries: int = 2
+    task_query_rounds: int = 2
+    task_self_layers: int = 1
+    conditioned_control_queries: int = 4
+    pi_prefix_queries: int = 4
+    conditioned_future_queries: int = 2
     predictive_semantic_reads: int = 2
     control_semantic_reads: int = 2
     predictive_semantic_dropout_prob: float = 0.1
@@ -86,6 +94,10 @@ class PicfCoreConfig:
     tau_route_v: float = 0.1
     visual_reread_topk: int = 32
     tactile_reread_groups: int = 2
+    task_visual_reread_topk: int = 32
+    task_tactile_reread_groups: int = 2
+    task_point_reread_topk: int = 32
+    require_pi0_action_generator: bool = True
 
     @property
     def point_occ_dim(self) -> int:

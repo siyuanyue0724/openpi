@@ -80,6 +80,7 @@ class PicfAlignmentLossConfig:
 class PicfTransitionLossBreakdown:
     total: torch.Tensor
     action: torch.Tensor
+    action_active7: torch.Tensor
     action_pos: torch.Tensor
     action_rot: torch.Tensor
     action_gripper: torch.Tensor
@@ -90,8 +91,13 @@ class PicfTransitionLossBreakdown:
     tactile_aux: torch.Tensor
     point_real: torch.Tensor
     semantic_future_aux: torch.Tensor
+    semantic_group_raw: torch.Tensor
+    semantic_group_capped: torch.Tensor
     physical_aux: torch.Tensor
+    physical_aux_capped: torch.Tensor
     alignment: torch.Tensor
+    alignment_raw: torch.Tensor
+    total_minus_action: torch.Tensor
     anchor_pv: torch.Tensor
     pv_weak: torch.Tensor
     focus_pv: torch.Tensor
@@ -105,6 +111,7 @@ class PicfTransitionLossBreakdown:
         return {
             "total": float(self.total.item()),
             "action": float(self.action.item()),
+            "action_active7": float(self.action_active7.item()),
             "action_pos": float(self.action_pos.item()),
             "action_rot": float(self.action_rot.item()),
             "action_gripper": float(self.action_gripper.item()),
@@ -115,8 +122,13 @@ class PicfTransitionLossBreakdown:
             "tactile_aux": float(self.tactile_aux.item()),
             "point_real": float(self.point_real.item()),
             "semantic_future_aux": float(self.semantic_future_aux.item()),
+            "semantic_group_raw": float(self.semantic_group_raw.item()),
+            "semantic_group_capped": float(self.semantic_group_capped.item()),
             "physical_aux": float(self.physical_aux.item()),
+            "physical_aux_capped": float(self.physical_aux_capped.item()),
             "alignment": float(self.alignment.item()),
+            "alignment_raw": float(self.alignment_raw.item()),
+            "total_minus_action": float(self.total_minus_action.item()),
             "anchor_pv": float(self.anchor_pv.item()),
             "pv_weak": float(self.pv_weak.item()),
             "focus_pv": float(self.focus_pv.item()),
@@ -317,6 +329,14 @@ def _budgeted_group(
     budget = budget_base * float(ratio)
     scale = torch.clamp(budget / torch.clamp(loss.detach(), min=1e-6), max=1.0)
     return loss * scale, scale
+
+
+def _action_active7_loss(
+    action_pos: torch.Tensor,
+    action_rot: torch.Tensor,
+    action_gripper: torch.Tensor,
+) -> torch.Tensor:
+    return ((3.0 * action_pos) + (3.0 * action_rot) + action_gripper) / 7.0
 
 
 def _routing_responsibilities(mass: torch.Tensor, *, eps: float) -> torch.Tensor:
@@ -680,6 +700,7 @@ def compute_transition_loss(
             + (cfg.lambda_action_rot * action_rot)
             + (cfg.lambda_action_gripper * action_gripper)
         )
+    action_active7 = _action_active7_loss(action_pos, action_rot, action_gripper)
 
     if _branch_is_usable(
         pred=pred_cache.visual_latent,
@@ -832,6 +853,7 @@ def compute_transition_loss(
     return PicfTransitionLossBreakdown(
         total=total,
         action=action_loss,
+        action_active7=action_active7,
         action_pos=action_pos,
         action_rot=action_rot,
         action_gripper=action_gripper,
@@ -842,8 +864,13 @@ def compute_transition_loss(
         tactile_aux=tactile_aux,
         point_real=point_real,
         semantic_future_aux=semantic_future_aux,
+        semantic_group_raw=semantic_group,
+        semantic_group_capped=semantic_group_capped,
         physical_aux=physical_aux,
+        physical_aux_capped=physical_aux_capped,
         alignment=alignment_group_capped,
+        alignment_raw=alignment.total,
+        total_minus_action=total - action_loss,
         anchor_pv=alignment.anchor_pv,
         pv_weak=alignment.pv_weak,
         focus_pv=alignment.focus_pv,

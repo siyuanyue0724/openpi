@@ -1,0 +1,244 @@
+from __future__ import annotations
+
+import dataclasses
+import inspect
+from typing import Any
+
+import numpy as np
+import torch
+
+from openpi.picf.contracts import PicfObservation
+from openpi.picf.core import PicfCoreOutput
+from openpi.picf.core import PicfCoreState
+from openpi.picf.core import PicfFullCore
+
+
+@dataclasses.dataclass(frozen=True)
+class PicfPolicyTrainResult:
+    output: PicfCoreOutput
+    observed: Any | None
+    semantic_override: Any | None
+    flow_override: dict[str, torch.Tensor] | None
+    next_state: PicfCoreState
+
+
+@dataclasses.dataclass(frozen=True)
+class PicfPolicyActResult:
+    action: torch.Tensor
+    action_chunk: torch.Tensor | None
+    state: PicfCoreState
+    debug: dict[str, float]
+    output: PicfCoreOutput
+
+
+class PicfPi05Policy:
+    def __init__(self, *, core: PicfFullCore, semantic_encoder: torch.nn.Module | None) -> None:
+        self.core = core
+        self.semantic_encoder = semantic_encoder
+
+    def _supports_action_generation(self) -> bool:
+        return bool(
+            self.semantic_encoder is not None
+            and bool(getattr(self.semantic_encoder, "supports_pi0_action_generation", lambda: False)())
+        )
+
+    def _requires_action_generation(self) -> bool:
+        return bool(getattr(getattr(self.core, "config", None), "require_pi0_action_generator", False))
+
+    def _require_action_generation(self) -> None:
+        if not self._requires_action_generation():
+            return
+        if not self._supports_action_generation():
+            raise RuntimeError(
+                "PICF v2.2 requires PI0.5 action generation. "
+                "No semantic action generator is available for this policy."
+            )
+
+    def _legacy_action_condition_tokens(self, output: PicfCoreOutput) -> Any:
+        predictive = getattr(output.state, "predictive", None)
+        prefix = None if predictive is None else getattr(predictive, "action_condition_tokens", None)
+        if prefix is None:
+            raise RuntimeError(
+                "Legacy PICF core fallback requires predictive.action_condition_tokens "
+                "to drive PI0.5 action generation."
+            )
+        return prefix
+
+    def encode_semantic(self, observation: PicfObservation) -> Any | None:
+        if self.semantic_encoder is None:
+            return None
+        return self.semantic_encoder.encode_observation(observation)
+
+    def _legacy_core_step(
+        self,
+        observation: PicfObservation,
+        *,
+        previous: PicfCoreState | None,
+        point_features_override: torch.Tensor | np.ndarray | None,
+        visual_map_override: torch.Tensor | np.ndarray | None,
+        semantic_override: Any | None,
+        action_future: torch.Tensor | np.ndarray | None,
+    ) -> PicfCoreOutput:
+        step = self.core.step
+        signature = inspect.signature(step)
+        kwargs: dict[str, Any] = {}
+        for name, value in (
+            ("previous", previous),
+            ("point_features_override", point_features_override),
+            ("visual_map_override", visual_map_override),
+            ("semantic_override", semantic_override),
+            ("action_future", action_future),
+        ):
+            if name in signature.parameters:
+                kwargs[name] = value
+        return step(observation, **kwargs)
+
+    def _teacher_forced_action_future(
+        self,
+        observation: PicfObservation,
+        *,
+        action_chunk_target: torch.Tensor | np.ndarray | None,
+    ) -> torch.Tensor | np.ndarray | None:
+        if observation.action is not None:
+            return observation.action
+        if action_chunk_target is not None:
+            return action_chunk_target
+        return None
+
+    def forward_train_transition(
+        self,
+        current: PicfObservation,
+        *,
+        previous: PicfCoreState | None = None,
+        point_features_override: torch.Tensor | np.ndarray | None = None,
+        visual_map_override: torch.Tensor | np.ndarray | None = None,
+        semantic_override: Any | None = None,
+        action_chunk_target: torch.Tensor | np.ndarray | None = None,
+    ) -> PicfPolicyTrainResult:
+        if semantic_override is None and self.semantic_encoder is not None:
+            semantic_override = self.encode_semantic(current)
+        if not hasattr(self.core, "observe_step"):
+            output = self._legacy_core_step(
+                current,
+                previous=previous,
+                point_features_override=point_features_override,
+                visual_map_override=visual_map_override,
+                semantic_override=semantic_override,
+                action_future=current.action,
+            )
+            flow_override: dict[str, torch.Tensor] | None = None
+            if action_chunk_target is not None:
+                self._require_action_generation()
+                if self._supports_action_generation():
+                    flow_override = self.semantic_encoder.compute_action_flow_loss(
+                        semantic_override,
+                        extra_prefix_tokens=self._legacy_action_condition_tokens(output),
+                        action_chunk_target=action_chunk_target,
+                    )
+                    output.state.predictive.action = flow_override["predicted_action"]
+                    output.state.predictive.action_chunk = flow_override["predicted_chunk"]
+            return PicfPolicyTrainResult(
+                output=output,
+                observed=None,
+                semantic_override=semantic_override,
+                flow_override=flow_override,
+                next_state=output.state,
+            )
+        observed = self.core.observe_step(
+            current,
+            previous=previous,
+            point_features_override=point_features_override,
+            visual_map_override=visual_map_override,
+            semantic_override=semantic_override,
+        )
+        flow_override: dict[str, torch.Tensor] | None = None
+        if action_chunk_target is not None:
+            self._require_action_generation()
+            flow_override = self.semantic_encoder.compute_action_flow_loss(
+                semantic_override,
+                extra_prefix_tokens=observed.conditioned_control.pi_prefix_tokens,
+                action_chunk_target=action_chunk_target,
+            )
+        output = self.core.finalize_with_action(
+            current,
+            observed,
+            action_future=self._teacher_forced_action_future(
+                current,
+                action_chunk_target=action_chunk_target,
+            ),
+        )
+        if flow_override is not None:
+            output.state.predictive.action = flow_override["predicted_action"]
+            output.state.predictive.action_chunk = flow_override["predicted_chunk"]
+        return PicfPolicyTrainResult(
+            output=output,
+            observed=observed,
+            semantic_override=semantic_override,
+            flow_override=flow_override,
+            next_state=output.state,
+        )
+
+    @torch.no_grad()
+    def act(
+        self,
+        observation: PicfObservation,
+        *,
+        previous: PicfCoreState | None = None,
+        point_features_override: torch.Tensor | np.ndarray | None = None,
+        visual_map_override: torch.Tensor | np.ndarray | None = None,
+        semantic_override: Any | None = None,
+    ) -> PicfPolicyActResult:
+        if semantic_override is None:
+            semantic_override = self.encode_semantic(observation)
+        if not hasattr(self.core, "observe_step"):
+            self._require_action_generation()
+            output = self._legacy_core_step(
+                observation,
+                previous=previous,
+                point_features_override=point_features_override,
+                visual_map_override=visual_map_override,
+                semantic_override=semantic_override,
+                action_future=None,
+            )
+            if self._supports_action_generation():
+                action_chunk = self.semantic_encoder.sample_action_chunk(
+                    semantic_override,
+                    extra_prefix_tokens=self._legacy_action_condition_tokens(output),
+                )
+                if not hasattr(self.core, "refresh_predictive_state_for_action"):
+                    raise RuntimeError(
+                        "Legacy PICF core fallback requires refresh_predictive_state_for_action "
+                        "to finalize PI0.5 sampled actions."
+                    )
+                output.state.predictive = self.core.refresh_predictive_state_for_action(
+                    observation,
+                    output.state,
+                    action_future=action_chunk,
+                )
+            return PicfPolicyActResult(
+                action=output.state.predictive.action,
+                action_chunk=getattr(output.state.predictive, "action_chunk", None),
+                state=output.state,
+                debug=output.debug,
+                output=output,
+            )
+        self._require_action_generation()
+        observed = self.core.observe_step(
+            observation,
+            previous=previous,
+            point_features_override=point_features_override,
+            visual_map_override=visual_map_override,
+            semantic_override=semantic_override,
+        )
+        action_chunk = self.semantic_encoder.sample_action_chunk(
+            semantic_override,
+            extra_prefix_tokens=observed.conditioned_control.pi_prefix_tokens,
+        )
+        output = self.core.finalize_with_action(observation, observed, action_future=action_chunk)
+        return PicfPolicyActResult(
+            action=output.state.predictive.action,
+            action_chunk=output.state.predictive.action_chunk,
+            state=output.state,
+            debug=output.debug,
+            output=output,
+        )

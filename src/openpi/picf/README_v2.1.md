@@ -2,12 +2,13 @@
 
 Date: 2026-04-17
 Repo: `/home/siyuanyue/Documents/openpi`
-Status: canonical deployed architecture record for the current live code
+Status: archived v2.1 deployment record retained for reference after the local
+v2.2 contract rewrite
 
 ## 0. Document Map
 
-The maintained PICF document set is intentionally limited to 3 persistent
-documents:
+At the time this file was written, the maintained PICF document set was limited
+to 3 persistent documents:
 
 1. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md`
 2. `/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md`
@@ -16,9 +17,10 @@ documents:
 `src/openpi/picf/README.md` is only a directory entry that points at these 3
 files and is not treated as a fourth maintained design document.
 
-This file and `PICF_FORMAL_CONTRACT.md` are expected to stay synchronized.
-`README_v2.1.md` is the broader architecture and handoff document;
-`PICF_FORMAL_CONTRACT.md` is the concise executable contract checked by tests.
+This file is now historical context. The current live local architecture record
+is [`README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md),
+and the current concise executable contract is
+[`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md).
 
 ## 0.1 Current Live Deployment
 
@@ -872,6 +874,32 @@ actions + noise + sampled t
 -> model predicts v_t
 -> flow-matching loss on v_t vs u_t
 ```
+
+Loss logging is intentionally split into raw diagnostic terms and effective
+optimizer terms:
+
+- `loss_action` is the full PI0.5-style flow MSE over the whole internal action
+  chunk (`action_horizon x action_dim`)
+- `loss_action_active7` is the mean over the first 7 CALVIN action dimensions
+  only; this is the most interpretable action metric when comparing against
+  `loss_action_pos/rot/gripper`
+- `loss_physical_aux`, `loss_semantic_future_aux`, and `loss_alignment_raw` are
+  raw auxiliary diagnostics before budget capping
+- `loss_physical_aux_capped`, `loss_semantic_group_capped`, and
+  `loss_alignment` are the effective auxiliary terms that actually enter
+  `loss_total`
+- `loss_total_minus_action` is the total capped auxiliary contribution, so the
+  optimizer identity is:
+
+```text
+loss_total
+= loss_action
++ loss_total_minus_action
+```
+
+This avoids the old ambiguity where large raw auxiliary diagnostics could make
+`loss_total` look suspiciously small even though the budgeted objective was
+behaving correctly.
 
 Inference:
 

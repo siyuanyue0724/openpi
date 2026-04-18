@@ -580,40 +580,32 @@ def test_control_prefix_explicitly_depends_on_global_post(tmp_path: Path) -> Non
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
     frame.tactile = _make_tactile_packet(frame.step_id)
-    output = core.step(
+    observed = core.observe_step(
         frame,
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
         semantic_override=_semantic_features(1.0),
-        action_future=frame.action,
     )
-    semantic = core._semantic_context(frame, None, _semantic_features(1.0))
     shifted_posterior = dataclasses.replace(
-        output.state.posterior,
-        global_post=output.state.posterior.global_post + 0.5,
+        observed.posterior,
+        global_post=observed.posterior.global_post + 0.5,
     )
-    base_predictive = core._predictive_state(
-        frame,
-        output.state.posterior,
-        semantic,
-        output.state.predictive.innovation_token,
-        output.state.predictive.innovation_norm,
-        output.state.predictive.availability,
-        frame.action,
+    base_control = core._build_conditioned_control_state(
+        observed.posterior,
+        observed.innovation_token,
+        observed.proprio_token,
+        observed.task_readout,
     )
-    shifted_predictive = core._predictive_state(
-        frame,
+    shifted_control = core._build_conditioned_control_state(
         shifted_posterior,
-        semantic,
-        output.state.predictive.innovation_token,
-        output.state.predictive.innovation_norm,
-        output.state.predictive.availability,
-        frame.action,
+        observed.innovation_token,
+        observed.proprio_token,
+        observed.task_readout,
     )
-    assert not torch.allclose(base_predictive.control_tokens, shifted_predictive.control_tokens)
+    assert not torch.allclose(base_control.tokens, shifted_control.tokens)
 
 
-def test_full_semantic_prefix_tokens_are_directly_included_in_control_and_future_trunks(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_control_and_future_trunks_consume_task_readout_and_not_raw_semantic_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
     frame.tactile = _make_tactile_packet(frame.step_id)
@@ -643,8 +635,20 @@ def test_full_semantic_prefix_tokens_are_directly_included_in_control_and_future
     )
     control_prefix = captured["control_prefix"][0]
     predictive_prefix = captured["predictive_prefix"][0]
-    expected_control_tokens = semantic_tokens.shape[0] + core.config.persistent_anchors + 4
-    expected_predictive_tokens = semantic_tokens.shape[0] + core.config.persistent_anchors + 4
+    expected_control_tokens = (
+        core.config.persistent_anchors
+        + 1
+        + 1
+        + 1
+        + core.config.task_local_queries
+        + core.config.task_global_queries
+        + core.config.task_instruction_queries
+        + core.config.conditioned_control_queries
+    )
+    expected_predictive_tokens = (
+        output.state.predictive.physical_pred_tokens.shape[0]
+        + core.config.conditioned_future_queries
+    )
     assert control_prefix.shape[0] == expected_control_tokens
     assert predictive_prefix.shape[0] == expected_predictive_tokens
     assert control_prefix.shape[1] == core.config.semantic_dim
@@ -678,8 +682,8 @@ def test_semantic_tokens_alone_can_condition_action_without_cross_reads(tmp_path
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
     frame.tactile = _make_tactile_packet(frame.step_id)
-    semantic_tokens_a = torch.full((3, core.config.semantic_dim), -1.5, dtype=torch.float32)
-    semantic_tokens_b = torch.full((3, core.config.semantic_dim), 2.5, dtype=torch.float32)
+    semantic_tokens_a = torch.linspace(-1.5, 1.5, steps=3 * core.config.semantic_dim, dtype=torch.float32).reshape(3, core.config.semantic_dim)
+    semantic_tokens_b = torch.linspace(1.5, -1.5, steps=3 * core.config.semantic_dim, dtype=torch.float32).reshape(3, core.config.semantic_dim)
     common_kwargs = dict(
         point_features_override=_point_override(core, frame),
         visual_map_override=_visual_override(1.0),
@@ -699,6 +703,7 @@ def test_semantic_tokens_alone_can_condition_action_without_cross_reads(tmp_path
     torch.testing.assert_close(first.state.predictive.physical_global_pred, second.state.predictive.physical_global_pred)
     assert first.state.predictive.semantic_tokens.shape[0] == 3
     assert second.state.predictive.semantic_tokens.shape[0] == 3
+    assert not torch.allclose(first.state.task_readout.local_tokens, second.state.task_readout.local_tokens)
     assert not torch.allclose(first.state.predictive.control_tokens, second.state.predictive.control_tokens)
 
 

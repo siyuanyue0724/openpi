@@ -50,6 +50,7 @@ from openpi.picf.core import PicfTransitionLossConfig
 from openpi.picf.core import compute_transition_loss
 from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticEncoder
+from openpi.picf.policy import PicfPi05Policy
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.replay.calvin_replay import _calvin_tactile_packet
 from openpi.picf.replay.calvin_replay import _resolve_tactile_calibration
@@ -73,12 +74,28 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.global_post_to_control_proj.*",
     "core.innovation_to_control_proj.*",
     "core.proprio_to_control_proj.*",
+    "core.task_query_tokens",
+    "core.task_global_query_tokens",
+    "core.task_instruction_query_tokens",
+    "core.task_query_conditioner.*",
+    "core.task_public_reader.*",
+    "core.task_visual_reread.*",
+    "core.task_tactile_reread.*",
+    "core.task_point_reread.*",
+    "core.task_self.*",
+    "core.task_geom_proj.*",
+    "core.task_to_control_proj.*",
+    "core.task_global_to_control_proj.*",
+    "core.instruction_to_control_proj.*",
     "core.control_role_embedding.*",
     "core.predictive_physical_role_embedding.*",
     "core.physical_pred_to_conditioned_proj.*",
     "core.predictive_conditioned_role_embedding.*",
     "core.control_query_tokens",
     "core.predictive_query_tokens",
+    "core.pi_prefix_query_tokens",
+    "core.pi_prefix_reader.*",
+    "core.future_condition_reader.*",
     "core.predictive_semantic_world.*",
     "core.predictive_state_proj.*",
     "semantic_prefix_proj.*",
@@ -86,12 +103,28 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "global_post_to_control_proj.*",
     "innovation_to_control_proj.*",
     "proprio_to_control_proj.*",
+    "task_query_tokens",
+    "task_global_query_tokens",
+    "task_instruction_query_tokens",
+    "task_query_conditioner.*",
+    "task_public_reader.*",
+    "task_visual_reread.*",
+    "task_tactile_reread.*",
+    "task_point_reread.*",
+    "task_self.*",
+    "task_geom_proj.*",
+    "task_to_control_proj.*",
+    "task_global_to_control_proj.*",
+    "instruction_to_control_proj.*",
     "control_role_embedding.*",
     "predictive_physical_role_embedding.*",
     "physical_pred_to_conditioned_proj.*",
     "predictive_conditioned_role_embedding.*",
     "control_query_tokens",
     "predictive_query_tokens",
+    "pi_prefix_query_tokens",
+    "pi_prefix_reader.*",
+    "future_condition_reader.*",
     "predictive_semantic_world.*",
     "predictive_state_proj.*",
 )
@@ -104,6 +137,18 @@ _COMPAT_ALLOWED_UNEXPECTED_KEYS = (
     "predictive_semantic_reads.*",
     "control_semantic_reads.*",
     "control_pool.*",
+    "core.control_semantic_prefix_tokens",
+    "core.predictive_conditioned_query_tokens",
+    "core.task_fused_public_reader.*",
+    "core.task_visual_public_reader.*",
+    "core.task_point_public_reader.*",
+    "core.task_tactile_public_reader.*",
+    "control_semantic_prefix_tokens",
+    "predictive_conditioned_query_tokens",
+    "task_fused_public_reader.*",
+    "task_visual_public_reader.*",
+    "task_point_public_reader.*",
+    "task_tactile_public_reader.*",
 )
 
 _DEBUG_INDEX_GUARDS_INSTALLED = False
@@ -1483,6 +1528,7 @@ class _CalvinTransitionSource:
 class _MetricAccumulator:
     loss_total: float = 0.0
     loss_action: float = 0.0
+    loss_action_active7: float = 0.0
     loss_action_pos: float = 0.0
     loss_action_rot: float = 0.0
     loss_action_gripper: float = 0.0
@@ -1493,8 +1539,13 @@ class _MetricAccumulator:
     loss_tactile_aux: float = 0.0
     loss_point_real: float = 0.0
     loss_semantic_future_aux: float = 0.0
+    loss_semantic_group_raw: float = 0.0
+    loss_semantic_group_capped: float = 0.0
     loss_physical_aux: float = 0.0
+    loss_physical_aux_capped: float = 0.0
     loss_alignment: float = 0.0
+    loss_alignment_raw: float = 0.0
+    loss_total_minus_action: float = 0.0
     loss_anchor_pv: float = 0.0
     loss_pv_weak: float = 0.0
     loss_focus_pv: float = 0.0
@@ -1517,6 +1568,7 @@ class _MetricAccumulator:
     ) -> None:
         self.loss_total += float(losses.total.item())
         self.loss_action += float(losses.action.item())
+        self.loss_action_active7 += float(losses.action_active7.item())
         self.loss_action_pos += float(losses.action_pos.item())
         self.loss_action_rot += float(losses.action_rot.item())
         self.loss_action_gripper += float(losses.action_gripper.item())
@@ -1527,8 +1579,13 @@ class _MetricAccumulator:
         self.loss_tactile_aux += float(losses.tactile_aux.item())
         self.loss_point_real += float(losses.point_real.item())
         self.loss_semantic_future_aux += float(losses.semantic_future_aux.item())
+        self.loss_semantic_group_raw += float(losses.semantic_group_raw.item())
+        self.loss_semantic_group_capped += float(losses.semantic_group_capped.item())
         self.loss_physical_aux += float(losses.physical_aux.item())
+        self.loss_physical_aux_capped += float(losses.physical_aux_capped.item())
         self.loss_alignment += float(losses.alignment.item())
+        self.loss_alignment_raw += float(losses.alignment_raw.item())
+        self.loss_total_minus_action += float(losses.total_minus_action.item())
         self.loss_anchor_pv += float(losses.anchor_pv.item())
         self.loss_pv_weak += float(losses.pv_weak.item())
         self.loss_focus_pv += float(losses.focus_pv.item())
@@ -1544,6 +1601,7 @@ class _MetricAccumulator:
     def update_from_outputs(self, outputs: dict[str, torch.Tensor]) -> None:
         self.loss_total += float(outputs["loss_total"].detach().item())
         self.loss_action += float(outputs["loss_action"].detach().item())
+        self.loss_action_active7 += float(outputs["loss_action_active7"].detach().item())
         self.loss_action_pos += float(outputs["loss_action_pos"].detach().item())
         self.loss_action_rot += float(outputs["loss_action_rot"].detach().item())
         self.loss_action_gripper += float(outputs["loss_action_gripper"].detach().item())
@@ -1554,8 +1612,13 @@ class _MetricAccumulator:
         self.loss_tactile_aux += float(outputs["loss_tactile_aux"].detach().item())
         self.loss_point_real += float(outputs["loss_point_real"].detach().item())
         self.loss_semantic_future_aux += float(outputs["loss_semantic_future_aux"].detach().item())
+        self.loss_semantic_group_raw += float(outputs["loss_semantic_group_raw"].detach().item())
+        self.loss_semantic_group_capped += float(outputs["loss_semantic_group_capped"].detach().item())
         self.loss_physical_aux += float(outputs["loss_physical_aux"].detach().item())
+        self.loss_physical_aux_capped += float(outputs["loss_physical_aux_capped"].detach().item())
         self.loss_alignment += float(outputs["loss_alignment"].detach().item())
+        self.loss_alignment_raw += float(outputs["loss_alignment_raw"].detach().item())
+        self.loss_total_minus_action += float(outputs["loss_total_minus_action"].detach().item())
         self.loss_anchor_pv += float(outputs["loss_anchor_pv"].detach().item())
         self.loss_pv_weak += float(outputs["loss_pv_weak"].detach().item())
         self.loss_focus_pv += float(outputs["loss_focus_pv"].detach().item())
@@ -1573,6 +1636,7 @@ class _MetricAccumulator:
         return {
             "loss_total": self.loss_total / denom,
             "loss_action": self.loss_action / denom,
+            "loss_action_active7": self.loss_action_active7 / denom,
             "loss_action_pos": self.loss_action_pos / denom,
             "loss_action_rot": self.loss_action_rot / denom,
             "loss_action_gripper": self.loss_action_gripper / denom,
@@ -1583,8 +1647,13 @@ class _MetricAccumulator:
             "loss_tactile_aux": self.loss_tactile_aux / denom,
             "loss_point_real": self.loss_point_real / denom,
             "loss_semantic_future_aux": self.loss_semantic_future_aux / denom,
+            "loss_semantic_group_raw": self.loss_semantic_group_raw / denom,
+            "loss_semantic_group_capped": self.loss_semantic_group_capped / denom,
             "loss_physical_aux": self.loss_physical_aux / denom,
+            "loss_physical_aux_capped": self.loss_physical_aux_capped / denom,
             "loss_alignment": self.loss_alignment / denom,
+            "loss_alignment_raw": self.loss_alignment_raw / denom,
+            "loss_total_minus_action": self.loss_total_minus_action / denom,
             "loss_anchor_pv": self.loss_anchor_pv / denom,
             "loss_pv_weak": self.loss_pv_weak / denom,
             "loss_focus_pv": self.loss_focus_pv / denom,
@@ -1611,6 +1680,7 @@ class _PicfWindowTrainer(torch.nn.Module):
         super().__init__()
         self.core = core
         self.semantic_encoder = semantic_encoder
+        self.policy = PicfPi05Policy(core=core, semantic_encoder=semantic_encoder)
         self.visual_grid = int(visual_grid)
         self.use_visual_override = bool(use_visual_override)
         self.loss_config = loss_config or PicfTransitionLossConfig()
@@ -1635,47 +1705,23 @@ class _PicfWindowTrainer(torch.nn.Module):
             nxt = dataclasses.replace(window.frames[index + 1], reset_scaffold=False)
             current_visual = _rgb_visual_override(current.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
             next_visual = _rgb_visual_override(nxt.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
-            semantic_override = None
-            if self.semantic_encoder is not None:
-                semantic_start = time.perf_counter()
-                semantic_override = self.semantic_encoder.encode_observation(current)
-                if debug_phase_label is not None:
-                    logging.info(
-                        "%s transition=%s semantic_encode_sec=%.3f",
-                        debug_phase_label,
-                        index,
-                        time.perf_counter() - semantic_start,
-                    )
             step_start = time.perf_counter()
-            output = self.core.step(
-                current,
+            action_chunk_target = current.action_chunk if current.action_chunk is not None else current.action
+            policy_forward = self.policy.forward_train_transition(
                 previous=previous,
+                current=current,
                 visual_map_override=current_visual,
-                semantic_override=semantic_override,
-                action_future=current.action,
+                action_chunk_target=action_chunk_target,
             )
+            output = policy_forward.output
+            flow_override = policy_forward.flow_override
             if debug_phase_label is not None:
                 logging.info(
-                    "%s transition=%s core_step_sec=%.3f",
+                    "%s transition=%s policy_forward_sec=%.3f",
                     debug_phase_label,
                     index,
                     time.perf_counter() - step_start,
                 )
-            flow_override: dict[str, torch.Tensor] | None = None
-            if (
-                semantic_override is not None
-                and self.semantic_encoder is not None
-                and bool(getattr(self.semantic_encoder, "supports_pi0_action_generation", lambda: False)())
-            ):
-                action_chunk_target = current.action_chunk if current.action_chunk is not None else current.action
-                if action_chunk_target is not None:
-                    flow_override = self.semantic_encoder.compute_action_flow_loss(
-                        semantic_override,
-                        extra_prefix_tokens=output.state.predictive.action_condition_tokens,
-                        action_chunk_target=action_chunk_target,
-                    )
-                    output.state.predictive.action = flow_override["predicted_action"]
-                    output.state.predictive.action_chunk = flow_override["predicted_chunk"]
             if capture_visual_diagnostics:
                 physical_visual_real = output.state.predictive.physical_prediction_cache.visual_real
                 semantic_visual_real = output.state.predictive.prediction_cache.visual_real
@@ -1725,6 +1771,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             if metrics is None:
                 metrics = {
                     "loss_action": losses.action,
+                    "loss_action_active7": losses.action_active7,
                     "loss_action_pos": losses.action_pos,
                     "loss_action_rot": losses.action_rot,
                     "loss_action_gripper": losses.action_gripper,
@@ -1735,8 +1782,13 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_tactile_aux": losses.tactile_aux,
                     "loss_point_real": losses.point_real,
                     "loss_semantic_future_aux": losses.semantic_future_aux,
+                    "loss_semantic_group_raw": losses.semantic_group_raw,
+                    "loss_semantic_group_capped": losses.semantic_group_capped,
                     "loss_physical_aux": losses.physical_aux,
+                    "loss_physical_aux_capped": losses.physical_aux_capped,
                     "loss_alignment": losses.alignment,
+                    "loss_alignment_raw": losses.alignment_raw,
+                    "loss_total_minus_action": losses.total_minus_action,
                     "loss_anchor_pv": losses.anchor_pv,
                     "loss_pv_weak": losses.pv_weak,
                     "loss_focus_pv": losses.focus_pv,
@@ -1750,6 +1802,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                 }
             else:
                 metrics["loss_action"] = metrics["loss_action"] + losses.action
+                metrics["loss_action_active7"] = metrics["loss_action_active7"] + losses.action_active7
                 metrics["loss_action_pos"] = metrics["loss_action_pos"] + losses.action_pos
                 metrics["loss_action_rot"] = metrics["loss_action_rot"] + losses.action_rot
                 metrics["loss_action_gripper"] = metrics["loss_action_gripper"] + losses.action_gripper
@@ -1760,8 +1813,13 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_tactile_aux"] = metrics["loss_tactile_aux"] + losses.tactile_aux
                 metrics["loss_point_real"] = metrics["loss_point_real"] + losses.point_real
                 metrics["loss_semantic_future_aux"] = metrics["loss_semantic_future_aux"] + losses.semantic_future_aux
+                metrics["loss_semantic_group_raw"] = metrics["loss_semantic_group_raw"] + losses.semantic_group_raw
+                metrics["loss_semantic_group_capped"] = metrics["loss_semantic_group_capped"] + losses.semantic_group_capped
                 metrics["loss_physical_aux"] = metrics["loss_physical_aux"] + losses.physical_aux
+                metrics["loss_physical_aux_capped"] = metrics["loss_physical_aux_capped"] + losses.physical_aux_capped
                 metrics["loss_alignment"] = metrics["loss_alignment"] + losses.alignment
+                metrics["loss_alignment_raw"] = metrics["loss_alignment_raw"] + losses.alignment_raw
+                metrics["loss_total_minus_action"] = metrics["loss_total_minus_action"] + losses.total_minus_action
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
                 metrics["loss_focus_pv"] = metrics["loss_focus_pv"] + losses.focus_pv
@@ -1780,6 +1838,7 @@ class _PicfWindowTrainer(torch.nn.Module):
         result: dict[str, Any] = {
             "loss_total": mean_total,
             "loss_action": metrics["loss_action"] / denom,
+            "loss_action_active7": metrics["loss_action_active7"] / denom,
             "loss_action_pos": metrics["loss_action_pos"] / denom,
             "loss_action_rot": metrics["loss_action_rot"] / denom,
             "loss_action_gripper": metrics["loss_action_gripper"] / denom,
@@ -1790,8 +1849,13 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_tactile_aux": metrics["loss_tactile_aux"] / denom,
             "loss_point_real": metrics["loss_point_real"] / denom,
             "loss_semantic_future_aux": metrics["loss_semantic_future_aux"] / denom,
+            "loss_semantic_group_raw": metrics["loss_semantic_group_raw"] / denom,
+            "loss_semantic_group_capped": metrics["loss_semantic_group_capped"] / denom,
             "loss_physical_aux": metrics["loss_physical_aux"] / denom,
+            "loss_physical_aux_capped": metrics["loss_physical_aux_capped"] / denom,
             "loss_alignment": metrics["loss_alignment"] / denom,
+            "loss_alignment_raw": metrics["loss_alignment_raw"] / denom,
+            "loss_total_minus_action": metrics["loss_total_minus_action"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
             "loss_focus_pv": metrics["loss_focus_pv"] / denom,
@@ -2499,13 +2563,14 @@ def _materialize_model_parameters(
             )
             _ = core.innovation_proj(innovation_in)
         if isinstance(core.tactile_route_reread.key_proj.weight, UninitializedParameter):
+            tactile_dense_dim = _infer_tactile_dense_dim(core)
             dummy_queries = torch.zeros(
                 (1, core.config.tactile_group_proposals, core.config.hidden_dim),
                 device=core.device,
                 dtype=core.dtype,
             )
             dummy_keys = torch.zeros(
-                (1, 1, core.config.hidden_dim),
+                (1, 1, tactile_dense_dim),
                 device=core.device,
                 dtype=core.dtype,
             )
@@ -2521,6 +2586,26 @@ def _materialize_model_parameters(
         )
     if not was_training:
         model.eval()
+
+
+def _infer_tactile_dense_dim(core: torch.nn.Module) -> int:
+    """Infer the private AnyTouch dense token width used by tactile reread.
+
+    The tactile public trunk runs at `hidden_dim`, but the dense group memory
+    stored by the AnyTouch encoder stays at the encoder-native token width
+    (currently CLIP-B/16 hidden size, 768). Warmup materialization must respect
+    that native width; forcing `hidden_dim` here will incorrectly initialize the
+    lazy reread projections and crash once real tactile groups appear.
+    """
+
+    tactile_encoder = getattr(core, "tactile_encoder", None)
+    model = getattr(tactile_encoder, "model", None)
+    config = getattr(model, "config", None)
+    vision_config = getattr(config, "vision_config", None)
+    hidden_size = getattr(vision_config, "hidden_size", None)
+    if isinstance(hidden_size, int) and hidden_size > 0:
+        return int(hidden_size)
+    return 768
 
 
 def _prepare_output_dir(
@@ -2891,7 +2976,7 @@ def train(args: argparse.Namespace) -> None:
                 args.future_vote_heads,
             )
             logging.info(
-                "Semantic-prefix contract: the full PaliGemma token sequence remains width=%s, enters semantic-width control / conditioned-future trunks as the primary semantic prefix, semantic_prefix_proj=identity, and physical posterior/global_post/innovation/proprio/physical_pred are up-projected into those trunks; semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not alter the current forward path.",
+                "v2.2 semantic/control contract: the full PaliGemma token sequence remains width=%s and stays native in PI0.5 semantic/action generation; core control/future no longer take raw semantic-prefix tokens directly, task readout builds semantic-conditioned current-step context from public_read_memory=[fused_tokens, visual_tokens] plus private dense rereads, and conditioned control/future consume that context together with up-projected physical posterior/global_post/innovation/proprio/physical_pred tokens; semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not restore direct raw-semantic injection into the core trunks.",
                 args.semantic_dim,
             )
             logging.info(

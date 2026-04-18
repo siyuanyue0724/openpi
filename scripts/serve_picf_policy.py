@@ -21,6 +21,7 @@ from openpi_client import base_policy as _base_policy
 import picf_core_train as _trainer
 from openpi.picf.action_normalization import PicfActionNormalizer
 from openpi.picf.contracts import PicfObservation
+from openpi.picf.policy import PicfPi05Policy
 from openpi.serving.websocket_policy_server import WebsocketPolicyServer
 
 
@@ -121,6 +122,7 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         self._trainer = trainer.eval()
         self._core = trainer.core
         self._semantic_encoder = trainer.semantic_encoder
+        self._policy = getattr(trainer, "policy", PicfPi05Policy(core=trainer.core, semantic_encoder=trainer.semantic_encoder))
         self._action_normalizer = action_normalizer
         self._frame_dt_s = float(frame_dt_s)
         self._segment_id = 0
@@ -169,34 +171,16 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         if reset:
             self._reset_episode()
         observation = self._build_observation(obs, reset=reset)
-        semantic_override = None
-        if self._semantic_encoder is not None:
-            with torch.inference_mode():
-                semantic_override = self._semantic_encoder.encode_observation(observation)
         visual_override = _visual_override_if_needed(self._trainer, observation)
         with torch.inference_mode():
-            output = self._core.step(
+            act_result = self._policy.act(
                 observation,
                 previous=self._previous,
                 visual_map_override=visual_override,
-                semantic_override=semantic_override,
-                action_future=None,
             )
-            if (
-                semantic_override is not None
-                and bool(getattr(self._semantic_encoder, "supports_pi0_action_generation", lambda: False)())
-            ):
-                action_chunk = self._semantic_encoder.sample_action_chunk(
-                    semantic_override,
-                    extra_prefix_tokens=output.state.predictive.action_condition_tokens,
-                )
-                output.state.predictive = self._core.refresh_predictive_state_for_action(
-                    observation,
-                    output.state,
-                    action_future=action_chunk,
-                )
+        output = act_result.output
         self._previous = output.state
-        action = output.state.predictive.action.detach().to(device="cpu", dtype=torch.float32).numpy()
+        action = act_result.action.detach().to(device="cpu", dtype=torch.float32).numpy()
         if self._action_normalizer is not None:
             action = self._action_normalizer.unnormalize_np(action)
         self._step_id += 1

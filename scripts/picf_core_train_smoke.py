@@ -11,6 +11,7 @@ from openpi.picf.anytouch.config import AnyTouchConfig
 from openpi.picf.core import PicfCoreConfig
 from openpi.picf.core import PicfFullCore
 from openpi.picf.core import compute_transition_loss
+from openpi.picf.policy import PicfPi05Policy
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
 from openpi.picf.sonata.config import SonataPointConfig
@@ -36,6 +37,45 @@ class _NullTactileEncoder:
 class _NullVisualEncoder:
     def encode_clip(self, _clip):
         raise AssertionError("visual_map_override should bypass encoder use in this smoke")
+
+
+class _SmokeSemanticEncoder(torch.nn.Module):
+    def __init__(self, *, device: torch.device, semantic_dim: int) -> None:
+        super().__init__()
+        self.device = device
+        self.semantic_dim = int(semantic_dim)
+
+    def encode_observation(self, _observation):
+        return torch.zeros((2, self.semantic_dim), device=self.device, dtype=torch.float32)
+
+    def supports_pi0_action_generation(self) -> bool:
+        return True
+
+    def _prepare_action_chunk(self, action_chunk_target: torch.Tensor | np.ndarray) -> torch.Tensor:
+        target = torch.as_tensor(action_chunk_target, device=self.device, dtype=torch.float32)
+        if target.ndim == 1:
+            target = target[None, :]
+        if target.ndim != 2:
+            raise RuntimeError(f"Expected smoke action chunk target to have shape [H, A], got {tuple(target.shape)}")
+        return target
+
+    def compute_action_flow_loss(self, semantic_override, *, extra_prefix_tokens, action_chunk_target):
+        del semantic_override, extra_prefix_tokens
+        target = self._prepare_action_chunk(action_chunk_target)
+        total = torch.nn.functional.mse_loss(target, torch.zeros_like(target))
+        return {
+            "total": total,
+            "action_pos": torch.nn.functional.mse_loss(target[..., :3], torch.zeros_like(target[..., :3])),
+            "action_rot": torch.nn.functional.mse_loss(target[..., 3:6], torch.zeros_like(target[..., 3:6])),
+            "action_gripper": torch.nn.functional.mse_loss(target[..., 6:7], torch.zeros_like(target[..., 6:7])),
+            "predicted_action": target[0],
+            "predicted_chunk": target,
+        }
+
+    @torch.no_grad()
+    def sample_action_chunk(self, semantic_override, *, extra_prefix_tokens):
+        del semantic_override, extra_prefix_tokens
+        return torch.zeros((1, 7), device=self.device, dtype=torch.float32)
 
 
 def _rgb_visual_override(rgb: np.ndarray, grid: int = 8) -> torch.Tensor:
@@ -323,20 +363,24 @@ def run_smoke(
         tactile_stride=tactile_stride,
     )
     core, use_visual_override = _build_core(args)
+    policy = PicfPi05Policy(
+        core=core,
+        semantic_encoder=_SmokeSemanticEncoder(device=core.device, semantic_dim=core.config.semantic_dim),
+    )
     optimizer = torch.optim.AdamW(core.parameters(), lr=lr)
 
     current = frames[0]
     nxt = frames[1]
     current_visual = _rgb_visual_override(current.rgb_static) if use_visual_override else None
     next_visual = _rgb_visual_override(nxt.rgb_static) if use_visual_override else None
-    semantic = np.zeros((core.config.semantic_dim,), dtype=np.float32)
-
-    output = core.step(
+    action_chunk_target = current.action_chunk if current.action_chunk is not None else current.action
+    policy_forward = policy.forward_train_transition(
         current,
         visual_map_override=current_visual,
-        semantic_override=semantic,
-        action_future=current.action,
+        action_chunk_target=action_chunk_target,
     )
+    output = policy_forward.output
+    flow_override = policy_forward.flow_override
     optimizer.zero_grad(set_to_none=True)
     losses = compute_transition_loss(
         core,
@@ -344,6 +388,10 @@ def run_smoke(
         nxt,
         action_target=current.action,
         next_visual_map_override=next_visual,
+        action_loss_override=None if flow_override is None else flow_override["total"],
+        action_pos_override=None if flow_override is None else flow_override["action_pos"],
+        action_rot_override=None if flow_override is None else flow_override["action_rot"],
+        action_gripper_override=None if flow_override is None else flow_override["action_gripper"],
     )
     losses.total.backward()
     point_grad_norm = float(core.point_real_head.weight.grad.norm().item()) if core.point_real_head.weight.grad is not None else 0.0
@@ -375,6 +423,20 @@ def run_smoke(
         "loss_pv_weak": float(losses.pv_weak.item()),
         "loss_focus_pv": float(losses.focus_pv.item()),
         "loss_pt": float(losses.pt.item()),
+        "policy_path_used": True,
+        "flow_override_used": bool(flow_override is not None),
+        "conditioned_control_present": bool(policy_forward.observed is not None and getattr(policy_forward.observed, "conditioned_control", None) is not None),
+        "pi_prefix_tokens_present": bool(
+            policy_forward.observed is not None
+            and getattr(getattr(policy_forward.observed, "conditioned_control", None), "pi_prefix_tokens", None) is not None
+        ),
+        "conditioned_control_query_state_norm": float(
+            torch.linalg.norm(policy_forward.observed.conditioned_control.query_state.float()).item()
+        ) if policy_forward.observed is not None else 0.0,
+        "pi_prefix_tokens_norm": float(
+            torch.linalg.norm(policy_forward.observed.conditioned_control.pi_prefix_tokens.float()).item()
+        ) if policy_forward.observed is not None else 0.0,
+        "predictive_action_chunk_present": bool(output.state.predictive.action_chunk is not None),
         "availability_visual_latent": float(losses.availability[0].item()),
         "availability_visual_real": float(losses.availability[1].item()),
         "availability_tactile_real": float(losses.availability[2].item()),

@@ -19,6 +19,7 @@ from openpi.picf.anytouch.wrapper import AnyTouch2TactileEncoder
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.contracts import RuntimeMeta
 from openpi.picf.core.config import PicfCoreConfig
+from openpi.picf.core.contracts import PicfConditionedControlState
 from openpi.picf.core.contracts import PicfControlState
 from openpi.picf.core.contracts import PicfCoreOutput
 from openpi.picf.core.contracts import PicfCoreState
@@ -27,6 +28,7 @@ from openpi.picf.core.contracts import PicfPosteriorAnchorState
 from openpi.picf.core.contracts import PicfPredictionCache
 from openpi.picf.core.contracts import PicfPredictiveState
 from openpi.picf.core.contracts import PicfProjectiveGeometryState
+from openpi.picf.core.contracts import PicfTaskReadoutState
 from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.tactile_contact import contact_prob_with_hysteresis
 from openpi.picf.core.tactile_contact import summarize_contact_context
@@ -431,7 +433,7 @@ class CrossAttentionRead(nn.Module):
 
 
 class GatedCrossAttentionRead(nn.Module):
-    def __init__(self, query_dim: int, kv_dim: int, heads: int, *, inner_dim: int):
+    def __init__(self, query_dim: int, kv_dim: int, heads: int, *, inner_dim: int, gate_init: float = 0.0):
         super().__init__()
         if inner_dim % heads != 0:
             raise ValueError(
@@ -447,7 +449,7 @@ class GatedCrossAttentionRead(nn.Module):
             kdim=kv_dim,
             vdim=kv_dim,
         )
-        self.cross_gate = nn.Parameter(torch.zeros(()))
+        self.cross_gate = nn.Parameter(torch.as_tensor(float(gate_init)))
         self.ff_norm = nn.LayerNorm(query_dim)
         self.ff = nn.Sequential(
             nn.Linear(query_dim, inner_dim),
@@ -628,6 +630,26 @@ class _StepDenseMemory:
     tactile_group_tokens: tuple[torch.Tensor, ...]
 
 
+@dataclasses.dataclass(frozen=True)
+class _ObservedStepState:
+    runtime_meta: RuntimeMeta
+    G_t: torch.Tensor
+    token_field: PicfTokenFieldState
+    dense_memory: _StepDenseMemory
+    observation_anchors: PicfObservationAnchorState
+    posterior: PicfPosteriorAnchorState
+    current_targets: dict[str, torch.Tensor | None]
+    availability: torch.Tensor
+    innovation_token: torch.Tensor
+    innovation_norm: torch.Tensor
+    semantic: _SemanticContext
+    proprio_token: torch.Tensor
+    task_readout: PicfTaskReadoutState
+    conditioned_control: PicfConditionedControlState
+    control: PicfControlState
+    last_prompt: str | None
+
+
 class PicfFullCore(nn.Module):
     def __init__(
         self,
@@ -731,16 +753,38 @@ class PicfFullCore(nn.Module):
         self.semantic_prefix_proj = nn.Identity()
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
+        self.task_query_tokens = nn.Parameter(torch.zeros((self.config.task_local_queries, hidden_dim)))
+        self.task_global_query_tokens = nn.Parameter(torch.zeros((self.config.task_global_queries, hidden_dim)))
+        self.task_instruction_query_tokens = nn.Parameter(torch.zeros((self.config.task_instruction_queries, hidden_dim)))
+        self.task_query_conditioner = GatedCrossAttentionRead(
+            hidden_dim,
+            semantic_trunk_dim,
+            heads,
+            inner_dim=max(self.config.semantic_cross_dim, hidden_dim),
+            gate_init=1.0,
+        )
+        self.task_public_reader = CrossAttentionRead(hidden_dim, heads)
+        self.task_visual_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.task_tactile_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.task_point_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.task_self = TransformerStack(hidden_dim, heads, self.config.task_self_layers)
+        self.task_geom_proj = nn.LazyLinear(hidden_dim)
         self.posterior_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
         self.global_post_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
         self.innovation_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
         self.proprio_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
-        self.control_role_embedding = nn.Embedding(5, semantic_trunk_dim)
+        self.task_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
+        self.task_global_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
+        self.instruction_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
+        self.control_role_embedding = nn.Embedding(8, semantic_trunk_dim)
         self.predictive_physical_role_embedding = nn.Embedding(4, hidden_dim)
         self.physical_pred_to_conditioned_proj = nn.LazyLinear(semantic_trunk_dim)
         self.predictive_conditioned_role_embedding = nn.Embedding(3, semantic_trunk_dim)
-        self.control_query_tokens = nn.Parameter(torch.zeros((self.config.control_query_tokens, semantic_trunk_dim)))
-        self.predictive_query_tokens = nn.Parameter(torch.zeros((self.config.predictive_query_tokens, semantic_trunk_dim)))
+        self.control_query_tokens = nn.Parameter(torch.zeros((self.config.conditioned_control_queries, semantic_trunk_dim)))
+        self.predictive_query_tokens = nn.Parameter(torch.zeros((self.config.conditioned_future_queries, semantic_trunk_dim)))
+        self.pi_prefix_query_tokens = nn.Parameter(torch.zeros((self.config.pi_prefix_queries, semantic_trunk_dim)))
+        self.pi_prefix_reader = CrossAttentionRead(semantic_trunk_dim, heads)
+        self.future_condition_reader = CrossAttentionRead(semantic_trunk_dim, heads)
         self.predictive_world = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
         self.predictive_semantic_world = TransformerStack(semantic_trunk_dim, heads, self.config.predictive_layers)
         self.predictive_pool = AttentionPool(hidden_dim)
@@ -983,6 +1027,247 @@ class PicfFullCore(nn.Module):
         dropout_prob: float,
     ) -> torch.Tensor:
         return self._semantic_memory(semantic.prefix_tokens, dropout_prob=dropout_prob)
+
+    def _build_public_read_memory(self, token_field: PicfTokenFieldState) -> torch.Tensor:
+        pieces = []
+        if token_field.fused_tokens.shape[0] > 0:
+            pieces.append(token_field.fused_tokens)
+        if token_field.visual_tokens.shape[0] > 0:
+            pieces.append(token_field.visual_tokens)
+        if pieces:
+            return torch.cat(pieces, dim=0)
+        return torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype)
+
+    def _build_task_readout(
+        self,
+        token_field: PicfTokenFieldState,
+        dense_memory: _StepDenseMemory,
+        semantic: _SemanticContext,
+        proprio_token: torch.Tensor,
+    ) -> PicfTaskReadoutState:
+        del proprio_token
+        query_tokens = torch.cat(
+            [
+                self.task_query_tokens.to(device=self.device, dtype=self.dtype),
+                self.task_global_query_tokens.to(device=self.device, dtype=self.dtype),
+                self.task_instruction_query_tokens.to(device=self.device, dtype=self.dtype),
+            ],
+            dim=0,
+        )
+        queries = query_tokens[None, :]
+        semantic_attention = None
+        if semantic.tokens.shape[0] > 0:
+            queries, semantic_attention = self.task_query_conditioner(queries, semantic.tokens[None, :])
+        public_read_memory = self._build_public_read_memory(token_field)
+        public_attention = torch.zeros((queries.shape[1], public_read_memory.shape[0]), device=self.device, dtype=self.dtype)
+        fused_attention = torch.zeros((queries.shape[1], token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
+        visual_public_attention = torch.zeros((queries.shape[1], token_field.visual_tokens.shape[0]), device=self.device, dtype=self.dtype)
+        point_public_attention = torch.zeros((queries.shape[1], token_field.point_tokens.shape[0]), device=self.device, dtype=self.dtype)
+        tactile_count = 0 if token_field.tactile_tokens_active is None else token_field.tactile_tokens_active.shape[0]
+        tactile_public_attention = torch.zeros((queries.shape[1], tactile_count), device=self.device, dtype=self.dtype)
+        if public_read_memory.shape[0] > 0:
+            queries, public_attention = self.task_public_reader(queries, public_read_memory[None, :])
+            fused_count = token_field.fused_tokens.shape[0]
+            visual_count = token_field.visual_tokens.shape[0]
+            fused_attention = public_attention[:, :fused_count]
+            visual_public_attention = public_attention[:, fused_count : fused_count + visual_count]
+            point_count = token_field.point_tokens.shape[0]
+            point_public_attention = fused_attention[:, :point_count]
+            tactile_public_attention = fused_attention[:, point_count : point_count + tactile_count]
+
+        visual_private_attention = torch.zeros((queries.shape[1], 0), device=self.device, dtype=self.dtype)
+        if dense_memory.visual_payload.shape[0] > 0:
+            visual_candidates, visual_bias = self._gather_topk_native_candidates(
+                dense_memory.visual_payload,
+                visual_public_attention,
+                topk=self.config.task_visual_reread_topk,
+            )
+            queries, visual_private_attention = self.task_visual_reread(queries, visual_candidates, attn_bias=visual_bias)
+            visual_private_attention = visual_private_attention[0]
+
+        point_private_attention = torch.zeros((queries.shape[1], 0), device=self.device, dtype=self.dtype)
+        if dense_memory.point_payload.shape[0] > 0 and token_field.point_tokens.shape[0] > 0:
+            point_candidates, point_bias = self._gather_topk_native_candidates(
+                dense_memory.point_payload,
+                point_public_attention,
+                topk=self.config.task_point_reread_topk,
+            )
+            queries, point_private_attention = self.task_point_reread(queries, point_candidates, attn_bias=point_bias)
+            point_private_attention = point_private_attention[0]
+
+        tactile_private_attention = torch.zeros((queries.shape[1], 0), device=self.device, dtype=self.dtype)
+        if dense_memory.tactile_group_tokens and tactile_count > 0 and token_field.tactile_group_ids is not None:
+            group_weights = torch.zeros(
+                (queries.shape[1], len(dense_memory.tactile_group_tokens)),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            group_weights.scatter_add_(
+                1,
+                token_field.tactile_group_ids[None, :].expand(queries.shape[1], -1),
+                tactile_public_attention,
+            )
+            tactile_candidates, tactile_bias = self._gather_tactile_group_candidates(
+                dense_memory.tactile_group_tokens,
+                group_weights,
+                top_groups=self.config.task_tactile_reread_groups,
+            )
+            queries, tactile_private_attention = self.task_tactile_reread(queries, tactile_candidates, attn_bias=tactile_bias)
+            tactile_private_attention = tactile_private_attention[0]
+
+        task_tokens = self.task_self(queries)[0]
+        local_count = int(self.config.task_local_queries)
+        global_count = int(self.config.task_global_queries)
+        instruction_count = int(self.config.task_instruction_queries)
+        local_tokens = task_tokens[:local_count]
+        global_tokens = task_tokens[local_count : local_count + global_count]
+        instruction_tokens = task_tokens[local_count + global_count : local_count + global_count + instruction_count]
+
+        if token_field.point_tokens.shape[0] > 0 and local_count > 0:
+            point_weights = point_public_attention[:local_count]
+            denom = torch.clamp(point_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+            point_weights = point_weights / denom
+            x = point_weights @ token_field.point_positions
+            S = _weighted_cov(token_field.point_positions, point_weights, x, self.config)
+            a = _extent_from_cov(S, self.config)
+            local_tokens = local_tokens + self.task_geom_proj(_geometry_pe(x, a, S, self.config))
+        else:
+            point_weights = torch.zeros((local_count, 0), device=self.device, dtype=self.dtype)
+            x = torch.zeros((local_count, 3), device=self.device, dtype=self.dtype)
+            S = _diag_embed(torch.full((local_count, 3), self.config.epsilon_s, device=self.device, dtype=self.dtype))
+            a = _to_tensor(self.config.a_min_m, device=self.device, dtype=self.dtype)[None, :].expand(local_count, -1)
+
+        conditioned_queries = torch.cat([local_tokens, global_tokens, instruction_tokens], dim=0)
+        global_token = (
+            global_tokens.mean(dim=0)
+            if global_tokens.shape[0] > 0
+            else torch.zeros((self.config.hidden_dim,), device=self.device, dtype=self.dtype)
+        )
+        return PicfTaskReadoutState(
+            conditioned_queries=conditioned_queries,
+            local_tokens=local_tokens,
+            global_token=global_token,
+            instruction_tokens=instruction_tokens,
+            point_weights=point_weights,
+            x=x,
+            S=S,
+            a=a,
+            semantic_attention=semantic_attention,
+            public_attention=public_attention,
+            visual_public_attention=visual_public_attention,
+            point_public_attention=point_public_attention,
+            tactile_public_attention=tactile_public_attention,
+            visual_private_attention=visual_private_attention,
+            tactile_private_attention=tactile_private_attention,
+            point_private_attention=point_private_attention,
+        )
+
+    def _build_conditioned_control_state(
+        self,
+        posterior: PicfPosteriorAnchorState,
+        innovation_token: torch.Tensor,
+        proprio_token: torch.Tensor,
+        task_readout: PicfTaskReadoutState,
+    ) -> PicfConditionedControlState:
+        control_posterior_tokens = self.posterior_to_control_proj(posterior.tokens)
+        control_global_post = self.global_post_to_control_proj(posterior.global_post[None, :])
+        control_innovation_token = self.innovation_to_control_proj(innovation_token[None, :])
+        control_proprio_token = self.proprio_to_control_proj(proprio_token[None, :])
+        task_local_tokens = self.task_to_control_proj(task_readout.local_tokens)
+        task_global_token = self.task_global_to_control_proj(task_readout.global_token[None, :])
+        instruction_tokens = (
+            self.instruction_to_control_proj(task_readout.instruction_tokens)
+            if task_readout.instruction_tokens.shape[0] > 0
+            else torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype)
+        )
+        base_tokens = torch.cat(
+            [
+                _add_role_embedding(control_posterior_tokens, self.control_role_embedding, 0),
+                _add_role_embedding(control_global_post, self.control_role_embedding, 1),
+                _add_role_embedding(control_innovation_token, self.control_role_embedding, 2),
+                _add_role_embedding(control_proprio_token, self.control_role_embedding, 3),
+            ],
+            dim=0,
+        )
+        task_tokens = torch.cat(
+            [
+                _add_role_embedding(task_local_tokens, self.control_role_embedding, 4),
+                _add_role_embedding(task_global_token, self.control_role_embedding, 5),
+                _add_role_embedding(instruction_tokens, self.control_role_embedding, 6),
+            ],
+            dim=0,
+        )
+        conditioned_control_queries = self.control_query_tokens.to(device=self.device, dtype=self.dtype)
+        control_prefix = torch.cat(
+            [
+                base_tokens,
+                task_tokens,
+                _add_role_embedding(conditioned_control_queries, self.control_role_embedding, 7),
+            ],
+            dim=0,
+        )
+        control_tokens = self.control_world(control_prefix[None, :])[0]
+        query_state = _mean_query_state(control_tokens, num_query_tokens=self.control_query_tokens.shape[0])
+        pi_queries = self.pi_prefix_query_tokens.to(device=self.device, dtype=self.dtype)[None, :]
+        pi_prefix_tokens, _ = self.pi_prefix_reader(pi_queries, control_tokens[None, :])
+        future_queries = self.predictive_query_tokens.to(device=self.device, dtype=self.dtype)[None, :]
+        future_condition_tokens, _ = self.future_condition_reader(future_queries, control_tokens[None, :])
+        return PicfConditionedControlState(
+            base_tokens=base_tokens,
+            task_tokens=task_tokens,
+            tokens=control_tokens,
+            query_state=query_state,
+            pi_prefix_tokens=pi_prefix_tokens[0],
+            future_condition_tokens=future_condition_tokens[0],
+        )
+
+    def _build_physical_predictive_basis(
+        self,
+        posterior: PicfPosteriorAnchorState,
+        *,
+        proprio_token: torch.Tensor,
+        executed_action: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, PicfPredictionCache]:
+        pred_tail = torch.stack(
+            [
+                posterior.global_post,
+                proprio_token,
+                self.action_cond_proj(executed_action[None, :])[0],
+            ],
+            dim=0,
+        )
+        pred_world_tokens = torch.cat(
+            [
+                _add_role_embedding(posterior.tokens, self.predictive_physical_role_embedding, 0),
+                _add_role_embedding(pred_tail[0:1], self.predictive_physical_role_embedding, 1),
+                _add_role_embedding(pred_tail[1:2], self.predictive_physical_role_embedding, 2),
+                _add_role_embedding(pred_tail[2:3], self.predictive_physical_role_embedding, 3),
+            ],
+            dim=0,
+        )
+        physical_pred_tokens = self.predictive_world(pred_world_tokens[None, :])[0]
+        physical_global_pred = self.predictive_pool(physical_pred_tokens[None, :])[0]
+        physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)
+        return physical_pred_tokens, physical_global_pred, physical_prediction_cache
+
+    def _build_conditioned_predictive_cache(
+        self,
+        physical_pred_tokens: torch.Tensor,
+        future_condition_tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor, PicfPredictionCache]:
+        conditioned_physical_pred_tokens = self.physical_pred_to_conditioned_proj(physical_pred_tokens)
+        pred_conditioned_tokens = torch.cat(
+            [
+                _add_role_embedding(conditioned_physical_pred_tokens, self.predictive_conditioned_role_embedding, 0),
+                _add_role_embedding(future_condition_tokens, self.predictive_conditioned_role_embedding, 1),
+            ],
+            dim=0,
+        )
+        pred_tokens = self.predictive_semantic_world(pred_conditioned_tokens[None, :])[0]
+        predictive_query_state = _mean_query_state(pred_tokens, num_query_tokens=max(future_condition_tokens.shape[0], 1))
+        global_pred = self.predictive_state_proj(predictive_query_state)
+        prediction_cache = self._prediction_cache_from_global(global_pred)
+        return predictive_query_state, global_pred, prediction_cache
 
     def _prediction_cache_from_global(self, global_state: torch.Tensor) -> PicfPredictionCache:
         return PicfPredictionCache(
@@ -2313,6 +2598,75 @@ class PicfFullCore(nn.Module):
         innovation = self.innovation_token_proj(innovation_latent)
         return innovation, torch.cat(norms, dim=0)
 
+    def observe_step(
+        self,
+        observation: PicfObservation,
+        previous: PicfCoreState | None = None,
+        *,
+        point_features_override: torch.Tensor | np.ndarray | None = None,
+        visual_map_override: torch.Tensor | np.ndarray | None = None,
+        semantic_override: torch.Tensor | np.ndarray | None = None,
+    ) -> _ObservedStepState:
+        if observation.G_t is None:
+            observation.G_t = self.local_frame.make_transform(observation.robot_obs)
+        if observation.point_set is None:
+            focus_centers_world = _focus_centers_world_from_observation(observation)
+            observation.point_set = self.pointcloud_builder(
+                {
+                    "rgb_static": observation.rgb_static,
+                    "depth_static": observation.depth_static,
+                    "rgb_gripper": observation.rgb_gripper,
+                    "depth_gripper": observation.depth_gripper,
+                    "robot_obs": observation.robot_obs,
+                    "focus_centers_world": focus_centers_world,
+                    "focus_radius_m": self.config.crop_radius_m,
+                }
+            )
+        if observation.reset_scaffold:
+            previous = None
+        meta = self._build_runtime_meta(observation, previous.runtime_meta if previous is not None else None)
+        if previous is None and not meta.point_contract_ok:
+            raise RuntimeError("PICF core requires a valid xyzrgb point cloud on the first control step.")
+        frame_context = self._point_subset(observation) if meta.point_contract_ok else None
+        if previous is None and frame_context is not None and frame_context.points_local.shape[0] == 0:
+            raise RuntimeError("PICF core requires non-empty local xyzrgb support on the first control step.")
+        point_features = self._extract_point_features(frame_context, point_features_override) if frame_context is not None else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
+        visual_map = self._visual_map(observation, visual_map_override, meta)
+        tactile_bundle = self._tactile_features(observation, meta)
+        semantic = self._semantic_context(observation, previous, semantic_override)
+        token_field, dense_memory = self._build_token_field(observation, frame_context, point_features, visual_map, tactile_bundle, meta, previous)
+        observation_anchors = self._build_observation_anchors(token_field, dense_memory)
+        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory)
+        current_targets, availability = self._current_targets(observation, frame_context, visual_map, dense_memory)
+        innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
+        proprio = _to_tensor(
+            np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
+            device=self.device,
+            dtype=self.dtype,
+        )
+        proprio_token = self.proprio_proj(proprio[None, :])[0]
+        task_readout = self._build_task_readout(token_field, dense_memory, semantic, proprio_token)
+        conditioned_control = self._build_conditioned_control_state(posterior, innovation_token, proprio_token, task_readout)
+        hold_reason = self._hold_reason(meta, posterior, innovation_token)
+        return _ObservedStepState(
+            runtime_meta=meta,
+            G_t=_to_tensor(observation.G_t, device=self.device, dtype=self.dtype),
+            token_field=token_field,
+            dense_memory=dense_memory,
+            observation_anchors=observation_anchors,
+            posterior=posterior,
+            current_targets=current_targets,
+            availability=availability,
+            innovation_token=innovation_token,
+            innovation_norm=innovation_norm,
+            semantic=semantic,
+            proprio_token=proprio_token,
+            task_readout=task_readout,
+            conditioned_control=conditioned_control,
+            control=PicfControlState(hold_reason=hold_reason),
+            last_prompt=observation.prompt,
+        )
+
     def _predictive_state(
         self,
         observation: PicfObservation,
@@ -2322,102 +2676,31 @@ class PicfFullCore(nn.Module):
         innovation_norm: torch.Tensor,
         targets_availability: torch.Tensor,
         action_future: torch.Tensor | np.ndarray | None,
+        *,
+        conditioned_control: PicfConditionedControlState,
+        proprio_token: torch.Tensor,
     ) -> PicfPredictiveState:
-        proprio = _to_tensor(
-            np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
-            device=self.device,
-            dtype=self.dtype,
-        )
-        proprio_token = self.proprio_proj(proprio[None, :])[0]
-        control_semantic_prefix_tokens = self._semantic_prefix_tokens(
-            semantic,
-            dropout_prob=self.config.semantic_prefix_dropout_prob,
-        )
-        control_posterior_tokens = self.posterior_to_control_proj(posterior.tokens)
-        control_global_post = self.global_post_to_control_proj(posterior.global_post[None, :])
-        control_innovation_token = self.innovation_to_control_proj(innovation_token[None, :])
-        control_proprio_token = self.proprio_to_control_proj(proprio_token[None, :])
-        control_query_tokens = self.control_query_tokens.to(device=self.device, dtype=self.dtype)
-        action_condition_prefix = torch.cat(
-            [
-                _add_role_embedding(control_posterior_tokens, self.control_role_embedding, 0),
-                _add_role_embedding(control_global_post, self.control_role_embedding, 0),
-                _add_role_embedding(control_innovation_token, self.control_role_embedding, 1),
-                _add_role_embedding(control_proprio_token, self.control_role_embedding, 2),
-                _add_role_embedding(control_query_tokens, self.control_role_embedding, 4),
-            ],
-            dim=0,
-        )
-        action_condition_tokens = self.control_world(action_condition_prefix[None, :])[0]
-        control_prefix = torch.cat(
-            [
-                _add_role_embedding(control_semantic_prefix_tokens, self.control_role_embedding, 3),
-                _add_role_embedding(control_posterior_tokens, self.control_role_embedding, 0),
-                _add_role_embedding(control_global_post, self.control_role_embedding, 0),
-                _add_role_embedding(control_innovation_token, self.control_role_embedding, 1),
-                _add_role_embedding(control_proprio_token, self.control_role_embedding, 2),
-                _add_role_embedding(control_query_tokens, self.control_role_embedding, 4),
-            ],
-            dim=0,
-        )
-        control_tokens = self.control_world(control_prefix[None, :])[0]
-        control_query_state = _mean_query_state(control_tokens, num_query_tokens=self.config.control_query_tokens)
-        pooled_state = self.control_state_proj(control_query_state)
         action, action_chunk = self._default_predictive_action(action_future)
         executed_action = self._executed_action(observation, action)
-
-        if action_future is not None:
-            future_action = _to_tensor(action_future, device=self.device, dtype=self.dtype)
-            action_cond = future_action[0] if future_action.ndim > 1 else future_action
-        else:
-            action_cond = action
-        pred_tail = torch.stack(
-            [posterior.global_post, proprio_token, self.action_cond_proj(action_cond[None, :])[0]],
-            dim=0,
+        physical_pred_tokens, physical_global_pred, physical_prediction_cache = self._build_physical_predictive_basis(
+            posterior,
+            proprio_token=proprio_token,
+            executed_action=executed_action,
         )
-        pred_world_tokens = torch.cat(
-            [
-                _add_role_embedding(posterior.tokens, self.predictive_physical_role_embedding, 0),
-                _add_role_embedding(pred_tail[0:1], self.predictive_physical_role_embedding, 1),
-                _add_role_embedding(pred_tail[1:2], self.predictive_physical_role_embedding, 2),
-                _add_role_embedding(pred_tail[2:3], self.predictive_physical_role_embedding, 3),
-            ],
-            dim=0,
+        predictive_query_state, global_pred, prediction_cache = self._build_conditioned_predictive_cache(
+            physical_pred_tokens,
+            conditioned_control.future_condition_tokens,
         )
-        # First produce a purely physical predictive basis. This is the only cache
-        # allowed to feed the next-step innovation constructor.
-        physical_pred_tokens = self.predictive_world(pred_world_tokens[None, :])[0]
-        physical_global_pred = self.predictive_pool(physical_pred_tokens[None, :])[0]
-        physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)
-        conditioned_semantic_prefix_tokens = self._semantic_prefix_tokens(
-            semantic,
-            dropout_prob=self.config.predictive_semantic_dropout_prob,
-        )
-        conditioned_physical_pred_tokens = self.physical_pred_to_conditioned_proj(physical_pred_tokens)
-        predictive_query_tokens = self.predictive_query_tokens.to(device=self.device, dtype=self.dtype)
-        pred_conditioned_tokens = torch.cat(
-            [
-                _add_role_embedding(conditioned_semantic_prefix_tokens, self.predictive_conditioned_role_embedding, 1),
-                _add_role_embedding(conditioned_physical_pred_tokens, self.predictive_conditioned_role_embedding, 0),
-                _add_role_embedding(predictive_query_tokens, self.predictive_conditioned_role_embedding, 2),
-            ],
-            dim=0,
-        )
-        pred_tokens = self.predictive_semantic_world(pred_conditioned_tokens[None, :])[0]
-        predictive_query_state = _mean_query_state(
-            pred_tokens,
-            num_query_tokens=self.config.predictive_query_tokens,
-        )
-        global_pred = self.predictive_state_proj(predictive_query_state)
-        prediction_cache = self._prediction_cache_from_global(global_pred)
+        pooled_state = self.control_state_proj(conditioned_control.query_state)
         return PicfPredictiveState(
             semantic_tokens=semantic.tokens,
             innovation_token=innovation_token,
             innovation_norm=innovation_norm,
             availability=targets_availability,
-            control_tokens=control_tokens,
-            action_condition_tokens=action_condition_tokens,
-            control_query_state=control_query_state,
+            physical_pred_tokens=physical_pred_tokens,
+            control_tokens=conditioned_control.tokens,
+            action_condition_tokens=conditioned_control.pi_prefix_tokens,
+            control_query_state=conditioned_control.query_state,
             pooled_state=pooled_state,
             action=action,
             action_chunk=action_chunk,
@@ -2429,6 +2712,66 @@ class PicfFullCore(nn.Module):
             prediction_cache=prediction_cache,
         )
 
+    def finalize_with_action(
+        self,
+        observation: PicfObservation,
+        observed: _ObservedStepState,
+        *,
+        action_future: torch.Tensor | np.ndarray | None,
+    ) -> PicfCoreOutput:
+        predictive = self._predictive_state(
+            observation,
+            posterior=observed.posterior,
+            semantic=observed.semantic,
+            innovation_token=observed.innovation_token,
+            innovation_norm=observed.innovation_norm,
+            targets_availability=observed.availability,
+            action_future=action_future,
+            conditioned_control=observed.conditioned_control,
+            proprio_token=observed.proprio_token,
+        )
+        state = PicfCoreState(
+            runtime_meta=observed.runtime_meta,
+            G_t=observed.G_t,
+            token_field=observed.token_field,
+            observation_anchors=observed.observation_anchors,
+            posterior=observed.posterior,
+            task_readout=observed.task_readout,
+            conditioned_control=observed.conditioned_control,
+            predictive=predictive,
+            control=observed.control,
+            last_prompt=observed.last_prompt,
+        )
+        debug = {
+            "num_point_tokens": float(observed.token_field.point_tokens.shape[0]),
+            "num_visual_tokens": float(observed.token_field.visual_tokens.shape[0]),
+            "num_tactile_tokens": float(observed.token_field.tactile_tokens.shape[0]),
+            "num_tactile_tokens_all": float(0 if observed.token_field.tactile_tokens_all is None else observed.token_field.tactile_tokens_all.shape[0]),
+            "support_mass_mean": float(observed.posterior.support_mass.mean().item()),
+            "active_alpha_sum": float(observed.posterior.alpha.sum().item()),
+            "innovation_norm": float(torch.linalg.norm(observed.innovation_token).item()),
+            "hold_triggered": 1.0 if observed.control.hold_reason is not None else 0.0,
+        }
+        if observed.token_field.tactile_contact_prob is not None and observed.token_field.tactile_contact_prob.numel() > 0:
+            debug["tactile_contact_prob_mean"] = float(observed.token_field.tactile_contact_prob.mean().item())
+        if observed.token_field.tactile_anchor_mask is not None and observed.token_field.tactile_anchor_mask.numel() > 0:
+            debug["tactile_active_rate"] = float(observed.token_field.tactile_anchor_mask.to(dtype=self.dtype).mean().item())
+        if observed.observation_anchors.routing_gate_point.numel() > 0:
+            debug["mean_point_route_gate"] = float(observed.observation_anchors.routing_gate_point.mean().item())
+            debug["mean_point_route_support"] = float(observed.observation_anchors.routing_support_point.mean().item())
+        if observed.observation_anchors.routing_gate_visual.numel() > 0:
+            debug["mean_visual_route_gate"] = float(observed.observation_anchors.routing_gate_visual.mean().item())
+            debug["mean_visual_route_support"] = float(observed.observation_anchors.routing_support_visual.mean().item())
+        if observed.token_field.projective_geometry is not None:
+            geom = observed.token_field.projective_geometry
+            num_edges = int(geom.projective_candidate_mask.sum().item()) if geom.projective_candidate_mask.numel() > 0 else 0
+            total_edges = int(geom.projective_candidate_mask.numel())
+            density = (float(num_edges) / float(total_edges)) if total_edges > 0 else 0.0
+            debug["mean_point_visibility"] = float(geom.point_visibility.mean().item()) if geom.point_visibility.numel() > 0 else 0.0
+            debug["projective_candidate_edges"] = float(num_edges)
+            debug["projective_candidate_density"] = float(density)
+        return PicfCoreOutput(state=state, debug=debug)
+
     def refresh_predictive_state_for_action(
         self,
         observation: PicfObservation,
@@ -2436,28 +2779,35 @@ class PicfFullCore(nn.Module):
         *,
         action_future: torch.Tensor | np.ndarray,
     ) -> PicfPredictiveState:
-        action_tensor = _to_tensor(action_future, device=self.device, dtype=self.dtype)
-        action_tensor = action_tensor if action_tensor.ndim > 1 else action_tensor[None, :]
-        action_for_cache = action_tensor[:, :7]
-        semantic = self._project_semantic_context(tokens_raw=state.predictive.semantic_tokens)
-        predictive = self._predictive_state(
-            observation,
+        observed = _ObservedStepState(
+            runtime_meta=state.runtime_meta,
+            G_t=state.G_t,
+            token_field=state.token_field,
+            dense_memory=_StepDenseMemory(
+                point_payload=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
+                visual_payload=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
+                tactile_group_tokens=(),
+            ),
+            observation_anchors=state.observation_anchors,
             posterior=state.posterior,
-            semantic=semantic,
+            current_targets={},
+            availability=state.predictive.availability,
             innovation_token=state.predictive.innovation_token,
             innovation_norm=state.predictive.innovation_norm,
-            targets_availability=state.predictive.availability,
-            action_future=action_for_cache,
+            semantic=self._project_semantic_context(tokens_raw=state.predictive.semantic_tokens),
+            proprio_token=self.proprio_proj(
+                _to_tensor(
+                    np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
+                    device=self.device,
+                    dtype=self.dtype,
+                )[None, :]
+            )[0],
+            task_readout=state.task_readout,
+            conditioned_control=state.conditioned_control,
+            control=state.control,
+            last_prompt=state.last_prompt,
         )
-        action_7d = action_tensor[0]
-        if action_7d.numel() < 7:
-            action_7d = fn.pad(action_7d, (0, 7 - action_7d.numel()))
-        elif action_7d.numel() > 7:
-            action_7d = action_7d[:7]
-        predictive.action = action_7d
-        predictive.action_chunk = action_tensor
-        predictive.executed_action = self._executed_action(observation, predictive.action)
-        return predictive
+        return self.finalize_with_action(observation, observed, action_future=action_future).state.predictive
 
     def _hold_reason(self, meta: RuntimeMeta, posterior: PicfPosteriorAnchorState, innovation_token: torch.Tensor) -> str | None:
         if not meta.point_contract_ok:
@@ -2481,85 +2831,11 @@ class PicfFullCore(nn.Module):
         semantic_override: torch.Tensor | np.ndarray | None = None,
         action_future: torch.Tensor | np.ndarray | None = None,
     ) -> PicfCoreOutput:
-        if observation.G_t is None:
-            observation.G_t = self.local_frame.make_transform(observation.robot_obs)
-        if observation.point_set is None:
-            focus_centers_world = _focus_centers_world_from_observation(observation)
-            observation.point_set = self.pointcloud_builder(
-                {
-                    "rgb_static": observation.rgb_static,
-                    "depth_static": observation.depth_static,
-                    "rgb_gripper": observation.rgb_gripper,
-                    "depth_gripper": observation.depth_gripper,
-                    "robot_obs": observation.robot_obs,
-                    "focus_centers_world": focus_centers_world,
-                    "focus_radius_m": self.config.crop_radius_m,
-                }
-            )
-        if observation.reset_scaffold:
-            previous = None
-        meta = self._build_runtime_meta(observation, previous.runtime_meta if previous is not None else None)
-        if previous is None and not meta.point_contract_ok:
-            raise RuntimeError("PICF core requires a valid xyzrgb point cloud on the first control step.")
-
-        frame_context = self._point_subset(observation) if meta.point_contract_ok else None
-        if previous is None and frame_context is not None and frame_context.points_local.shape[0] == 0:
-            raise RuntimeError("PICF core requires non-empty local xyzrgb support on the first control step.")
-        point_features = self._extract_point_features(frame_context, point_features_override) if frame_context is not None else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
-        visual_map = self._visual_map(observation, visual_map_override, meta)
-        tactile_bundle = self._tactile_features(observation, meta)
-        semantic = self._semantic_context(observation, previous, semantic_override)
-        token_field, dense_memory = self._build_token_field(observation, frame_context, point_features, visual_map, tactile_bundle, meta, previous)
-        observation_anchors = self._build_observation_anchors(token_field, dense_memory)
-        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory)
-        current_targets, availability = self._current_targets(observation, frame_context, visual_map, dense_memory)
-        innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
-        predictive = self._predictive_state(
+        observed = self.observe_step(
             observation,
-            posterior,
-            semantic,
-            innovation_token,
-            innovation_norm,
-            availability,
-            action_future,
+            previous=previous,
+            point_features_override=point_features_override,
+            visual_map_override=visual_map_override,
+            semantic_override=semantic_override,
         )
-        hold_reason = self._hold_reason(meta, posterior, innovation_token)
-        state = PicfCoreState(
-            runtime_meta=meta,
-            G_t=_to_tensor(observation.G_t, device=self.device, dtype=self.dtype),
-            token_field=token_field,
-            observation_anchors=observation_anchors,
-            posterior=posterior,
-            predictive=predictive,
-            control=PicfControlState(hold_reason=hold_reason),
-            last_prompt=observation.prompt,
-        )
-        debug = {
-            "num_point_tokens": float(token_field.point_tokens.shape[0]),
-            "num_visual_tokens": float(token_field.visual_tokens.shape[0]),
-            "num_tactile_tokens": float(token_field.tactile_tokens.shape[0]),
-            "num_tactile_tokens_all": float(0 if token_field.tactile_tokens_all is None else token_field.tactile_tokens_all.shape[0]),
-            "support_mass_mean": float(posterior.support_mass.mean().item()),
-            "active_alpha_sum": float(posterior.alpha.sum().item()),
-            "innovation_norm": float(torch.linalg.norm(innovation_token).item()),
-            "hold_triggered": 1.0 if hold_reason is not None else 0.0,
-        }
-        if token_field.tactile_contact_prob is not None and token_field.tactile_contact_prob.numel() > 0:
-            debug["tactile_contact_prob_mean"] = float(token_field.tactile_contact_prob.mean().item())
-        if token_field.tactile_anchor_mask is not None and token_field.tactile_anchor_mask.numel() > 0:
-            debug["tactile_active_rate"] = float(token_field.tactile_anchor_mask.to(dtype=self.dtype).mean().item())
-        if observation_anchors.routing_gate_point.numel() > 0:
-            debug["mean_point_route_gate"] = float(observation_anchors.routing_gate_point.mean().item())
-            debug["mean_point_route_support"] = float(observation_anchors.routing_support_point.mean().item())
-        if observation_anchors.routing_gate_visual.numel() > 0:
-            debug["mean_visual_route_gate"] = float(observation_anchors.routing_gate_visual.mean().item())
-            debug["mean_visual_route_support"] = float(observation_anchors.routing_support_visual.mean().item())
-        if token_field.projective_geometry is not None:
-            geom = token_field.projective_geometry
-            num_edges = int(geom.projective_candidate_mask.sum().item()) if geom.projective_candidate_mask.numel() > 0 else 0
-            total_edges = int(geom.projective_candidate_mask.numel())
-            density = (float(num_edges) / float(total_edges)) if total_edges > 0 else 0.0
-            debug["mean_point_visibility"] = float(geom.point_visibility.mean().item()) if geom.point_visibility.numel() > 0 else 0.0
-            debug["projective_candidate_edges"] = float(num_edges)
-            debug["projective_candidate_density"] = float(density)
-        return PicfCoreOutput(state=state, debug=debug)
+        return self.finalize_with_action(observation, observed, action_future=action_future)

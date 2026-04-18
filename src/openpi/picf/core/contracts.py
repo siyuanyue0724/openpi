@@ -80,6 +80,36 @@ class PicfPredictionCache:
 
 
 @dataclasses.dataclass
+class PicfTaskReadoutState:
+    conditioned_queries: torch.Tensor
+    local_tokens: torch.Tensor
+    global_token: torch.Tensor
+    instruction_tokens: torch.Tensor
+    point_weights: torch.Tensor
+    x: torch.Tensor
+    S: torch.Tensor
+    a: torch.Tensor
+    semantic_attention: torch.Tensor | None = None
+    public_attention: torch.Tensor | None = None
+    visual_public_attention: torch.Tensor | None = None
+    point_public_attention: torch.Tensor | None = None
+    tactile_public_attention: torch.Tensor | None = None
+    visual_private_attention: torch.Tensor | None = None
+    tactile_private_attention: torch.Tensor | None = None
+    point_private_attention: torch.Tensor | None = None
+
+
+@dataclasses.dataclass
+class PicfConditionedControlState:
+    base_tokens: torch.Tensor
+    task_tokens: torch.Tensor
+    tokens: torch.Tensor
+    query_state: torch.Tensor
+    pi_prefix_tokens: torch.Tensor
+    future_condition_tokens: torch.Tensor
+
+
+@dataclasses.dataclass
 class PicfPosteriorAnchorState:
     h: torch.Tensor
     c: torch.Tensor
@@ -104,6 +134,7 @@ class PicfPredictiveState:
     innovation_token: torch.Tensor
     innovation_norm: torch.Tensor
     availability: torch.Tensor
+    physical_pred_tokens: torch.Tensor
     control_tokens: torch.Tensor
     action_condition_tokens: torch.Tensor | None
     control_query_state: torch.Tensor
@@ -130,6 +161,8 @@ class PicfCoreState:
     token_field: PicfTokenFieldState
     observation_anchors: PicfObservationAnchorState
     posterior: PicfPosteriorAnchorState
+    task_readout: PicfTaskReadoutState
+    conditioned_control: PicfConditionedControlState
     predictive: PicfPredictiveState
     control: PicfControlState
     last_prompt: str | None = None
