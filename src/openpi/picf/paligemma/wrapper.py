@@ -355,6 +355,15 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
     def sample_action_chunk(self, *args, **kwargs):
         raise RuntimeError("HF PaliGemma semantic encoder does not provide PI0 action generation.")
 
+    def forward(self, op: str, /, *args: Any, **kwargs: Any):
+        if op == "encode_observation":
+            return self.encode_observation(*args, **kwargs)
+        if op == "compute_action_flow_loss":
+            return self.compute_action_flow_loss(*args, **kwargs)
+        if op == "sample_action_chunk":
+            return self.sample_action_chunk(*args, **kwargs)
+        raise ValueError(f"Unsupported semantic forward op: {op!r}")
+
 
 class _Pi0PaliGemmaSemanticEncoder(nn.Module):
     def __init__(self, config: PaliGemmaSemanticConfig):
@@ -911,6 +920,15 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             time += dt
         return x_t[0]
 
+    def forward(self, op: str, /, *args: Any, **kwargs: Any):
+        if op == "encode_observation":
+            return self.encode_observation(*args, **kwargs)
+        if op == "compute_action_flow_loss":
+            return self.compute_action_flow_loss(*args, **kwargs)
+        if op == "sample_action_chunk":
+            return self.sample_action_chunk(*args, **kwargs)
+        raise ValueError(f"Unsupported semantic forward op: {op!r}")
+
 
 class PaliGemmaSemanticEncoder(nn.Module):
     def __init__(self, config: PaliGemmaSemanticConfig | None = None):
@@ -949,3 +967,6 @@ class PaliGemmaSemanticEncoder(nn.Module):
         if fn is None:
             raise RuntimeError("Semantic encoder does not implement PI0 action chunk sampling.")
         return fn(*args, **kwargs)
+
+    def forward(self, op: str, /, *args: Any, **kwargs: Any):
+        return self.encoder(op, *args, **kwargs)

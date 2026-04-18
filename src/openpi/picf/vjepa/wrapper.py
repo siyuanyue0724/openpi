@@ -230,3 +230,6 @@ class Vjepa2VisualEncoder(nn.Module):
             checkpoint_loaded=self.checkpoint_loaded,
             model_name=self.config.model_name,
         )
+
+    def forward(self, clip: np.ndarray) -> VjepaFeatureMap:
+        return self.encode_clip(clip)

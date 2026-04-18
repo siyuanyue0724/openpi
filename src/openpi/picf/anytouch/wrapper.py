@@ -252,3 +252,16 @@ class AnyTouch2TactileEncoder(nn.Module):
             hidden_dim=hidden_dim,
             pooled_dim=int(global_feature.shape[0]),
         )
+
+    def forward(
+        self,
+        *,
+        clips_by_sensor: dict[str, torch.Tensor | object],
+        backgrounds_by_sensor: dict[str, object],
+        poses_by_sensor: dict[str, torch.Tensor | object],
+    ) -> AnyTouchFeatureBundle | None:
+        return self.encode_sensor_clips(
+            clips_by_sensor=clips_by_sensor,
+            backgrounds_by_sensor=backgrounds_by_sensor,
+            poses_by_sensor=poses_by_sensor,
+        )

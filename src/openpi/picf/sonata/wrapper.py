@@ -333,3 +333,6 @@ class SonataPointFeatureExtractor(nn.Module):
             stage_name=self.stage_name,
             cpu_fallback_used=self.cpu_fallback,
         )
+
+    def forward(self, frame_context: PointFrameContext) -> SonataPointFeatures:
+        return self.encode_local_context(frame_context)

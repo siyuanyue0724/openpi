@@ -11,7 +11,7 @@ from openpi.picf.contracts import PicfObservation
 from openpi.picf.core import PicfCoreOutput
 from openpi.picf.core import PicfCoreState
 from openpi.picf.core import PicfFullCore
-from openpi.picf.fsdp_utils import call_fsdp_method
+from openpi.picf.fsdp_utils import call_module_forward_or_method
 
 
 @dataclasses.dataclass(frozen=True)
@@ -68,7 +68,7 @@ class PicfPi05Policy:
     def encode_semantic(self, observation: PicfObservation) -> Any | None:
         if self.semantic_encoder is None:
             return None
-        return call_fsdp_method(self.semantic_encoder, "encode_observation", observation)
+        return call_module_forward_or_method(self.semantic_encoder, "encode_observation", "encode_observation", observation)
 
     def _legacy_core_step(
         self,
@@ -131,8 +131,9 @@ class PicfPi05Policy:
             if action_chunk_target is not None:
                 self._require_action_generation()
                 if self._supports_action_generation():
-                    flow_override = call_fsdp_method(
+                    flow_override = call_module_forward_or_method(
                         self.semantic_encoder,
+                        "compute_action_flow_loss",
                         "compute_action_flow_loss",
                         semantic_override,
                         extra_prefix_tokens=self._legacy_action_condition_tokens(output),
@@ -157,8 +158,9 @@ class PicfPi05Policy:
         flow_override: dict[str, torch.Tensor] | None = None
         if action_chunk_target is not None:
             self._require_action_generation()
-            flow_override = call_fsdp_method(
+            flow_override = call_module_forward_or_method(
                 self.semantic_encoder,
+                "compute_action_flow_loss",
                 "compute_action_flow_loss",
                 semantic_override,
                 extra_prefix_tokens=observed.conditioned_control.pi_prefix_tokens,
@@ -206,8 +208,9 @@ class PicfPi05Policy:
                 action_future=None,
             )
             if self._supports_action_generation():
-                action_chunk = call_fsdp_method(
+                action_chunk = call_module_forward_or_method(
                     self.semantic_encoder,
+                    "sample_action_chunk",
                     "sample_action_chunk",
                     semantic_override,
                     extra_prefix_tokens=self._legacy_action_condition_tokens(output),
@@ -237,8 +240,9 @@ class PicfPi05Policy:
             visual_map_override=visual_map_override,
             semantic_override=semantic_override,
         )
-        action_chunk = call_fsdp_method(
+        action_chunk = call_module_forward_or_method(
             self.semantic_encoder,
+            "sample_action_chunk",
             "sample_action_chunk",
             semantic_override,
             extra_prefix_tokens=observed.conditioned_control.pi_prefix_tokens,

@@ -33,7 +33,7 @@ from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.tactile_contact import contact_prob_with_hysteresis
 from openpi.picf.core.tactile_contact import summarize_contact_context
 from openpi.picf.frame_context import PointFrameContext
-from openpi.picf.fsdp_utils import call_fsdp_method
+from openpi.picf.fsdp_utils import call_module_forward_or_method
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.visual_expert import load_camera_model
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticFeatures
@@ -873,7 +873,7 @@ class PicfFullCore(nn.Module):
             return feature if feature.ndim == 2 else feature.squeeze(0)
         if self.point_feature_extractor is None:
             return _to_tensor(frame_context.colors, device=self.device, dtype=self.dtype)
-        encoded = call_fsdp_method(self.point_feature_extractor, "encode_local_context", frame_context)
+        encoded = call_module_forward_or_method(self.point_feature_extractor, "encode_local_context", frame_context)
         return _to_tensor(encoded.features, device=self.device, dtype=self.dtype)
 
     def _visual_map(self, observation: PicfObservation, override: torch.Tensor | np.ndarray | None, meta: RuntimeMeta) -> torch.Tensor | None:
@@ -887,7 +887,7 @@ class PicfFullCore(nn.Module):
             self.clip_buffer.push(rgb, segment_id=int(observation.segment_id), reset=bool(observation.reset_scaffold))
         if not self.clip_buffer.has_frames:
             return None
-        fmap = call_fsdp_method(self.visual_encoder, "encode_clip", self.clip_buffer.get_clip())
+        fmap = call_module_forward_or_method(self.visual_encoder, "encode_clip", self.clip_buffer.get_clip())
         return _to_tensor(fmap.current_map(use_last_two_mean=self.visual_config.use_last_two_mean), device=self.device, dtype=self.dtype)
 
     def _tactile_features(self, observation: PicfObservation, meta: RuntimeMeta) -> AnyTouchFeatureBundle | None:
@@ -906,7 +906,7 @@ class PicfFullCore(nn.Module):
         clips = {name: self.tactile_buffer.get_clip(name) for name in sensor_names}
         backgrounds = {name: self.tactile_buffer.background_for(name) for name in sensor_names}
         poses = {name: self.tactile_buffer.latest_pose(name) for name in sensor_names}
-        return call_fsdp_method(
+        return call_module_forward_or_method(
             self.tactile_encoder,
             "encode_sensor_clips",
             clips_by_sensor=clips,

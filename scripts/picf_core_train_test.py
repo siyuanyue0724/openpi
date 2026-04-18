@@ -21,6 +21,7 @@ from openpi.picf.contracts import PicfPointCloudFrame
 from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.pipeline import LazyCrossAttentionRead
 from openpi.picf.fsdp_utils import call_fsdp_method
+from openpi.picf.fsdp_utils import call_module_forward_or_method
 from openpi.picf.test_utils import build_mini_calvin_dataset
 
 
@@ -1024,6 +1025,47 @@ def test_call_fsdp_method_supports_plain_modules_with_nested_fsdp_children() -> 
         outer = _OuterPlainModule(wrapped_inner)
         result = call_fsdp_method(outer, "encode", torch.randn(2, 4))
         assert tuple(result.shape) == (2, 4)
+
+
+def test_call_module_forward_or_method_prefers_forward_for_wrapped_modules() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _ForwardDispatchModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inner = torch.nn.Linear(4, 4)
+
+        def encode(self, inputs: torch.Tensor) -> torch.Tensor:
+            raise AssertionError("explicit custom method should not be used through the FSDP path")
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.inner(inputs)
+
+    with _single_rank_process_group():
+        wrapped = _MODULE.FullyShardedDataParallel(
+            _ForwardDispatchModule(),
+            sharding_strategy=_MODULE.ShardingStrategy.FULL_SHARD,
+            use_orig_params=True,
+            device_id=torch.device("cpu"),
+            limit_all_gathers=True,
+        )
+        result = call_module_forward_or_method(wrapped, "encode", torch.randn(2, 4))
+        assert tuple(result.shape) == (2, 4)
+
+
+def test_call_module_forward_or_method_strips_dispatch_opcode_for_method_fallback() -> None:
+    class _DispatchlessSemanticStub:
+        def encode_observation(self, value: torch.Tensor) -> torch.Tensor:
+            return value + 1
+
+    result = call_module_forward_or_method(
+        _DispatchlessSemanticStub(),
+        "encode_observation",
+        "encode_observation",
+        torch.tensor([1.0]),
+    )
+    assert torch.equal(result, torch.tensor([2.0]))
 
 
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:
