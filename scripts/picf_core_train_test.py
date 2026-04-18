@@ -981,6 +981,39 @@ def test_call_fsdp_method_supports_custom_module_methods_on_wrapped_modules() ->
         assert tuple(result.shape) == (2, 4)
 
 
+def test_call_fsdp_method_supports_plain_modules_with_nested_fsdp_children() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _InnerCustomMethodModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inner = torch.nn.Linear(4, 4)
+
+        def encode(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.inner(inputs)
+
+    class _OuterPlainModule(torch.nn.Module):
+        def __init__(self, inner: torch.nn.Module) -> None:
+            super().__init__()
+            self.inner_module = inner
+
+        def encode(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.inner_module.encode(inputs)
+
+    with _single_rank_process_group():
+        wrapped_inner = _MODULE.FullyShardedDataParallel(
+            _InnerCustomMethodModule(),
+            sharding_strategy=_MODULE.ShardingStrategy.FULL_SHARD,
+            use_orig_params=True,
+            device_id=torch.device("cpu"),
+            limit_all_gathers=True,
+        )
+        outer = _OuterPlainModule(wrapped_inner)
+        result = call_fsdp_method(outer, "encode", torch.randn(2, 4))
+        assert tuple(result.shape) == (2, 4)
+
+
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:
     param_a = torch.nn.Parameter(torch.tensor([1.0]))
     param_b = torch.nn.Parameter(torch.tensor([2.0]))
