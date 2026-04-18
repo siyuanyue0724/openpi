@@ -449,7 +449,7 @@ class GatedCrossAttentionRead(nn.Module):
             kdim=kv_dim,
             vdim=kv_dim,
         )
-        self.cross_gate = nn.Parameter(torch.as_tensor(float(gate_init)))
+        self.cross_gate = nn.Parameter(torch.tensor([float(gate_init)]))
         self.ff_norm = nn.LayerNorm(query_dim)
         self.ff = nn.Sequential(
             nn.Linear(query_dim, inner_dim),
@@ -496,7 +496,7 @@ class LazyCrossAttentionRead(nn.Module):
         self.query_proj = nn.Linear(query_dim, inner_dim)
         self.key_proj = nn.LazyLinear(inner_dim)
         self.value_proj = nn.LazyLinear(query_dim)
-        self.cross_gate = nn.Parameter(torch.zeros(()))
+        self.cross_gate = nn.Parameter(torch.zeros(1))
         self.ff_norm = nn.LayerNorm(query_dim)
         self.ff = nn.Sequential(
             nn.Linear(query_dim, inner_dim),
