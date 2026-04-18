@@ -1,7 +1,9 @@
 from pathlib import Path
 import sys
+import types
 
 import numpy as np
+import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
@@ -31,3 +33,71 @@ def test_discretize_calvin_gripper_maps_last_dimension_to_binary() -> None:
     discrete = sut._discretize_calvin_gripper(action)
     assert discrete.shape == (7,)
     assert discrete[-1] == -1.0
+
+
+def test_main_runs_without_pytorch_lightning_dependency(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: dict[str, object] = {}
+
+    fake_eval = types.ModuleType("evaluation.evaluate_policy")
+
+    def make_env(dataset_path: str):
+        calls["dataset_path"] = dataset_path
+        return "ENV"
+
+    def evaluate_policy(model, env, *, epoch, eval_log_dir, debug, create_plan_tsne):
+        calls["model"] = model
+        calls["env"] = env
+        calls["epoch"] = epoch
+        calls["eval_log_dir"] = eval_log_dir
+        calls["debug"] = debug
+        calls["create_plan_tsne"] = create_plan_tsne
+
+    fake_eval.NUM_SEQUENCES = None
+    fake_eval.make_env = make_env
+    fake_eval.evaluate_policy = evaluate_policy
+    fake_pkg = types.ModuleType("evaluation")
+    fake_pkg.evaluate_policy = fake_eval
+
+    monkeypatch.setitem(sys.modules, "evaluation", fake_pkg)
+    monkeypatch.setitem(sys.modules, "evaluation.evaluate_policy", fake_eval)
+
+    class _DummyModel:
+        def __init__(self, *, host: str, port: int):
+            self.host = host
+            self.port = port
+
+    monkeypatch.setattr(sut, "_PicfCalvinModel", _DummyModel)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "evaluate_picf_policy.py",
+            "--dataset_path",
+            str(tmp_path / "dataset"),
+            "--eval_log_dir",
+            str(tmp_path / "eval"),
+            "--num_sequences",
+            "20",
+            "--epoch_tag",
+            "step5000",
+            "--save_video",
+            "--video_dir",
+            str(tmp_path / "videos"),
+            "--server_host",
+            "127.0.0.1",
+            "--server_port",
+            "8000",
+            "--calvin_agent_root",
+            str(tmp_path / "calvin_agent"),
+        ],
+    )
+
+    sut.main()
+
+    assert fake_eval.NUM_SEQUENCES == 20
+    assert calls["dataset_path"] == str(tmp_path / "dataset")
+    assert calls["env"] == "ENV"
+    assert calls["epoch"] == "step5000"
+    assert calls["eval_log_dir"] == str(tmp_path / "eval")
+    assert calls["debug"] is False
+    assert calls["create_plan_tsne"] is False

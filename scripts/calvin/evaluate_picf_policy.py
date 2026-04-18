@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import os
 from pathlib import Path
+import random
 import sys
 from typing import Any
 
@@ -13,6 +14,7 @@ for _path in (_REPO_ROOT / "src", _REPO_ROOT / "packages" / "openpi-client" / "s
         sys.path.insert(0, _path_str)
 
 import numpy as np
+import torch
 from openpi_client.websocket_client_policy import WebsocketClientPolicy
 
 
@@ -41,6 +43,15 @@ def _discretize_calvin_gripper(action: np.ndarray) -> np.ndarray:
     out = np.array(action, dtype=np.float32, copy=True).reshape(-1)
     out[-1] = 1.0 if out[-1] >= 0.0 else -1.0
     return out
+
+
+def _seed_everything(seed: int) -> None:
+    seed = int(seed)
+    random.seed(seed)
+    np.random.seed(seed)
+    torch.manual_seed(seed)
+    if torch.cuda.is_available():
+        torch.cuda.manual_seed_all(seed)
 
 
 class _PicfCalvinModel:
@@ -85,10 +96,9 @@ def main() -> None:
     if str(calvin_root) not in sys.path:
         sys.path.insert(0, str(calvin_root))
 
-    from pytorch_lightning import seed_everything
     import evaluation.evaluate_policy as upstream_eval
 
-    seed_everything(0, workers=True)  # type: ignore[arg-type]
+    _seed_everything(0)
     upstream_eval.NUM_SEQUENCES = int(args.num_sequences)
     if args.save_video:
         os.environ["CALVIN_SAVE_VIDEO"] = "1"
