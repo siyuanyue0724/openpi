@@ -172,6 +172,14 @@ CUDA_VISIBLE_DEVICES=0,1,2,3 torchrun --standalone --nnodes=1 --nproc_per_node=4
 This is a preserved historical launch path from before the fully restored
 PI0.5-action-stack deployment.
 
+Current v2.2 long-run training profile:
+
+- `--num-train-steps 30000`
+- `--save-interval 2500`
+- `--grad-clip-mode percentile`
+- `--grad-clip-percentile 75`
+- `--grad-clip-window 100`
+
 Distributed runtime note for current multi-rank bring-up:
 
 - do not use `TORCH_DISTRIBUTED_DEBUG=DETAIL` as the default 4-GPU training

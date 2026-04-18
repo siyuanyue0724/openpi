@@ -17,6 +17,7 @@ from openpi.picf.contracts import PicfObservation
 from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import PicfPointCloudFrame
 from openpi.picf.contracts import TactileSensorFrame
+from openpi.picf.core.pipeline import LazyCrossAttentionRead
 from openpi.picf.test_utils import build_mini_calvin_dataset
 
 
@@ -714,6 +715,61 @@ def test_infer_tactile_dense_dim_falls_back_to_default() -> None:
     core = types.SimpleNamespace(tactile_encoder=None)
 
     assert _MODULE._infer_tactile_dense_dim(core) == 768
+
+
+def test_materialize_model_parameters_initializes_task_tactile_reread() -> None:
+    class _FakeCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.device = torch.device("cpu")
+            self.dtype = torch.float32
+            self.config = types.SimpleNamespace(
+                hidden_dim=8,
+                tactile_group_proposals=2,
+                task_local_queries=8,
+                task_global_queries=1,
+                task_instruction_queries=2,
+            )
+            self.tactile_token_proj = torch.nn.Linear(4, 4)
+            self.tactile_error_encoder = torch.nn.Linear(4, 4)
+            self.visual_error_encoder = torch.nn.Linear(4, 4)
+            self.visual_real_error_encoder = torch.nn.Linear(4, 4)
+            self.point_error_encoder = torch.nn.Linear(4, 4)
+            self.innovation_proj = torch.nn.Linear(4, 4)
+            self.tactile_route_reread = LazyCrossAttentionRead(self.config.hidden_dim, inner_dim=self.config.hidden_dim)
+            self.task_tactile_reread = LazyCrossAttentionRead(self.config.hidden_dim, inner_dim=self.config.hidden_dim)
+            self.tactile_encoder = types.SimpleNamespace(
+                model=types.SimpleNamespace(
+                    config=types.SimpleNamespace(vision_config=types.SimpleNamespace(hidden_size=768))
+                )
+            )
+
+    class _FakeTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = _FakeCore()
+
+        def forward(self, _window):
+            return torch.tensor(0.0)
+
+    class _FakeSource:
+        def __len__(self) -> int:
+            return 1
+
+        def window(self, _index: int):
+            return object()
+
+    trainer = _FakeTrainer()
+
+    assert isinstance(trainer.core.task_tactile_reread.key_proj.weight, torch.nn.parameter.UninitializedParameter)
+
+    _MODULE._materialize_model_parameters(trainer, source=_FakeSource(), rank=0)
+
+    assert not isinstance(
+        trainer.core.task_tactile_reread.key_proj.weight,
+        torch.nn.parameter.UninitializedParameter,
+    )
+    assert tuple(trainer.core.task_tactile_reread.key_proj.weight.shape) == (8, 768)
 
 
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:

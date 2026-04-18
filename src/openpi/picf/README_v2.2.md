@@ -1471,6 +1471,17 @@ Additional trainer runtime rule:
   `Broken pipe` heartbeat noise even while training continues
 - DDP launch also fails fast if `LOCAL_RANK` is missing
 
+Current standard long-run launch profile:
+
+- `--num-train-steps 30000`
+- `--save-interval 2500`
+- `--grad-clip-mode percentile`
+- `--grad-clip-percentile 75`
+- `--grad-clip-window 100`
+
+These values are the current operational training defaults for v2.2 runs even
+if historical baseline commands in older docs still show `--save-interval 5000`.
+
 ### 7.7 `scripts/serve_picf_policy.py`
 
 Serving no longer treats this manual sequence as the deployed action path:

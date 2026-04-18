@@ -2623,6 +2623,25 @@ def _materialize_model_parameters(
                 dtype=core.dtype,
             )
             _ = core.tactile_route_reread(dummy_queries, dummy_keys)
+        if isinstance(core.task_tactile_reread.key_proj.weight, UninitializedParameter):
+            tactile_dense_dim = _infer_tactile_dense_dim(core)
+            task_query_count = max(
+                int(core.config.task_local_queries)
+                + int(core.config.task_global_queries)
+                + int(core.config.task_instruction_queries),
+                1,
+            )
+            dummy_queries = torch.zeros(
+                (1, task_query_count, core.config.hidden_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            dummy_keys = torch.zeros(
+                (1, 1, tactile_dense_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = core.task_tactile_reread(dummy_queries, dummy_keys)
     model.zero_grad(set_to_none=True)
     remaining_uninitialized = [
         name for name, param in model.named_parameters() if isinstance(param, UninitializedParameter)
