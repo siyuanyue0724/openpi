@@ -20,6 +20,7 @@ from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import PicfPointCloudFrame
 from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.pipeline import LazyCrossAttentionRead
+from openpi.picf.fsdp_utils import call_fsdp_method
 from openpi.picf.test_utils import build_mini_calvin_dataset
 
 
@@ -954,6 +955,30 @@ def test_fsdp_wrap_keeps_uniform_subtrees_at_single_boundary_on_cpu() -> None:
         wrapped = _MODULE._fsdp_wrap_uniform_dtype_subtrees(module, device=torch.device("cpu"))
         assert _MODULE._is_fsdp_model(wrapped)
         assert not any(_MODULE._is_fsdp_model(child) for child in wrapped.module.children())
+
+
+def test_call_fsdp_method_supports_custom_module_methods_on_wrapped_modules() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _CustomMethodModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inner = torch.nn.Linear(4, 4)
+
+        def encode(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.inner(inputs)
+
+    with _single_rank_process_group():
+        wrapped = _MODULE.FullyShardedDataParallel(
+            _CustomMethodModule(),
+            sharding_strategy=_MODULE.ShardingStrategy.FULL_SHARD,
+            use_orig_params=True,
+            device_id=torch.device("cpu"),
+            limit_all_gathers=True,
+        )
+        result = call_fsdp_method(wrapped, "encode", torch.randn(2, 4))
+        assert tuple(result.shape) == (2, 4)
 
 
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:
