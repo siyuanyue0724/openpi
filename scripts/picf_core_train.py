@@ -35,6 +35,19 @@ except Exception:  # pragma: no cover - depends on torch distributed build
     ZeroRedundancyOptimizer = None
 
 try:
+    from torch.distributed.fsdp import FullyShardedDataParallel
+    from torch.distributed.fsdp import FullOptimStateDictConfig
+    from torch.distributed.fsdp import FullStateDictConfig
+    from torch.distributed.fsdp import ShardingStrategy
+    from torch.distributed.fsdp import StateDictType
+except Exception:  # pragma: no cover - depends on torch distributed build
+    FullyShardedDataParallel = None
+    FullOptimStateDictConfig = None
+    FullStateDictConfig = None
+    ShardingStrategy = None
+    StateDictType = None
+
+try:
     import wandb
 except Exception:  # pragma: no cover - import availability depends on env
     wandb = None
@@ -756,6 +769,7 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
 
 
 def _normalize_train_args(args: argparse.Namespace) -> None:
+    args.training_strategy = str(getattr(args, "training_strategy", "ddp")).lower().replace("-", "_")
     if getattr(args, "grad_clip_mode", None) is None:
         args.grad_clip_mode = "percentile"
     else:
@@ -927,10 +941,20 @@ def _validate_train_args(args: argparse.Namespace) -> None:
             "grad_clip_mode must be one of {'fixed', 'percentile'}, "
             f"got {args.grad_clip_mode!r}."
         )
+    if str(args.training_strategy) not in {"ddp", "fsdp_full_shard"}:
+        raise ValueError(
+            "training_strategy must be one of {'ddp', 'fsdp_full_shard'}, "
+            f"got {args.training_strategy!r}."
+        )
     if str(args.optimizer_sharding) not in {"none", "zero1"}:
         raise ValueError(
             "optimizer_sharding must be one of {'none', 'zero1'}, "
             f"got {args.optimizer_sharding!r}."
+        )
+    if str(args.training_strategy) == "fsdp_full_shard" and str(args.optimizer_sharding) != "none":
+        raise ValueError(
+            "training_strategy=fsdp_full_shard is incompatible with optimizer_sharding. "
+            "FSDP full_shard already shards parameter, gradient, and optimizer state."
         )
     if str(args.optimizer_checkpoint_mode) not in {"auto", "full", "model_only"}:
         raise ValueError(
@@ -1179,6 +1203,92 @@ def _setup_distributed(requested_device: str) -> tuple[bool, int, int, torch.dev
     return use_ddp, rank, world_size, device, runtime_env
 
 
+def _is_fsdp_training(args: argparse.Namespace) -> bool:
+    return str(getattr(args, "training_strategy", "ddp")).lower().replace("-", "_") == "fsdp_full_shard"
+
+
+def _is_fsdp_model(model: torch.nn.Module) -> bool:
+    return FullyShardedDataParallel is not None and isinstance(model, FullyShardedDataParallel)
+
+
+def _unwrap_training_model(model: torch.nn.Module) -> torch.nn.Module:
+    if isinstance(model, DistributedDataParallel):
+        return model.module
+    if _is_fsdp_model(model):
+        return model.module
+    return model
+
+
+def _training_model_no_sync(
+    model: torch.nn.Module,
+    *,
+    enabled: bool,
+) -> contextlib.AbstractContextManager[None]:
+    if enabled and callable(getattr(model, "no_sync", None)):
+        return model.no_sync()
+    return contextlib.nullcontext()
+
+
+def _fsdp_device_id(device: torch.device) -> int | torch.device:
+    if device.type == "cuda":
+        return int(device.index if device.index is not None else 0)
+    return device
+
+
+def _fsdp_sharded_child_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Module]:
+    children: list[torch.nn.Module] = []
+    for module in (
+        model.semantic_encoder if isinstance(model.semantic_encoder, torch.nn.Module) else None,
+        model.core.point_feature_extractor if isinstance(model.core.point_feature_extractor, torch.nn.Module) else None,
+        model.core.visual_encoder if isinstance(model.core.visual_encoder, torch.nn.Module) else None,
+        model.core.tactile_encoder if isinstance(model.core.tactile_encoder, torch.nn.Module) else None,
+    ):
+        if module is None:
+            continue
+        if not any(bool(getattr(param, "requires_grad", False)) for param in module.parameters()):
+            continue
+        children.append(module)
+    return children
+
+
+def _wrap_model_for_training_strategy(
+    model: "_PicfWindowTrainer",
+    *,
+    args: argparse.Namespace,
+    device: torch.device,
+) -> torch.nn.Module:
+    if not _is_fsdp_training(args):
+        return model
+    if FullyShardedDataParallel is None:
+        raise RuntimeError("training_strategy=fsdp_full_shard requires torch.distributed.fsdp to be available.")
+    child_modules = _fsdp_sharded_child_modules(model)
+    device_id = _fsdp_device_id(device)
+    for child in child_modules:
+        wrapped = FullyShardedDataParallel(
+            child,
+            sharding_strategy=ShardingStrategy.FULL_SHARD,
+            device_id=device_id,
+            use_orig_params=True,
+            limit_all_gathers=True,
+        )
+        if child is model.semantic_encoder:
+            model.semantic_encoder = wrapped
+            model.policy.semantic_encoder = wrapped
+        elif child is model.core.point_feature_extractor:
+            model.core.point_feature_extractor = wrapped
+        elif child is model.core.visual_encoder:
+            model.core.visual_encoder = wrapped
+        elif child is model.core.tactile_encoder:
+            model.core.tactile_encoder = wrapped
+    return FullyShardedDataParallel(
+        model,
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        device_id=device_id,
+        use_orig_params=True,
+        limit_all_gathers=True,
+    )
+
+
 def _cleanup_distributed() -> None:
     if dist.is_initialized():
         dist.destroy_process_group()
@@ -1233,6 +1343,18 @@ def _grad_norm(parameters: Iterator[torch.nn.Parameter]) -> float:
         sq_sum += float(torch.sum(grad * grad).item())
         found = True
     return float(math.sqrt(sq_sum)) if found else 0.0
+
+
+def _grad_norm_for_training_model(model: torch.nn.Module) -> float:
+    if _is_fsdp_model(model):
+        return float(model.clip_grad_norm_(float("inf")).item())
+    return _grad_norm(model.parameters())
+
+
+def _clip_grad_norm_for_training_model(model: torch.nn.Module, *, max_norm: float) -> float:
+    if _is_fsdp_model(model):
+        return float(model.clip_grad_norm_(float(max_norm)).item())
+    return float(torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(max_norm)))
 
 
 @dataclasses.dataclass
@@ -2093,28 +2215,69 @@ def _should_save_optimizer_state(*, args: argparse.Namespace) -> bool:
     return str(getattr(args, "optimizer_sharding", "none")).lower() != "zero1"
 
 
+def _fsdp_full_state_dict_context(
+    model: torch.nn.Module,
+    *,
+    rank0_only: bool,
+) -> contextlib.AbstractContextManager[None]:
+    assert FullyShardedDataParallel is not None
+    assert FullStateDictConfig is not None
+    assert FullOptimStateDictConfig is not None
+    assert StateDictType is not None
+    return FullyShardedDataParallel.state_dict_type(
+        model,
+        StateDictType.FULL_STATE_DICT,
+        FullStateDictConfig(offload_to_cpu=True, rank0_only=bool(rank0_only)),
+        FullOptimStateDictConfig(offload_to_cpu=True, rank0_only=bool(rank0_only)),
+    )
+
+
 def _save_checkpoint(
     *,
     output_dir: Path,
-    model: _PicfWindowTrainer | DistributedDataParallel,
+    model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     step: int,
     args: argparse.Namespace,
+    rank: int = 0,
+    device: torch.device | None = None,
     grad_clip_controller: _GradClipController | None = None,
     save_optimizer_state: bool = True,
 ) -> None:
-    module = model.module if isinstance(model, DistributedDataParallel) else model
+    module = _unwrap_training_model(model)
     final_dir = _checkpoint_dir_for_step(output_dir, step)
     tmp_dir = output_dir / f"tmp_{int(step)}"
     latest_path = output_dir / "latest.pt"
+
+    is_main = _is_main(int(rank))
+
+    if device is None:
+        device = getattr(module, "device", torch.device("cpu"))
+
+    if _is_fsdp_model(model):
+        with _fsdp_full_state_dict_context(model, rank0_only=True):
+            model_state = model.state_dict()
+            optimizer_state = (
+                None
+                if not save_optimizer_state
+                else FullyShardedDataParallel.optim_state_dict(model, optimizer)
+            )
+        _distributed_barrier(use_ddp=dist.is_initialized(), device=device)
+        if not is_main:
+            return
+    else:
+        if not is_main:
+            return
+        model_state = module.state_dict()
+        optimizer_state = optimizer.state_dict() if save_optimizer_state else None
 
     if tmp_dir.exists():
         shutil.rmtree(tmp_dir)
     tmp_dir.mkdir(parents=True, exist_ok=True)
 
-    torch.save(module.state_dict(), tmp_dir / "model.pt")
-    if save_optimizer_state:
-        torch.save(optimizer.state_dict(), tmp_dir / "optimizer.pt")
+    torch.save(model_state, tmp_dir / "model.pt")
+    if save_optimizer_state and optimizer_state is not None:
+        torch.save(optimizer_state, tmp_dir / "optimizer.pt")
     metadata = {
         "step": int(step),
         "args": vars(args),
@@ -2207,12 +2370,12 @@ def _load_state_dict_picf_compat(module: torch.nn.Module, state_dict: dict[str, 
 def _load_checkpoint(
     *,
     path: Path,
-    model: _PicfWindowTrainer | DistributedDataParallel,
+    model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     grad_clip_controller: _GradClipController | None = None,
 ) -> int:
-    module = model.module if isinstance(model, DistributedDataParallel) else model
+    module = _unwrap_training_model(model)
     if path.is_dir():
         model_state = torch.load(path / "model.pt", map_location=device, weights_only=False)
         metadata = torch.load(path / "metadata.pt", map_location=device, weights_only=False)
@@ -2223,6 +2386,22 @@ def _load_checkpoint(
             else None
         )
         optimizer_loaded = optimizer_state is not None
+        if _is_fsdp_model(model):
+            with _fsdp_full_state_dict_context(model, rank0_only=False):
+                try:
+                    model.load_state_dict(model_state, strict=True)
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        "FSDP checkpoint load failed. Compatibility migration is not supported for "
+                        "training_strategy=fsdp_full_shard; load a checkpoint written by the same architecture."
+                    ) from exc
+                if optimizer_loaded:
+                    optimizer.load_state_dict(
+                        FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_state)
+                    )
+            if grad_clip_controller is not None and not grad_clip_controller.load_state_dict(metadata.get("grad_clip_controller")):
+                logging.info("Gradient clip controller state not restored from checkpoint; starting with fresh history.")
+            return int(metadata.get("step", 0))
         try:
             module.load_state_dict(model_state, strict=True)
         except RuntimeError:
@@ -2269,6 +2448,25 @@ def _load_checkpoint(
     if checkpoint_dir is not None and "model" not in payload:
         return _load_checkpoint(path=Path(checkpoint_dir), model=model, optimizer=optimizer, device=device)
     optimizer_loaded = True
+    if _is_fsdp_model(model):
+        with _fsdp_full_state_dict_context(model, rank0_only=False):
+            try:
+                model.load_state_dict(payload["model"], strict=True)
+            except RuntimeError as exc:
+                raise RuntimeError(
+                    "FSDP payload load failed. Compatibility migration is not supported for "
+                    "training_strategy=fsdp_full_shard; load a checkpoint written by the same architecture."
+                ) from exc
+            optimizer_payload = payload.get("optimizer")
+            if optimizer_loaded and optimizer_payload is not None:
+                optimizer.load_state_dict(
+                    FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_payload)
+                )
+            elif optimizer_loaded:
+                logging.info("No optimizer payload found in checkpoint; optimizer will be reinitialized.")
+        if grad_clip_controller is not None and not grad_clip_controller.load_state_dict(payload.get("grad_clip_controller")):
+            logging.info("Gradient clip controller state not restored from payload; starting with fresh history.")
+        return int(payload.get("step", 0))
     try:
         module.load_state_dict(payload["model"], strict=True)
     except RuntimeError:
@@ -2313,7 +2511,7 @@ def _load_checkpoint(
 def _load_checkpoint_sequential_across_ranks(
     *,
     path: Path,
-    model: _PicfWindowTrainer | DistributedDataParallel,
+    model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
     rank: int,
@@ -2326,6 +2524,20 @@ def _load_checkpoint_sequential_across_ranks(
     but the large resume checkpoint for PICF trainer state should only be read by one
     rank at a time on networked storage.
     """
+    if _is_fsdp_model(model):
+        loaded_step = _load_checkpoint(
+            path=path,
+            model=model,
+            optimizer=optimizer,
+            device=device,
+            grad_clip_controller=grad_clip_controller,
+        )
+        _distributed_barrier(use_ddp=world_size > 1, device=device)
+        if world_size > 1:
+            step_tensor = torch.tensor([int(loaded_step)], device=device, dtype=torch.int64)
+            dist.broadcast(step_tensor, src=0)
+            return int(step_tensor.item())
+        return int(loaded_step)
     if world_size <= 1:
         return _load_checkpoint(
             path=path,
@@ -2917,9 +3129,10 @@ def train(args: argparse.Namespace) -> None:
             loss_config=_build_loss_config(args),
         ).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
+        model = _wrap_model_for_training_strategy(model, args=args, device=device)
         optimizer, optimizer_group_info = _build_optimizer(model, args=args)
         grad_clip_controller = _GradClipController.from_args(args)
-        if use_ddp:
+        if use_ddp and not _is_fsdp_training(args):
             model = DistributedDataParallel(
                 model,
                 device_ids=[device.index] if device.type == "cuda" else None,
@@ -2998,8 +3211,9 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s wandb=%s",
                 world_size,
+                args.training_strategy,
                 args.accum_steps,
                 effective_global_batch,
                 args.num_train_steps,
@@ -3129,7 +3343,7 @@ def train(args: argparse.Namespace) -> None:
             optimizer.zero_grad(set_to_none=True)
             if debug_phase_enabled:
                 logging.info("phase step=%s rank=%s zero_grad_done", int(step + 1), rank)
-            trainer_module = model.module if isinstance(model, DistributedDataParallel) else model
+            trainer_module = _unwrap_training_model(model)
             capture_visual_diagnostics = bool(
                 (args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0))
                 or ((step + 1) == args.num_train_steps)
@@ -3207,11 +3421,10 @@ def train(args: argparse.Namespace) -> None:
                                 args.max_empty_window_retries,
                             )
                         continue
-                sync_context: Any
-                if use_ddp and micro_step < args.accum_steps - 1:
-                    sync_context = model.no_sync()
-                else:
-                    sync_context = contextlib.nullcontext()
+                sync_context: Any = _training_model_no_sync(
+                    model,
+                    enabled=bool(world_size > 1 and micro_step < args.accum_steps - 1),
+                )
                 # Keep all ranks aligned before entering the DDP-wrapped forward.
                 # The exact DDP probe is stable with an explicit post-preflight barrier,
                 # while the unconstrained training loop can let one rank run far ahead
@@ -3305,13 +3518,13 @@ def train(args: argparse.Namespace) -> None:
                 if _DEBUG_INDEX_TRACE:
                     logging.error("Recent tensor index trace before non-finite gradient: %s", _dump_debug_index_trace())
                 raise RuntimeError("Non-finite gradients detected before optimizer step.")
-            preclip_local_grad = _grad_norm(model.parameters())
+            preclip_local_grad = _grad_norm_for_training_model(model)
             grad_clip_threshold = grad_clip_controller.threshold()
             grad_clip_applied = bool(
                 grad_clip_threshold is not None and float(preclip_local_grad) > float(grad_clip_threshold)
             )
             if grad_clip_applied:
-                torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(grad_clip_threshold))
+                _clip_grad_norm_for_training_model(model, max_norm=float(grad_clip_threshold))
             if debug_phase_enabled:
                 logging.info("phase step=%s rank=%s grad_clip_sec=%.3f", int(step + 1), rank, time.perf_counter() - clip_start)
             opt_start = time.perf_counter()
@@ -3347,7 +3560,7 @@ def train(args: argparse.Namespace) -> None:
             should_log = ((step + 1) % args.log_interval == 0) or ((step + 1) == args.num_train_steps)
             if should_log:
                 elapsed = max(time.time() - interval_start, 1e-6)
-                local_grad = _grad_norm(model.parameters())
+                local_grad = _grad_norm_for_training_model(model)
                 averages = metric_accum.averages()
                 retried_windows = float(retried_windows_interval)
                 if world_size > 1:
@@ -3388,18 +3601,20 @@ def train(args: argparse.Namespace) -> None:
             should_save = ((step + 1) % args.save_interval == 0) or ((step + 1) == args.num_train_steps)
             if should_save:
                 save_optimizer_state = _should_save_optimizer_state(args=args)
-                if save_optimizer_state:
+                if save_optimizer_state and not _is_fsdp_model(model):
                     _consolidate_optimizer_state_for_checkpoint(optimizer, rank=rank)
+                _save_checkpoint(
+                    output_dir=output_dir,
+                    model=model,
+                    optimizer=optimizer,
+                    step=step + 1,
+                    args=args,
+                    rank=rank,
+                    device=device,
+                    grad_clip_controller=grad_clip_controller,
+                    save_optimizer_state=save_optimizer_state,
+                )
                 if is_main:
-                    _save_checkpoint(
-                        output_dir=output_dir,
-                        model=model,
-                        optimizer=optimizer,
-                        step=step + 1,
-                        args=args,
-                        grad_clip_controller=grad_clip_controller,
-                        save_optimizer_state=save_optimizer_state,
-                    )
                     message = f"[picf_core_train] saved checkpoint step={step + 1} -> {_checkpoint_dir_for_step(output_dir, step + 1)}"
                     if pbar is not None:
                         pbar.write(message)
@@ -3458,6 +3673,15 @@ def main() -> None:
     parser.add_argument("--min-lr", type=float, default=2e-5)
     parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--training-strategy",
+        choices=["ddp", "fsdp_full_shard"],
+        default="ddp",
+        help=(
+            "Distributed training strategy. 'ddp' keeps full parameter replicas per rank; "
+            "'fsdp_full_shard' shards trainable parameters, gradients, and optimizer state across ranks."
+        ),
+    )
     parser.add_argument(
         "--optimizer-sharding",
         choices=["none", "zero1"],

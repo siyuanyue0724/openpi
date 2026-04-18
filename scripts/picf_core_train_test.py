@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import importlib.util
 import math
@@ -8,6 +9,7 @@ import os
 import types
 from pathlib import Path
 import sys
+import tempfile
 
 import pytest
 import numpy as np
@@ -660,6 +662,16 @@ def test_build_optimizer_rejects_zero1_without_initialized_distributed(monkeypat
         _MODULE._build_optimizer(trainer, args=args)
 
 
+def test_validate_train_args_rejects_fsdp_with_optimizer_sharding() -> None:
+    args = _base_args()
+    _MODULE._normalize_train_args(args)
+    args.training_strategy = "fsdp_full_shard"
+    args.optimizer_sharding = "zero1"
+
+    with pytest.raises(ValueError, match="training_strategy=fsdp_full_shard is incompatible with optimizer_sharding"):
+        _MODULE._validate_train_args(args)
+
+
 def test_split_optimizer_groups_by_dense_type_preserves_group_metadata() -> None:
     fp32 = torch.nn.Parameter(torch.ones(2, dtype=torch.float32))
     bf16 = torch.nn.Parameter(torch.ones(3, dtype=torch.bfloat16))
@@ -770,6 +782,94 @@ def test_materialize_model_parameters_initializes_task_tactile_reread() -> None:
         torch.nn.parameter.UninitializedParameter,
     )
     assert tuple(trainer.core.task_tactile_reread.key_proj.weight.shape) == (8, 768)
+
+
+@contextlib.contextmanager
+def _single_rank_process_group() -> None:
+    fd, init_path = tempfile.mkstemp()
+    os.close(fd)
+    os.unlink(init_path)
+    _MODULE.dist.init_process_group("gloo", init_method=f"file://{init_path}", rank=0, world_size=1)
+    try:
+        yield
+    finally:
+        _MODULE.dist.destroy_process_group()
+
+
+def test_fsdp_wrap_and_checkpoint_roundtrip_on_cpu(tmp_path: Path) -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _TinyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.point_feature_extractor = torch.nn.Linear(4, 4)
+            self.visual_encoder = torch.nn.Linear(4, 4)
+            self.tactile_encoder = torch.nn.Linear(4, 4)
+            self.head = torch.nn.Linear(4, 2)
+
+    class _TinyTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = _TinyCore()
+            self.semantic_encoder = torch.nn.Linear(4, 4)
+            self.policy = types.SimpleNamespace(semantic_encoder=self.semantic_encoder)
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            hidden = self.core.point_feature_extractor(inputs)
+            hidden = self.core.visual_encoder(hidden)
+            hidden = self.core.tactile_encoder(hidden)
+            hidden = self.semantic_encoder(hidden)
+            return self.core.head(hidden).sum()
+
+    args = _base_args()
+    args.training_strategy = "fsdp_full_shard"
+    args.optimizer_sharding = "none"
+
+    with _single_rank_process_group():
+        trainer = _TinyTrainer()
+        wrapped = _MODULE._wrap_model_for_training_strategy(trainer, args=args, device=torch.device("cpu"))
+        assert _MODULE._is_fsdp_model(wrapped)
+        unwrapped = _MODULE._unwrap_training_model(wrapped)
+        assert _MODULE._is_fsdp_model(unwrapped.semantic_encoder)
+        assert _MODULE._is_fsdp_model(unwrapped.core.point_feature_extractor)
+        optimizer = torch.optim.AdamW(wrapped.parameters(), lr=1e-3)
+        loss = wrapped(torch.randn(2, 4))
+        loss.backward()
+        optimizer.step()
+
+        output_dir = tmp_path / "fsdp_ckpt"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _MODULE._save_checkpoint(
+            output_dir=output_dir,
+            model=wrapped,
+            optimizer=optimizer,
+            step=13,
+            args=args,
+            rank=0,
+            device=torch.device("cpu"),
+        )
+
+        reloaded = _TinyTrainer()
+        wrapped_reloaded = _MODULE._wrap_model_for_training_strategy(
+            reloaded,
+            args=args,
+            device=torch.device("cpu"),
+        )
+        reloaded_optimizer = torch.optim.AdamW(wrapped_reloaded.parameters(), lr=1e-3)
+        step = _MODULE._load_checkpoint(
+            path=output_dir / "13",
+            model=wrapped_reloaded,
+            optimizer=reloaded_optimizer,
+            device=torch.device("cpu"),
+        )
+
+        assert step == 13
+        original_state = _MODULE._unwrap_training_model(wrapped).state_dict()
+        reloaded_state = _MODULE._unwrap_training_model(wrapped_reloaded).state_dict()
+        assert set(original_state) == set(reloaded_state)
+        for key in original_state:
+            torch.testing.assert_close(reloaded_state[key], original_state[key])
 
 
 def test_optimizer_collection_exposes_unified_optimizer_interface() -> None:

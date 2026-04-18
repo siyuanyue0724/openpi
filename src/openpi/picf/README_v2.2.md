@@ -1478,6 +1478,8 @@ Current standard long-run launch profile:
 - `--grad-clip-mode percentile`
 - `--grad-clip-percentile 75`
 - `--grad-clip-window 100`
+- `--training-strategy fsdp_full_shard` for the standard 4x40GB A100 full-finetune profile
+- `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
 
 These values are the current operational training defaults for v2.2 runs even
 if historical baseline commands in older docs still show `--save-interval 5000`.
