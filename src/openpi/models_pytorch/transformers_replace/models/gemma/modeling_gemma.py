@@ -46,6 +46,17 @@ from .configuration_gemma import GemmaConfig
 logger = logging.get_logger(__name__)
 
 
+def _match_attention_dtype(
+    input_embeds: torch.Tensor,
+    layers: nn.ModuleList,
+) -> tuple[torch.Tensor, torch.dtype]:
+    attn_dtype = input_embeds.dtype
+    if len(layers) > 0:
+        attn_dtype = layers[0].self_attn.q_proj.weight.dtype
+    hidden_states = input_embeds if input_embeds.dtype == attn_dtype else input_embeds.to(attn_dtype)
+    return hidden_states, attn_dtype
+
+
 class GemmaRMSNorm(nn.Module):
     def __init__(self, dim: int, eps: float = 1e-6, cond_dim: Optional[int] = None):
         super().__init__()
@@ -491,20 +502,20 @@ class GemmaModel(GemmaPreTrainedModel):
         if position_ids is None:
             position_ids = cache_position.unsqueeze(0)
 
+        hidden_states, attn_dtype = _match_attention_dtype(inputs_embeds, self.layers)
+
         causal_mask = create_causal_mask(
             config=self.config,
-            input_embeds=inputs_embeds,
+            input_embeds=hidden_states,
             attention_mask=attention_mask,
             cache_position=cache_position,
             past_key_values=past_key_values,
             position_ids=position_ids,
         )
+        if isinstance(causal_mask, torch.Tensor) and causal_mask.dtype != attn_dtype:
+            causal_mask = causal_mask.to(attn_dtype)
 
         # embed positions
-        hidden_states = inputs_embeds
-        # Convert to bfloat16 if the first layer uses bfloat16
-        if len(self.layers) > 0 and self.layers[0].self_attn.q_proj.weight.dtype == torch.bfloat16:
-            hidden_states = hidden_states.to(torch.bfloat16)
 
         # create position embeddings to be shared across the decoder layers
         position_embeddings = self.rotary_emb(hidden_states, position_ids)
