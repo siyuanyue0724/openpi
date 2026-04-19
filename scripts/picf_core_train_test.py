@@ -193,6 +193,16 @@ def test_window_output_tensor_tuple_roundtrip() -> None:
         torch.testing.assert_close(restored[key], outputs[key])
 
 
+def test_checkpoint_dummy_input_is_not_a_parameter_view() -> None:
+    module = torch.nn.Linear(4, 3, bias=False)
+    dummy = _MODULE._checkpoint_dummy_input(module)
+    assert dummy.shape == ()
+    assert dummy.requires_grad is True
+    assert dummy._base is None
+    param = next(module.parameters())
+    assert dummy.device == param.device
+
+
 def test_normalize_train_args_sets_percentile_clip_defaults() -> None:
     args = _base_args()
     args.grad_clip_mode = None

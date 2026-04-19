@@ -2337,10 +2337,11 @@ def _window_outputs_from_tensor_tuple(outputs: Sequence[torch.Tensor]) -> dict[s
     }
 
 
-def _checkpoint_anchor_tensor(model: torch.nn.Module) -> torch.Tensor:
+def _checkpoint_dummy_input(model: torch.nn.Module) -> torch.Tensor:
     for param in model.parameters():
         if bool(getattr(param, "requires_grad", False)):
-            return param.reshape(-1)[:1]
+            dtype = param.dtype if torch.is_floating_point(param) else torch.float32
+            return torch.zeros((), device=param.device, dtype=dtype, requires_grad=True)
     raise RuntimeError("Window activation checkpointing requires at least one trainable parameter.")
 
 
@@ -3803,22 +3804,24 @@ def train(args: argparse.Namespace) -> None:
                             logging.info("%s forward_begin", forward_label)
                         forward_start = time.perf_counter()
                         if use_window_activation_checkpointing and forward_label is None:
-                            checkpoint_anchor = _checkpoint_anchor_tensor(model)
+                            checkpoint_dummy = _checkpoint_dummy_input(model)
 
-                            def _checkpoint_window_forward(_anchor: torch.Tensor) -> tuple[torch.Tensor, ...]:
-                                del _anchor
-                                return _window_outputs_to_tensor_tuple(
-                                    model(
-                                        window,
-                                        capture_visual_diagnostics=False,
-                                        debug_phase_label=None,
-                                    )
+                            def _checkpoint_window_forward(_dummy: torch.Tensor) -> tuple[torch.Tensor, ...]:
+                                outputs = model(
+                                    window,
+                                    capture_visual_diagnostics=False,
+                                    debug_phase_label=None,
                                 )
+                                outputs = dict(outputs)
+                                outputs["loss_total"] = outputs["loss_total"] + (
+                                    _dummy.to(dtype=outputs["loss_total"].dtype) * 0
+                                )
+                                return _window_outputs_to_tensor_tuple(outputs)
 
                             outputs = _window_outputs_from_tensor_tuple(
                                 torch.utils.checkpoint.checkpoint(
                                     _checkpoint_window_forward,
-                                    checkpoint_anchor,
+                                    checkpoint_dummy,
                                     use_reentrant=False,
                                     preserve_rng_state=True,
                                 )
