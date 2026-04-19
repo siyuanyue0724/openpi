@@ -3,6 +3,7 @@ from typing import Literal
 
 import torch
 from torch import nn
+from transformers.integrations.sdpa_attention import sdpa_attention_forward as transformers_sdpa_attention_forward
 from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.gemma import modeling_gemma
 
@@ -210,14 +211,20 @@ class PaliGemmaWithExpertModel(nn.Module):
                 batch_size = query_states.shape[0]
                 scaling = self.paligemma.language_model.layers[layer_idx].self_attn.scaling
 
-                # Attention computation
-                att_output, _ = modeling_gemma.eager_attention_forward(
+                # SDPA keeps the dual-branch PI0/Gemma path mathematically aligned
+                # while avoiding the large eager attention workspace that blows up
+                # 40GB full-finetune runs after optimizer state becomes resident.
+                causal_mask = attention_mask
+                if causal_mask is not None and causal_mask.dtype != query_states.dtype:
+                    causal_mask = causal_mask.to(dtype=query_states.dtype)
+                att_output, _ = transformers_sdpa_attention_forward(
                     self.paligemma.language_model.layers[layer_idx].self_attn,
                     query_states,
                     key_states,
                     value_states,
-                    attention_mask,
-                    scaling,
+                    causal_mask,
+                    dropout=0.0,
+                    scaling=scaling,
                 )
                 # Get head_dim from the current layer, not from the model
                 head_dim = self.paligemma.language_model.layers[layer_idx].self_attn.head_dim

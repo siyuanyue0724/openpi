@@ -170,6 +170,18 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="gemma_dual_branch_attention_uses_sdpa_not_eager_workspace",
+            ok=(
+                "transformers_sdpa_attention_forward(" in gemma_pytorch_source
+                and "modeling_gemma.eager_attention_forward(" not in gemma_pytorch_source
+            ),
+            detail=(
+                "The custom PI0/Gemma dual-branch attention path now uses SDPA instead of the eager "
+                "attention workspace, preserving training semantics while avoiding the large attention "
+                "buffer that exhausts 40GB A100s once optimizer state is resident."
+            ),
+        ),
+        CheckResult(
             name="fsdp_keeps_semantic_gradient_checkpointing_enabled",
             ok=(
                 "args.semantic_gradient_checkpointing_disabled_for_fsdp = True" not in trainer_source
