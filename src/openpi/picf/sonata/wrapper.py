@@ -252,6 +252,11 @@ class SonataPointFeatureExtractor(nn.Module):
         self.feature_dim = _infer_stage_dim(self.model, self.stage_name)
         self.cpu_fallback = False
 
+    def _apply_train_checkpoint(self, func, *args):
+        if bool(self.trainable and self.training):
+            return torch.utils.checkpoint.checkpoint(func, *args, use_reentrant=False, preserve_rng_state=False)
+        return func(*args)
+
     def _encode_stage(self, sample: dict[str, torch.Tensor]) -> torch.Tensor:
         point = self._point_cls(sample)
         point = self.model.embedding(point)
@@ -308,6 +313,40 @@ class SonataPointFeatureExtractor(nn.Module):
             "offset": torch.tensor([n_points], device=self.device, dtype=torch.int64),
         }
 
+    def _encode_stage_checkpointed(self, sample: dict[str, torch.Tensor]) -> torch.Tensor:
+        def _forward(
+            coord: torch.Tensor,
+            grid_coord: torch.Tensor,
+            color: torch.Tensor,
+            normal: torch.Tensor,
+            feat: torch.Tensor,
+            batch: torch.Tensor,
+            offset: torch.Tensor,
+        ) -> torch.Tensor:
+            return self._encode_stage(
+                {
+                    "coord": coord,
+                    "grid_coord": grid_coord,
+                    "color": color,
+                    "normal": normal,
+                    "feat": feat,
+                    "grid_size": float(self.config.voxel_size_m),
+                    "batch": batch,
+                    "offset": offset,
+                }
+            )
+
+        return self._apply_train_checkpoint(
+            _forward,
+            sample["coord"],
+            sample["grid_coord"],
+            sample["color"],
+            sample["normal"],
+            sample["feat"],
+            sample["batch"],
+            sample["offset"],
+        )
+
     def encode_local_context(self, frame_context: PointFrameContext) -> SonataPointFeatures:
         n_points = int(frame_context.points_local.shape[0])
         if n_points == 0:
@@ -323,7 +362,7 @@ class SonataPointFeatureExtractor(nn.Module):
         use_grad = bool(self.trainable and self.training)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
-            feat = self._encode_stage(sample)
+            feat = self._encode_stage_checkpointed(sample)
         feat_out = feat.to(dtype=self.output_dtype) if use_grad else feat.detach().to(dtype=self.output_dtype)
         return SonataPointFeatures(
             features=feat_out,

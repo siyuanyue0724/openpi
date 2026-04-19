@@ -178,3 +178,52 @@ def test_sonata_wrapper_encodes_local_points_without_checkpoint() -> None:
     assert features.features.shape[1] == extractor.feature_dim
     feat_np = features.features.detach().cpu().numpy() if isinstance(features.features, torch.Tensor) else np.asarray(features.features)
     assert np.all(np.isfinite(feat_np))
+
+
+def test_sonata_wrapper_uses_train_checkpoint_when_trainable(monkeypatch: pytest.MonkeyPatch) -> None:
+    extractor = SonataPointFeatureExtractor.__new__(SonataPointFeatureExtractor)
+    nn_module_init = torch.nn.Module.__init__
+    nn_module_init(extractor)
+    extractor.trainable = True
+    extractor.training = True
+    extractor.device = torch.device("cpu")
+    extractor.config = SonataPointConfig()
+    extractor.output_dtype = torch.float32
+    extractor.feature_dim = 4
+    extractor.checkpoint_loaded = False
+    extractor.checkpoint_path = None
+    extractor.stage_name = "embedding"
+    extractor.cpu_fallback = False
+    context = PointFrameContext(
+        grid_coord=np.array([[0, 0, 0]], dtype=np.int32),
+        points_local=np.array([[0.0, 0.1, 0.2]], dtype=np.float32),
+        normals_local=np.array([[0.0, 0.0, 1.0]], dtype=np.float32),
+        colors=np.array([[0.2, 0.4, 0.6]], dtype=np.float32),
+        local_mask=np.array([True]),
+        world_to_local=np.eye(4, dtype=np.float32),
+        G_t=np.eye(4, dtype=np.float32),
+    )
+    sample = {
+        "coord": torch.zeros((1, 3), dtype=torch.float32),
+        "grid_coord": torch.zeros((1, 3), dtype=torch.int32),
+        "color": torch.zeros((1, 3), dtype=torch.float32),
+        "normal": torch.zeros((1, 3), dtype=torch.float32),
+        "feat": torch.zeros((1, 6), dtype=torch.float32),
+        "grid_size": float(extractor.config.voxel_size_m),
+        "batch": torch.zeros((1,), dtype=torch.int64),
+        "offset": torch.ones((1,), dtype=torch.int64),
+    }
+    monkeypatch.setattr(extractor, "_build_sample", lambda _: sample)
+    monkeypatch.setattr(extractor, "_encode_stage", lambda _: torch.ones((1, 4), dtype=torch.float32))
+    called = {"value": False}
+
+    def _checkpoint(func, *args, **kwargs):
+        called["value"] = True
+        return func(*args)
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", _checkpoint)
+
+    features = extractor.encode_local_context(context)
+
+    assert called["value"]
+    assert tuple(features.features.shape) == (1, 4)

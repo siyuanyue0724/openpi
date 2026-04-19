@@ -1,5 +1,6 @@
 import numpy as np
 import pytest
+import torch
 
 from openpi.picf.anytouch.config import AnyTouchConfig
 from openpi.picf.anytouch.wrapper import AnyTouch2TactileEncoder
@@ -11,6 +12,7 @@ def test_anytouch_wrapper_emits_probe_tokens_and_pooled_features() -> None:
             device="cpu",
             dtype="float32",
             allow_random_init=True,
+            trainable=True,
         )
     )
     clip = np.full((4, 32, 32, 3), 120, dtype=np.uint8)
@@ -89,3 +91,34 @@ def test_anytouch_wrapper_uses_calibrated_contact_stats_for_contact_score() -> N
     sensor = bundle.sensors["digit"]
     expected = 0.5 * (sensor.rgb_residual_score + sensor.latent_residual_score)
     assert sensor.contact_score == pytest.approx(expected, rel=1e-4, abs=1e-4)
+
+
+def test_anytouch_wrapper_uses_train_checkpoint_when_trainable(monkeypatch: pytest.MonkeyPatch) -> None:
+    encoder = AnyTouch2TactileEncoder(
+        AnyTouchConfig(
+            device="cpu",
+            dtype="float32",
+            allow_random_init=True,
+            trainable=True,
+        )
+    )
+    encoder.train()
+    called = {"count": 0}
+
+    def _checkpoint(func, *args, **kwargs):
+        called["count"] += 1
+        return func(*args)
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", _checkpoint)
+    clip = np.full((4, 32, 32, 3), 120, dtype=np.uint8)
+    pose = np.eye(4, dtype=np.float32)
+    background = np.full((32, 32, 3), 120, dtype=np.uint8)
+
+    bundle = encoder.encode_sensor_clips(
+        clips_by_sensor={"digit": clip},
+        backgrounds_by_sensor={"digit": background},
+        poses_by_sensor={"digit": pose},
+    )
+
+    assert bundle is not None
+    assert called["count"] >= 2

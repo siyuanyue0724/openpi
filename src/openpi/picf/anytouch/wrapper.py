@@ -147,6 +147,11 @@ class AnyTouch2TactileEncoder(nn.Module):
             for parameter in self.model.parameters():
                 parameter.requires_grad_(False)
 
+    def _apply_train_checkpoint(self, func, *args):
+        if bool(self.trainable and self.training):
+            return torch.utils.checkpoint.checkpoint(func, *args, use_reentrant=False, preserve_rng_state=False)
+        return func(*args)
+
     def encode_sensor_clips(
         self,
         *,
@@ -181,12 +186,15 @@ class AnyTouch2TactileEncoder(nn.Module):
         use_grad = bool(self.trainable and self.training)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
-            tokens = self.model(inputs, sensor_id_tensor, probe=True)
+            tokens = self._apply_train_checkpoint(lambda clip_batch: self.model(clip_batch, sensor_id_tensor, probe=True), inputs)
             background_pooled_by_sensor: dict[str, torch.Tensor] = {}
             if background_batch:
                 background_inputs = torch.stack(background_batch, dim=0).to(device=self.device, dtype=self.dtype)
                 background_ids = torch.as_tensor(background_sensor_ids, device=self.device, dtype=torch.long)
-                background_tokens = self.model(background_inputs, background_ids, probe=True)
+                background_tokens = self._apply_train_checkpoint(
+                    lambda clip_batch: self.model(clip_batch, background_ids, probe=True),
+                    background_inputs,
+                )
                 for index, sensor_name in enumerate(background_sensor_names):
                     background_pooled_by_sensor[sensor_name] = _pooled_from_sensor_tokens(background_tokens[index])
         hidden_dim = int(tokens.shape[-1])

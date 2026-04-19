@@ -30,6 +30,8 @@ TRAINER_SCRIPT_PATH = REPO_ROOT / "scripts" / "picf_core_train.py"
 SERVE_SCRIPT_PATH = REPO_ROOT / "scripts" / "serve_picf_policy.py"
 POLICY_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "policy.py"
 GEMMA_PYTORCH_PATH = REPO_ROOT / "src" / "openpi" / "models_pytorch" / "gemma_pytorch.py"
+SONATA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "sonata" / "wrapper.py"
+ANYTOUCH_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "anytouch" / "wrapper.py"
 
 
 @dataclass
@@ -102,6 +104,8 @@ def verify_static_contract() -> list[CheckResult]:
     serve_source = _read(SERVE_SCRIPT_PATH)
     policy_source = _read(POLICY_PATH)
     gemma_pytorch_source = _read(GEMMA_PYTORCH_PATH)
+    sonata_wrapper_source = _read(SONATA_WRAPPER_PATH)
+    anytouch_wrapper_source = _read(ANYTOUCH_WRAPPER_PATH)
     tree = ast.parse(source)
     defaults = PicfCoreConfig()
 
@@ -198,6 +202,20 @@ def verify_static_contract() -> list[CheckResult]:
             detail=(
                 "Standard v2.2 full-finetune startup now builds the stack on each rank in parallel "
                 "instead of serializing checkpoint construction through rank barriers."
+            ),
+        ),
+        CheckResult(
+            name="foundation_backbones_use_train_recompute_under_fsdp",
+            ok=(
+                "def _apply_train_checkpoint(self, func, *args):" in sonata_wrapper_source
+                and "torch.utils.checkpoint.checkpoint(func, *args, use_reentrant=False, preserve_rng_state=False)" in sonata_wrapper_source
+                and "feat = self._encode_stage_checkpointed(sample)" in sonata_wrapper_source
+                and "def _apply_train_checkpoint(self, func, *args):" in anytouch_wrapper_source
+                and "tokens = self._apply_train_checkpoint(lambda clip_batch: self.model(clip_batch, sensor_id_tensor, probe=True), inputs)" in anytouch_wrapper_source
+            ),
+            detail=(
+                "Trainable Sonata and AnyTouch backbones now use non-reentrant train-time recompute, "
+                "so v2.2 FSDP full-finetune reduces backbone activation peaks without changing the objective."
             ),
         ),
         CheckResult(
