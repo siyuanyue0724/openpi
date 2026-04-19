@@ -838,7 +838,6 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.pt_bag_sigma_m = float(args.pt_bag_sigma_m)
         args.pt_bag_sigma_m_source = "cli"
     args.semantic_gradient_checkpointing_disabled_for_accum = False
-    args.semantic_gradient_checkpointing_disabled_for_fsdp = False
     if (
         int(args.accum_steps) > 1
         and bool(getattr(args, "semantic_gradient_checkpointing", False))
@@ -849,20 +848,6 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         # backwards within one optimizer step.
         args.semantic_gradient_checkpointing = False
         args.semantic_gradient_checkpointing_disabled_for_accum = True
-    if (
-        _is_fsdp_training(args)
-        and bool(getattr(args, "semantic_gradient_checkpointing", False))
-        and str(getattr(args, "semantic_mode", "zero")) == "paligemma"
-    ):
-        # PaliGemma flow loss runs through custom methods on the semantic wrapper.
-        # Under FSDP, activation-checkpoint recomputation re-enters those methods
-        # after the summon_full_params scope has exited, so the recompute path can
-        # observe sharded projection weights and crash in Gemma attention/MLP
-        # reshapes. Disable semantic checkpointing for the FSDP training strategy;
-        # this changes memory/compute tradeoffs, not the training objective.
-        args.semantic_gradient_checkpointing = False
-        args.semantic_gradient_checkpointing_disabled_for_fsdp = True
-
 
 def _resolve_action_normalizer(args: argparse.Namespace) -> PicfActionNormalizer | None:
     mode = str(getattr(args, "action_normalization", "quantile"))
@@ -3432,19 +3417,17 @@ def train(args: argparse.Namespace) -> None:
                     "this avoids DDP 'mark ready twice' failures during gradient accumulation.",
                     args.accum_steps,
                 )
-            if bool(getattr(args, "semantic_gradient_checkpointing_disabled_for_fsdp", False)):
-                logging.info(
-                    "Semantic contract: disabled PaliGemma gradient checkpointing for training_strategy=%s; "
-                    "FSDP custom-method flow-loss paths cannot safely re-enter Gemma checkpoint recomputation "
-                    "after summon_full_params scopes exit.",
-                    args.training_strategy,
-                )
             if not compact_startup_logging:
                 logging.info(
                     "Backbone runtime types: point=%s semantic=%s",
                     type(core.point_feature_extractor).__name__ if core.point_feature_extractor is not None else "none",
                     type(semantic_encoder).__name__ if semantic_encoder is not None else "none",
                 )
+                if _is_fsdp_training(args) and str(getattr(args, "semantic_mode", "zero")) == "paligemma":
+                    logging.info(
+                        "Semantic contract: FSDP keeps the PI0/PaliGemma stack at one shard boundary, "
+                        "so non-reentrant semantic gradient checkpointing remains enabled when requested."
+                    )
                 logging.info(
                     "Semantic checkpointing request: enabled=%s non_reentrant=%s",
                     bool(args.semantic_gradient_checkpointing),

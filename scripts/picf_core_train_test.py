@@ -215,7 +215,7 @@ def test_normalize_train_args_disables_semantic_gradient_checkpointing_for_accum
     assert args.semantic_gradient_checkpointing_disabled_for_accum is True
 
 
-def test_normalize_train_args_disables_semantic_gradient_checkpointing_for_fsdp() -> None:
+def test_normalize_train_args_keeps_semantic_gradient_checkpointing_for_fsdp() -> None:
     args = _base_args()
     args.training_strategy = "fsdp_full_shard"
     args.semantic_mode = "paligemma"
@@ -223,8 +223,8 @@ def test_normalize_train_args_disables_semantic_gradient_checkpointing_for_fsdp(
 
     _MODULE._normalize_train_args(args)
 
-    assert args.semantic_gradient_checkpointing is False
-    assert args.semantic_gradient_checkpointing_disabled_for_fsdp is True
+    assert args.semantic_gradient_checkpointing is True
+    assert getattr(args, "semantic_gradient_checkpointing_disabled_for_fsdp", False) is False
 
 
 def test_gemma_training_does_not_force_gradient_checkpointing() -> None:

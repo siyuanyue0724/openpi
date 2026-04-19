@@ -166,6 +166,18 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="fsdp_keeps_semantic_gradient_checkpointing_enabled",
+            ok=(
+                "args.semantic_gradient_checkpointing_disabled_for_fsdp = True" not in trainer_source
+                and "Semantic contract: disabled PaliGemma gradient checkpointing for training_strategy=" not in trainer_source
+                and "Semantic contract: FSDP keeps the PI0/PaliGemma stack at one shard boundary" in trainer_source
+            ),
+            detail=(
+                "FSDP no longer force-disables semantic gradient checkpointing; "
+                "the single-boundary PI0/PaliGemma contract keeps non-reentrant checkpoint recomputation live."
+            ),
+        ),
+        CheckResult(
             name="paligemma_tokenization_injects_state_into_prompt",
             ok="self.tokenizer.tokenize(str(prompt), state=state)" in wrapper_source,
             detail="PICF semantic tokenization injects robot state back into the PI0.5 prompt path.",
