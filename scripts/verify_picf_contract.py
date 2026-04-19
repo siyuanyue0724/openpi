@@ -190,6 +190,17 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="parallel_rank_model_build_is_standard_path",
+            ok=(
+                "for build_rank in range(int(world_size))" not in trainer_source
+                and "return _build_model(args, device=device)" in trainer_source
+            ),
+            detail=(
+                "Standard v2.2 full-finetune startup now builds the stack on each rank in parallel "
+                "instead of serializing checkpoint construction through rank barriers."
+            ),
+        ),
+        CheckResult(
             name="paligemma_tokenization_injects_state_into_prompt",
             ok="self.tokenizer.tokenize(str(prompt), state=state)" in wrapper_source,
             detail="PICF semantic tokenization injects robot state back into the PI0.5 prompt path.",

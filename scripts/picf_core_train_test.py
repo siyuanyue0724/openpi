@@ -1941,7 +1941,7 @@ def test_load_checkpoint_sequential_across_ranks_only_loads_local_rank(monkeypat
     assert barriers == [1, 1]
 
 
-def test_build_model_sequential_across_ranks_serializes_backbone_loading(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_model_sequential_across_ranks_now_builds_in_parallel(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, int]] = []
 
     def fake_build_model(args, *, device):
@@ -1966,14 +1966,10 @@ def test_build_model_sequential_across_ranks_serializes_backbone_loading(monkeyp
     assert core is not None
     assert semantic_encoder is not None
     assert use_visual_override is True
-    assert calls == [
-        ("build", 0),
-        ("barrier", 1),
-        ("barrier", 1),
-    ]
+    assert calls == [("build", 0)]
 
 
-def test_build_model_sequential_across_ranks_only_builds_local_rank(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_build_model_sequential_across_ranks_has_no_rank_barrier_side_effects(monkeypatch: pytest.MonkeyPatch) -> None:
     built: list[int] = []
     barriers: list[int] = []
 
@@ -1998,4 +1994,4 @@ def test_build_model_sequential_across_ranks_only_builds_local_rank(monkeypatch:
 
     assert result == ("core", None, False)
     assert built == [1]
-    assert barriers == [1, 1]
+    assert barriers == []

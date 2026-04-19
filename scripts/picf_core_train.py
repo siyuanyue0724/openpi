@@ -2695,21 +2695,16 @@ def _build_model_sequential_across_ranks(
     rank: int,
     world_size: int,
 ) -> tuple[PicfFullCore, torch.nn.Module | None, bool]:
-    """Serialize heavyweight backbone construction across DDP ranks.
+    """Build the training stack on each rank without serialized barriers.
 
-    The foundation backbones and semantic model are loaded from large checkpoints on
-    shared storage. Building them on every rank concurrently can stall in kernel
-    page-wait. Let each rank build once in turn, with barriers between turns.
+    The v2.2 full-finetune path already spends significant wall clock in large
+    checkpoint loads. Serializing that work rank-by-rank turns startup into a
+    multi-stage stall without improving training semantics. The standard path now
+    lets each rank construct its stack independently and relies on the regular
+    distributed initialization immediately after model build.
     """
-    if world_size <= 1:
-        return _build_model(args, device=device)
-    built: tuple[PicfFullCore, torch.nn.Module | None, bool] | None = None
-    for build_rank in range(int(world_size)):
-        if rank == build_rank:
-            built = _build_model(args, device=device)
-        _distributed_barrier(use_ddp=True, device=device)
-    assert built is not None
-    return built
+    del rank, world_size
+    return _build_model(args, device=device)
 
 
 def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[PicfFullCore, torch.nn.Module | None, bool]:
