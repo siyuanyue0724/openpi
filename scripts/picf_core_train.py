@@ -1261,6 +1261,9 @@ def _fsdp_device_id(device: torch.device) -> int | torch.device:
     return device
 
 
+_FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES = 512 * 1024 * 1024
+
+
 def _fsdp_wrap_kwargs(*, device: torch.device) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "sharding_strategy": ShardingStrategy.FULL_SHARD,
@@ -1275,13 +1278,23 @@ def _fsdp_wrap_kwargs(*, device: torch.device) -> dict[str, Any]:
 
 def _fsdp_sharded_child_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Module]:
     children: list[torch.nn.Module] = []
+    core = model.core
     for module in (
         model.semantic_encoder if isinstance(model.semantic_encoder, torch.nn.Module) else None,
-        model.core.point_feature_extractor if isinstance(model.core.point_feature_extractor, torch.nn.Module) else None,
-        model.core.visual_encoder if isinstance(model.core.visual_encoder, torch.nn.Module) else None,
-        model.core.tactile_encoder if isinstance(model.core.tactile_encoder, torch.nn.Module) else None,
+        getattr(core, "point_feature_extractor", None),
+        getattr(core, "visual_encoder", None),
+        getattr(core, "tactile_encoder", None),
+        getattr(core, "token_fusion", None),
+        getattr(core, "obs_self", None),
+        getattr(core, "posterior_self", None),
+        getattr(core, "task_self", None),
+        getattr(core, "predictive_world", None),
+        getattr(core, "predictive_semantic_world", None),
+        getattr(core, "control_world", None),
     ):
         if module is None:
+            continue
+        if not isinstance(module, torch.nn.Module):
             continue
         if not any(bool(getattr(param, "requires_grad", False)) for param in module.parameters()):
             continue
@@ -1310,6 +1323,13 @@ def _collect_fsdp_managed_params_excluding_nested_fsdp(module: torch.nn.Module) 
     return params
 
 
+def _fsdp_param_storage_bytes(params: Sequence[torch.nn.Parameter]) -> int:
+    total = 0
+    for param in params:
+        total += int(param.numel()) * int(param.element_size())
+    return int(total)
+
+
 def _fsdp_wrap_uniform_dtype_subtrees(
     module: torch.nn.Module,
     *,
@@ -1327,7 +1347,10 @@ def _fsdp_wrap_uniform_dtype_subtrees(
         return module
 
     remaining_dtypes = {param.dtype for param in remaining_params}
-    if len(remaining_dtypes) == 1:
+    subtree_param_bytes = _fsdp_param_storage_bytes(remaining_params)
+    if len(remaining_dtypes) == 1 and (
+        subtree_param_bytes <= _FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES or not any(True for _ in module.children())
+    ):
         return FullyShardedDataParallel(module, **_fsdp_wrap_kwargs(device=device))
 
     for child_name, child in list(module.named_children()):
@@ -1363,6 +1386,9 @@ def _fsdp_wrap_uniform_dtype_subtrees(
             "Unable to recursively split a mixed-dtype subtree for FSDP wrapping. "
             f"module={type(module).__name__} unresolved_children={unresolved_children}"
         )
+
+    if direct_params:
+        return FullyShardedDataParallel(module, **_fsdp_wrap_kwargs(device=device))
 
     return module
 
@@ -3497,6 +3523,11 @@ def train(args: argparse.Namespace) -> None:
                     logging.info(
                         "FSDP memory contract: FULL_SHARD uses BACKWARD_POST prefetch and the PICF core "
                         "transformer stacks run train-time activation recompute to reduce backward peak memory."
+                    )
+                    logging.info(
+                        "FSDP shard contract: large uniform-dtype subtrees recurse to a 512MiB per-boundary "
+                        "budget and safe core stacks (token_fusion/obs_self/posterior_self/task_self/"
+                        "predictive_world/predictive_semantic_world/control_world) shard before the root wrapper."
                     )
                 logging.info(
                     "Semantic checkpointing request: enabled=%s non_reentrant=%s",

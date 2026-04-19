@@ -196,6 +196,27 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="fsdp_recursively_splits_large_uniform_subtrees_and_shards_safe_core_stacks",
+            ok=all(
+                text in trainer_source
+                for text in (
+                    "_FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES = 512 * 1024 * 1024",
+                    'getattr(core, "token_fusion", None)',
+                    'getattr(core, "obs_self", None)',
+                    'getattr(core, "posterior_self", None)',
+                    'getattr(core, "task_self", None)',
+                    'getattr(core, "predictive_world", None)',
+                    'getattr(core, "predictive_semantic_world", None)',
+                    'getattr(core, "control_world", None)',
+                    "subtree_param_bytes <= _FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES",
+                )
+            ),
+            detail=(
+                "Standard 4x40GB v2.2 FSDP now recursively splits large uniform-dtype subtrees and "
+                "shards the safe core transformer stacks as dedicated boundaries before the root wrapper."
+            ),
+        ),
+        CheckResult(
             name="fsdp_grad_clipping_uses_explicit_global_l2_reduction",
             ok=(
                 "def _fsdp_global_grad_l2_norm(" in trainer_source

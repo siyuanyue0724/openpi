@@ -1020,6 +1020,68 @@ def test_fsdp_wrap_keeps_uniform_subtrees_at_single_boundary_on_cpu() -> None:
         assert not any(_MODULE._is_fsdp_model(child) for child in wrapped.module.children())
 
 
+def test_fsdp_wrap_recursively_splits_large_uniform_subtrees_when_over_byte_budget() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _UniformNestedModule(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.inner = torch.nn.Sequential(
+                torch.nn.Linear(4, 4),
+                torch.nn.ReLU(),
+                torch.nn.Linear(4, 4),
+            )
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.inner(inputs)
+
+    with _single_rank_process_group():
+        module = _UniformNestedModule()
+        original_budget = _MODULE._FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES
+        _MODULE._FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES = 1
+        try:
+            wrapped = _MODULE._fsdp_wrap_uniform_dtype_subtrees(module, device=torch.device("cpu"))
+        finally:
+            _MODULE._FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES = original_budget
+
+        assert not _MODULE._is_fsdp_model(wrapped)
+        nested_wrappers = [m for m in wrapped.modules() if _MODULE._is_fsdp_model(m)]
+        assert nested_wrappers, "large uniform subtrees should recurse into smaller FSDP boundaries"
+
+
+def test_fsdp_sharded_child_modules_include_core_transformer_stacks() -> None:
+    trainer = types.SimpleNamespace()
+    trainer.semantic_encoder = torch.nn.Linear(4, 4)
+    trainer.core = types.SimpleNamespace(
+        point_feature_extractor=torch.nn.Linear(4, 4),
+        visual_encoder=torch.nn.Linear(4, 4),
+        tactile_encoder=torch.nn.Linear(4, 4),
+        token_fusion=torch.nn.Linear(4, 4),
+        obs_self=torch.nn.Linear(4, 4),
+        posterior_self=torch.nn.Linear(4, 4),
+        task_self=torch.nn.Linear(4, 4),
+        predictive_world=torch.nn.Linear(4, 4),
+        predictive_semantic_world=torch.nn.Linear(4, 4),
+        control_world=torch.nn.Linear(4, 4),
+    )
+
+    children = _MODULE._fsdp_sharded_child_modules(trainer)
+    assert children == [
+        trainer.semantic_encoder,
+        trainer.core.point_feature_extractor,
+        trainer.core.visual_encoder,
+        trainer.core.tactile_encoder,
+        trainer.core.token_fusion,
+        trainer.core.obs_self,
+        trainer.core.posterior_self,
+        trainer.core.task_self,
+        trainer.core.predictive_world,
+        trainer.core.predictive_semantic_world,
+        trainer.core.control_world,
+    ]
+
+
 def test_call_fsdp_method_supports_custom_module_methods_on_wrapped_modules() -> None:
     if _MODULE.FullyShardedDataParallel is None:
         pytest.skip("FSDP is not available in this torch build.")
