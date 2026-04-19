@@ -1302,6 +1302,40 @@ def _fsdp_sharded_child_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Mo
     return children
 
 
+def _assign_fsdp_wrapped_child_module(
+    model: "_PicfWindowTrainer",
+    *,
+    original: torch.nn.Module,
+    wrapped: torch.nn.Module,
+) -> None:
+    if original is model.semantic_encoder:
+        model.semantic_encoder = wrapped
+        model.policy.semantic_encoder = wrapped
+        return
+
+    core = model.core
+    for attr_name in (
+        "point_feature_extractor",
+        "visual_encoder",
+        "tactile_encoder",
+        "token_fusion",
+        "obs_self",
+        "posterior_self",
+        "task_self",
+        "predictive_world",
+        "predictive_semantic_world",
+        "control_world",
+    ):
+        if getattr(core, attr_name, None) is original:
+            setattr(core, attr_name, wrapped)
+            return
+
+    raise RuntimeError(
+        "FSDP child module enumeration returned a module that could not be reattached "
+        f"to the trainer graph: type={type(original).__name__} id={id(original)}"
+    )
+
+
 def _promote_non_trainable_nonfloating_params_to_buffers(module: torch.nn.Module) -> None:
     for name, param in list(module.named_parameters(recurse=False)):
         if bool(getattr(param, "requires_grad", False)):
@@ -1454,15 +1488,7 @@ def _wrap_model_for_training_strategy(
             wrapped = _fsdp_wrap_root_with_ignored_non_dominant_dtypes(child, device=device)
         else:
             wrapped = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
-        if child is model.semantic_encoder:
-            model.semantic_encoder = wrapped
-            model.policy.semantic_encoder = wrapped
-        elif child is model.core.point_feature_extractor:
-            model.core.point_feature_extractor = wrapped
-        elif child is model.core.visual_encoder:
-            model.core.visual_encoder = wrapped
-        elif child is model.core.tactile_encoder:
-            model.core.tactile_encoder = wrapped
+        _assign_fsdp_wrapped_child_module(model, original=child, wrapped=wrapped)
     return FullyShardedDataParallel(model, **_fsdp_wrap_kwargs(device=device))
 
 

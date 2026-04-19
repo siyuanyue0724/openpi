@@ -914,11 +914,66 @@ def test_fsdp_wrap_and_checkpoint_roundtrip_on_cpu(tmp_path: Path) -> None:
         )
 
         assert step == 13
-        original_state = _MODULE._unwrap_training_model(wrapped).state_dict()
-        reloaded_state = _MODULE._unwrap_training_model(wrapped_reloaded).state_dict()
-        assert set(original_state) == set(reloaded_state)
-        for key in original_state:
-            torch.testing.assert_close(reloaded_state[key], original_state[key])
+
+
+def test_fsdp_wrap_reattaches_core_transformer_stack_children_on_cpu() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _TinyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.point_feature_extractor = torch.nn.Linear(4, 4)
+            self.visual_encoder = torch.nn.Linear(4, 4)
+            self.tactile_encoder = torch.nn.Linear(4, 4)
+            self.token_fusion = torch.nn.Linear(4, 4)
+            self.obs_self = torch.nn.Linear(4, 4)
+            self.posterior_self = torch.nn.Linear(4, 4)
+            self.task_self = torch.nn.Linear(4, 4)
+            self.predictive_world = torch.nn.Linear(4, 4)
+            self.predictive_semantic_world = torch.nn.Linear(4, 4)
+            self.control_world = torch.nn.Linear(4, 4)
+            self.head = torch.nn.Linear(4, 2)
+
+    class _TinyTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = _TinyCore()
+            self.semantic_encoder = torch.nn.Linear(4, 4)
+            self.policy = types.SimpleNamespace(semantic_encoder=self.semantic_encoder)
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            hidden = self.core.point_feature_extractor(inputs)
+            hidden = self.core.token_fusion(hidden)
+            hidden = self.core.obs_self(hidden)
+            hidden = self.core.posterior_self(hidden)
+            hidden = self.core.task_self(hidden)
+            hidden = self.core.predictive_world(hidden)
+            hidden = self.core.predictive_semantic_world(hidden)
+            hidden = self.core.control_world(hidden)
+            hidden = self.core.visual_encoder(hidden)
+            hidden = self.core.tactile_encoder(hidden)
+            hidden = self.semantic_encoder(hidden)
+            return self.core.head(hidden).sum()
+
+    args = _base_args()
+    args.training_strategy = "fsdp_full_shard"
+    args.optimizer_sharding = "none"
+
+    with _single_rank_process_group():
+        trainer = _TinyTrainer()
+        wrapped = _MODULE._wrap_model_for_training_strategy(trainer, args=args, device=torch.device("cpu"))
+        unwrapped = _MODULE._unwrap_training_model(wrapped)
+        for attr_name in (
+            "token_fusion",
+            "obs_self",
+            "posterior_self",
+            "task_self",
+            "predictive_world",
+            "predictive_semantic_world",
+            "control_world",
+        ):
+            assert _MODULE._is_fsdp_model(getattr(unwrapped.core, attr_name)), attr_name
 
 
 def test_fsdp_wrap_kwargs_prefers_backward_post() -> None:

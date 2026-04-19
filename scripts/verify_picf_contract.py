@@ -209,11 +209,13 @@ def verify_static_contract() -> list[CheckResult]:
                     'getattr(core, "predictive_semantic_world", None)',
                     'getattr(core, "control_world", None)',
                     "subtree_param_bytes <= _FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES",
+                    "def _assign_fsdp_wrapped_child_module(",
+                    "_assign_fsdp_wrapped_child_module(model, original=child, wrapped=wrapped)",
                 )
             ),
             detail=(
                 "Standard 4x40GB v2.2 FSDP now recursively splits large uniform-dtype subtrees and "
-                "shards the safe core transformer stacks as dedicated boundaries before the root wrapper."
+                "reattaches the safe core transformer stacks as dedicated boundaries before the root wrapper."
             ),
         ),
         CheckResult(
