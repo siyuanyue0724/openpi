@@ -241,6 +241,25 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="semantic_checkpoint_startup_uses_node_local_staging_from_shared_storage",
+            ok=all(
+                text in wrapper_source
+                for text in (
+                    "def _stage_pi0_checkpoint_if_needed(",
+                    'os.environ.get("OPENPI_LOCAL_CHECKPOINT_CACHE_DIR", "")',
+                    'os.environ.get("OPENPI_STAGE_PI0_CHECKPOINT", "auto")',
+                    'return str(resolved).startswith("/mnt/")',
+                    "logging.info(",
+                    "Staged PI0 checkpoint locally:",
+                    "self.config = _stage_local_pi0_config(config or PaliGemmaSemanticConfig())",
+                )
+            ),
+            detail=(
+                "Standard multi-rank startup now stages the shared PI0/PaliGemma checkpoint into a node-local cache "
+                "before rank-local weight loading, removing `/mnt` page-wait stalls without changing training semantics."
+            ),
+        ),
+        CheckResult(
             name="foundation_backbones_use_train_recompute_under_fsdp",
             ok=(
                 "def _apply_train_checkpoint(self, func, *args):" in sonata_wrapper_source

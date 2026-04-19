@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import contextlib
 import dataclasses
+import hashlib
 import json
 import logging
 import math
 import os
+import shutil
 import time
 from pathlib import Path
 from typing import Any
@@ -158,6 +160,133 @@ def _resolve_checkpoint_file(checkpoint_path: str | None) -> Path | None:
     if candidate.is_file() and candidate.suffix == ".safetensors":
         return candidate
     return None
+
+
+def _checkpoint_cache_root() -> Path:
+    raw = os.environ.get("OPENPI_LOCAL_CHECKPOINT_CACHE_DIR", "").strip()
+    if raw:
+        return Path(raw).expanduser()
+    return Path.home() / ".cache" / "openpi" / "pi0_checkpoints"
+
+
+def _checkpoint_stage_mode() -> str:
+    raw = os.environ.get("OPENPI_STAGE_PI0_CHECKPOINT", "auto").strip().lower()
+    if raw in {"1", "true", "yes", "on", "force"}:
+        return "on"
+    if raw in {"0", "false", "no", "off", "disable", "disabled"}:
+        return "off"
+    return "auto"
+
+
+def _path_signature(path: Path) -> dict[str, Any]:
+    resolved = path.expanduser().resolve()
+    stat = resolved.stat()
+    return {
+        "path": str(resolved),
+        "size": int(stat.st_size),
+        "mtime_ns": int(stat.st_mtime_ns),
+    }
+
+
+def _checkpoint_stage_key(checkpoint: Path, config_path: Path | None) -> str:
+    payload = {
+        "checkpoint": _path_signature(checkpoint),
+        "config": _path_signature(config_path) if config_path is not None and config_path.is_file() else None,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode("utf-8")).hexdigest()[:16]
+
+
+def _copy_stage_file(source: Path, target: Path) -> None:
+    source = source.expanduser().resolve()
+    target.parent.mkdir(parents=True, exist_ok=True)
+    source_stat = source.stat()
+    if target.is_file():
+        target_stat = target.stat()
+        if int(target_stat.st_size) == int(source_stat.st_size) and int(target_stat.st_mtime_ns) == int(source_stat.st_mtime_ns):
+            return
+    temp_target = target.with_name(f"{target.name}.tmp-{os.getpid()}")
+    if temp_target.exists():
+        temp_target.unlink()
+    shutil.copy2(source, temp_target)
+    os.replace(temp_target, target)
+
+
+def _should_stage_checkpoint_locally(checkpoint: Path) -> bool:
+    mode = _checkpoint_stage_mode()
+    if mode == "on":
+        return True
+    if mode == "off":
+        return False
+    try:
+        resolved = checkpoint.expanduser().resolve()
+    except FileNotFoundError:
+        resolved = checkpoint.expanduser()
+    return str(resolved).startswith("/mnt/")
+
+
+def _stage_pi0_checkpoint_if_needed(
+    checkpoint: Path,
+    config_path: Path | None,
+) -> tuple[Path, Path | None]:
+    if not _should_stage_checkpoint_locally(checkpoint):
+        return checkpoint, config_path
+
+    cache_root = _checkpoint_cache_root()
+    stage_key = _checkpoint_stage_key(checkpoint, config_path)
+    stage_dir = cache_root / stage_key
+    staged_checkpoint = stage_dir / checkpoint.name
+    staged_config = stage_dir / config_path.name if config_path is not None and config_path.is_file() else None
+
+    rank = 0
+    world_size = 1
+    use_barrier = bool(dist.is_available() and dist.is_initialized())
+    if use_barrier:
+        rank = int(dist.get_rank())
+        world_size = int(dist.get_world_size())
+
+    if rank == 0:
+        start = time.perf_counter()
+        stage_dir.mkdir(parents=True, exist_ok=True)
+        _copy_stage_file(checkpoint, staged_checkpoint)
+        if config_path is not None and config_path.is_file():
+            _copy_stage_file(config_path, staged_config)
+        logging.info(
+            "Staged PI0 checkpoint locally: src=%s dst=%s world_size=%d elapsed_sec=%.3f",
+            str(checkpoint),
+            str(staged_checkpoint),
+            world_size,
+            time.perf_counter() - start,
+        )
+    if use_barrier and world_size > 1:
+        dist.barrier()
+
+    if not staged_checkpoint.is_file():
+        raise FileNotFoundError(f"Staged PI0 checkpoint missing after local staging: {staged_checkpoint}")
+    if staged_config is not None and not staged_config.is_file():
+        raise FileNotFoundError(f"Staged PI0 config missing after local staging: {staged_config}")
+    return staged_checkpoint, staged_config
+
+
+def _stage_local_pi0_config(config: PaliGemmaSemanticConfig) -> PaliGemmaSemanticConfig:
+    checkpoint = _resolve_checkpoint_file(config.checkpoint_path)
+    if checkpoint is None:
+        return config
+    explicit_config = Path(config.checkpoint_config_path).expanduser() if config.checkpoint_config_path is not None else None
+    if explicit_config is not None and not explicit_config.is_file():
+        explicit_config = None
+    if explicit_config is None:
+        sidecar = checkpoint.parent / "config.json"
+        explicit_config = sidecar if sidecar.is_file() else None
+    staged_checkpoint, staged_config = _stage_pi0_checkpoint_if_needed(checkpoint, explicit_config)
+    if staged_checkpoint == checkpoint and staged_config == explicit_config:
+        return config
+    staged_checkpoint_path = str(staged_checkpoint.parent if staged_checkpoint.name == "model.safetensors" else staged_checkpoint)
+    staged_config_path = str(staged_config) if staged_config is not None else None
+    return dataclasses.replace(
+        config,
+        checkpoint_path=staged_checkpoint_path,
+        checkpoint_config_path=staged_config_path,
+    )
 
 
 def _resolve_source(config: PaliGemmaSemanticConfig) -> str:
@@ -933,7 +1062,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
 class PaliGemmaSemanticEncoder(nn.Module):
     def __init__(self, config: PaliGemmaSemanticConfig | None = None):
         super().__init__()
-        self.config = config or PaliGemmaSemanticConfig()
+        self.config = _stage_local_pi0_config(config or PaliGemmaSemanticConfig())
         source = _resolve_source(self.config)
         if source == "pi0_pytorch":
             self.encoder = _Pi0PaliGemmaSemanticEncoder(self.config)

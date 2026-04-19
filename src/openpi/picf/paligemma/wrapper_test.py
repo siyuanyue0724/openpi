@@ -12,8 +12,11 @@ from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_ree
 from openpi.picf.paligemma.wrapper import _masked_position_ids
 from openpi.picf.paligemma.wrapper import _recover_flow_target
 from openpi.picf.paligemma.wrapper import _repair_missing_tied_embeddings
+from openpi.picf.paligemma.wrapper import _stage_local_pi0_config
+from openpi.picf.paligemma.wrapper import _stage_pi0_checkpoint_if_needed
 from openpi.picf.paligemma.wrapper import _take_valid_prefix_tokens
 from openpi.picf.paligemma.wrapper import _Pi0PaliGemmaSemanticEncoder
+from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 
 
 class _TinyLanguageModel(torch.nn.Module):
@@ -64,6 +67,73 @@ def test_repair_missing_tied_embeddings_leaves_unrelated_missing_keys() -> None:
         missing_keys=["some.other.weight"],
     )
     assert remaining == ["some.other.weight"]
+
+
+def test_stage_pi0_checkpoint_if_needed_copies_to_local_cache_when_forced(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "pi0_src"
+    cache_dir = tmp_path / "pi0_cache"
+    source_dir.mkdir()
+    cache_dir.mkdir()
+    checkpoint = source_dir / "model.safetensors"
+    config_json = source_dir / "config.json"
+    checkpoint.write_bytes(b"checkpoint-bytes")
+    config_json.write_text('{"paligemma_variant":"gemma_2b"}', encoding="utf-8")
+
+    import openpi.picf.paligemma.wrapper as wrapper_mod
+
+    monkeypatch.setenv("OPENPI_STAGE_PI0_CHECKPOINT", "1")
+    monkeypatch.setenv("OPENPI_LOCAL_CHECKPOINT_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(wrapper_mod.dist, "is_available", lambda: True)
+    monkeypatch.setattr(wrapper_mod.dist, "is_initialized", lambda: True)
+    monkeypatch.setattr(wrapper_mod.dist, "get_rank", lambda: 0)
+    monkeypatch.setattr(wrapper_mod.dist, "get_world_size", lambda: 4)
+    monkeypatch.setattr(wrapper_mod.dist, "barrier", lambda: None)
+
+    staged_checkpoint, staged_config = _stage_pi0_checkpoint_if_needed(checkpoint, config_json)
+
+    assert staged_checkpoint != checkpoint
+    assert staged_checkpoint.read_bytes() == checkpoint.read_bytes()
+    assert staged_config is not None
+    assert staged_config.read_text(encoding="utf-8") == config_json.read_text(encoding="utf-8")
+    assert str(staged_checkpoint).startswith(str(cache_dir))
+
+
+def test_stage_local_pi0_config_rewrites_checkpoint_and_config_paths(
+    tmp_path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    source_dir = tmp_path / "pi0_cfg"
+    cache_dir = tmp_path / "pi0_cfg_cache"
+    source_dir.mkdir()
+    cache_dir.mkdir()
+    checkpoint = source_dir / "model.safetensors"
+    config_json = source_dir / "config.json"
+    checkpoint.write_bytes(b"checkpoint")
+    config_json.write_text("{}", encoding="utf-8")
+
+    import openpi.picf.paligemma.wrapper as wrapper_mod
+
+    monkeypatch.setenv("OPENPI_STAGE_PI0_CHECKPOINT", "1")
+    monkeypatch.setenv("OPENPI_LOCAL_CHECKPOINT_CACHE_DIR", str(cache_dir))
+    monkeypatch.setattr(wrapper_mod.dist, "is_available", lambda: False)
+    monkeypatch.setattr(wrapper_mod.dist, "is_initialized", lambda: False)
+
+    config = PaliGemmaSemanticConfig(
+        source="pi0_pytorch",
+        checkpoint_path=str(source_dir),
+        checkpoint_config_path=str(config_json),
+    )
+
+    staged = _stage_local_pi0_config(config)
+
+    assert staged != config
+    assert staged.checkpoint_path is not None
+    assert staged.checkpoint_config_path is not None
+    assert staged.checkpoint_path.startswith(str(cache_dir))
+    assert staged.checkpoint_config_path.startswith(str(cache_dir))
 
 
 def test_prepare_image_accepts_resize_with_pad_batch1_squeeze(monkeypatch: pytest.MonkeyPatch) -> None:
