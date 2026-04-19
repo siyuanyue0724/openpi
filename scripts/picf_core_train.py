@@ -806,6 +806,16 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
     args.optimizer_sharding = str(getattr(args, "optimizer_sharding", "none")).lower()
     optimizer_checkpoint_mode = str(getattr(args, "optimizer_checkpoint_mode", "auto")).lower().replace("-", "_")
     args.optimizer_checkpoint_mode = optimizer_checkpoint_mode
+    visual_finetune_mode = str(getattr(args, "visual_finetune_mode", "auto")).lower().replace("-", "_")
+    if visual_finetune_mode == "auto":
+        visual_finetune_mode = "full" if bool(getattr(args, "visual_trainable", False)) else "frozen"
+    if visual_finetune_mode not in {"full", "frozen"}:
+        raise ValueError(
+            "visual_finetune_mode must be one of {'auto', 'full', 'frozen'} before normalization, "
+            f"got {getattr(args, 'visual_finetune_mode', None)!r}."
+        )
+    args.visual_finetune_mode = visual_finetune_mode
+    args.visual_trainable = bool(visual_finetune_mode == "full")
     if getattr(args, "grad_clip_percentile", None) is None:
         args.grad_clip_percentile = 75.0
     else:
@@ -1309,6 +1319,31 @@ def _fsdp_sharded_child_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Mo
     return children
 
 
+def _module_has_trainable_params(module: torch.nn.Module | None) -> bool:
+    if module is None:
+        return False
+    return any(bool(getattr(param, "requires_grad", False)) for param in module.parameters())
+
+
+def _fsdp_root_ignored_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Module]:
+    core = model.core
+    ignored: list[torch.nn.Module] = []
+    for module in (
+        model.semantic_encoder if isinstance(model.semantic_encoder, torch.nn.Module) else None,
+        getattr(core, "point_feature_extractor", None),
+        getattr(core, "visual_encoder", None),
+        getattr(core, "tactile_encoder", None),
+    ):
+        if not isinstance(module, torch.nn.Module):
+            continue
+        if _is_fsdp_model(module):
+            continue
+        if _module_has_trainable_params(module):
+            continue
+        ignored.append(module)
+    return ignored
+
+
 def _assign_fsdp_wrapped_child_module(
     model: "_PicfWindowTrainer",
     *,
@@ -1496,7 +1531,11 @@ def _wrap_model_for_training_strategy(
         else:
             wrapped = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
         _assign_fsdp_wrapped_child_module(model, original=child, wrapped=wrapped)
-    return FullyShardedDataParallel(model, **_fsdp_wrap_kwargs(device=device))
+    ignored_modules = _fsdp_root_ignored_modules(model)
+    root_wrap_kwargs = _fsdp_wrap_kwargs(device=device)
+    if ignored_modules:
+        root_wrap_kwargs["ignored_modules"] = ignored_modules
+    return FullyShardedDataParallel(model, **root_wrap_kwargs)
 
 
 def _cleanup_distributed() -> None:
@@ -3582,11 +3621,12 @@ def train(args: argparse.Namespace) -> None:
                 args.semantic_dim,
             )
             logging.info(
-                "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
+                "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),
                 bool(not args.sonata_disable_flash),
                 args.visual_mode,
+                args.visual_finetune_mode,
                 bool(args.visual_trainable),
                 args.tactile_mode,
                 bool(args.tactile_trainable),
@@ -4111,6 +4151,7 @@ def main() -> None:
     parser.add_argument("--sonata-disable-flash", action="store_true")
     parser.add_argument("--point-backbone-lr-scale", type=float, default=0.25)
     parser.add_argument("--visual-mode", choices=["stub", "encoder"], default="stub")
+    parser.add_argument("--visual-finetune-mode", choices=["auto", "full", "frozen"], default="auto")
     parser.add_argument("--visual-trainable", action="store_true")
     parser.add_argument("--visual-model-name", default="vjepa2_1_vit_base_384")
     parser.add_argument("--visual-checkpoint-path", default=None)

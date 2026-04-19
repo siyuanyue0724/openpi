@@ -135,6 +135,7 @@ def _base_args() -> argparse.Namespace:
         semantic_use_gripper=True,
         semantic_max_length=256,
         visual_mode="stub",
+        visual_finetune_mode="auto",
         tactile_mode="stub",
         use_tactile=False,
         visual_model_name="vjepa2_1_vit_base_384",
@@ -479,6 +480,49 @@ def test_foundation_profile_enables_semantic_and_trainable_backbones() -> None:
     assert args.tactile_trainable is True
     assert args.point_backbone_trainable is True
     assert args.semantic_trainable is True
+
+
+def test_normalize_train_args_resolves_visual_finetune_mode() -> None:
+    args = _base_args()
+    args.visual_finetune_mode = "frozen"
+    args.visual_trainable = True
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.visual_finetune_mode == "frozen"
+    assert args.visual_trainable is False
+
+    args = _base_args()
+    args.visual_finetune_mode = "full"
+    args.visual_trainable = False
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.visual_finetune_mode == "full"
+    assert args.visual_trainable is True
+
+
+def test_fsdp_root_ignored_modules_collects_fully_frozen_backbones() -> None:
+    class _DummyTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.semantic_encoder = torch.nn.Linear(4, 4)
+            self.core = types.SimpleNamespace(
+                point_feature_extractor=torch.nn.Linear(4, 4),
+                visual_encoder=torch.nn.Linear(4, 4),
+                tactile_encoder=torch.nn.Linear(4, 4),
+            )
+
+    trainer = _DummyTrainer()
+    for param in trainer.core.visual_encoder.parameters():
+        param.requires_grad_(False)
+
+    ignored = _MODULE._fsdp_root_ignored_modules(trainer)
+
+    assert trainer.core.visual_encoder in ignored
+    assert trainer.semantic_encoder not in ignored
+    assert trainer.core.point_feature_extractor not in ignored
+    assert trainer.core.tactile_encoder not in ignored
 
 
 def test_load_tactile_backgrounds_npz_roundtrip(tmp_path: Path) -> None:

@@ -82,8 +82,8 @@ def _resolve_dtype(config: VjepaVisualConfig, device: torch.device) -> torch.dty
     return torch.float32
 
 
-def _trainable_vjepa_uses_autocast(*, trainable: bool, device: torch.device, dtype: torch.dtype) -> bool:
-    return bool(trainable and device.type == "cuda" and dtype in (torch.float16, torch.bfloat16))
+def _vjepa_uses_autocast(*, device: torch.device, dtype: torch.dtype) -> bool:
+    return bool(device.type == "cuda" and dtype in (torch.float16, torch.bfloat16))
 
 
 def _clean_backbone_key(state_dict: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
@@ -159,10 +159,11 @@ class Vjepa2VisualEncoder(nn.Module):
             interpolate_rope=True,
             use_activation_checkpointing=bool(config.trainable and config.use_activation_checkpointing),
         )
-        # For cotraining we keep weights in their native fp32 dtype and rely on autocast
-        # during the forward pass. The vendor V-JEPA stack is not uniformly safe to
-        # hard-cast to bf16/fp16 ahead of time.
-        if _trainable_vjepa_uses_autocast(trainable=self.trainable, device=self.device, dtype=self.dtype):
+        # Keep V-JEPA weights in native fp32 whenever mixed precision is requested
+        # on CUDA and rely on autocast for the forward path. The vendor stack is
+        # not uniformly safe to hard-cast ahead of time, regardless of whether
+        # the encoder is frozen or trainable.
+        if _vjepa_uses_autocast(device=self.device, dtype=self.dtype):
             self.encoder.to(device=self.device)
         else:
             self.encoder.to(device=self.device, dtype=self.dtype)
@@ -186,11 +187,7 @@ class Vjepa2VisualEncoder(nn.Module):
             )
         source_hw = (int(clip.shape[1]), int(clip.shape[2]))
         pixel_values = preprocess_video_clip(clip, self.config)
-        use_autocast = _trainable_vjepa_uses_autocast(
-            trainable=bool(self.trainable),
-            device=self.device,
-            dtype=self.dtype,
-        )
+        use_autocast = _vjepa_uses_autocast(device=self.device, dtype=self.dtype)
         if use_autocast:
             pixel_values = pixel_values.to(device=self.device)
         else:

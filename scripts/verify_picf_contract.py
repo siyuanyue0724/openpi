@@ -32,6 +32,7 @@ POLICY_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "policy.py"
 GEMMA_PYTORCH_PATH = REPO_ROOT / "src" / "openpi" / "models_pytorch" / "gemma_pytorch.py"
 SONATA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "sonata" / "wrapper.py"
 ANYTOUCH_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "anytouch" / "wrapper.py"
+VJEPA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "vjepa" / "wrapper.py"
 
 
 @dataclass
@@ -106,6 +107,7 @@ def verify_static_contract() -> list[CheckResult]:
     gemma_pytorch_source = _read(GEMMA_PYTORCH_PATH)
     sonata_wrapper_source = _read(SONATA_WRAPPER_PATH)
     anytouch_wrapper_source = _read(ANYTOUCH_WRAPPER_PATH)
+    vjepa_wrapper_source = _read(VJEPA_WRAPPER_PATH)
     tree = ast.parse(source)
     defaults = PicfCoreConfig()
 
@@ -231,11 +233,28 @@ def verify_static_contract() -> list[CheckResult]:
                     "subtree_param_bytes <= _FSDP_UNIFORM_WRAP_MAX_PARAM_BYTES",
                     "def _assign_fsdp_wrapped_child_module(",
                     "_assign_fsdp_wrapped_child_module(model, original=child, wrapped=wrapped)",
+                    "def _fsdp_root_ignored_modules(",
+                    "ignored_modules",
                 )
             ),
             detail=(
                 "Standard 4x40GB v2.2 FSDP now recursively splits large uniform-dtype subtrees and "
-                "reattaches the safe core transformer stacks as dedicated boundaries before the root wrapper."
+                "reattaches the safe core transformer stacks as dedicated boundaries before the root wrapper, "
+                "while the root FSDP boundary ignores fully frozen backbone subtrees instead of flattening "
+                "mixed requires_grad parameter sets."
+            ),
+        ),
+        CheckResult(
+            name="vjepa_mixed_precision_uses_safe_autocast_for_frozen_and_trainable_paths",
+            ok=(
+                "def _vjepa_uses_autocast(" in vjepa_wrapper_source
+                and "_trainable_vjepa_uses_autocast" not in vjepa_wrapper_source
+                and "if _vjepa_uses_autocast(device=self.device, dtype=self.dtype):" in vjepa_wrapper_source
+                and "use_autocast = _vjepa_uses_autocast(device=self.device, dtype=self.dtype)" in vjepa_wrapper_source
+            ),
+            detail=(
+                "V-JEPA mixed precision now uses one CUDA autocast contract for both frozen and trainable paths, "
+                "avoiding bf16/fp32 conv bias mismatches while preserving the encoder's native fp32 weights."
             ),
         ),
         CheckResult(
