@@ -131,6 +131,7 @@ def _base_args() -> argparse.Namespace:
         semantic_trainable=False,
         semantic_lr_scale=0.25,
         semantic_gradient_checkpointing=True,
+        window_activation_checkpointing=False,
         semantic_use_gripper=True,
         semantic_max_length=256,
         visual_mode="stub",
@@ -170,6 +171,26 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     args = _base_args()
     _MODULE._normalize_train_args(args)
     assert args.warmup_steps == 600
+
+
+def test_foundation_profile_enables_window_activation_checkpointing() -> None:
+    args = _base_args()
+    args.use_foundation_backbones = True
+    _MODULE._apply_foundation_profile(args)
+    assert args.window_activation_checkpointing is True
+    assert args.diagnostic_interval == 0
+
+
+def test_window_output_tensor_tuple_roundtrip() -> None:
+    outputs = {
+        key: torch.tensor(float(index + 1), dtype=torch.float32)
+        for index, key in enumerate(_MODULE._WINDOW_OUTPUT_TENSOR_KEYS)
+    }
+    packed = _MODULE._window_outputs_to_tensor_tuple(outputs)
+    restored = _MODULE._window_outputs_from_tensor_tuple(packed)
+    assert tuple(restored) == _MODULE._WINDOW_OUTPUT_TENSOR_KEYS
+    for key in _MODULE._WINDOW_OUTPUT_TENSOR_KEYS:
+        torch.testing.assert_close(restored[key], outputs[key])
 
 
 def test_normalize_train_args_sets_percentile_clip_defaults() -> None:

@@ -189,10 +189,15 @@ def verify_static_contract() -> list[CheckResult]:
                 "BackwardPrefetch.BACKWARD_POST" in trainer_source
                 and "activation_checkpointing=True" in source
                 and "torch.utils.checkpoint.checkpoint(" in source
+                and '"window_activation_checkpointing"' in trainer_source
+                and "_window_outputs_to_tensor_tuple(" in trainer_source
+                and "preserve_rng_state=True" in trainer_source
+                and "args.diagnostic_interval = 0" in trainer_source
             ),
             detail=(
                 "Standard v2.2 FSDP training now reduces backward peak memory with flat-parameter sharding "
-                "(use_orig_params=False), BACKWARD_POST, and train-time core transformer activation recompute."
+                "(use_orig_params=False), BACKWARD_POST, train-time core transformer activation recompute, "
+                "and checkpointed whole-window recompute on the 40GB full-finetune path."
             ),
         ),
         CheckResult(

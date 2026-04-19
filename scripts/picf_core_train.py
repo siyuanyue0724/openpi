@@ -793,6 +793,8 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
     args.tactile_trainable = True
     args.point_backbone_trainable = True
     args.semantic_trainable = True
+    args.window_activation_checkpointing = True
+    args.diagnostic_interval = 0
 
 
 def _normalize_train_args(args: argparse.Namespace) -> None:
@@ -981,6 +983,11 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(
             "training_strategy=fsdp_full_shard is incompatible with optimizer_sharding. "
             "FSDP full_shard already shards parameter, gradient, and optimizer state."
+        )
+    if bool(getattr(args, "window_activation_checkpointing", False)) and str(args.training_strategy) != "fsdp_full_shard":
+        raise ValueError(
+            "window_activation_checkpointing is reserved for training_strategy=fsdp_full_shard, "
+            f"got training_strategy={args.training_strategy!r}."
         )
     if str(args.optimizer_checkpoint_mode) not in {"auto", "full", "model_only"}:
         raise ValueError(
@@ -2280,6 +2287,63 @@ class _PicfWindowTrainer(torch.nn.Module):
         return result
 
 
+_WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
+    "loss_total",
+    "loss_action",
+    "loss_action_active7",
+    "loss_action_pos",
+    "loss_action_rot",
+    "loss_action_gripper",
+    "loss_visual_latent",
+    "loss_visual_real",
+    "loss_tactile_real",
+    "loss_tactile_map",
+    "loss_tactile_aux",
+    "loss_point_real",
+    "loss_semantic_future_aux",
+    "loss_semantic_group_raw",
+    "loss_semantic_group_capped",
+    "loss_physical_aux",
+    "loss_physical_aux_capped",
+    "loss_alignment",
+    "loss_alignment_raw",
+    "loss_total_minus_action",
+    "loss_anchor_pv",
+    "loss_pv_weak",
+    "loss_focus_pv",
+    "loss_pt",
+    "physical_aux_budget_scale",
+    "semantic_aux_budget_scale",
+    "alignment_budget_scale",
+    "projective_candidate_density",
+    "tactile_contact_prob_mean",
+    "tactile_active_rate",
+)
+
+
+def _window_outputs_to_tensor_tuple(outputs: dict[str, Any]) -> tuple[torch.Tensor, ...]:
+    return tuple(outputs[key] for key in _WINDOW_OUTPUT_TENSOR_KEYS)
+
+
+def _window_outputs_from_tensor_tuple(outputs: Sequence[torch.Tensor]) -> dict[str, torch.Tensor]:
+    if len(outputs) != len(_WINDOW_OUTPUT_TENSOR_KEYS):
+        raise RuntimeError(
+            "Checkpointed window-output tuple does not match the canonical loss/metric contract: "
+            f"expected {len(_WINDOW_OUTPUT_TENSOR_KEYS)} tensors, got {len(outputs)}."
+        )
+    return {
+        key: tensor
+        for key, tensor in zip(_WINDOW_OUTPUT_TENSOR_KEYS, outputs, strict=True)
+    }
+
+
+def _checkpoint_anchor_tensor(model: torch.nn.Module) -> torch.Tensor:
+    for param in model.parameters():
+        if bool(getattr(param, "requires_grad", False)):
+            return param.reshape(-1)[:1]
+    raise RuntimeError("Window activation checkpointing requires at least one trainable parameter.")
+
+
 def _is_retryable_first_step_error(exc: RuntimeError) -> bool:
     message = str(exc)
     return any(pattern in message for pattern in _RETRYABLE_FIRST_STEP_ERRORS)
@@ -3456,7 +3520,7 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s wandb=%s",
                 world_size,
                 args.training_strategy,
                 args.accum_steps,
@@ -3468,6 +3532,7 @@ def train(args: argparse.Namespace) -> None:
                 args.save_interval,
                 args.optimizer_sharding,
                 args.optimizer_checkpoint_mode,
+                bool(getattr(args, "window_activation_checkpointing", False)),
                 bool(args.wandb_enabled and args.wandb_mode != "disabled"),
             )
             logging.info(
@@ -3607,6 +3672,10 @@ def train(args: argparse.Namespace) -> None:
                 (args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0))
                 or ((step + 1) == args.num_train_steps)
             )
+            use_window_activation_checkpointing = bool(
+                getattr(args, "window_activation_checkpointing", False)
+                and not capture_visual_diagnostics
+            )
             for micro_step in range(args.accum_steps):
                 sample_start = time.perf_counter()
                 retry_count = 0
@@ -3733,11 +3802,33 @@ def train(args: argparse.Namespace) -> None:
                             )
                             logging.info("%s forward_begin", forward_label)
                         forward_start = time.perf_counter()
-                        outputs = model(
-                            window,
-                            capture_visual_diagnostics=capture_visual_diagnostics,
-                            debug_phase_label=forward_label,
-                        )
+                        if use_window_activation_checkpointing and forward_label is None:
+                            checkpoint_anchor = _checkpoint_anchor_tensor(model)
+
+                            def _checkpoint_window_forward(_anchor: torch.Tensor) -> tuple[torch.Tensor, ...]:
+                                del _anchor
+                                return _window_outputs_to_tensor_tuple(
+                                    model(
+                                        window,
+                                        capture_visual_diagnostics=False,
+                                        debug_phase_label=None,
+                                    )
+                                )
+
+                            outputs = _window_outputs_from_tensor_tuple(
+                                torch.utils.checkpoint.checkpoint(
+                                    _checkpoint_window_forward,
+                                    checkpoint_anchor,
+                                    use_reentrant=False,
+                                    preserve_rng_state=True,
+                                )
+                            )
+                        else:
+                            outputs = model(
+                                window,
+                                capture_visual_diagnostics=capture_visual_diagnostics,
+                                debug_phase_label=forward_label,
+                            )
                         if debug_phase_enabled:
                             logging.info("%s forward_sec=%.3f", forward_label, time.perf_counter() - forward_start)
                         if debug_cuda_sync and device.type == "cuda":
@@ -4060,6 +4151,7 @@ def main() -> None:
     parser.add_argument("--semantic-trainable", action="store_true")
     parser.add_argument("--semantic-lr-scale", type=float, default=0.25)
     parser.add_argument("--semantic-gradient-checkpointing", action="store_true")
+    parser.add_argument("--window-activation-checkpointing", action="store_true")
     parser.add_argument("--semantic-use-gripper", action="store_true")
     parser.add_argument("--semantic-max-length", type=int, default=256)
     parser.add_argument("--hidden-dim", type=int, default=_SPEC_DEFAULTS.hidden_dim)

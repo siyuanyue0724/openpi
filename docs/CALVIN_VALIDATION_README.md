@@ -181,12 +181,15 @@ Current v2.2 long-run training profile:
 - `--grad-clip-window 100`
 - `--visual-activation-checkpointing`
 - `--semantic-gradient-checkpointing`
+- `--window-activation-checkpointing`
+- `--diagnostic-interval 0`
 - `--training-strategy fsdp_full_shard` for the standard 4x40GB A100 full-finetune profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
 - the standard FSDP profile uses flat-parameter mode (`use_orig_params=False`) together with `backward_prefetch=BACKWARD_POST` and `limit_all_gathers=True`, so the 4x40GB job reduces parameter-view residency before changing anything about the optimization objective
 - the standard FSDP profile now recursively splits large uniform-dtype subtrees with a 512MiB parameter-storage budget per boundary, and it shards the safe core transformer stacks (`token_fusion`, `obs_self`, `posterior_self`, `task_self`, `predictive_world`, `predictive_semantic_world`, `control_world`) before the root wrapper so the remaining root shard stays light
 - those safe core transformer stacks are now also explicitly reattached back onto `core` after wrapping; this is part of the 4x40GB contract so the root FSDP wrapper does not silently pull them back into one monolithic flat-parameter shard
 - transformer stacks on this profile now materialize every incoming activation once at stack entry before attention. PICF builds many `[1, T, C]` batches via `tokens[None, :]`, and FSDP can also surface storage-sharing tensors whose aliasing is not reliably visible through `_base`; the stack-entry clone is mathematically exact and avoids FSDP/autograd multi-view alias failures inside residual attention blocks
+- the standard 4x40GB profile also checkpoints the full `_PicfWindowTrainer.forward(...)` window body and sets `diagnostic_interval=0`; this is the clean way to recover the optimizer-state headroom lost after step 1 without changing the objective or freezing any backbone
 - the FSDP path uses explicit global-L2 grad norm / percentile clipping across local shards instead of `FSDP.clip_grad_norm_`, because the semantic stack deliberately mixes bf16 bulk weights with a small float32 stabilizer subset
 - standard multi-rank FSDP startup now stages the PI0/PaliGemma semantic checkpoint into a node-local cache before rank-local `load_state_dict(...)`; this avoids four ranks faulting the same `/mnt/checkpoints/pi05_base_pytorch` file tree at once without changing model math. Default cache root: `~/.cache/openpi/pi0_checkpoints`. Override with `OPENPI_LOCAL_CHECKPOINT_CACHE_DIR` or disable/force via `OPENPI_STAGE_PI0_CHECKPOINT=off|on|auto`
 
