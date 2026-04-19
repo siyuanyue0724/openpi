@@ -926,7 +926,7 @@ def test_fsdp_wrap_kwargs_prefers_backward_post() -> None:
         pytest.skip("FSDP BackwardPrefetch is not available in this torch build.")
 
     kwargs = _MODULE._fsdp_wrap_kwargs(device=torch.device("cpu"))
-    assert kwargs["use_orig_params"] is True
+    assert kwargs["use_orig_params"] is False
     assert kwargs["limit_all_gathers"] is True
     assert kwargs["backward_prefetch"] == _MODULE.BackwardPrefetch.BACKWARD_POST
 
@@ -1036,7 +1036,7 @@ def test_call_fsdp_method_supports_custom_module_methods_on_wrapped_modules() ->
         wrapped = _MODULE.FullyShardedDataParallel(
             _CustomMethodModule(),
             sharding_strategy=_MODULE.ShardingStrategy.FULL_SHARD,
-            use_orig_params=True,
+            use_orig_params=False,
             device_id=torch.device("cpu"),
             limit_all_gathers=True,
         )
@@ -1068,7 +1068,7 @@ def test_call_fsdp_method_supports_plain_modules_with_nested_fsdp_children() -> 
         wrapped_inner = _MODULE.FullyShardedDataParallel(
             _InnerCustomMethodModule(),
             sharding_strategy=_MODULE.ShardingStrategy.FULL_SHARD,
-            use_orig_params=True,
+            use_orig_params=False,
             device_id=torch.device("cpu"),
             limit_all_gathers=True,
         )
@@ -1096,7 +1096,7 @@ def test_call_module_forward_or_method_prefers_forward_for_wrapped_modules() -> 
         wrapped = _MODULE.FullyShardedDataParallel(
             _ForwardDispatchModule(),
             sharding_strategy=_MODULE.ShardingStrategy.FULL_SHARD,
-            use_orig_params=True,
+            use_orig_params=False,
             device_id=torch.device("cpu"),
             limit_all_gathers=True,
         )

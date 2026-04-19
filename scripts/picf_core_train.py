@@ -1265,7 +1265,7 @@ def _fsdp_wrap_kwargs(*, device: torch.device) -> dict[str, Any]:
     kwargs: dict[str, Any] = {
         "sharding_strategy": ShardingStrategy.FULL_SHARD,
         "device_id": _fsdp_device_id(device),
-        "use_orig_params": True,
+        "use_orig_params": False,
         "limit_all_gathers": True,
     }
     if BackwardPrefetch is not None:

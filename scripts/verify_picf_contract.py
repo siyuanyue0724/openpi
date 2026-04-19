@@ -184,13 +184,15 @@ def verify_static_contract() -> list[CheckResult]:
         CheckResult(
             name="fsdp_uses_backward_post_and_core_recompute",
             ok=(
+                '"use_orig_params": False' in trainer_source
+                and
                 "BackwardPrefetch.BACKWARD_POST" in trainer_source
                 and "activation_checkpointing=True" in source
                 and "torch.utils.checkpoint.checkpoint(" in source
             ),
             detail=(
-                "Standard v2.2 FSDP training now reduces backward peak memory with BACKWARD_POST "
-                "and train-time core transformer activation recompute."
+                "Standard v2.2 FSDP training now reduces backward peak memory with flat-parameter sharding "
+                "(use_orig_params=False), BACKWARD_POST, and train-time core transformer activation recompute."
             ),
         ),
         CheckResult(

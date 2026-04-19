@@ -183,6 +183,7 @@ Current v2.2 long-run training profile:
 - `--semantic-gradient-checkpointing`
 - `--training-strategy fsdp_full_shard` for the standard 4x40GB A100 full-finetune profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
+- the standard FSDP profile uses flat-parameter mode (`use_orig_params=False`) together with `backward_prefetch=BACKWARD_POST` and `limit_all_gathers=True`, so the 4x40GB job reduces parameter-view residency before changing anything about the optimization objective
 - the FSDP path uses explicit global-L2 grad norm / percentile clipping across local shards instead of `FSDP.clip_grad_norm_`, because the semantic stack deliberately mixes bf16 bulk weights with a small float32 stabilizer subset
 
 Distributed runtime note for current multi-rank bring-up:
