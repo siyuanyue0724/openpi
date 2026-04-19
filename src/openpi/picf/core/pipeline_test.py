@@ -80,6 +80,34 @@ class _FeatureMapFromClip:
         return self._map
 
 
+def test_transformer_stack_uses_activation_checkpointing_during_training(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[int] = []
+
+    def _checkpoint(fn, *args, **kwargs):
+        calls.append(1)
+        return fn(*args)
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", _checkpoint)
+    stack = pipeline_module.TransformerStack(16, 4, 2, activation_checkpointing=True).train()
+    x = torch.randn(1, 5, 16, requires_grad=True)
+    y = stack(x)
+    assert isinstance(y, torch.Tensor)
+    assert y.shape == x.shape
+    assert len(calls) == 2
+
+
+def test_transformer_stack_skips_checkpointing_for_attention_reads(monkeypatch: pytest.MonkeyPatch) -> None:
+    def _boom(*args, **kwargs):
+        raise AssertionError("attention-return path should not use activation checkpointing")
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", _boom)
+    stack = pipeline_module.TransformerStack(16, 4, 2, activation_checkpointing=True).train()
+    x = torch.randn(1, 5, 16, requires_grad=True)
+    y, attn = stack(x, return_attention=True)
+    assert y.shape == x.shape
+    assert attn is not None
+
+
 class _ClipAwareVisualEncoder:
     def __init__(self) -> None:
         self.clips: list[np.ndarray] = []

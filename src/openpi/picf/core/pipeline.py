@@ -378,9 +378,10 @@ class SelfAttentionBlock(nn.Module):
 
 
 class TransformerStack(nn.Module):
-    def __init__(self, hidden_dim: int, heads: int, layers: int):
+    def __init__(self, hidden_dim: int, heads: int, layers: int, *, activation_checkpointing: bool = False):
         super().__init__()
         self.layers = nn.ModuleList(SelfAttentionBlock(hidden_dim, heads, 1) for _ in range(layers))
+        self.activation_checkpointing = bool(activation_checkpointing)
 
     def forward(
         self,
@@ -393,7 +394,25 @@ class TransformerStack(nn.Module):
             return (x, None) if return_attention else x
         attn_maps = []
         for layer in self.layers:
-            x, attn = layer(x, attn_bias=attn_bias, return_attention=return_attention)
+            if (
+                self.activation_checkpointing
+                and self.training
+                and not return_attention
+                and bool(x.requires_grad)
+            ):
+                def _forward(layer_inputs: torch.Tensor) -> torch.Tensor:
+                    layer_output, _ = layer(layer_inputs, attn_bias=attn_bias, return_attention=False)
+                    return layer_output
+
+                x = torch.utils.checkpoint.checkpoint(
+                    _forward,
+                    x,
+                    use_reentrant=False,
+                    preserve_rng_state=False,
+                )
+                attn = None
+            else:
+                x, attn = layer(x, attn_bias=attn_bias, return_attention=return_attention)
             if return_attention and attn is not None:
                 attn_maps.append(attn.mean(dim=1))
         if return_attention:
@@ -724,10 +743,15 @@ class PicfFullCore(nn.Module):
             nn.GELU(),
             nn.Linear(hidden_dim, 1),
         )
-        self.token_fusion = TransformerStack(hidden_dim, heads, self.config.fusion_layers)
+        self.token_fusion = TransformerStack(
+            hidden_dim,
+            heads,
+            self.config.fusion_layers,
+            activation_checkpointing=True,
+        )
 
         self.obs_reader = CrossAttentionRead(hidden_dim, heads)
-        self.obs_self = TransformerStack(hidden_dim, heads, 1)
+        self.obs_self = TransformerStack(hidden_dim, heads, 1, activation_checkpointing=True)
 
         self.prior_proj = nn.LazyLinear(self.config.future_hidden_dim)
         self.prior_delta_mu = ResidualMLP(self.config.latent_dim, self.config.future_hidden_dim, zero_init_last=True)
@@ -748,7 +772,12 @@ class PicfFullCore(nn.Module):
         self.post_write_proj = nn.LazyLinear(hidden_dim)
         self.post_lstm = nn.LSTMCell(hidden_dim, self.config.posterior_hidden_dim)
         self.posterior_token_proj = nn.LazyLinear(hidden_dim)
-        self.posterior_self = TransformerStack(hidden_dim, heads, self.config.posterior_layers)
+        self.posterior_self = TransformerStack(
+            hidden_dim,
+            heads,
+            self.config.posterior_layers,
+            activation_checkpointing=True,
+        )
         self.posterior_pool = AttentionPool(hidden_dim)
 
         self.semantic_prefix_proj = nn.Identity()
@@ -768,7 +797,12 @@ class PicfFullCore(nn.Module):
         self.task_visual_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
         self.task_tactile_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
         self.task_point_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
-        self.task_self = TransformerStack(hidden_dim, heads, self.config.task_self_layers)
+        self.task_self = TransformerStack(
+            hidden_dim,
+            heads,
+            self.config.task_self_layers,
+            activation_checkpointing=True,
+        )
         self.task_geom_proj = nn.LazyLinear(hidden_dim)
         self.posterior_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
         self.global_post_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
@@ -786,8 +820,18 @@ class PicfFullCore(nn.Module):
         self.pi_prefix_query_tokens = nn.Parameter(torch.zeros((self.config.pi_prefix_queries, semantic_trunk_dim)))
         self.pi_prefix_reader = CrossAttentionRead(semantic_trunk_dim, heads)
         self.future_condition_reader = CrossAttentionRead(semantic_trunk_dim, heads)
-        self.predictive_world = TransformerStack(hidden_dim, heads, self.config.predictive_layers)
-        self.predictive_semantic_world = TransformerStack(semantic_trunk_dim, heads, self.config.predictive_layers)
+        self.predictive_world = TransformerStack(
+            hidden_dim,
+            heads,
+            self.config.predictive_layers,
+            activation_checkpointing=True,
+        )
+        self.predictive_semantic_world = TransformerStack(
+            semantic_trunk_dim,
+            heads,
+            self.config.predictive_layers,
+            activation_checkpointing=True,
+        )
         self.predictive_pool = AttentionPool(hidden_dim)
 
         self.visual_latent_queries = nn.Parameter(torch.zeros((self.config.visual_latent_tokens, hidden_dim)))
@@ -819,7 +863,12 @@ class PicfFullCore(nn.Module):
         nn.init.zeros_(self.evidence_delta[-1].bias)
         self.evidence_gate = nn.LazyLinear(hidden_dim)
 
-        self.control_world = TransformerStack(semantic_trunk_dim, heads, self.config.control_layers)
+        self.control_world = TransformerStack(
+            semantic_trunk_dim,
+            heads,
+            self.config.control_layers,
+            activation_checkpointing=True,
+        )
         self.control_state_proj = nn.Linear(semantic_trunk_dim, self.config.control_dim)
         self.predictive_state_proj = nn.Linear(semantic_trunk_dim, hidden_dim)
         self.to(device=self.device, dtype=self.dtype)

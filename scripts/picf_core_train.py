@@ -35,12 +35,14 @@ except Exception:  # pragma: no cover - depends on torch distributed build
     ZeroRedundancyOptimizer = None
 
 try:
+    from torch.distributed.fsdp import BackwardPrefetch
     from torch.distributed.fsdp import FullyShardedDataParallel
     from torch.distributed.fsdp import FullOptimStateDictConfig
     from torch.distributed.fsdp import FullStateDictConfig
     from torch.distributed.fsdp import ShardingStrategy
     from torch.distributed.fsdp import StateDictType
 except Exception:  # pragma: no cover - depends on torch distributed build
+    BackwardPrefetch = None
     FullyShardedDataParallel = None
     FullOptimStateDictConfig = None
     FullStateDictConfig = None
@@ -1234,6 +1236,18 @@ def _fsdp_device_id(device: torch.device) -> int | torch.device:
     return device
 
 
+def _fsdp_wrap_kwargs(*, device: torch.device) -> dict[str, Any]:
+    kwargs: dict[str, Any] = {
+        "sharding_strategy": ShardingStrategy.FULL_SHARD,
+        "device_id": _fsdp_device_id(device),
+        "use_orig_params": True,
+        "limit_all_gathers": True,
+    }
+    if BackwardPrefetch is not None:
+        kwargs["backward_prefetch"] = BackwardPrefetch.BACKWARD_POST
+    return kwargs
+
+
 def _fsdp_sharded_child_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Module]:
     children: list[torch.nn.Module] = []
     for module in (
@@ -1289,13 +1303,7 @@ def _fsdp_wrap_uniform_dtype_subtrees(
 
     remaining_dtypes = {param.dtype for param in remaining_params}
     if len(remaining_dtypes) == 1:
-        return FullyShardedDataParallel(
-            module,
-            sharding_strategy=ShardingStrategy.FULL_SHARD,
-            device_id=_fsdp_device_id(device),
-            use_orig_params=True,
-            limit_all_gathers=True,
-        )
+        return FullyShardedDataParallel(module, **_fsdp_wrap_kwargs(device=device))
 
     for child_name, child in list(module.named_children()):
         wrapped_child = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
@@ -1374,11 +1382,8 @@ def _fsdp_wrap_root_with_ignored_non_dominant_dtypes(
 
     return FullyShardedDataParallel(
         module,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
-        device_id=_fsdp_device_id(device),
-        use_orig_params=True,
-        limit_all_gathers=True,
         ignored_states=ignored_states or None,
+        **_fsdp_wrap_kwargs(device=device),
     )
 
 
@@ -1407,13 +1412,7 @@ def _wrap_model_for_training_strategy(
             model.core.visual_encoder = wrapped
         elif child is model.core.tactile_encoder:
             model.core.tactile_encoder = wrapped
-    return FullyShardedDataParallel(
-        model,
-        sharding_strategy=ShardingStrategy.FULL_SHARD,
-        device_id=_fsdp_device_id(device),
-        use_orig_params=True,
-        limit_all_gathers=True,
-    )
+    return FullyShardedDataParallel(model, **_fsdp_wrap_kwargs(device=device))
 
 
 def _cleanup_distributed() -> None:
@@ -3427,6 +3426,10 @@ def train(args: argparse.Namespace) -> None:
                     logging.info(
                         "Semantic contract: FSDP keeps the PI0/PaliGemma stack at one shard boundary, "
                         "so non-reentrant semantic gradient checkpointing remains enabled when requested."
+                    )
+                    logging.info(
+                        "FSDP memory contract: FULL_SHARD uses BACKWARD_POST prefetch and the PICF core "
+                        "transformer stacks run train-time activation recompute to reduce backward peak memory."
                     )
                 logging.info(
                     "Semantic checkpointing request: enabled=%s non_reentrant=%s",

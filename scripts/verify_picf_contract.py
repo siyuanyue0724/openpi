@@ -178,6 +178,18 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="fsdp_uses_backward_post_and_core_recompute",
+            ok=(
+                "BackwardPrefetch.BACKWARD_POST" in trainer_source
+                and "activation_checkpointing=True" in source
+                and "torch.utils.checkpoint.checkpoint(" in source
+            ),
+            detail=(
+                "Standard v2.2 FSDP training now reduces backward peak memory with BACKWARD_POST "
+                "and train-time core transformer activation recompute."
+            ),
+        ),
+        CheckResult(
             name="paligemma_tokenization_injects_state_into_prompt",
             ok="self.tokenizer.tokenize(str(prompt), state=state)" in wrapper_source,
             detail="PICF semantic tokenization injects robot state back into the PI0.5 prompt path.",

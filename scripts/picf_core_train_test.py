@@ -894,6 +894,16 @@ def test_fsdp_wrap_and_checkpoint_roundtrip_on_cpu(tmp_path: Path) -> None:
             torch.testing.assert_close(reloaded_state[key], original_state[key])
 
 
+def test_fsdp_wrap_kwargs_prefers_backward_post() -> None:
+    if _MODULE.FullyShardedDataParallel is None or _MODULE.BackwardPrefetch is None:
+        pytest.skip("FSDP BackwardPrefetch is not available in this torch build.")
+
+    kwargs = _MODULE._fsdp_wrap_kwargs(device=torch.device("cpu"))
+    assert kwargs["use_orig_params"] is True
+    assert kwargs["limit_all_gathers"] is True
+    assert kwargs["backward_prefetch"] == _MODULE.BackwardPrefetch.BACKWARD_POST
+
+
 def test_fsdp_wrap_recursively_splits_mixed_dtype_subtrees_on_cpu() -> None:
     if _MODULE.FullyShardedDataParallel is None:
         pytest.skip("FSDP is not available in this torch build.")

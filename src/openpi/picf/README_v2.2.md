@@ -1481,7 +1481,9 @@ Current standard long-run launch profile:
 - `--training-strategy fsdp_full_shard` for the standard 4x40GB A100 full-finetune profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
 - semantic FSDP wrapping must keep the PI0/PaliGemma stack at one boundary and leave minority float32 stabilizer parameters in `ignored_states`; recursive internal FSDP splitting inside the hand-written Gemma dual-branch forward is not valid
+- FSDP full-shard on this profile should prefer `backward_prefetch=BACKWARD_POST` together with `limit_all_gathers=True`; the goal is to lower backward all-gather overlap peaks, not to change model math
 - semantic gradient checkpointing remains enabled on that FSDP path; after routing PI0 flow-loss calls through module `forward(op, ...)` and collapsing the semantic stack to one FSDP boundary, non-reentrant checkpoint recomputation is again the correct memory-saving path rather than a forbidden custom-method re-entry
+- core transformer stacks (`token_fusion`, `obs_self`, `posterior_self`, `task_self`, `predictive_world`, `predictive_semantic_world`, `control_world`) now also use train-time non-reentrant activation recompute; this is part of the standard all-backbone v2.2 training path and does not alter the underlying objective
 
 These values are the current operational training defaults for v2.2 runs even
 if historical baseline commands in older docs still show `--save-interval 5000`.
