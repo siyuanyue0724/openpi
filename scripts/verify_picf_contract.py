@@ -29,6 +29,7 @@ PALIGEMMA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "paligemma" / "
 TRAINER_SCRIPT_PATH = REPO_ROOT / "scripts" / "picf_core_train.py"
 SERVE_SCRIPT_PATH = REPO_ROOT / "scripts" / "serve_picf_policy.py"
 POLICY_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "policy.py"
+GEMMA_PYTORCH_PATH = REPO_ROOT / "src" / "openpi" / "models_pytorch" / "gemma_pytorch.py"
 
 
 @dataclass
@@ -100,6 +101,7 @@ def verify_static_contract() -> list[CheckResult]:
     trainer_source = _read(TRAINER_SCRIPT_PATH)
     serve_source = _read(SERVE_SCRIPT_PATH)
     policy_source = _read(POLICY_PATH)
+    gemma_pytorch_source = _read(GEMMA_PYTORCH_PATH)
     tree = ast.parse(source)
     defaults = PicfCoreConfig()
 
@@ -151,6 +153,17 @@ def verify_static_contract() -> list[CheckResult]:
                 and "self.time_mlp_in = nn.Linear(" in wrapper_source
             ),
             detail="PICF semantic wrapper restores the PI0.5 expert stack and suffix action projections.",
+        ),
+        CheckResult(
+            name="gemma_training_honors_semantic_checkpointing_flag",
+            ok=(
+                "Forcing gradient checkpointing to be enabled for Gemma expert model" not in gemma_pytorch_source
+                and "self.gemma_expert.model.gradient_checkpointing = True" not in gemma_pytorch_source
+            ),
+            detail=(
+                "Gemma expert training no longer force-enables gradient checkpointing; "
+                "trainer/wrapper checkpointing policy remains authoritative."
+            ),
         ),
         CheckResult(
             name="paligemma_tokenization_injects_state_into_prompt",

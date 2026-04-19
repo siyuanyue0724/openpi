@@ -26,6 +26,7 @@ from openpi.picf.test_utils import build_mini_calvin_dataset
 
 
 _SCRIPT_PATH = Path(__file__).with_name("picf_core_train.py")
+_GEMMA_PYTORCH_PATH = Path(__file__).resolve().parents[1] / "src" / "openpi" / "models_pytorch" / "gemma_pytorch.py"
 _SPEC = importlib.util.spec_from_file_location("picf_core_train_script", _SCRIPT_PATH)
 assert _SPEC is not None and _SPEC.loader is not None
 _MODULE = importlib.util.module_from_spec(_SPEC)
@@ -224,6 +225,13 @@ def test_normalize_train_args_disables_semantic_gradient_checkpointing_for_fsdp(
 
     assert args.semantic_gradient_checkpointing is False
     assert args.semantic_gradient_checkpointing_disabled_for_fsdp is True
+
+
+def test_gemma_training_does_not_force_gradient_checkpointing() -> None:
+    source = _GEMMA_PYTORCH_PATH.read_text(encoding="utf-8")
+
+    assert "Forcing gradient checkpointing to be enabled for Gemma expert model" not in source
+    assert "self.gemma_expert.model.gradient_checkpointing = True" not in source
 
 
 def test_setup_distributed_defaults_torch_distributed_debug_to_info_for_ddp(
