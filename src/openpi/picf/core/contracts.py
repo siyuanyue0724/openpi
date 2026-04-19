@@ -52,6 +52,13 @@ class PicfTokenFieldState:
 
 
 @dataclasses.dataclass
+class PicfRecurrentTokenFieldState:
+    tactile_contact_gate: torch.Tensor | None = None
+    tactile_anchor_mask: torch.Tensor | None = None
+    tactile_contact_score_ema: torch.Tensor | None = None
+
+
+@dataclasses.dataclass
 class PicfObservationAnchorState:
     seed_indices: torch.Tensor
     tokens: torch.Tensor
@@ -150,6 +157,12 @@ class PicfPredictiveState:
 
 
 @dataclasses.dataclass
+class PicfRecurrentPredictiveState:
+    executed_action: torch.Tensor
+    physical_prediction_cache: PicfPredictionCache
+
+
+@dataclasses.dataclass
 class PicfControlState:
     hold_reason: str | None
 
@@ -169,6 +182,17 @@ class PicfCoreState:
 
 
 @dataclasses.dataclass
+class PicfRecurrentCarryState:
+    runtime_meta: RuntimeMeta
+    token_field: PicfRecurrentTokenFieldState
+    posterior: PicfPosteriorAnchorState
+    predictive: PicfRecurrentPredictiveState
+
+
+@dataclasses.dataclass
 class PicfCoreOutput:
     state: PicfCoreState
     debug: dict[str, float]
+
+
+PicfPreviousState = PicfCoreState | PicfRecurrentCarryState

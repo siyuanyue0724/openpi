@@ -71,6 +71,20 @@ At control step `t`:
 The only recurrent physical state family is `W_t`. `R_t` and `C_t` are
 current-step conditioned objects, not recurrent world-state replacements.
 
+The training/inference recurrence carrier must therefore remain compact. The
+canonical recurrent carry contains only the next-step inputs actually consumed
+by the live code:
+
+- `runtime_meta`
+- tactile contact hysteresis state
+- `posterior`
+- `predictive.executed_action`
+- `predictive.physical_prediction_cache`
+
+Non-recurrent state such as task readout, conditioned control, semantic token
+streams, and conditioned future cache must not be forwarded across the training
+window as the canonical `previous` object.
+
 ## 3. Transition Order
 
 The intended order is:

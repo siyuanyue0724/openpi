@@ -76,6 +76,14 @@ needed:
 3. [`/tmp/picf_v22_final_reconciliation_20260418.md`](/tmp/picf_v22_final_reconciliation_20260418.md)
    Final reconciliation of current code vs v2.2 contract, including pass/fail
    items and residual compatibility notes.
+4. [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md)
+   Current recursive dataflow audit refreshed after the 40GB training-memory investigation.
+5. [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md)
+   Refreshed v2.2 mathematical specification with the canonical recurrent-carry contract.
+6. [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md)
+   Explicit list of design mismatches / unnecessary glue, plus the fixes landed during the current audit.
+7. [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md)
+   Quantitative 4x40GB A100 memory audit and backbone-contribution ranking.
 
 These `/tmp` documents are audit artifacts, not persistent maintained docs.
 
@@ -112,6 +120,10 @@ When verifying the local v2.2 codebase, use this navigation split:
   - [`/tmp/picf_v22_current_code_dataflow_20260418.md`](/tmp/picf_v22_current_code_dataflow_20260418.md)
   - [`/tmp/picf_v22_mathematical_spec_20260418.md`](/tmp/picf_v22_mathematical_spec_20260418.md)
   - [`/tmp/picf_v22_final_reconciliation_20260418.md`](/tmp/picf_v22_final_reconciliation_20260418.md)
+  - [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md)
+  - [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md)
+  - [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md)
+  - [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md)
 
 ## 1. Scope
 
@@ -1381,7 +1393,7 @@ Engineering rule:
   - `observed`
   - `semantic_override`
   - `flow_override`
-  - `next_state`
+  - `next_state` as the compact recurrent carry, not the full `PicfCoreState`
 - the serving-facing result exposes:
   - `action`
   - `action_chunk`
@@ -1501,6 +1513,7 @@ Current standard long-run launch profile:
 - standard FSDP full-finetune startup no longer serializes checkpoint construction rank-by-rank; each rank builds in parallel, because the serialized path turned one large checkpoint load into a multi-stage startup stall without changing training semantics
 - standard FSDP full-finetune startup now also stages the local PI0/PaliGemma checkpoint from shared `/mnt` storage into a node-local cache before rank-local `safe_open(...)/load_state_dict(...)`; this preserves training math while removing the shared-filesystem page-wait stall that appeared when four ranks loaded the same multi-GB semantic checkpoint concurrently. The default cache root is `~/.cache/openpi/pi0_checkpoints`, `OPENPI_STAGE_PI0_CHECKPOINT=auto` stages only `/mnt/...` sources, and `OPENPI_LOCAL_CHECKPOINT_CACHE_DIR` overrides the cache location when needed
 - V-JEPA mixed precision on CUDA now uses one safe autocast contract for both frozen and trainable modes. The encoder stays in native fp32 weights and the forward path enters autocast when `visual_dtype` is `float16`/`bfloat16`, avoiding frozen-path conv bias dtype mismatches without changing the feature contract.
+- window training now carries a canonical recurrent-carry object instead of forwarding the full `PicfCoreState` into `previous`. The carry contains only the fields that the next step actually consumes: `runtime_meta`, tactile contact hysteresis state, `posterior`, `predictive.executed_action`, and `predictive.physical_prediction_cache`. This is mathematically exact for the current v2.2 recurrence contract and removes non-recurrent semantic/control/task-readout state from the cross-step training graph.
 
 These values are the current operational training defaults for v2.2 runs even
 if historical baseline commands in older docs still show `--save-interval 5000`.

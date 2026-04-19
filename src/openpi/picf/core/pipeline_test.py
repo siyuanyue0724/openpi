@@ -1349,3 +1349,42 @@ def test_extract_targets_tactile_real_is_summary_head_not_per_sensor_reconstruct
     torch.testing.assert_close(tactile_base, torch.full_like(tactile_base, 0.5), atol=1e-6, rtol=0.0)
     assert float(tactile_aux[4].item()) == pytest.approx(0.5, abs=1e-6)
     assert bool(availability[2].item()) is True
+
+
+def test_recurrent_carry_matches_full_state_next_step_outputs(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    core.eval()
+    iterator = iter(replay)
+    first = next(iterator)
+    second = next(iterator)
+    first.tactile = _make_tactile_packet(first.step_id, contact_shift=8)
+    second.tactile = _make_tactile_packet(second.step_id, contact_shift=12)
+    with torch.no_grad():
+        first_output = core.step(
+            first,
+            point_features_override=_point_override(core, first),
+            visual_map_override=_visual_override(1.0),
+            semantic_override=_semantic_features(1.0),
+        )
+        recurrent_carry = core.make_recurrent_carry(first_output.state)
+        second_full = core.step(
+            second,
+            previous=first_output.state,
+            point_features_override=_point_override(core, second),
+            visual_map_override=_visual_override(1.5),
+            semantic_override=_semantic_features(1.5),
+        )
+        second_carry = core.step(
+            second,
+            previous=recurrent_carry,
+            point_features_override=_point_override(core, second),
+            visual_map_override=_visual_override(1.5),
+            semantic_override=_semantic_features(1.5),
+        )
+
+    torch.testing.assert_close(second_carry.state.posterior.h, second_full.state.posterior.h)
+    torch.testing.assert_close(second_carry.state.posterior.mu, second_full.state.posterior.mu)
+    torch.testing.assert_close(second_carry.state.posterior.global_post, second_full.state.posterior.global_post)
+    torch.testing.assert_close(second_carry.state.conditioned_control.pi_prefix_tokens, second_full.state.conditioned_control.pi_prefix_tokens)
+    torch.testing.assert_close(second_carry.state.predictive.physical_global_pred, second_full.state.predictive.physical_global_pred)
+    torch.testing.assert_close(second_carry.state.predictive.global_pred, second_full.state.predictive.global_pred)

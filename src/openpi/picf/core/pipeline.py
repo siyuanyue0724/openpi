@@ -26,8 +26,12 @@ from openpi.picf.core.contracts import PicfCoreState
 from openpi.picf.core.contracts import PicfObservationAnchorState
 from openpi.picf.core.contracts import PicfPosteriorAnchorState
 from openpi.picf.core.contracts import PicfPredictionCache
+from openpi.picf.core.contracts import PicfPreviousState
 from openpi.picf.core.contracts import PicfPredictiveState
 from openpi.picf.core.contracts import PicfProjectiveGeometryState
+from openpi.picf.core.contracts import PicfRecurrentCarryState
+from openpi.picf.core.contracts import PicfRecurrentPredictiveState
+from openpi.picf.core.contracts import PicfRecurrentTokenFieldState
 from openpi.picf.core.contracts import PicfTaskReadoutState
 from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.tactile_contact import contact_prob_with_hysteresis
@@ -1006,7 +1010,7 @@ class PicfFullCore(nn.Module):
     def _semantic_context(
         self,
         observation: PicfObservation,
-        previous: PicfCoreState | None,
+        previous: PicfPreviousState | None,
         semantic_override: Any | None,
     ) -> _SemanticContext:
         if not self.config.language_enabled:
@@ -1033,7 +1037,7 @@ class PicfFullCore(nn.Module):
                 "Pass PaliGemmaSemanticFeatures instead of summary-only outputs."
             )
 
-    def _previous_action(self, previous: PicfCoreState | None) -> torch.Tensor:
+    def _previous_action(self, previous: PicfPreviousState | None) -> torch.Tensor:
         if previous is None:
             return torch.zeros((7,), device=self.device, dtype=self.dtype)
         executed = getattr(previous.predictive, "executed_action", None)
@@ -1382,7 +1386,7 @@ class PicfFullCore(nn.Module):
             return action
         return torch.clamp(action, min=-clip_value, max=clip_value)
 
-    def _encode_context_tokens(self, observation: PicfObservation, meta: RuntimeMeta, previous: PicfCoreState | None) -> torch.Tensor:
+    def _encode_context_tokens(self, observation: PicfObservation, meta: RuntimeMeta, previous: PicfPreviousState | None) -> torch.Tensor:
         proprio = np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1)
         action = self._previous_action(previous)
         timing = np.asarray(
@@ -1686,7 +1690,7 @@ class PicfFullCore(nn.Module):
         visual_map: torch.Tensor | None,
         tactile_bundle: AnyTouchFeatureBundle | None,
         meta: RuntimeMeta,
-        previous: PicfCoreState | None,
+        previous: PicfPreviousState | None,
     ) -> tuple[PicfTokenFieldState, _StepDenseMemory]:
         hidden_dim = self.config.hidden_dim
         point_tokens = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
@@ -2057,7 +2061,7 @@ class PicfFullCore(nn.Module):
         alpha = torch.full((k,), self.config.alpha_init, device=self.device, dtype=self.dtype)
         return h, c, mu, var, x, S, a, alpha
 
-    def _current_prior(self, previous: PicfCoreState | None, observation: PicfObservation) -> tuple[torch.Tensor, ...]:
+    def _current_prior(self, previous: PicfPreviousState | None, observation: PicfObservation) -> tuple[torch.Tensor, ...]:
         if previous is None:
             return self._initial_persistent()
         prev = previous.posterior
@@ -2214,7 +2218,7 @@ class PicfFullCore(nn.Module):
 
     def _posterior_update(
         self,
-        previous: PicfCoreState | None,
+        previous: PicfPreviousState | None,
         observation: PicfObservation,
         obs_anchors: PicfObservationAnchorState,
         dense_memory: _StepDenseMemory | None = None,
@@ -2606,7 +2610,7 @@ class PicfFullCore(nn.Module):
 
     def _innovation(
         self,
-        previous: PicfCoreState | None,
+        previous: PicfPreviousState | None,
         targets: dict[str, torch.Tensor | None],
         availability: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
@@ -2661,7 +2665,7 @@ class PicfFullCore(nn.Module):
     def observe_step(
         self,
         observation: PicfObservation,
-        previous: PicfCoreState | None = None,
+        previous: PicfPreviousState | None = None,
         *,
         point_features_override: torch.Tensor | np.ndarray | None = None,
         visual_map_override: torch.Tensor | np.ndarray | None = None,
@@ -2725,6 +2729,21 @@ class PicfFullCore(nn.Module):
             conditioned_control=conditioned_control,
             control=PicfControlState(hold_reason=hold_reason),
             last_prompt=observation.prompt,
+        )
+
+    def make_recurrent_carry(self, state: PicfCoreState) -> PicfRecurrentCarryState:
+        return PicfRecurrentCarryState(
+            runtime_meta=state.runtime_meta,
+            token_field=PicfRecurrentTokenFieldState(
+                tactile_contact_gate=state.token_field.tactile_contact_gate,
+                tactile_anchor_mask=state.token_field.tactile_anchor_mask,
+                tactile_contact_score_ema=state.token_field.tactile_contact_score_ema,
+            ),
+            posterior=state.posterior,
+            predictive=PicfRecurrentPredictiveState(
+                executed_action=state.predictive.executed_action,
+                physical_prediction_cache=state.predictive.physical_prediction_cache,
+            ),
         )
 
     def _predictive_state(
@@ -2884,7 +2903,7 @@ class PicfFullCore(nn.Module):
     def step(
         self,
         observation: PicfObservation,
-        previous: PicfCoreState | None = None,
+        previous: PicfPreviousState | None = None,
         *,
         point_features_override: torch.Tensor | np.ndarray | None = None,
         visual_map_override: torch.Tensor | np.ndarray | None = None,

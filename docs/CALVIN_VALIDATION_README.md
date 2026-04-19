@@ -196,6 +196,7 @@ Current v2.2 long-run training profile:
 - the FSDP path uses explicit global-L2 grad norm / percentile clipping across local shards instead of `FSDP.clip_grad_norm_`, because the semantic stack deliberately mixes bf16 bulk weights with a small float32 stabilizer subset
 - standard multi-rank FSDP startup now stages the PI0/PaliGemma semantic checkpoint into a node-local cache before rank-local `load_state_dict(...)`; this avoids four ranks faulting the same `/mnt/checkpoints/pi05_base_pytorch` file tree at once without changing model math. Default cache root: `~/.cache/openpi/pi0_checkpoints`. Override with `OPENPI_LOCAL_CHECKPOINT_CACHE_DIR` or disable/force via `OPENPI_STAGE_PI0_CHECKPOINT=off|on|auto`
 - V-JEPA mixed precision on CUDA now uses the same safe autocast rule in both frozen and trainable modes. Keep `visual_dtype=float32` if you want the most conservative frozen path, or use `visual_dtype=bfloat16/float16` with the knowledge that the encoder remains in native fp32 and the forward path is autocast rather than hard-cast.
+- window training on this profile now forwards only the canonical recurrent carry between transitions rather than the full `PicfCoreState`. This keeps the recurrence mathematically exact while removing non-recurrent semantic/control/task-readout state from the cross-step training graph.
 
 Distributed runtime note for current multi-rank bring-up:
 

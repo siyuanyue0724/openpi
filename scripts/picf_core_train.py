@@ -2283,7 +2283,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["projective_candidate_density"] = metrics["projective_candidate_density"] + candidate_density
                 metrics["tactile_contact_prob_mean"] = metrics["tactile_contact_prob_mean"] + tactile_contact_prob_mean
                 metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + tactile_active_rate
-            previous = output.state
+            previous = policy_forward.next_state
 
         assert metrics is not None
         denom = float(len(window.frames) - 1)

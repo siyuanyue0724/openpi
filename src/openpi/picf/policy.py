@@ -11,6 +11,7 @@ from openpi.picf.contracts import PicfObservation
 from openpi.picf.core import PicfCoreOutput
 from openpi.picf.core import PicfCoreState
 from openpi.picf.core import PicfFullCore
+from openpi.picf.core import PicfPreviousState
 from openpi.picf.fsdp_utils import call_module_forward_or_method
 
 
@@ -20,7 +21,7 @@ class PicfPolicyTrainResult:
     observed: Any | None
     semantic_override: Any | None
     flow_override: dict[str, torch.Tensor] | None
-    next_state: PicfCoreState
+    next_state: PicfPreviousState
 
 
 @dataclasses.dataclass(frozen=True)
@@ -69,6 +70,11 @@ class PicfPi05Policy:
         if self.semantic_encoder is None:
             return None
         return call_module_forward_or_method(self.semantic_encoder, "encode_observation", "encode_observation", observation)
+
+    def recurrent_state(self, state: PicfCoreState) -> PicfPreviousState:
+        if hasattr(self.core, "make_recurrent_carry"):
+            return self.core.make_recurrent_carry(state)
+        return state
 
     def _legacy_core_step(
         self,
@@ -146,7 +152,7 @@ class PicfPi05Policy:
                 observed=None,
                 semantic_override=semantic_override,
                 flow_override=flow_override,
-                next_state=output.state,
+                next_state=self.recurrent_state(output.state),
             )
         observed = self.core.observe_step(
             current,
@@ -182,7 +188,7 @@ class PicfPi05Policy:
             observed=observed,
             semantic_override=semantic_override,
             flow_override=flow_override,
-            next_state=output.state,
+            next_state=self.recurrent_state(output.state),
         )
 
     @torch.no_grad()

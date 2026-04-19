@@ -29,6 +29,7 @@ PALIGEMMA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "paligemma" / "
 TRAINER_SCRIPT_PATH = REPO_ROOT / "scripts" / "picf_core_train.py"
 SERVE_SCRIPT_PATH = REPO_ROOT / "scripts" / "serve_picf_policy.py"
 POLICY_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "policy.py"
+CORE_CONTRACTS_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "core" / "contracts.py"
 GEMMA_PYTORCH_PATH = REPO_ROOT / "src" / "openpi" / "models_pytorch" / "gemma_pytorch.py"
 SONATA_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "sonata" / "wrapper.py"
 ANYTOUCH_WRAPPER_PATH = REPO_ROOT / "src" / "openpi" / "picf" / "anytouch" / "wrapper.py"
@@ -104,6 +105,7 @@ def verify_static_contract() -> list[CheckResult]:
     trainer_source = _read(TRAINER_SCRIPT_PATH)
     serve_source = _read(SERVE_SCRIPT_PATH)
     policy_source = _read(POLICY_PATH)
+    contracts_source = _read(CORE_CONTRACTS_PATH)
     gemma_pytorch_source = _read(GEMMA_PYTORCH_PATH)
     sonata_wrapper_source = _read(SONATA_WRAPPER_PATH)
     anytouch_wrapper_source = _read(ANYTOUCH_WRAPPER_PATH)
@@ -640,6 +642,19 @@ def verify_static_contract() -> list[CheckResult]:
                 and "flow_override = policy_forward.flow_override" in trainer_source
             ),
             detail="PICF trainer now uses the unified policy interface for action/control integration.",
+        ),
+        CheckResult(
+            name="trainer_uses_compact_recurrent_next_state_instead_of_full_output_state",
+            ok=(
+                "previous = policy_forward.next_state" in trainer_source
+                and "def make_recurrent_carry(self, state: PicfCoreState)" in source
+                and "class PicfRecurrentCarryState:" in contracts_source
+                and "class PicfRecurrentPredictiveState:" in contracts_source
+            ),
+            detail=(
+                "Window training now carries only the canonical recurrent state between transitions "
+                "instead of forwarding the full PicfCoreState object."
+            ),
         ),
         CheckResult(
             name="trainer_ddp_runtime_guard_rejects_detail_debug_by_default",

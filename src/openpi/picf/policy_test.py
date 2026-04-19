@@ -172,6 +172,61 @@ def test_policy_forward_train_transition_uses_action_chunk_when_single_action_mi
     torch.testing.assert_close(result.output.state.predictive.action_chunk, target)
 
 
+def test_policy_forward_train_transition_returns_recurrent_carry_when_core_supports_it() -> None:
+    carry = object()
+
+    class _DummyCore:
+        def __init__(self) -> None:
+            self.config = types.SimpleNamespace(require_pi0_action_generator=True)
+
+        def observe_step(self, *_args, **_kwargs):
+            return types.SimpleNamespace(
+                conditioned_control=types.SimpleNamespace(
+                    pi_prefix_tokens=torch.ones((4, 8), dtype=torch.float32),
+                )
+            )
+
+        def finalize_with_action(self, _observation, _observed, *, action_future):
+            state = types.SimpleNamespace(
+                predictive=types.SimpleNamespace(
+                    action=torch.as_tensor(action_future, dtype=torch.float32),
+                    action_chunk=None,
+                )
+            )
+            return types.SimpleNamespace(state=state, debug={})
+
+        def make_recurrent_carry(self, state):
+            assert state is not None
+            return carry
+
+    class _SemanticEncoder:
+        def encode_observation(self, _observation):
+            return torch.zeros((2, 8), dtype=torch.float32)
+
+        def supports_pi0_action_generation(self):
+            return True
+
+        def compute_action_flow_loss(self, semantic_override, *, extra_prefix_tokens, action_chunk_target):
+            del semantic_override, extra_prefix_tokens
+            return {
+                "total": torch.tensor(0.25),
+                "action_pos": torch.tensor(0.1),
+                "action_rot": torch.tensor(0.1),
+                "action_gripper": torch.tensor(0.05),
+                "predicted_action": torch.zeros((7,), dtype=torch.float32),
+                "predicted_chunk": torch.as_tensor(action_chunk_target, dtype=torch.float32),
+            }
+
+    policy = PicfPi05Policy(core=_DummyCore(), semantic_encoder=_SemanticEncoder())
+    target = torch.ones((2, 7), dtype=torch.float32)
+    result = policy.forward_train_transition(
+        _dummy_observation(),
+        action_chunk_target=target,
+    )
+
+    assert result.next_state is carry
+
+
 def test_policy_forward_train_transition_legacy_core_uses_flow_override_when_available() -> None:
     class _LegacyCore:
         def __init__(self) -> None:
