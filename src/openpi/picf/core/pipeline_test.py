@@ -108,6 +108,17 @@ def test_transformer_stack_skips_checkpointing_for_attention_reads(monkeypatch: 
     assert attn is not None
 
 
+def test_transformer_stack_clones_view_inputs_before_attention() -> None:
+    stack = pipeline_module.TransformerStack(16, 4, 2, activation_checkpointing=False).train()
+    base = torch.randn(5, 16, requires_grad=True)
+    view = base[None, :]
+    y, attn = stack(view, return_attention=True)
+    assert y.shape == view.shape
+    assert attn is not None
+    y.sum().backward()
+    assert base.grad is not None
+
+
 class _ClipAwareVisualEncoder:
     def __init__(self) -> None:
         self.clips: list[np.ndarray] = []

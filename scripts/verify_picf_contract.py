@@ -217,6 +217,18 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="transformer_stacks_break_batched_view_aliases_before_attention",
+            ok=(
+                'if getattr(x, "_base", None) is not None:' in source
+                and "x = x.clone()" in source
+                and "autograd can reject those aliasing views" in source
+            ),
+            detail=(
+                "Transformer stacks now clone batched view inputs once at stack entry so FSDP full-shard "
+                "does not trip autograd multi-view alias errors inside residual attention blocks."
+            ),
+        ),
+        CheckResult(
             name="fsdp_grad_clipping_uses_explicit_global_l2_reduction",
             ok=(
                 "def _fsdp_global_grad_l2_norm(" in trainer_source
