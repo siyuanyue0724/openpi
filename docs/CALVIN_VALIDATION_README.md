@@ -179,6 +179,8 @@ Current v2.2 long-run training profile:
 - `--grad-clip-mode percentile`
 - `--grad-clip-percentile 75`
 - `--grad-clip-window 100`
+- `--visual-activation-checkpointing`
+- `--semantic-gradient-checkpointing`
 - `--training-strategy fsdp_full_shard` for the standard 4x40GB A100 full-finetune profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
 - the FSDP path uses explicit global-L2 grad norm / percentile clipping across local shards instead of `FSDP.clip_grad_norm_`, because the semantic stack deliberately mixes bf16 bulk weights with a small float32 stabilizer subset

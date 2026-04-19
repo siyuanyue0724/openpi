@@ -1478,6 +1478,8 @@ Current standard long-run launch profile:
 - `--grad-clip-mode percentile`
 - `--grad-clip-percentile 75`
 - `--grad-clip-window 100`
+- `--visual-activation-checkpointing`
+- `--semantic-gradient-checkpointing`
 - `--training-strategy fsdp_full_shard` for the standard 4x40GB A100 full-finetune profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
 - semantic FSDP wrapping must keep the PI0/PaliGemma stack at one boundary and leave minority float32 stabilizer parameters in `ignored_states`; recursive internal FSDP splitting inside the hand-written Gemma dual-branch forward is not valid
