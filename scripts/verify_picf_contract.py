@@ -219,6 +219,19 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="fsdp_defaults_expandable_segments_allocator_contract",
+            ok=(
+                'applied = "expandable_segments:True"' in trainer_source
+                and "PYTORCH_CUDA_ALLOC_CONF" in trainer_source
+                and "expandable_segments:True" in trainer_source
+                and "all-backbone CUDA training expects" in trainer_source
+            ),
+            detail=(
+                "FSDP full-finetune now standardizes the CUDA allocator contract on "
+                "expandable_segments:True instead of leaving fragmentation behavior implicit."
+            ),
+        ),
+        CheckResult(
             name="paligemma_tokenization_injects_state_into_prompt",
             ok="self.tokenizer.tokenize(str(prompt), state=state)" in wrapper_source,
             detail="PICF semantic tokenization injects robot state back into the PI0.5 prompt path.",

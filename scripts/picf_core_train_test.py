@@ -292,6 +292,33 @@ def test_setup_distributed_preserves_detail_with_explicit_opt_in(monkeypatch: py
     assert runtime_env.torch_distributed_debug_source == "inherited"
 
 
+def test_configure_cuda_allocator_env_defaults_expandable_segments_for_fsdp(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PYTORCH_CUDA_ALLOC_CONF", raising=False)
+
+    alloc_conf, source = _MODULE._configure_cuda_allocator_env(
+        requested_device="cuda",
+        training_strategy="fsdp_full_shard",
+        world_size=4,
+    )
+
+    assert alloc_conf == "expandable_segments:True"
+    assert source == "defaulted_for_fsdp"
+    assert os.environ["PYTORCH_CUDA_ALLOC_CONF"] == "expandable_segments:True"
+
+
+def test_configure_cuda_allocator_env_rejects_non_expandable_override_for_fsdp(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PYTORCH_CUDA_ALLOC_CONF", "max_split_size_mb:512")
+
+    with pytest.raises(RuntimeError, match="expects PYTORCH_CUDA_ALLOC_CONF to include expandable_segments:True"):
+        _MODULE._configure_cuda_allocator_env(
+            requested_device="cuda",
+            training_strategy="fsdp_full_shard",
+            world_size=4,
+        )
+
+
 def test_setup_distributed_requires_local_rank_for_ddp(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("WORLD_SIZE", "4")
     monkeypatch.setenv("RANK", "0")

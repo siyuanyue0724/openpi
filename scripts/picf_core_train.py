@@ -198,6 +198,8 @@ class _DistributedRuntimeEnv:
     allow_torch_distributed_debug_detail: bool
     torch_nccl_enable_monitoring: str | None
     torch_nccl_heartbeat_timeout_sec: str | None
+    pytorch_cuda_alloc_conf: str | None
+    pytorch_cuda_alloc_conf_source: str
 
 
 def _env_flag(name: str) -> bool:
@@ -232,7 +234,30 @@ def _configure_distributed_runtime_env(*, world_size: int, rank: int) -> _Distri
         allow_torch_distributed_debug_detail=allow_detail,
         torch_nccl_enable_monitoring=os.environ.get("TORCH_NCCL_ENABLE_MONITORING"),
         torch_nccl_heartbeat_timeout_sec=os.environ.get("TORCH_NCCL_HEARTBEAT_TIMEOUT_SEC"),
+        pytorch_cuda_alloc_conf=os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+        pytorch_cuda_alloc_conf_source="inherited",
     )
+
+
+def _configure_cuda_allocator_env(*, requested_device: str, training_strategy: str, world_size: int) -> tuple[str | None, str]:
+    if not str(requested_device).startswith("cuda"):
+        return os.environ.get("PYTORCH_CUDA_ALLOC_CONF"), "not_applicable"
+    if str(training_strategy).lower().replace("-", "_") != "fsdp_full_shard" or int(world_size) <= 1:
+        return os.environ.get("PYTORCH_CUDA_ALLOC_CONF"), "not_applicable"
+
+    requested = os.environ.get("PYTORCH_CUDA_ALLOC_CONF", "").strip()
+    if requested:
+        if "expandable_segments" not in requested.lower():
+            raise RuntimeError(
+                "FSDP runtime guard: all-backbone CUDA training expects "
+                "PYTORCH_CUDA_ALLOC_CONF to include expandable_segments:True. "
+                f"Got {requested!r}."
+            )
+        return requested, "inherited"
+
+    applied = "expandable_segments:True"
+    os.environ["PYTORCH_CUDA_ALLOC_CONF"] = applied
+    return applied, "defaulted_for_fsdp"
 
 
 def _register_fault_dump_handler(*, stream: TextIO | None = None) -> bool:
@@ -3186,7 +3211,17 @@ def _init_wandb(*, args: argparse.Namespace, output_dir: Path, resuming: bool, e
 
 
 def train(args: argparse.Namespace) -> None:
+    alloc_conf, alloc_conf_source = _configure_cuda_allocator_env(
+        requested_device=args.device,
+        training_strategy=str(getattr(args, "training_strategy", "ddp")),
+        world_size=int(os.environ.get("WORLD_SIZE", "1")),
+    )
     use_ddp, rank, world_size, device, runtime_env = _setup_distributed(args.device)
+    runtime_env = dataclasses.replace(
+        runtime_env,
+        pytorch_cuda_alloc_conf=alloc_conf,
+        pytorch_cuda_alloc_conf_source=alloc_conf_source,
+    )
     wandb_active = False
     is_main = False
     source: _CalvinTransitionSource | None = None
@@ -3201,13 +3236,16 @@ def train(args: argparse.Namespace) -> None:
             _warn_single_gpu_foundation_accum_risk(args, world_size=world_size, logger=logging.getLogger())
             logging.info(
                 "Distributed runtime env: world_size=%s torch_distributed_debug=%s source=%s allow_detail=%s "
-                "torch_nccl_enable_monitoring=%s torch_nccl_heartbeat_timeout_sec=%s",
+                "torch_nccl_enable_monitoring=%s torch_nccl_heartbeat_timeout_sec=%s "
+                "pytorch_cuda_alloc_conf=%s alloc_source=%s",
                 world_size,
                 runtime_env.torch_distributed_debug or None,
                 runtime_env.torch_distributed_debug_source,
                 runtime_env.allow_torch_distributed_debug_detail,
                 runtime_env.torch_nccl_enable_monitoring,
                 runtime_env.torch_nccl_heartbeat_timeout_sec,
+                runtime_env.pytorch_cuda_alloc_conf,
+                runtime_env.pytorch_cuda_alloc_conf_source,
             )
         output_dir = Path(args.checkpoint_base_dir) / "picf_core" / args.exp_name
         latest_path = output_dir / "latest.pt"
