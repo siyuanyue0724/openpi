@@ -898,7 +898,7 @@ def test_fsdp_wrap_recursively_splits_mixed_dtype_subtrees_on_cpu() -> None:
     if _MODULE.FullyShardedDataParallel is None:
         pytest.skip("FSDP is not available in this torch build.")
 
-    class _MixedSemanticEncoder(torch.nn.Module):
+    class _MixedModule(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
             self.patch = torch.nn.Linear(4, 4).float()
@@ -913,44 +913,49 @@ def test_fsdp_wrap_recursively_splits_mixed_dtype_subtrees_on_cpu() -> None:
             x = self.norm(x + y)
             return self.head(x)
 
-    class _TinyCore(torch.nn.Module):
-        def __init__(self) -> None:
-            super().__init__()
-            self.point_feature_extractor = torch.nn.Linear(4, 4)
-            self.visual_encoder = torch.nn.Linear(4, 4)
-            self.tactile_encoder = torch.nn.Linear(4, 4)
-            self.head = torch.nn.Linear(4, 2)
+    with _single_rank_process_group():
+        module = _MixedModule()
+        wrapped = _MODULE._fsdp_wrap_uniform_dtype_subtrees(module, device=torch.device("cpu"))
+        assert not _MODULE._is_fsdp_model(wrapped)
+        nested_wrappers = [m for m in wrapped.modules() if _MODULE._is_fsdp_model(m)]
+        assert nested_wrappers, "generic mixed-dtype helper should recursively split into nested FSDP wrappers"
+        assert "position_ids" not in dict(wrapped.named_parameters())
+        assert "position_ids" in dict(wrapped.named_buffers())
+        optimizer = torch.optim.AdamW(wrapped.parameters(), lr=1e-3)
+        loss = wrapped(torch.randn(2, 4)).sum()
+        loss.backward()
+        optimizer.step()
 
-    class _TinyTrainer(torch.nn.Module):
+
+def test_fsdp_wrap_root_with_ignored_non_dominant_dtypes_keeps_single_boundary_on_cpu() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _MixedRootModule(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
-            self.core = _TinyCore()
-            self.semantic_encoder = _MixedSemanticEncoder()
-            self.policy = types.SimpleNamespace(semantic_encoder=self.semantic_encoder)
+            self.patch = torch.nn.Linear(4, 4).float()
+            self.block = torch.nn.Linear(4, 4, bias=False).to(torch.bfloat16)
+            self.norm = torch.nn.LayerNorm(4).float()
+            self.head = torch.nn.Linear(4, 4).to(torch.bfloat16)
 
         def forward(self, inputs: torch.Tensor) -> torch.Tensor:
-            hidden = self.core.point_feature_extractor(inputs)
-            hidden = self.core.visual_encoder(hidden)
-            hidden = self.core.tactile_encoder(hidden)
-            hidden = self.semantic_encoder(hidden)
-            return self.core.head(hidden).sum()
-
-    args = _base_args()
-    args.training_strategy = "fsdp_full_shard"
-    args.optimizer_sharding = "none"
+            x = self.patch(inputs.float())
+            x = self.block(x.to(torch.bfloat16)).to(torch.float32) + x
+            x = self.norm(x)
+            return self.head(x.to(torch.bfloat16)).to(torch.float32)
 
     with _single_rank_process_group():
-        trainer = _TinyTrainer()
-        wrapped = _MODULE._wrap_model_for_training_strategy(trainer, args=args, device=torch.device("cpu"))
+        module = _MixedRootModule()
+        wrapped = _MODULE._fsdp_wrap_root_with_ignored_non_dominant_dtypes(module, device=torch.device("cpu"))
+
         assert _MODULE._is_fsdp_model(wrapped)
-        unwrapped = _MODULE._unwrap_training_model(wrapped)
-        nested_semantic_wrappers = [m for m in unwrapped.semantic_encoder.modules() if _MODULE._is_fsdp_model(m)]
-        assert nested_semantic_wrappers, "mixed-dtype semantic encoder should be recursively split into nested FSDP wrappers"
-        assert "position_ids" not in dict(unwrapped.semantic_encoder.named_parameters())
-        assert "position_ids" in dict(unwrapped.semantic_encoder.named_buffers())
+        assert not any(
+            _MODULE._is_fsdp_model(child) for child in wrapped.module.modules() if child is not wrapped.module
+        ), "semantic-style root wrap should not recursively shard internal mixed-dtype subtrees"
 
         optimizer = torch.optim.AdamW(wrapped.parameters(), lr=1e-3)
-        loss = wrapped(torch.randn(2, 4))
+        loss = wrapped(torch.randn(2, 4)).sum()
         loss.backward()
         optimizer.step()
 

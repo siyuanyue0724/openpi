@@ -1349,6 +1349,54 @@ def _fsdp_wrap_uniform_dtype_subtrees(
     return module
 
 
+def _fsdp_wrap_root_with_ignored_non_dominant_dtypes(
+    module: torch.nn.Module,
+    *,
+    device: torch.device,
+) -> torch.nn.Module:
+    """Wrap a mixed-dtype root as one FSDP boundary, ignoring minority dtypes.
+
+    The PI0/PaliGemma semantic stack contains a hand-written dual-branch Gemma
+    forward that walks language-model and action-expert layers directly instead
+    of re-entering each internal submodule via ``module(...)``. Recursive FSDP
+    splitting inside that stack therefore breaks parameter-view materialization:
+    the custom forward can cross into nested sharded subtrees without hitting
+    their pre-forward unshard hooks.
+
+    For that specific training path we keep one semantic FSDP boundary and leave
+    the minority-dtype trainable parameters unsharded via ``ignored_states``.
+    This preserves the custom forward while still full-sharding the bulk of the
+    semantic parameters.
+    """
+
+    if _is_fsdp_model(module):
+        return module
+    if FullyShardedDataParallel is None:
+        raise RuntimeError("training_strategy=fsdp_full_shard requires torch.distributed.fsdp to be available.")
+
+    _promote_non_trainable_nonfloating_params_to_buffers(module)
+
+    trainable_params = [param for param in module.parameters() if bool(getattr(param, "requires_grad", False))]
+    if not trainable_params:
+        return module
+
+    dtype_numel: dict[torch.dtype, int] = {}
+    for param in trainable_params:
+        dtype_numel[param.dtype] = dtype_numel.get(param.dtype, 0) + int(param.numel())
+
+    dominant_dtype = max(dtype_numel, key=dtype_numel.get)
+    ignored_states = [param for param in trainable_params if param.dtype != dominant_dtype]
+
+    return FullyShardedDataParallel(
+        module,
+        sharding_strategy=ShardingStrategy.FULL_SHARD,
+        device_id=_fsdp_device_id(device),
+        use_orig_params=True,
+        limit_all_gathers=True,
+        ignored_states=ignored_states or None,
+    )
+
+
 def _wrap_model_for_training_strategy(
     model: "_PicfWindowTrainer",
     *,
@@ -1361,7 +1409,10 @@ def _wrap_model_for_training_strategy(
         raise RuntimeError("training_strategy=fsdp_full_shard requires torch.distributed.fsdp to be available.")
     child_modules = _fsdp_sharded_child_modules(model)
     for child in child_modules:
-        wrapped = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
+        if child is model.semantic_encoder:
+            wrapped = _fsdp_wrap_root_with_ignored_non_dominant_dtypes(child, device=device)
+        else:
+            wrapped = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
         if child is model.semantic_encoder:
             model.semantic_encoder = wrapped
             model.policy.semantic_encoder = wrapped
