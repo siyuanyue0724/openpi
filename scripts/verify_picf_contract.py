@@ -219,12 +219,12 @@ def verify_static_contract() -> list[CheckResult]:
         CheckResult(
             name="transformer_stacks_break_batched_view_aliases_before_attention",
             ok=(
-                'if getattr(x, "_base", None) is not None:' in source
-                and "x = x.clone()" in source
-                and "autograd can reject those aliasing views" in source
+                "x = x.clone()" in source
+                and "storage aliasing is not reliably exposed via" in source
+                and "multi-view in-place checks from tripping" in source
             ),
             detail=(
-                "Transformer stacks now clone batched view inputs once at stack entry so FSDP full-shard "
+                "Transformer stacks now materialize stack inputs once at entry so FSDP full-shard "
                 "does not trip autograd multi-view alias errors inside residual attention blocks."
             ),
         ),

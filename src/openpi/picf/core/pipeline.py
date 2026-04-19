@@ -392,13 +392,14 @@ class TransformerStack(nn.Module):
     ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
         if x.shape[1] == 0:
             return (x, None) if return_attention else x
-        if getattr(x, "_base", None) is not None:
-            # PICF frequently batches token fields via `tokens[None, :]`, which
-            # yields a lightweight view. Under FSDP full-shard, downstream
-            # autograd can reject those aliasing views once sibling views of the
-            # same base participate in residual updates. Cloning once at stack
-            # entry preserves the exact math while removing the alias.
-            x = x.clone()
+        # PICF frequently batches token fields via lightweight views such as
+        # `tokens[None, :]`, and FSDP can also hand stacks parameter-compatible
+        # activations whose storage aliasing is not reliably exposed via
+        # `tensor._base`. Residual attention blocks do not benefit from
+        # preserving those aliases, so we materialize a fresh tensor once at
+        # stack entry. This is mathematically exact and prevents autograd's
+        # multi-view in-place checks from tripping inside LayerNorm/attention.
+        x = x.clone()
         attn_maps = []
         for layer in self.layers:
             if (
