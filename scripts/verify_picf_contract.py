@@ -194,6 +194,19 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="fsdp_grad_clipping_uses_explicit_global_l2_reduction",
+            ok=(
+                "def _fsdp_global_grad_l2_norm(" in trainer_source
+                and "dist.all_reduce(local_sq, op=dist.ReduceOp.SUM)" in trainer_source
+                and "return _fsdp_global_grad_l2_norm(model)" in trainer_source
+                and "return _fsdp_clip_grad_norm_exact(model, max_norm=float(max_norm))" in trainer_source
+            ),
+            detail=(
+                "Mixed-dtype FSDP training now computes grad norm and percentile clipping via an explicit "
+                "global L2 reduction over local gradient shards instead of relying on clip_grad_norm_."
+            ),
+        ),
+        CheckResult(
             name="parallel_rank_model_build_is_standard_path",
             ok=(
                 "for build_rank in range(int(world_size))" not in trainer_source

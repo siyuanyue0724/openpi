@@ -2022,3 +2022,45 @@ def test_build_model_sequential_across_ranks_has_no_rank_barrier_side_effects(mo
     assert result == ("core", None, False)
     assert built == [1]
     assert barriers == []
+
+
+def test_fsdp_grad_norm_handles_mixed_grad_dtypes_without_clip_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyFSDP(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bf16 = torch.nn.Parameter(torch.tensor([3.0], dtype=torch.bfloat16))
+            self.fp32 = torch.nn.Parameter(torch.tensor([4.0], dtype=torch.float32))
+
+        def clip_grad_norm_(self, max_norm: float) -> torch.Tensor:
+            raise AssertionError("FSDP clip_grad_norm_ should not be used for mixed-dtype grad norm probing")
+
+    model = _DummyFSDP()
+    model.bf16.grad = torch.tensor([3.0], dtype=torch.bfloat16)
+    model.fp32.grad = torch.tensor([4.0], dtype=torch.float32)
+    monkeypatch.setattr(_MODULE, "_is_fsdp_model", lambda candidate: candidate is model)
+
+    grad_norm = _MODULE._grad_norm_for_training_model(model)
+
+    assert math.isclose(grad_norm, 5.0, rel_tol=0.0, abs_tol=1e-6)
+
+
+def test_fsdp_grad_clipping_handles_mixed_grad_dtypes_without_clip_api(monkeypatch: pytest.MonkeyPatch) -> None:
+    class _DummyFSDP(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.bf16 = torch.nn.Parameter(torch.tensor([3.0], dtype=torch.bfloat16))
+            self.fp32 = torch.nn.Parameter(torch.tensor([4.0], dtype=torch.float32))
+
+        def clip_grad_norm_(self, max_norm: float) -> torch.Tensor:
+            raise AssertionError("FSDP clip_grad_norm_ should not be used for mixed-dtype grad clipping")
+
+    model = _DummyFSDP()
+    model.bf16.grad = torch.tensor([3.0], dtype=torch.bfloat16)
+    model.fp32.grad = torch.tensor([4.0], dtype=torch.float32)
+    monkeypatch.setattr(_MODULE, "_is_fsdp_model", lambda candidate: candidate is model)
+
+    total_norm = _MODULE._clip_grad_norm_for_training_model(model, max_norm=2.5)
+
+    assert math.isclose(total_norm, 5.0, rel_tol=0.0, abs_tol=1e-6)
+    torch.testing.assert_close(model.fp32.grad, torch.tensor([2.0], dtype=torch.float32), atol=1e-5, rtol=0)
+    torch.testing.assert_close(model.bf16.grad.float(), torch.tensor([1.5], dtype=torch.float32), atol=5e-3, rtol=0)

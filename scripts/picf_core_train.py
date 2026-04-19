@@ -1496,15 +1496,49 @@ def _grad_norm(parameters: Iterator[torch.nn.Parameter]) -> float:
     return float(math.sqrt(sq_sum)) if found else 0.0
 
 
+def _fsdp_global_grad_l2_norm(model: torch.nn.Module) -> float:
+    local_sq: torch.Tensor | None = None
+    for param in model.parameters():
+        if param.grad is None:
+            continue
+        grad = param.grad.detach()
+        grad64 = grad.to(dtype=torch.float64)
+        grad_sq = torch.sum(grad64 * grad64)
+        if local_sq is None:
+            local_sq = grad_sq
+        else:
+            local_sq = local_sq + grad_sq
+    if local_sq is None:
+        return 0.0
+    if dist.is_initialized():
+        dist.all_reduce(local_sq, op=dist.ReduceOp.SUM)
+    return float(torch.sqrt(local_sq).item())
+
+
+def _fsdp_clip_grad_norm_exact(model: torch.nn.Module, *, max_norm: float, eps: float = 1e-6) -> float:
+    total_norm = _fsdp_global_grad_l2_norm(model)
+    if total_norm <= 0.0:
+        return 0.0
+    clip_coef = float(max_norm) / (float(total_norm) + float(eps))
+    if clip_coef >= 1.0:
+        return float(total_norm)
+    with torch.no_grad():
+        for param in model.parameters():
+            if param.grad is None:
+                continue
+            param.grad.mul_(clip_coef)
+    return float(total_norm)
+
+
 def _grad_norm_for_training_model(model: torch.nn.Module) -> float:
     if _is_fsdp_model(model):
-        return float(model.clip_grad_norm_(float("inf")).item())
+        return _fsdp_global_grad_l2_norm(model)
     return _grad_norm(model.parameters())
 
 
 def _clip_grad_norm_for_training_model(model: torch.nn.Module, *, max_norm: float) -> float:
     if _is_fsdp_model(model):
-        return float(model.clip_grad_norm_(float(max_norm)).item())
+        return _fsdp_clip_grad_norm_exact(model, max_norm=float(max_norm))
     return float(torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(max_norm)))
 
 
