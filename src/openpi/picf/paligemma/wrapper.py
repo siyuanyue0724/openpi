@@ -28,6 +28,8 @@ from openpi.models_pytorch.pi0_pytorch import create_sinusoidal_pos_embedding
 from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
 from openpi.models_pytorch.pi0_pytorch import _ensure_transformers_replace_is_ready
 from openpi.picf.contracts import PicfObservation
+from openpi.picf.fsdp_utils import module_num_embeddings
+from openpi.picf.fsdp_utils import module_parameter_dtype
 from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 from openpi.shared import image_tools
 
@@ -533,6 +535,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
         self._load_full_pi0_weights(checkpoint)
+        self._drop_unused_generation_heads()
         self.to(device=self.device)
         self.tokenizer = PaligemmaTokenizer(max_len=max_token_len)
         if self.trainable:
@@ -565,11 +568,14 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
     ) -> PaliGemmaWithExpertModel:
         paligemma_config = _gemma.get_config(paligemma_variant)
         action_expert_config = _gemma.get_config(action_expert_variant)
+        config = self.__dict__.get("config")
+        tokenwise_chunk_size = int(getattr(config, "tokenwise_chunk_size", 0))
         model = PaliGemmaWithExpertModel(
             paligemma_config,
             action_expert_config,
             use_adarms=[False, True] if pi05 else [False, False],
             precision=precision,
+            tokenwise_chunk_size=tokenwise_chunk_size,
         )
         return model
 
@@ -654,6 +660,59 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         with torch.no_grad():
             module.weight.copy_(weight.to(device=module.weight.device, dtype=module.weight.dtype))
             module.bias.copy_(bias.to(device=module.bias.device, dtype=module.bias.dtype))
+
+    def _drop_unused_generation_heads(self) -> None:
+        """Remove unused LM heads from the runtime graph.
+
+        PICF/PI0 training consumes hidden states from `paligemma.language_model`
+        and `gemma_expert.model`, then uses `action_out_proj` for the final action
+        path. The outer causal-LM heads are checkpoint artifacts for tokenizer /
+        tie-weight compatibility, but they are not touched by the live training
+        forward. Dropping them after checkpoint load keeps the runtime graph
+        mathematically unchanged while removing large dead parameters from FSDP
+        wrapping and optimizer enumeration.
+        """
+
+        if getattr(self.paligemma_with_expert.paligemma, "lm_head", None) is not None:
+            self.paligemma_with_expert.paligemma.lm_head = None
+        if getattr(self.paligemma_with_expert.gemma_expert, "lm_head", None) is not None:
+            self.paligemma_with_expert.gemma_expert.lm_head = None
+
+    def fsdp_runtime_leaf_module_specs(self) -> list[tuple[nn.Module, str, str]]:
+        """Expose runtime-hot semantic leaves that can be nested-FSDP wrapped exactly.
+
+        The dual-branch PI0/Gemma path directly calls these child modules during
+        training. Wrapping them as explicit nested leaves lets FSDP all-gather
+        them on demand instead of materializing the full semantic stack as one
+        monolithic boundary.
+        """
+
+        specs: list[tuple[nn.Module, str, str]] = []
+        paligemma = self.paligemma_with_expert.paligemma
+        specs.append((paligemma.language_model, "embed_tokens", "uniform_recursive"))
+        for model in (paligemma.language_model, self.paligemma_with_expert.gemma_expert.model):
+            for layer in model.layers:
+                specs.extend(
+                    [
+                        (layer.self_attn, "q_proj", "uniform_recursive"),
+                        (layer.self_attn, "k_proj", "uniform_recursive"),
+                        (layer.self_attn, "v_proj", "uniform_recursive"),
+                        (layer.self_attn, "o_proj", "uniform_recursive"),
+                        (layer, "mlp", "uniform_recursive"),
+                    ]
+                )
+        specs.extend(
+            [
+                (self, "action_in_proj", "uniform_recursive"),
+                (self, "action_out_proj", "uniform_recursive"),
+                (self, "time_mlp_in", "uniform_recursive"),
+                (self, "time_mlp_out", "uniform_recursive"),
+            ]
+        )
+        return specs
+
+    def _model_runtime_dtype(self) -> torch.dtype:
+        return module_parameter_dtype(self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj)
 
     def _views(self, observation: PicfObservation) -> list[np.ndarray]:
         views = [np.asarray(observation.rgb_static)]
@@ -760,7 +819,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         def _lang_embed(tokens: torch.Tensor) -> torch.Tensor:
             _assert_index_tensor_in_range(
                 tokens,
-                size=int(self.paligemma_with_expert.paligemma.language_model.embed_tokens.num_embeddings),
+                size=module_num_embeddings(self.paligemma_with_expert.paligemma.language_model.embed_tokens),
                 name="paligemma_language_token_ids",
             )
             lang_emb = self.paligemma_with_expert.embed_language_tokens(tokens)
@@ -775,7 +834,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         prefix_pad_masks = torch.cat(pad_masks, dim=1)
         prefix_att_masks = torch.as_tensor(att_masks, device=self.device, dtype=torch.int32)[None, :]
         prefix_att_masks = prefix_att_masks.expand(prefix_pad_masks.shape[0], -1)
-        model_dtype = self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+        model_dtype = self._model_runtime_dtype()
         if model_dtype in (torch.float16, torch.bfloat16):
             prefix_embs = prefix_embs.to(dtype=model_dtype)
         return prefix_embs, prefix_pad_masks, prefix_att_masks, image_token_count, lang_masks
@@ -946,7 +1005,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             extra_prefix_tokens=extra_prefix_tokens,
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self._embed_suffix(x_t, time)
-        model_dtype = self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+        model_dtype = self._model_runtime_dtype()
         if model_dtype in (torch.bfloat16, torch.float16):
             prefix_embs = prefix_embs.to(dtype=model_dtype)
             suffix_embs = suffix_embs.to(dtype=model_dtype)
@@ -1002,7 +1061,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             features,
             extra_prefix_tokens=extra_prefix_tokens,
         )
-        model_dtype = self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj.weight.dtype
+        model_dtype = self._model_runtime_dtype()
         if model_dtype in (torch.bfloat16, torch.float16):
             prefix_embs = prefix_embs.to(dtype=model_dtype)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
@@ -1096,6 +1155,12 @@ class PaliGemmaSemanticEncoder(nn.Module):
         if fn is None:
             raise RuntimeError("Semantic encoder does not implement PI0 action chunk sampling.")
         return fn(*args, **kwargs)
+
+    def fsdp_runtime_leaf_module_specs(self) -> list[tuple[nn.Module, str, str]]:
+        fn = getattr(self.encoder, "fsdp_runtime_leaf_module_specs", None)
+        if fn is None:
+            return []
+        return fn()
 
     def forward(self, op: str, /, *args: Any, **kwargs: Any):
         return self.encoder(op, *args, **kwargs)

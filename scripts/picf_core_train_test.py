@@ -1127,6 +1127,34 @@ def test_fsdp_wrap_root_with_ignored_non_dominant_dtypes_keeps_single_boundary_o
         optimizer.step()
 
 
+def test_prepare_semantic_runtime_leaf_fsdp_wraps_declared_hot_leaves_on_cpu() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _SemanticStub(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.uniform_leaf = torch.nn.Linear(4, 4)
+            self.mixed_root = torch.nn.Sequential(
+                torch.nn.Linear(4, 4).float(),
+                torch.nn.Linear(4, 4).to(torch.bfloat16),
+            )
+
+        def fsdp_runtime_leaf_module_specs(self):
+            return [
+                (self, "uniform_leaf", "uniform_recursive"),
+                (self, "mixed_root", "mixed_root"),
+            ]
+
+    with _single_rank_process_group():
+        module = _SemanticStub()
+        prepared = _MODULE._prepare_semantic_runtime_leaf_fsdp(module, device=torch.device("cpu"))
+
+        assert prepared is module
+        assert _MODULE._is_fsdp_model(module.uniform_leaf)
+        assert _MODULE._is_fsdp_model(module.mixed_root)
+
+
 def test_fsdp_wrap_keeps_uniform_subtrees_at_single_boundary_on_cpu() -> None:
     if _MODULE.FullyShardedDataParallel is None:
         pytest.skip("FSDP is not available in this torch build.")

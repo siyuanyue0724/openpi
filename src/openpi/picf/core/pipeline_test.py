@@ -119,6 +119,31 @@ def test_transformer_stack_clones_view_inputs_before_attention() -> None:
     assert base.grad is not None
 
 
+def test_transformer_stack_tokenwise_ff_chunking_matches_unchunked() -> None:
+    torch.manual_seed(0)
+    base = pipeline_module.TransformerStack(
+        16,
+        4,
+        2,
+        activation_checkpointing=False,
+        ff_chunk_size=0,
+    ).eval()
+    chunked = pipeline_module.TransformerStack(
+        16,
+        4,
+        2,
+        activation_checkpointing=False,
+        ff_chunk_size=2,
+    ).eval()
+    chunked.load_state_dict(base.state_dict())
+    x = torch.randn(1, 5, 16)
+    y_base = base(x)
+    y_chunked = chunked(x)
+    assert isinstance(y_base, torch.Tensor)
+    assert isinstance(y_chunked, torch.Tensor)
+    torch.testing.assert_close(y_base, y_chunked, atol=1e-5, rtol=1e-5)
+
+
 class _ClipAwareVisualEncoder:
     def __init__(self) -> None:
         self.clips: list[np.ndarray] = []

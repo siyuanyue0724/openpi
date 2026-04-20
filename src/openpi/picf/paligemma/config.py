@@ -23,3 +23,4 @@ class PaliGemmaSemanticConfig:
     action_horizon: int = 16
     denoise_steps: int = 10
     inject_state_into_prompt: bool = True
+    tokenwise_chunk_size: int = 0

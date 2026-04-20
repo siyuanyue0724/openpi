@@ -186,6 +186,19 @@ def verify_static_contract() -> list[CheckResult]:
             ),
         ),
         CheckResult(
+            name="semantic_runtime_drops_unused_generation_heads",
+            ok=(
+                "self._drop_unused_generation_heads()" in wrapper_source
+                and "def _drop_unused_generation_heads(self) -> None:" in wrapper_source
+                and 'self.paligemma_with_expert.paligemma.lm_head = None' in wrapper_source
+                and 'self.paligemma_with_expert.gemma_expert.lm_head = None' in wrapper_source
+            ),
+            detail=(
+                "The PI0/PICF semantic runtime now drops the unused outer causal-LM heads after checkpoint load, "
+                "so dead generation weights do not inflate FSDP wrapping or optimizer enumeration."
+            ),
+        ),
+        CheckResult(
             name="fsdp_keeps_semantic_gradient_checkpointing_enabled",
             ok=(
                 "args.semantic_gradient_checkpointing_disabled_for_fsdp = True" not in trainer_source
@@ -326,6 +339,39 @@ def verify_static_contract() -> list[CheckResult]:
             detail=(
                 "Trainable Sonata and AnyTouch backbones now use non-reentrant train-time recompute, "
                 "so v2.2 FSDP full-finetune reduces backbone activation peaks without changing the objective."
+            ),
+        ),
+        CheckResult(
+            name="tokenwise_exact_chunking_is_wired_for_core_and_semantic_hot_paths",
+            ok=(
+                "tokenwise_ff_chunk_size" in trainer_source
+                and "semantic_tokenwise_chunk_size" in trainer_source
+                and "def _apply_tokenwise_in_chunks(" in source
+                and "def _apply_tokenwise_in_chunks(" in gemma_pytorch_source
+                and "tokenwise_chunk_size =" in wrapper_source
+                and 'self.__dict__.get("config")' in wrapper_source
+                and "chunk_size=self.tokenwise_chunk_size" in gemma_pytorch_source
+                and "chunk_size=self.ff_chunk_size" in source
+            ),
+            detail=(
+                "Exact tokenwise chunking is now wired into the current hottest core and PI0/Gemma "
+                "token-local paths, so sequence-local projections and FFNs can lower activation peaks "
+                "without changing model math."
+            ),
+        ),
+        CheckResult(
+            name="semantic_runtime_hot_leaves_are_nested_fsdp_ready",
+            ok=(
+                "def fsdp_runtime_leaf_module_specs(self) -> list[tuple[nn.Module, str, str]]:" in wrapper_source
+                and "def _prepare_semantic_runtime_leaf_fsdp(" in trainer_source
+                and '_prepare_semantic_runtime_leaf_fsdp(child, device=device)' in trainer_source
+                and "module_parameter_dtype" in wrapper_source
+                and "module_num_embeddings" in wrapper_source
+                and "module_parameter_dtype" in gemma_pytorch_source
+            ),
+            detail=(
+                "The semantic runtime now exposes directly called hot leaves for nested exact FSDP wrapping, "
+                "and trainer/wrapper code use FSDP-safe module metadata instead of raw `.weight` attribute access."
             ),
         ),
         CheckResult(
@@ -808,6 +854,48 @@ def verify_doc_links() -> list[CheckResult]:
                 )
             ),
             detail="README_v2.2 captures the corrected public-read/task-readout/conditioned-future contract.",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="readme_v22_and_calvin_doc_record_tokenwise_exact_chunking_contract",
+            ok=all(
+                needle in v22_text
+                for needle in (
+                    "tokenwise_ff_chunk_size=64",
+                    "semantic_tokenwise_chunk_size=64",
+                )
+            )
+            and all(
+                needle in calvin_text
+                for needle in (
+                    "tokenwise_ff_chunk_size=64",
+                    "semantic_tokenwise_chunk_size=64",
+                )
+            ),
+            detail="README_v2.2 and CALVIN validation doc both record the exact tokenwise chunking contract.",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="readme_v22_and_calvin_doc_record_semantic_nested_leaf_fsdp_contract",
+            ok=all(
+                needle in v22_text
+                for needle in (
+                    "directly called PI0/PaliGemma runtime hot leaves",
+                    "remaining semantic root still uses `ignored_states`",
+                    "SigLIP vision tower and multimodal projector currently remain under the outer semantic root",
+                )
+            )
+            and all(
+                needle in calvin_text
+                for needle in (
+                    "semantic FSDP path now pre-wraps the directly called PI0/PaliGemma runtime hot leaves",
+                    "mixed-dtype semantic root wrapper only to the remaining parameters",
+                    "SigLIP vision tower and multimodal projector currently stay under the outer semantic root",
+                )
+            ),
+            detail="README_v2.2 and CALVIN validation doc both record the nested semantic-leaf FSDP contract.",
         )
     )
     checks.append(

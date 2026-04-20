@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 from typing import Any
 from torch import nn
+import torch
 
 try:
     from torch.distributed.fsdp import FullyShardedDataParallel as _FSDP
@@ -30,6 +31,41 @@ def _iter_fsdp_method_roots(module: Any) -> list[Any]:
 
     _collect(module, has_fsdp_ancestor=False)
     return roots
+
+
+def unwrap_fsdp_module(module: Any) -> Any:
+    if _FSDP is not None and isinstance(module, _FSDP):
+        return module.module
+    return module
+
+
+def module_parameter_dtype(module: Any) -> torch.dtype:
+    for attr_name in ("weight", "bias"):
+        attr = getattr(module, attr_name, None)
+        if isinstance(attr, torch.Tensor):
+            return attr.dtype
+    if isinstance(module, nn.Module):
+        for param in module.parameters():
+            return param.dtype
+    target = unwrap_fsdp_module(module)
+    for attr_name in ("weight", "bias"):
+        attr = getattr(target, attr_name, None)
+        if isinstance(attr, torch.Tensor):
+            return attr.dtype
+    if isinstance(target, nn.Module):
+        for param in target.parameters():
+            return param.dtype
+    raise RuntimeError(f"Unable to infer parameter dtype from module type={type(module).__name__}.")
+
+
+def module_num_embeddings(module: Any) -> int:
+    target = unwrap_fsdp_module(module)
+    if hasattr(target, "num_embeddings"):
+        return int(target.num_embeddings)
+    weight = getattr(target, "weight", None)
+    if isinstance(weight, torch.Tensor) and weight.ndim >= 1:
+        return int(weight.shape[0])
+    raise RuntimeError(f"Module type={type(module).__name__} does not expose num_embeddings.")
 
 
 def call_fsdp_method(module: Any, method_name: str, /, *args: Any, **kwargs: Any) -> Any:

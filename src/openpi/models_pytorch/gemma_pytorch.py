@@ -6,6 +6,7 @@ from torch import nn
 from transformers.integrations.sdpa_attention import sdpa_attention_forward as transformers_sdpa_attention_forward
 from transformers.models.auto import CONFIG_MAPPING
 from transformers.models.gemma import modeling_gemma
+from openpi.picf.fsdp_utils import module_parameter_dtype
 
 
 def _gated_residual(x: torch.Tensor | None, y: torch.Tensor | None, gate: torch.Tensor | None) -> torch.Tensor | None:
@@ -28,6 +29,22 @@ def _gated_residual(x: torch.Tensor | None, y: torch.Tensor | None, gate: torch.
     return x + y * gate
 
 
+def _apply_tokenwise_in_chunks(
+    x: torch.Tensor,
+    fn_apply,
+    *,
+    chunk_size: int,
+) -> torch.Tensor:
+    chunk = int(chunk_size)
+    if chunk <= 0 or x.ndim < 2 or x.shape[1] <= chunk:
+        return fn_apply(x)
+    outputs = []
+    for start in range(0, int(x.shape[1]), chunk):
+        end = min(start + chunk, int(x.shape[1]))
+        outputs.append(fn_apply(x[:, start:end]))
+    return torch.cat(outputs, dim=1)
+
+
 class PaliGemmaWithExpertModel(nn.Module):
     def __init__(
         self,
@@ -35,6 +52,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         action_expert_config,
         use_adarms=None,
         precision: Literal["bfloat16", "float32"] = "bfloat16",
+        tokenwise_chunk_size: int = 0,
     ):
         if use_adarms is None:
             use_adarms = [False, False]
@@ -88,6 +106,7 @@ class PaliGemmaWithExpertModel(nn.Module):
         self.paligemma = RuntimePaliGemmaForConditionalGeneration(config=vlm_config_hf)
         self.gemma_expert = RuntimeGemmaForCausalLM(config=action_expert_config_hf)
         self.gemma_expert.model.embed_tokens = None
+        self.tokenwise_chunk_size = int(tokenwise_chunk_size)
 
         self.to_bfloat16_for_selected_params(precision)
 
@@ -183,9 +202,21 @@ class PaliGemmaWithExpertModel(nn.Module):
 
                     input_shape = hidden_states.shape[:-1]
                     hidden_shape = (*input_shape, -1, layer.self_attn.head_dim)
-                    query_state = layer.self_attn.q_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                    key_state = layer.self_attn.k_proj(hidden_states).view(hidden_shape).transpose(1, 2)
-                    value_state = layer.self_attn.v_proj(hidden_states).view(hidden_shape).transpose(1, 2)
+                    query_state = _apply_tokenwise_in_chunks(
+                        hidden_states,
+                        layer.self_attn.q_proj,
+                        chunk_size=self.tokenwise_chunk_size,
+                    ).view(hidden_shape).transpose(1, 2)
+                    key_state = _apply_tokenwise_in_chunks(
+                        hidden_states,
+                        layer.self_attn.k_proj,
+                        chunk_size=self.tokenwise_chunk_size,
+                    ).view(hidden_shape).transpose(1, 2)
+                    value_state = _apply_tokenwise_in_chunks(
+                        hidden_states,
+                        layer.self_attn.v_proj,
+                        chunk_size=self.tokenwise_chunk_size,
+                    ).view(hidden_shape).transpose(1, 2)
 
                     query_states.append(query_state)
                     key_states.append(key_state)
@@ -237,19 +268,28 @@ class PaliGemmaWithExpertModel(nn.Module):
                     layer = models[i].layers[layer_idx]
                     end_pos = start_pos + hidden_states.shape[1]
 
-                    if att_output.dtype != layer.self_attn.o_proj.weight.dtype:
-                        att_output = att_output.to(layer.self_attn.o_proj.weight.dtype)
-                    out_emb = layer.self_attn.o_proj(att_output[:, start_pos:end_pos])
+                    o_proj_dtype = module_parameter_dtype(layer.self_attn.o_proj)
+                    if att_output.dtype != o_proj_dtype:
+                        att_output = att_output.to(o_proj_dtype)
+                    out_emb = _apply_tokenwise_in_chunks(
+                        att_output[:, start_pos:end_pos],
+                        layer.self_attn.o_proj,
+                        chunk_size=self.tokenwise_chunk_size,
+                    )
 
                     # first residual
                     out_emb = _gated_residual(hidden_states, out_emb, gates[i])
                     after_first_residual = out_emb.clone()
                     out_emb, gate = layer.post_attention_layernorm(out_emb, cond=adarms_cond[i])
                     # Convert to bfloat16 if the next layer (mlp) uses bfloat16
-                    if layer.mlp.up_proj.weight.dtype == torch.bfloat16:
+                    if module_parameter_dtype(layer.mlp) == torch.bfloat16:
                         out_emb = out_emb.to(dtype=torch.bfloat16)
 
-                    out_emb = layer.mlp(out_emb)
+                    out_emb = _apply_tokenwise_in_chunks(
+                        out_emb,
+                        layer.mlp,
+                        chunk_size=self.tokenwise_chunk_size,
+                    )
                     # second residual
                     out_emb = _gated_residual(after_first_residual, out_emb, gate)
                     outputs_embeds.append(out_emb)

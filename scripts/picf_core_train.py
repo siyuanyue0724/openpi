@@ -860,6 +860,23 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.predictive_semantic_reads = int(_SPEC_DEFAULTS.predictive_semantic_reads)
     if getattr(args, "control_semantic_reads", None) is None:
         args.control_semantic_reads = int(_SPEC_DEFAULTS.control_semantic_reads)
+    if getattr(args, "tokenwise_ff_chunk_size", None) is None:
+        args.tokenwise_ff_chunk_size = int(_SPEC_DEFAULTS.tokenwise_ff_chunk_size)
+    else:
+        args.tokenwise_ff_chunk_size = int(args.tokenwise_ff_chunk_size)
+    if getattr(args, "semantic_tokenwise_chunk_size", None) is None:
+        args.semantic_tokenwise_chunk_size = 0
+    else:
+        args.semantic_tokenwise_chunk_size = int(args.semantic_tokenwise_chunk_size)
+    if args.training_strategy == "fsdp_full_shard":
+        if int(args.tokenwise_ff_chunk_size) <= 0:
+            args.tokenwise_ff_chunk_size = 64
+        if (
+            str(getattr(args, "semantic_mode", "zero")) == "paligemma"
+            and bool(getattr(args, "semantic_trainable", False))
+            and int(args.semantic_tokenwise_chunk_size) <= 0
+        ):
+            args.semantic_tokenwise_chunk_size = 64
     if args.warmup_steps is None:
         args.warmup_steps = max(1, int(round(0.02 * float(args.num_train_steps))))
     else:
@@ -1013,6 +1030,13 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         )
     if int(args.grad_clip_window) < 1:
         raise ValueError(f"grad_clip_window must be >= 1, got {args.grad_clip_window}.")
+    if int(getattr(args, "tokenwise_ff_chunk_size", 0)) < 0:
+        raise ValueError(f"tokenwise_ff_chunk_size must be >= 0, got {args.tokenwise_ff_chunk_size}.")
+    if int(getattr(args, "semantic_tokenwise_chunk_size", 0)) < 0:
+        raise ValueError(
+            "semantic_tokenwise_chunk_size must be >= 0, "
+            f"got {args.semantic_tokenwise_chunk_size}."
+        )
     if getattr(args, "action_output_clip", None) is not None and float(args.action_output_clip) <= 0.0:
         raise ValueError(f"action_output_clip must be > 0 when provided, got {args.action_output_clip}.")
     if float(args.crop_radius_m) <= 0.0:
@@ -1514,6 +1538,40 @@ def _fsdp_wrap_root_with_ignored_non_dominant_dtypes(
     )
 
 
+def _prepare_semantic_runtime_leaf_fsdp(
+    module: torch.nn.Module,
+    *,
+    device: torch.device,
+) -> torch.nn.Module:
+    """Wrap directly-called semantic hot leaves before the outer semantic root wrap.
+
+    The PI0/PaliGemma runtime mixes standard module forwards with a custom
+    dual-branch path that explicitly calls a subset of heavy child modules
+    (`embed_tokens`, attention projections, MLPs, projector heads). Those
+    leaves must become explicit nested FSDP modules first; otherwise the outer
+    semantic root remains the only sharding boundary and the whole stack is
+    materialized together.
+    """
+
+    specs_fn = getattr(module, "fsdp_runtime_leaf_module_specs", None)
+    if specs_fn is None:
+        return module
+    for parent, child_name, mode in specs_fn():
+        child = getattr(parent, child_name, None)
+        if child is None or _is_fsdp_model(child):
+            continue
+        if mode == "uniform_recursive":
+            wrapped = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
+        elif mode == "mixed_root":
+            wrapped = _fsdp_wrap_root_with_ignored_non_dominant_dtypes(child, device=device)
+        else:
+            raise ValueError(
+                f"Unsupported semantic runtime leaf FSDP mode={mode!r} for child={child_name!r}."
+            )
+        setattr(parent, child_name, wrapped)
+    return module
+
+
 def _wrap_model_for_training_strategy(
     model: "_PicfWindowTrainer",
     *,
@@ -1527,6 +1585,7 @@ def _wrap_model_for_training_strategy(
     child_modules = _fsdp_sharded_child_modules(model)
     for child in child_modules:
         if child is model.semantic_encoder:
+            child = _prepare_semantic_runtime_leaf_fsdp(child, device=device)
             wrapped = _fsdp_wrap_root_with_ignored_non_dominant_dtypes(child, device=device)
         else:
             wrapped = _fsdp_wrap_uniform_dtype_subtrees(child, device=device)
@@ -2962,6 +3021,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             getattr(args, "tactile_anchor_prob_on", _SPEC_DEFAULTS.tactile_anchor_prob_on)
         ),
         action_output_clip=getattr(args, "action_output_clip", None),
+        tokenwise_ff_chunk_size=int(getattr(args, "tokenwise_ff_chunk_size", _SPEC_DEFAULTS.tokenwise_ff_chunk_size)),
     )
     point_feature_extractor = None
     if args.point_backbone == "sonata":
@@ -3043,6 +3103,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 include_gripper_image=bool(args.semantic_use_gripper),
                 max_length=args.semantic_max_length,
                 action_horizon=int(args.action_horizon),
+                tokenwise_chunk_size=int(getattr(args, "semantic_tokenwise_chunk_size", 0)),
             )
         )
     else:
@@ -3619,6 +3680,11 @@ def train(args: argparse.Namespace) -> None:
             logging.info(
                 "v2.2 semantic/control contract: the full PaliGemma token sequence remains width=%s and stays native in PI0.5 semantic/action generation; core control/future no longer take raw semantic-prefix tokens directly, task readout builds semantic-conditioned current-step context from public_read_memory=[fused_tokens, visual_tokens] plus private dense rereads, and conditioned control/future consume that context together with up-projected physical posterior/global_post/innovation/proprio/physical_pred tokens; semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not restore direct raw-semantic injection into the core trunks.",
                 args.semantic_dim,
+            )
+            logging.info(
+                "Tokenwise exact-memory contract: core_ff_chunk_size=%s semantic_tokenwise_chunk_size=%s",
+                int(getattr(args, "tokenwise_ff_chunk_size", 0)),
+                int(getattr(args, "semantic_tokenwise_chunk_size", 0)),
             )
             logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
@@ -4218,6 +4284,8 @@ def main() -> None:
     parser.add_argument("--control-semantic-reads", type=int, default=_SPEC_DEFAULTS.control_semantic_reads)
     parser.add_argument("--predictive-semantic-dropout-prob", type=float, default=_SPEC_DEFAULTS.predictive_semantic_dropout_prob)
     parser.add_argument("--semantic-prefix-dropout-prob", type=float, default=_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
+    parser.add_argument("--tokenwise-ff-chunk-size", type=int, default=_SPEC_DEFAULTS.tokenwise_ff_chunk_size)
+    parser.add_argument("--semantic-tokenwise-chunk-size", type=int, default=0)
     parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)
     parser.add_argument("--future-vote-heads", type=int, default=_SPEC_DEFAULTS.future_vote_heads)
     parser.set_defaults(

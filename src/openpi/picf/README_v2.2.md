@@ -1,9 +1,10 @@
 # PICF v2.2
 
-Date: 2026-04-17
+Date: 2026-04-20
 Repo: `/home/siyuanyue/Documents/openpi`
-Status: current local v2.2 architecture record after the one-shot
-action/control contract rewrite
+Status: current local/cloud v2.2 architecture record after the one-shot
+action/control contract rewrite and the 4x40GB exact-memory full-train
+bring-up that has been directly observed through `step 10`
 
 ## 0. Document Map
 
@@ -64,26 +65,26 @@ If you are opening the repo cold, use this order:
 
 ### 0.2 Temporary Audit Companions
 
-For this local v2.2 rollout, the following temporary audit documents were
-generated and are read alongside this file when deep verification is
-needed:
+For this local v2.2 rollout, the following temporary audit documents are the
+current deep-verification companions:
 
-1. [`/tmp/picf_v22_current_code_dataflow_20260418.md`](/tmp/picf_v22_current_code_dataflow_20260418.md)
-   Recursive current-code dataflow audit.
-2. [`/tmp/picf_v22_mathematical_spec_20260418.md`](/tmp/picf_v22_mathematical_spec_20260418.md)
-   Mathematical object/transition specification derived from current code and
-   the v2.2 contract.
-3. [`/tmp/picf_v22_final_reconciliation_20260418.md`](/tmp/picf_v22_final_reconciliation_20260418.md)
-   Final reconciliation of current code vs v2.2 contract, including pass/fail
-   items and residual compatibility notes.
-4. [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md)
+1. [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md)
    Current recursive dataflow audit refreshed after the 40GB training-memory investigation.
-5. [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md)
+2. [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md)
    Refreshed v2.2 mathematical specification with the canonical recurrent-carry contract.
-6. [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md)
+3. [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md)
    Explicit list of design mismatches / unnecessary glue, plus the fixes landed during the current audit.
-7. [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md)
+4. [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md)
    Quantitative 4x40GB A100 memory audit and backbone-contribution ranking.
+5. [`/tmp/picf_v22_readme_sync_20260420.md`](/tmp/picf_v22_readme_sync_20260420.md)
+   Final README synchronization audit for the current live deployment profile, observability modes, and GitHub handoff scope.
+
+Historical temp audits from the earlier 2026-04-18 pass are retained only as
+archive context:
+
+6. [`/tmp/picf_v22_current_code_dataflow_20260418.md`](/tmp/picf_v22_current_code_dataflow_20260418.md)
+7. [`/tmp/picf_v22_mathematical_spec_20260418.md`](/tmp/picf_v22_mathematical_spec_20260418.md)
+8. [`/tmp/picf_v22_final_reconciliation_20260418.md`](/tmp/picf_v22_final_reconciliation_20260418.md)
 
 These `/tmp` documents are audit artifacts, not persistent maintained docs.
 
@@ -117,13 +118,12 @@ When verifying the local v2.2 codebase, use this navigation split:
 - historical pre-v2.2 reference only:
   - [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
 - temporary deep audits for this local rollout:
-  - [`/tmp/picf_v22_current_code_dataflow_20260418.md`](/tmp/picf_v22_current_code_dataflow_20260418.md)
-  - [`/tmp/picf_v22_mathematical_spec_20260418.md`](/tmp/picf_v22_mathematical_spec_20260418.md)
-  - [`/tmp/picf_v22_final_reconciliation_20260418.md`](/tmp/picf_v22_final_reconciliation_20260418.md)
   - [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md)
   - [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md)
   - [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md)
   - [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md)
+  - [`/tmp/picf_v22_readme_sync_20260420.md`](/tmp/picf_v22_readme_sync_20260420.md)
+  - archived 2026-04-18 temp audits only when historical comparison matters
 
 ## 1. Scope
 
@@ -1494,10 +1494,10 @@ Current standard long-run launch profile:
 - `--semantic-gradient-checkpointing`
 - `--window-activation-checkpointing`
 - `--diagnostic-interval 0`
-- `--training-strategy fsdp_full_shard` for the standard 4x40GB A100 full-finetune profile
+- `--training-strategy fsdp_full_shard` for the current 4x40GB A100 FSDP investigation profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
 - `--visual-finetune-mode full|frozen` is now the canonical visual-backbone contract. `full` preserves the default all-backbone profile; `frozen` keeps the V-JEPA encoder weights fixed without changing the rest of the training graph.
-- semantic FSDP wrapping must keep the PI0/PaliGemma stack at one boundary and leave minority float32 stabilizer parameters in `ignored_states`; recursive internal FSDP splitting inside the hand-written Gemma dual-branch forward is not valid
+- semantic FSDP wrapping now uses a two-level exact contract: directly called PI0/PaliGemma runtime hot leaves (`embed_tokens`, per-layer `q/k/v/o` projections, per-layer `mlp`, and PI0 action/time projections) are wrapped first as explicit nested leaves, and the remaining semantic root still uses `ignored_states` for the minority float32 stabilizer parameters. The SigLIP vision tower and multimodal projector currently remain under the outer semantic root because their current image-path implementations are not yet nested-FSDP-safe under the present view-alias constraints.
 - FSDP full-shard on this profile should use flat-parameter mode (`use_orig_params=False`) together with `backward_prefetch=BACKWARD_POST` and `limit_all_gathers=True`; the goal is to reduce parameter-view residency and backward all-gather overlap peaks without changing model math
 - standard 4x40GB FSDP sharding is now recursive for large uniform-dtype subtrees with a 512MiB parameter-storage budget per boundary; this lets point/visual/tactile backbone wrappers and safe internal stacks split into smaller shards instead of wrapping an entire uniform subtree as one flat unit
 - safe core stacks are now explicit FSDP child boundaries on this profile: `token_fusion`, `obs_self`, `posterior_self`, `task_self`, `predictive_world`, `predictive_semantic_world`, and `control_world`; the trainer now reattaches those wrapped children back onto `core` before the root wrap, so root FSDP only carries the remaining lighter core/projection parameters instead of one monolithic core shard
@@ -1509,6 +1509,8 @@ Current standard long-run launch profile:
 - the custom PI0/Gemma dual-branch semantic attention path now uses SDPA instead of the eager attention workspace. This is part of the standard 4x40GB profile because the eager path materializes a large attention buffer that fits at step 1 but blows up once optimizer state becomes resident; SDPA preserves the same training objective while removing that workspace peak.
 - core transformer stacks (`token_fusion`, `obs_self`, `posterior_self`, `task_self`, `predictive_world`, `predictive_semantic_world`, `control_world`) now also use train-time non-reentrant activation recompute; this is part of the standard all-backbone v2.2 training path and does not alter the underlying objective
 - the trainable Sonata point backbone and AnyTouch tactile encoder now also use train-time non-reentrant recompute on their main backbone forwards; this keeps all-backbone finetuning mathematically identical while shifting more of the per-rank memory burden from saved activations into recompute
+- tokenwise-only projections and FFNs on the current hottest paths now support exact sequence chunking instead of monolithic execution. On the current profile this is enabled by default as `tokenwise_ff_chunk_size=64` for PICF core transformer/cross-attention FFNs and `semantic_tokenwise_chunk_size=64` for the custom PI0/Gemma dual-branch tokenwise projections/MLPs under FSDP full-shard training. These chunked calls preserve the same parameterization and objective; they only lower local activation residency by evaluating tokenwise maps in smaller sequence slices.
+- the PI0/PICF semantic runtime now drops the unused outer causal-LM heads (`paligemma.lm_head`, `gemma_expert.lm_head`) immediately after checkpoint load. The live training path never routes through those logits heads, so removing them from the runtime graph is mathematically exact and prevents dead generation weights from inflating FSDP wrapping.
 - standard multi-rank `FSDP full_shard` training now also standardizes `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; after the backbone recompute cut, the dominant remaining failure mode was allocator fragmentation (`reserved but unallocated` growing much larger than free memory), so v2.2 now treats expandable segments as part of the clean startup contract rather than a post-hoc workaround
 - standard FSDP full-finetune startup no longer serializes checkpoint construction rank-by-rank; each rank builds in parallel, because the serialized path turned one large checkpoint load into a multi-stage startup stall without changing training semantics
 - standard FSDP full-finetune startup now also stages the local PI0/PaliGemma checkpoint from shared `/mnt` storage into a node-local cache before rank-local `safe_open(...)/load_state_dict(...)`; this preserves training math while removing the shared-filesystem page-wait stall that appeared when four ranks loaded the same multi-GB semantic checkpoint concurrently. The default cache root is `~/.cache/openpi/pi0_checkpoints`, `OPENPI_STAGE_PI0_CHECKPOINT=auto` stages only `/mnt/...` sources, and `OPENPI_LOCAL_CHECKPOINT_CACHE_DIR` overrides the cache location when needed
@@ -1517,6 +1519,232 @@ Current standard long-run launch profile:
 
 These values are the current operational training defaults for v2.2 runs even
 if historical baseline commands in older docs still show `--save-interval 5000`.
+
+Important status note:
+
+- this section records the implemented 4x40GB FSDP training contract and the
+  code paths that now exist in `scripts/picf_core_train.py`
+- the current exact-memory profile has now been empirically observed to:
+  - complete a 5-step diagnostic run and save a checkpoint
+  - execute a full-train run far enough to print a real metrics JSON line at
+    `step 10`
+- so the maintained v2.2 README should now be read as describing a live 4x40GB
+  full-train profile, not a merely hypothetical one
+- it still must not overclaim beyond current evidence:
+  - this file does **not** claim that `step 2500` or full `30000` completion has
+    already been observed unless a later audit explicitly records that fact
+
+### 7.6.1 Current Live 4x40GB Deployment Profile
+
+The current live cloud training profile is:
+
+- `training_strategy=fsdp_full_shard`
+- `optimizer_sharding=none`
+- `accum_steps=1`
+- `num_train_steps=30000`
+- `save_interval=2500`
+- `grad_clip_mode=percentile`
+- `grad_clip_percentile=75`
+- `grad_clip_window=100`
+- `use_foundation_backbones=True`
+- `use_tactile=True`
+- `visual_finetune_mode=full`
+- `visual_trainable=True`
+- `tactile_trainable=True`
+- `point_backbone_trainable=True`
+- `semantic_trainable=True`
+- `window_activation_checkpointing=True`
+- `semantic_gradient_checkpointing=True`
+- `tokenwise_ff_chunk_size=64`
+- `semantic_tokenwise_chunk_size=64`
+
+This is a **full-train** profile.
+
+It does **not** freeze:
+
+- V-JEPA
+- AnyTouch
+- Sonata
+- PaliGemma
+
+It also does **not** rely on:
+
+- LoRA
+- CPU offload
+- watchdog restart logic
+
+### 7.6.2 Current Exact-Memory Runtime Measures
+
+The current 4x40GB full-train profile fits because the following mathematically
+exact runtime measures are now part of the live contract:
+
+1. tokenwise exact chunking on the hot PICF core FFN/cross-attention FFN paths
+2. tokenwise exact chunking on the hot PI0/Gemma tokenwise projection/MLP paths
+3. nested semantic hot-leaf FSDP wrapping
+4. dead outer semantic generation heads dropped after checkpoint load
+5. recursive FSDP subtree splitting on large uniform-dtype subtrees
+6. explicit safe core-stack FSDP child boundaries
+7. global-L2 shard-aware grad norm / percentile clipping
+8. full-window activation checkpointing during training
+9. semantic gradient checkpointing
+10. train-time recompute on the core transformer stacks
+11. train-time recompute on the Sonata / AnyTouch backbone forwards
+12. SDPA on the custom PI0/Gemma dual-branch attention path
+13. allocator contract `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+14. node-local staging of the shared PI0/PaliGemma checkpoint
+15. compact recurrent-carry instead of forwarding the full `PicfCoreState`
+
+The current safe nested semantic hot-leaf set is:
+
+- `embed_tokens`
+- per-layer `self_attn.q_proj`
+- per-layer `self_attn.k_proj`
+- per-layer `self_attn.v_proj`
+- per-layer `self_attn.o_proj`
+- per-layer `mlp`
+- `action_in_proj`
+- `action_out_proj`
+- `time_mlp_in`
+- `time_mlp_out`
+
+The following remain under the outer semantic root because they are not yet
+nested-FSDP-safe under the current image-path alias constraints:
+
+- `vision_tower`
+- `multi_modal_projector`
+
+### 7.6.3 Operator Display / Observability Modes
+
+Two display modes are currently useful and both preserve the same optimization
+math:
+
+1. Standard long run
+   - keep the progress bar enabled
+   - use `--log-interval 100`
+   - this is the normal operator-facing mode for 30000-step training
+2. Early observability verification
+   - optionally use `--no-progress`
+   - use `--log-interval 10`
+   - this exists only to prove early training progress quickly, for example
+     when the operator explicitly wants direct evidence that the job crossed
+     `step 10`
+
+Important clarification:
+
+- `--no-progress` changes only what gets rendered to the terminal
+- `--log-interval` changes only how often the metrics JSON line is printed
+- neither changes training math
+
+### 7.6.4 Current Cloud Launch Templates
+
+The current standard long-run launch template is:
+
+```bash
+cd /root/openpi_run_latest
+export PYTHONPATH=/root/openpi_run_latest/src
+export WANDB_MODE=disabled
+export PYTHONUNBUFFERED=1
+
+/root/openpi/.venv/bin/torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=4 \
+  scripts/picf_core_train.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --backend dir \
+  --checkpoint-base-dir /mnt/checkpoints/picf_core \
+  --exp-name <exp_name> \
+  --overwrite \
+  --device cuda \
+  --use-foundation-backbones \
+  --use-tactile \
+  --training-strategy fsdp_full_shard \
+  --optimizer-sharding none \
+  --accum-steps 1 \
+  --num-train-steps 30000 \
+  --save-interval 2500 \
+  --log-interval 100 \
+  --grad-clip-mode percentile \
+  --grad-clip-percentile 75 \
+  --grad-clip-window 100 \
+  --wandb-mode disabled \
+  --no-wandb \
+  --visual-checkpoint-path /root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt \
+  --tactile-checkpoint-path /root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth \
+  --tactile-calibration-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_fingertip_calibration.json \
+  --tactile-backgrounds-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_backgrounds.npz \
+  --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
+  --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
+  --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
+  --tokenwise-ff-chunk-size 64 \
+  --semantic-tokenwise-chunk-size 64
+```
+
+The current early-observability verification template is the same command with:
+
+- `--log-interval 10`
+- optionally `--no-progress`
+
+### 7.6.5 Operationally Important Knobs
+
+The current operator-facing knobs that matter most are:
+
+Display / logging:
+
+- `--log-interval`
+- `--save-interval`
+- `--no-progress`
+- `--diagnostic-interval`
+
+Training envelope:
+
+- `--training-strategy`
+- `--optimizer-sharding`
+- `--accum-steps`
+- `--num-train-steps`
+- `--grad-clip-mode`
+- `--grad-clip-percentile`
+- `--grad-clip-window`
+
+Backbone trainability:
+
+- `--use-foundation-backbones`
+- `--use-tactile`
+- `--visual-finetune-mode`
+
+Exact-memory controls:
+
+- `--semantic-gradient-checkpointing`
+- `--window-activation-checkpointing`
+- `--tokenwise-ff-chunk-size`
+- `--semantic-tokenwise-chunk-size`
+
+Interpretation rule:
+
+- if a run must preserve the current live 4x40GB full-train contract, do not
+  change the exact-memory controls casually; those are part of the current fit
+  proof, not decorative micro-optimizations
+
+### 7.6.6 GitHub Handoff Scope
+
+For this v2.2 rollout, the GitHub commit scope should include:
+
+- code implementing the exact-memory training contract
+- `README_v2.2.md`
+- `PICF_FORMAL_CONTRACT.md`
+- `docs/CALVIN_VALIDATION_README.md`
+- test and verifier updates
+
+It should **not** include:
+
+- `/tmp/...` audit documents
+- `/tmp` cloud launch helper scripts
+- transient cloud logs
+- transient checkpoints
+
+The `/tmp` audits are intentionally local operator artifacts. They are used to
+derive the maintained README and contract docs, not to replace them in version
+control.
 
 ### 7.7 `scripts/serve_picf_policy.py`
 

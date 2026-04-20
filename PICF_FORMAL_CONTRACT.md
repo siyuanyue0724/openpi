@@ -85,6 +85,13 @@ Non-recurrent state such as task readout, conditioned control, semantic token
 streams, and conditioned future cache must not be forwarded across the training
 window as the canonical `previous` object.
 
+Exact within-step memory reductions that preserve the same v2.2 math are
+allowed, including:
+
+- activation recompute / checkpointing
+- SDPA replacement for eager attention workspace
+- tokenwise sequence chunking for purely token-local projections / FFNs
+
 ## 3. Transition Order
 
 The intended order is:

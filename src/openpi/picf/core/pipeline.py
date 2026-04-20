@@ -222,6 +222,22 @@ def _geometry_pe(x: torch.Tensor, a: torch.Tensor, S: torch.Tensor, config: Picf
     )
 
 
+def _apply_tokenwise_in_chunks(
+    x: torch.Tensor,
+    fn_apply,
+    *,
+    chunk_size: int,
+) -> torch.Tensor:
+    chunk = int(chunk_size)
+    if chunk <= 0 or x.ndim < 2 or x.shape[1] <= chunk:
+        return fn_apply(x)
+    outputs = []
+    for start in range(0, int(x.shape[1]), chunk):
+        end = min(start + chunk, int(x.shape[1]))
+        outputs.append(fn_apply(x[:, start:end]))
+    return torch.cat(outputs, dim=1)
+
+
 def _diag_from_cov(cov: torch.Tensor) -> torch.Tensor:
     return torch.diagonal(cov, dim1=-2, dim2=-1)
 
@@ -346,12 +362,13 @@ class ResidualMLP(nn.Module):
 
 
 class SelfAttentionBlock(nn.Module):
-    def __init__(self, hidden_dim: int, heads: int, layers: int):
+    def __init__(self, hidden_dim: int, heads: int, layers: int, *, ff_chunk_size: int = 0):
         super().__init__()
         del layers
         self.norm1 = nn.LayerNorm(hidden_dim)
         self.attn = nn.MultiheadAttention(hidden_dim, heads, batch_first=True)
         self.norm2 = nn.LayerNorm(hidden_dim)
+        self.ff_chunk_size = int(ff_chunk_size)
         self.ff = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 4),
             nn.GELU(),
@@ -377,14 +394,25 @@ class SelfAttentionBlock(nn.Module):
             average_attn_weights=False,
         )
         x = x + attn_out
-        x = x + self.ff(self.norm2(x))
+        ff_in = self.norm2(x)
+        x = x + _apply_tokenwise_in_chunks(ff_in, self.ff, chunk_size=self.ff_chunk_size)
         return x, attn_weights if return_attention else None
 
 
 class TransformerStack(nn.Module):
-    def __init__(self, hidden_dim: int, heads: int, layers: int, *, activation_checkpointing: bool = False):
+    def __init__(
+        self,
+        hidden_dim: int,
+        heads: int,
+        layers: int,
+        *,
+        activation_checkpointing: bool = False,
+        ff_chunk_size: int = 0,
+    ):
         super().__init__()
-        self.layers = nn.ModuleList(SelfAttentionBlock(hidden_dim, heads, 1) for _ in range(layers))
+        self.layers = nn.ModuleList(
+            SelfAttentionBlock(hidden_dim, heads, 1, ff_chunk_size=ff_chunk_size) for _ in range(layers)
+        )
         self.activation_checkpointing = bool(activation_checkpointing)
 
     def forward(
@@ -434,10 +462,11 @@ class TransformerStack(nn.Module):
 
 
 class CrossAttentionRead(nn.Module):
-    def __init__(self, hidden_dim: int, heads: int):
+    def __init__(self, hidden_dim: int, heads: int, *, ff_chunk_size: int = 0):
         super().__init__()
         self.attn = nn.MultiheadAttention(hidden_dim, heads, batch_first=True)
         self.norm = nn.LayerNorm(hidden_dim)
+        self.ff_chunk_size = int(ff_chunk_size)
         self.ff = nn.Sequential(
             nn.Linear(hidden_dim, hidden_dim * 4),
             nn.GELU(),
@@ -459,7 +488,8 @@ class CrossAttentionRead(nn.Module):
             average_attn_weights=False,
         )
         output = queries + output
-        output = output + self.ff(self.norm(output))
+        ff_in = self.norm(output)
+        output = output + _apply_tokenwise_in_chunks(ff_in, self.ff, chunk_size=self.ff_chunk_size)
         mean_weights = weights.mean(dim=1)[0]
         return output, mean_weights
 
@@ -483,6 +513,7 @@ class GatedCrossAttentionRead(nn.Module):
         )
         self.cross_gate = nn.Parameter(torch.tensor([float(gate_init)]))
         self.ff_norm = nn.LayerNorm(query_dim)
+        self.ff_chunk_size = 0
         self.ff = nn.Sequential(
             nn.Linear(query_dim, inner_dim),
             nn.GELU(),
@@ -516,7 +547,8 @@ class GatedCrossAttentionRead(nn.Module):
         # query transform while semantic cross-attention remains effectively shut.
         gate = torch.tanh(self.cross_gate)
         output = queries + (gate * attn_out)
-        output = output + (gate * self.ff(self.ff_norm(output)))
+        ff_in = self.ff_norm(output)
+        output = output + (gate * _apply_tokenwise_in_chunks(ff_in, self.ff, chunk_size=self.ff_chunk_size))
         mean_weights = weights.mean(dim=1)[0]
         return output, mean_weights
 
@@ -530,6 +562,7 @@ class LazyCrossAttentionRead(nn.Module):
         self.value_proj = nn.LazyLinear(query_dim)
         self.cross_gate = nn.Parameter(torch.zeros(1))
         self.ff_norm = nn.LayerNorm(query_dim)
+        self.ff_chunk_size = 0
         self.ff = nn.Sequential(
             nn.Linear(query_dim, inner_dim),
             nn.GELU(),
@@ -561,7 +594,8 @@ class LazyCrossAttentionRead(nn.Module):
         attn_out = torch.matmul(weights, value_in)
         gate = torch.tanh(self.cross_gate)
         output = queries + (gate * attn_out)
-        output = output + (gate * self.ff(self.ff_norm(output)))
+        ff_in = self.ff_norm(output)
+        output = output + (gate * _apply_tokenwise_in_chunks(ff_in, self.ff, chunk_size=self.ff_chunk_size))
         return output, weights
 
 
@@ -760,10 +794,21 @@ class PicfFullCore(nn.Module):
             heads,
             self.config.fusion_layers,
             activation_checkpointing=True,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
         )
 
-        self.obs_reader = CrossAttentionRead(hidden_dim, heads)
-        self.obs_self = TransformerStack(hidden_dim, heads, 1, activation_checkpointing=True)
+        self.obs_reader = CrossAttentionRead(
+            hidden_dim,
+            heads,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+        )
+        self.obs_self = TransformerStack(
+            hidden_dim,
+            heads,
+            1,
+            activation_checkpointing=True,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+        )
 
         self.prior_proj = nn.LazyLinear(self.config.future_hidden_dim)
         self.prior_delta_mu = ResidualMLP(self.config.latent_dim, self.config.future_hidden_dim, zero_init_last=True)
@@ -777,7 +822,11 @@ class PicfFullCore(nn.Module):
         self.residual_c_head = ResidualMLP(self.config.posterior_hidden_dim, hidden_dim)
 
         self.anchor_seed_proj = nn.LazyLinear(hidden_dim)
-        self.anchor_reader = CrossAttentionRead(hidden_dim, heads)
+        self.anchor_reader = CrossAttentionRead(
+            hidden_dim,
+            heads,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+        )
         self.contact_head = ResidualMLP(1, hidden_dim)
         self.vote_heads = nn.ModuleList(VoteHead(self.config.latent_dim, hidden_dim) for _ in range(self.config.future_vote_heads))
 
@@ -789,6 +838,7 @@ class PicfFullCore(nn.Module):
             heads,
             self.config.posterior_layers,
             activation_checkpointing=True,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
         )
         self.posterior_pool = AttentionPool(hidden_dim)
 
@@ -805,15 +855,24 @@ class PicfFullCore(nn.Module):
             inner_dim=max(self.config.semantic_cross_dim, hidden_dim),
             gate_init=1.0,
         )
-        self.task_public_reader = CrossAttentionRead(hidden_dim, heads)
+        self.task_query_conditioner.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
+        self.task_public_reader = CrossAttentionRead(
+            hidden_dim,
+            heads,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+        )
         self.task_visual_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
         self.task_tactile_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
         self.task_point_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.task_visual_reread.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
+        self.task_tactile_reread.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
+        self.task_point_reread.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
         self.task_self = TransformerStack(
             hidden_dim,
             heads,
             self.config.task_self_layers,
             activation_checkpointing=True,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
         )
         self.task_geom_proj = nn.LazyLinear(hidden_dim)
         self.posterior_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
@@ -830,19 +889,29 @@ class PicfFullCore(nn.Module):
         self.control_query_tokens = nn.Parameter(torch.zeros((self.config.conditioned_control_queries, semantic_trunk_dim)))
         self.predictive_query_tokens = nn.Parameter(torch.zeros((self.config.conditioned_future_queries, semantic_trunk_dim)))
         self.pi_prefix_query_tokens = nn.Parameter(torch.zeros((self.config.pi_prefix_queries, semantic_trunk_dim)))
-        self.pi_prefix_reader = CrossAttentionRead(semantic_trunk_dim, heads)
-        self.future_condition_reader = CrossAttentionRead(semantic_trunk_dim, heads)
+        self.pi_prefix_reader = CrossAttentionRead(
+            semantic_trunk_dim,
+            heads,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+        )
+        self.future_condition_reader = CrossAttentionRead(
+            semantic_trunk_dim,
+            heads,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+        )
         self.predictive_world = TransformerStack(
             hidden_dim,
             heads,
             self.config.predictive_layers,
             activation_checkpointing=True,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
         )
         self.predictive_semantic_world = TransformerStack(
             semantic_trunk_dim,
             heads,
             self.config.predictive_layers,
             activation_checkpointing=True,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
         )
         self.predictive_pool = AttentionPool(hidden_dim)
 
@@ -864,8 +933,12 @@ class PicfFullCore(nn.Module):
         self.visual_native_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
         self.tactile_native_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
         self.point_native_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.visual_native_reread.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
+        self.tactile_native_reread.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
+        self.point_native_reread.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
         self.tactile_group_route_queries = nn.Parameter(torch.zeros((self.config.tactile_group_proposals, hidden_dim)))
         self.tactile_route_reread = LazyCrossAttentionRead(hidden_dim, inner_dim=hidden_dim)
+        self.tactile_route_reread.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
         self.evidence_delta = nn.Sequential(
             nn.LazyLinear(hidden_dim),
             nn.GELU(),
@@ -880,6 +953,7 @@ class PicfFullCore(nn.Module):
             heads,
             self.config.control_layers,
             activation_checkpointing=True,
+            ff_chunk_size=self.config.tokenwise_ff_chunk_size,
         )
         self.control_state_proj = nn.Linear(semantic_trunk_dim, self.config.control_dim)
         self.predictive_state_proj = nn.Linear(semantic_trunk_dim, hidden_dim)

@@ -97,6 +97,7 @@ class PicfCoreConfig:
     task_visual_reread_topk: int = 32
     task_tactile_reread_groups: int = 2
     task_point_reread_topk: int = 32
+    tokenwise_ff_chunk_size: int = 0
     require_pi0_action_generator: bool = True
 
     @property

@@ -5,6 +5,7 @@ import torch
 
 from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import merge_image_features_dense
 from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import replace_oov_image_tokens
+from openpi.models_pytorch.gemma_pytorch import _apply_tokenwise_in_chunks as _gemma_apply_tokenwise_in_chunks
 from openpi.models_pytorch.gemma_pytorch import _gated_residual
 from openpi.models_pytorch.pi0_pytorch import _ensure_transformers_replace_is_ready
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
@@ -16,6 +17,7 @@ from openpi.picf.paligemma.wrapper import _stage_local_pi0_config
 from openpi.picf.paligemma.wrapper import _stage_pi0_checkpoint_if_needed
 from openpi.picf.paligemma.wrapper import _take_valid_prefix_tokens
 from openpi.picf.paligemma.wrapper import _Pi0PaliGemmaSemanticEncoder
+from openpi.picf.paligemma.wrapper import PaliGemmaSemanticEncoder
 from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 
 
@@ -31,6 +33,69 @@ class _TinyPaliGemma(torch.nn.Module):
         self.model = torch.nn.Module()
         self.model.language_model = _TinyLanguageModel()
         self.lm_head = torch.nn.Linear(3, 4, bias=False)
+
+
+class _TinyGemmaExpert(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.lm_head = torch.nn.Linear(3, 4, bias=False)
+
+
+class _TinyPaliGemmaWithExpert(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.paligemma = _TinyPaliGemma()
+        self.gemma_expert = _TinyGemmaExpert()
+
+
+class _TinyRuntimeSelfAttn(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.q_proj = torch.nn.Linear(3, 3)
+        self.k_proj = torch.nn.Linear(3, 3)
+        self.v_proj = torch.nn.Linear(3, 3)
+        self.o_proj = torch.nn.Linear(3, 3)
+
+
+class _TinyRuntimeLayer(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.self_attn = _TinyRuntimeSelfAttn()
+        self.mlp = torch.nn.Sequential(torch.nn.Linear(3, 6), torch.nn.GELU(), torch.nn.Linear(6, 3))
+
+
+class _TinyRuntimeLanguageModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.embed_tokens = torch.nn.Embedding(8, 3)
+        self.layers = torch.nn.ModuleList([_TinyRuntimeLayer(), _TinyRuntimeLayer()])
+
+
+class _TinyRuntimeGemmaModel(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.layers = torch.nn.ModuleList([_TinyRuntimeLayer(), _TinyRuntimeLayer()])
+
+
+class _TinyRuntimePaligemma(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.language_model = _TinyRuntimeLanguageModel()
+        self.vision_tower = torch.nn.Sequential(torch.nn.Linear(3, 3))
+        self.multi_modal_projector = torch.nn.Linear(3, 3)
+
+
+class _TinyRuntimeGemmaExpert(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.model = _TinyRuntimeGemmaModel()
+
+
+class _TinyRuntimePaliGemmaWithExpert(torch.nn.Module):
+    def __init__(self) -> None:
+        super().__init__()
+        self.paligemma = _TinyRuntimePaligemma()
+        self.gemma_expert = _TinyRuntimeGemmaExpert()
 
 
 def test_repair_missing_tied_embeddings_copies_lm_head_weights() -> None:
@@ -67,6 +132,53 @@ def test_repair_missing_tied_embeddings_leaves_unrelated_missing_keys() -> None:
         missing_keys=["some.other.weight"],
     )
     assert remaining == ["some.other.weight"]
+
+
+def test_drop_unused_generation_heads_removes_runtime_dead_lm_heads() -> None:
+    class _DummyEncoder:
+        pass
+
+    encoder = _DummyEncoder()
+    encoder.paligemma_with_expert = _TinyPaliGemmaWithExpert()
+
+    _Pi0PaliGemmaSemanticEncoder._drop_unused_generation_heads(encoder)
+
+    assert encoder.paligemma_with_expert.paligemma.lm_head is None
+    assert encoder.paligemma_with_expert.gemma_expert.lm_head is None
+
+
+def test_fsdp_runtime_leaf_module_specs_cover_direct_call_hot_path_modules() -> None:
+    class _DummyEncoder:
+        pass
+
+    encoder = _DummyEncoder()
+    encoder.paligemma_with_expert = _TinyRuntimePaliGemmaWithExpert()
+    encoder.action_in_proj = torch.nn.Linear(7, 3)
+    encoder.action_out_proj = torch.nn.Linear(3, 7)
+    encoder.time_mlp_in = torch.nn.Linear(3, 3)
+    encoder.time_mlp_out = torch.nn.Linear(3, 3)
+
+    specs = _Pi0PaliGemmaSemanticEncoder.fsdp_runtime_leaf_module_specs(encoder)
+
+    assert ("embed_tokens", "uniform_recursive") in [(name, mode) for _, name, mode in specs]
+    assert ("vision_tower", "mixed_root") not in [(name, mode) for _, name, mode in specs]
+    assert ("multi_modal_projector", "uniform_recursive") not in [(name, mode) for _, name, mode in specs]
+    assert sum(1 for _, name, _ in specs if name == "q_proj") == 4
+    assert sum(1 for _, name, _ in specs if name == "mlp") == 4
+    assert ("action_out_proj", "uniform_recursive") in [(name, mode) for _, name, mode in specs]
+
+
+def test_outer_semantic_encoder_proxies_runtime_leaf_specs() -> None:
+    class _DummyInner:
+        def fsdp_runtime_leaf_module_specs(self):
+            return [("parent", "child", "uniform_recursive")]
+
+    outer = object.__new__(PaliGemmaSemanticEncoder)
+    outer.encoder = _DummyInner()
+
+    assert PaliGemmaSemanticEncoder.fsdp_runtime_leaf_module_specs(outer) == [
+        ("parent", "child", "uniform_recursive")
+    ]
 
 
 def test_stage_pi0_checkpoint_if_needed_copies_to_local_cache_when_forced(
@@ -190,6 +302,15 @@ def test_enable_gradient_checkpointing_falls_back_when_kwargs_unsupported() -> N
     assert enabled is True
     assert non_reentrant is False
     assert module.calls == 1
+
+
+def test_gemma_tokenwise_chunk_helper_matches_direct_apply() -> None:
+    torch.manual_seed(0)
+    layer = torch.nn.Linear(3, 5)
+    x = torch.randn(2, 7, 3)
+    expected = layer(x)
+    actual = _gemma_apply_tokenwise_in_chunks(x, layer, chunk_size=3)
+    torch.testing.assert_close(actual, expected, atol=1e-6, rtol=1e-6)
 
 
 def test_apply_checkpoint_skips_checkpoint_when_inputs_have_no_grad(
