@@ -59,8 +59,6 @@ def _resolve_dtype(config: PicfCoreConfig) -> torch.dtype:
     if config.dtype == "bfloat16":
         return torch.bfloat16
     return torch.float32
-
-
 def _to_tensor(
     value: torch.Tensor | np.ndarray | Sequence[float] | float | int,
     *,

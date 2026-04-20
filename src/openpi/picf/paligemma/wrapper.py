@@ -785,10 +785,23 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         return tokens, mask
 
     def _apply_checkpoint(self, func, *args):
+        runtime = getattr(self, "paligemma_with_expert", None)
+        paligemma = getattr(runtime, "paligemma", None) if runtime is not None else None
+        gemma_expert = getattr(runtime, "gemma_expert", None) if runtime is not None else None
+        native_gc_active = any(
+            bool(getattr(module, "gradient_checkpointing", False))
+            for module in (
+                getattr(paligemma, "language_model", None),
+                getattr(paligemma, "vision_tower", None),
+                getattr(gemma_expert, "model", None),
+            )
+            if module is not None
+        )
         if bool(
             self.trainable
             and self.training
             and self.gradient_checkpointing_enabled
+            and not native_gc_active
             and _checkpoint_inputs_require_grad(*args)
         ):
             return torch.utils.checkpoint.checkpoint(func, *args, use_reentrant=False, preserve_rng_state=False)

@@ -63,6 +63,7 @@ from openpi.picf.core import PicfFullCore
 from openpi.picf.core import PicfTransitionLossBreakdown
 from openpi.picf.core import PicfTransitionLossConfig
 from openpi.picf.core import compute_transition_loss
+from openpi.picf.core import future_targets_from_current_targets
 from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticEncoder
 from openpi.picf.policy import PicfPi05Policy
@@ -793,7 +794,6 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
     args.tactile_trainable = True
     args.point_backbone_trainable = True
     args.semantic_trainable = True
-    args.window_activation_checkpointing = True
     args.diagnostic_interval = 0
 
 
@@ -828,6 +828,28 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.control_query_tokens = int(_SPEC_DEFAULTS.control_query_tokens)
     if getattr(args, "predictive_query_tokens", None) is None:
         args.predictive_query_tokens = int(_SPEC_DEFAULTS.predictive_query_tokens)
+    if getattr(args, "task_local_queries", None) is None:
+        args.task_local_queries = int(_SPEC_DEFAULTS.task_local_queries)
+    if getattr(args, "task_global_queries", None) is None:
+        args.task_global_queries = int(_SPEC_DEFAULTS.task_global_queries)
+    if getattr(args, "task_instruction_queries", None) is None:
+        args.task_instruction_queries = int(_SPEC_DEFAULTS.task_instruction_queries)
+    if getattr(args, "task_self_layers", None) is None:
+        args.task_self_layers = int(_SPEC_DEFAULTS.task_self_layers)
+    if getattr(args, "conditioned_control_queries", None) is None:
+        args.conditioned_control_queries = int(_SPEC_DEFAULTS.conditioned_control_queries)
+    if getattr(args, "pi_prefix_queries", None) is None:
+        args.pi_prefix_queries = int(_SPEC_DEFAULTS.pi_prefix_queries)
+    if getattr(args, "conditioned_future_queries", None) is None:
+        args.conditioned_future_queries = int(_SPEC_DEFAULTS.conditioned_future_queries)
+    if getattr(args, "task_visual_reread_topk", None) is None:
+        args.task_visual_reread_topk = int(_SPEC_DEFAULTS.task_visual_reread_topk)
+    if getattr(args, "task_tactile_reread_groups", None) is None:
+        args.task_tactile_reread_groups = int(_SPEC_DEFAULTS.task_tactile_reread_groups)
+    if getattr(args, "task_point_reread_topk", None) is None:
+        args.task_point_reread_topk = int(_SPEC_DEFAULTS.task_point_reread_topk)
+    if getattr(args, "require_pi0_action_generator", None) is None:
+        args.require_pi0_action_generator = bool(_SPEC_DEFAULTS.require_pi0_action_generator)
     if getattr(args, "semantic_prefix_dropout_prob", None) is None:
         args.semantic_prefix_dropout_prob = float(_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
     if getattr(args, "enable_aux_budgeting", None) is None:
@@ -972,10 +994,20 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "control_layers",
         "control_query_tokens",
         "predictive_query_tokens",
+        "task_local_queries",
+        "task_global_queries",
+        "task_instruction_queries",
+        "task_self_layers",
+        "conditioned_control_queries",
+        "pi_prefix_queries",
+        "conditioned_future_queries",
         "predictive_semantic_reads",
         "control_semantic_reads",
         "attention_heads",
         "future_vote_heads",
+        "task_visual_reread_topk",
+        "task_tactile_reread_groups",
+        "task_point_reread_topk",
     )
     for name in positive_int_fields:
         value = int(getattr(args, name))
@@ -1869,6 +1901,20 @@ class _TransitionWindow:
     frames: tuple[PicfObservation, ...]
 
 
+@dataclasses.dataclass(frozen=True)
+class _PendingTransitionLoss:
+    index: int
+    output: Any
+    next_observation: PicfObservation
+    next_visual_map_override: torch.Tensor | np.ndarray | None
+    action_target: torch.Tensor | np.ndarray | None
+    flow_override: dict[str, torch.Tensor] | None
+    candidate_density: torch.Tensor
+    tactile_contact_prob_mean: torch.Tensor
+    tactile_active_rate: torch.Tensor
+    policy_forward_sec: float
+
+
 def _load_action_chunk(
     reader,
     *,
@@ -2197,6 +2243,15 @@ class _PicfWindowTrainer(torch.nn.Module):
         self.use_visual_override = bool(use_visual_override)
         self.loss_config = loss_config or PicfTransitionLossConfig()
 
+    def _future_targets_override_from_observed(self, observed: Any | None) -> Any | None:
+        if observed is None:
+            return None
+        current_targets = getattr(observed, "current_targets", None)
+        availability = getattr(observed, "availability", None)
+        if current_targets is None or availability is None:
+            return None
+        return future_targets_from_current_targets(current_targets, availability)
+
     def forward(
         self,
         window: _TransitionWindow,
@@ -2209,8 +2264,8 @@ class _PicfWindowTrainer(torch.nn.Module):
         totals: list[torch.Tensor] = []
         physical_visual_real_seq: list[torch.Tensor | None] = []
         semantic_visual_real_seq: list[torch.Tensor | None] = []
+        pending: _PendingTransitionLoss | None = None
         for index in range(len(window.frames) - 1):
-            transition_start = time.perf_counter()
             if debug_phase_label is not None:
                 logging.info("%s transition=%s begin", debug_phase_label, index)
             current = dataclasses.replace(window.frames[index], reset_scaffold=(index == 0))
@@ -2227,12 +2282,13 @@ class _PicfWindowTrainer(torch.nn.Module):
             )
             output = policy_forward.output
             flow_override = policy_forward.flow_override
+            policy_forward_sec = time.perf_counter() - step_start
             if debug_phase_label is not None:
                 logging.info(
                     "%s transition=%s policy_forward_sec=%.3f",
                     debug_phase_label,
                     index,
-                    time.perf_counter() - step_start,
+                    policy_forward_sec,
                 )
             if capture_visual_diagnostics:
                 physical_visual_real = output.state.predictive.physical_prediction_cache.visual_real
@@ -2243,28 +2299,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                 semantic_visual_real_seq.append(
                     None if semantic_visual_real is None else semantic_visual_real.detach().to(device="cpu")
                 )
-            loss_start = time.perf_counter()
-            losses = compute_transition_loss(
-                self.core,
-                output,
-                nxt,
-                action_target=current.action,
-                next_visual_map_override=next_visual,
-                config=self.loss_config,
-                action_loss_override=None if flow_override is None else flow_override["total"],
-                action_pos_override=None if flow_override is None else flow_override["action_pos"],
-                action_rot_override=None if flow_override is None else flow_override["action_rot"],
-                action_gripper_override=None if flow_override is None else flow_override["action_gripper"],
-            )
-            if debug_phase_label is not None:
-                logging.info(
-                    "%s transition=%s loss_sec=%.3f total_transition_sec=%.3f",
-                    debug_phase_label,
-                    index,
-                    time.perf_counter() - loss_start,
-                    time.perf_counter() - transition_start,
-                )
-            totals.append(losses.total)
             candidate_density = torch.as_tensor(
                 float(output.debug.get("projective_candidate_density", 0.0)),
                 device=self.core.device,
@@ -2280,6 +2314,145 @@ class _PicfWindowTrainer(torch.nn.Module):
                 device=self.core.device,
                 dtype=self.core.dtype,
             )
+            if pending is not None:
+                loss_start = time.perf_counter()
+                losses = compute_transition_loss(
+                    self.core,
+                    pending.output,
+                    current,
+                    action_target=pending.action_target,
+                    next_visual_map_override=pending.next_visual_map_override,
+                    config=self.loss_config,
+                    action_loss_override=None if pending.flow_override is None else pending.flow_override["total"],
+                    action_pos_override=None if pending.flow_override is None else pending.flow_override["action_pos"],
+                    action_rot_override=None if pending.flow_override is None else pending.flow_override["action_rot"],
+                    action_gripper_override=None if pending.flow_override is None else pending.flow_override["action_gripper"],
+                    future_targets_override=self._future_targets_override_from_observed(policy_forward.observed),
+                )
+                loss_sec = time.perf_counter() - loss_start
+                if debug_phase_label is not None:
+                    logging.info(
+                        "%s transition=%s loss_sec=%.3f total_transition_sec=%.3f",
+                        debug_phase_label,
+                        pending.index,
+                        loss_sec,
+                        pending.policy_forward_sec + loss_sec,
+                    )
+                totals.append(losses.total)
+                metrics_candidate_density = pending.candidate_density
+                metrics_tactile_contact_prob_mean = pending.tactile_contact_prob_mean
+                metrics_tactile_active_rate = pending.tactile_active_rate
+            else:
+                losses = None
+                metrics_candidate_density = None
+                metrics_tactile_contact_prob_mean = None
+                metrics_tactile_active_rate = None
+            pending = _PendingTransitionLoss(
+                index=index,
+                output=output,
+                next_observation=nxt,
+                next_visual_map_override=next_visual,
+                action_target=current.action,
+                flow_override=flow_override,
+                candidate_density=candidate_density,
+                tactile_contact_prob_mean=tactile_contact_prob_mean,
+                tactile_active_rate=tactile_active_rate,
+                policy_forward_sec=policy_forward_sec,
+            )
+            if metrics is None:
+                if losses is None:
+                    previous = policy_forward.next_state
+                    continue
+                metrics = {
+                    "loss_action": losses.action,
+                    "loss_action_active7": losses.action_active7,
+                    "loss_action_pos": losses.action_pos,
+                    "loss_action_rot": losses.action_rot,
+                    "loss_action_gripper": losses.action_gripper,
+                    "loss_visual_latent": losses.visual_latent,
+                    "loss_visual_real": losses.visual_real,
+                    "loss_tactile_real": losses.tactile_real,
+                    "loss_tactile_map": losses.tactile_map,
+                    "loss_tactile_aux": losses.tactile_aux,
+                    "loss_point_real": losses.point_real,
+                    "loss_semantic_future_aux": losses.semantic_future_aux,
+                    "loss_semantic_group_raw": losses.semantic_group_raw,
+                    "loss_semantic_group_capped": losses.semantic_group_capped,
+                    "loss_physical_aux": losses.physical_aux,
+                    "loss_physical_aux_capped": losses.physical_aux_capped,
+                    "loss_alignment": losses.alignment,
+                    "loss_alignment_raw": losses.alignment_raw,
+                    "loss_total_minus_action": losses.total_minus_action,
+                    "loss_anchor_pv": losses.anchor_pv,
+                    "loss_pv_weak": losses.pv_weak,
+                    "loss_focus_pv": losses.focus_pv,
+                    "loss_pt": losses.pt,
+                    "physical_aux_budget_scale": losses.physical_aux_budget_scale,
+                    "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
+                    "alignment_budget_scale": losses.alignment_budget_scale,
+                    "projective_candidate_density": metrics_candidate_density,
+                    "tactile_contact_prob_mean": metrics_tactile_contact_prob_mean,
+                    "tactile_active_rate": metrics_tactile_active_rate,
+                }
+            else:
+                if losses is None:
+                    previous = policy_forward.next_state
+                    continue
+                metrics["loss_action"] = metrics["loss_action"] + losses.action
+                metrics["loss_action_active7"] = metrics["loss_action_active7"] + losses.action_active7
+                metrics["loss_action_pos"] = metrics["loss_action_pos"] + losses.action_pos
+                metrics["loss_action_rot"] = metrics["loss_action_rot"] + losses.action_rot
+                metrics["loss_action_gripper"] = metrics["loss_action_gripper"] + losses.action_gripper
+                metrics["loss_visual_latent"] = metrics["loss_visual_latent"] + losses.visual_latent
+                metrics["loss_visual_real"] = metrics["loss_visual_real"] + losses.visual_real
+                metrics["loss_tactile_real"] = metrics["loss_tactile_real"] + losses.tactile_real
+                metrics["loss_tactile_map"] = metrics["loss_tactile_map"] + losses.tactile_map
+                metrics["loss_tactile_aux"] = metrics["loss_tactile_aux"] + losses.tactile_aux
+                metrics["loss_point_real"] = metrics["loss_point_real"] + losses.point_real
+                metrics["loss_semantic_future_aux"] = metrics["loss_semantic_future_aux"] + losses.semantic_future_aux
+                metrics["loss_semantic_group_raw"] = metrics["loss_semantic_group_raw"] + losses.semantic_group_raw
+                metrics["loss_semantic_group_capped"] = metrics["loss_semantic_group_capped"] + losses.semantic_group_capped
+                metrics["loss_physical_aux"] = metrics["loss_physical_aux"] + losses.physical_aux
+                metrics["loss_physical_aux_capped"] = metrics["loss_physical_aux_capped"] + losses.physical_aux_capped
+                metrics["loss_alignment"] = metrics["loss_alignment"] + losses.alignment
+                metrics["loss_alignment_raw"] = metrics["loss_alignment_raw"] + losses.alignment_raw
+                metrics["loss_total_minus_action"] = metrics["loss_total_minus_action"] + losses.total_minus_action
+                metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
+                metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
+                metrics["loss_focus_pv"] = metrics["loss_focus_pv"] + losses.focus_pv
+                metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
+                metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
+                metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
+                metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
+                metrics["projective_candidate_density"] = metrics["projective_candidate_density"] + metrics_candidate_density
+                metrics["tactile_contact_prob_mean"] = metrics["tactile_contact_prob_mean"] + metrics_tactile_contact_prob_mean
+                metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + metrics_tactile_active_rate
+            previous = policy_forward.next_state
+
+        if pending is not None:
+            loss_start = time.perf_counter()
+            losses = compute_transition_loss(
+                self.core,
+                pending.output,
+                pending.next_observation,
+                action_target=pending.action_target,
+                next_visual_map_override=pending.next_visual_map_override,
+                config=self.loss_config,
+                action_loss_override=None if pending.flow_override is None else pending.flow_override["total"],
+                action_pos_override=None if pending.flow_override is None else pending.flow_override["action_pos"],
+                action_rot_override=None if pending.flow_override is None else pending.flow_override["action_rot"],
+                action_gripper_override=None if pending.flow_override is None else pending.flow_override["action_gripper"],
+            )
+            loss_sec = time.perf_counter() - loss_start
+            if debug_phase_label is not None:
+                logging.info(
+                    "%s transition=%s loss_sec=%.3f total_transition_sec=%.3f",
+                    debug_phase_label,
+                    pending.index,
+                    loss_sec,
+                    pending.policy_forward_sec + loss_sec,
+                )
+            totals.append(losses.total)
             if metrics is None:
                 metrics = {
                     "loss_action": losses.action,
@@ -2308,9 +2481,9 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
-                    "projective_candidate_density": candidate_density,
-                    "tactile_contact_prob_mean": tactile_contact_prob_mean,
-                    "tactile_active_rate": tactile_active_rate,
+                    "projective_candidate_density": pending.candidate_density,
+                    "tactile_contact_prob_mean": pending.tactile_contact_prob_mean,
+                    "tactile_active_rate": pending.tactile_active_rate,
                 }
             else:
                 metrics["loss_action"] = metrics["loss_action"] + losses.action
@@ -2339,10 +2512,9 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
-                metrics["projective_candidate_density"] = metrics["projective_candidate_density"] + candidate_density
-                metrics["tactile_contact_prob_mean"] = metrics["tactile_contact_prob_mean"] + tactile_contact_prob_mean
-                metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + tactile_active_rate
-            previous = policy_forward.next_state
+                metrics["projective_candidate_density"] = metrics["projective_candidate_density"] + pending.candidate_density
+                metrics["tactile_contact_prob_mean"] = metrics["tactile_contact_prob_mean"] + pending.tactile_contact_prob_mean
+                metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + pending.tactile_active_rate
 
         assert metrics is not None
         denom = float(len(window.frames) - 1)
@@ -2982,6 +3154,10 @@ def _build_model_sequential_across_ranks(
 
 
 def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[PicfFullCore, torch.nn.Module | None, bool]:
+    def _arg_or_default(name: str, default: Any) -> Any:
+        value = getattr(args, name, None)
+        return default if value is None else value
+
     builder = CalvinDepthToPicfPointCloud(args.calvin_root, stride=args.stride, max_points=args.max_points)
     config = PicfCoreConfig(
         device=str(device),
@@ -3001,27 +3177,38 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         control_layers=args.control_layers,
         control_query_tokens=args.control_query_tokens,
         predictive_query_tokens=args.predictive_query_tokens,
+        task_local_queries=args.task_local_queries,
+        task_global_queries=args.task_global_queries,
+        task_instruction_queries=args.task_instruction_queries,
+        task_self_layers=args.task_self_layers,
+        conditioned_control_queries=args.conditioned_control_queries,
+        pi_prefix_queries=args.pi_prefix_queries,
+        conditioned_future_queries=args.conditioned_future_queries,
         predictive_semantic_reads=args.predictive_semantic_reads,
         control_semantic_reads=args.control_semantic_reads,
         predictive_semantic_dropout_prob=args.predictive_semantic_dropout_prob,
         semantic_prefix_dropout_prob=args.semantic_prefix_dropout_prob,
         attention_heads=args.attention_heads,
         future_vote_heads=args.future_vote_heads,
-        crop_radius_m=float(getattr(args, "crop_radius_m", _SPEC_DEFAULTS.crop_radius_m)),
-        point_focus_sigma_m=float(getattr(args, "point_focus_sigma_m", _SPEC_DEFAULTS.point_focus_sigma_m)),
-        tactile_contact_tau_on=float(getattr(args, "tactile_contact_tau_on", _SPEC_DEFAULTS.tactile_contact_tau_on)),
-        tactile_contact_tau_off=float(getattr(args, "tactile_contact_tau_off", _SPEC_DEFAULTS.tactile_contact_tau_off)),
+        crop_radius_m=float(_arg_or_default("crop_radius_m", _SPEC_DEFAULTS.crop_radius_m)),
+        point_focus_sigma_m=float(_arg_or_default("point_focus_sigma_m", _SPEC_DEFAULTS.point_focus_sigma_m)),
+        tactile_contact_tau_on=float(_arg_or_default("tactile_contact_tau_on", _SPEC_DEFAULTS.tactile_contact_tau_on)),
+        tactile_contact_tau_off=float(_arg_or_default("tactile_contact_tau_off", _SPEC_DEFAULTS.tactile_contact_tau_off)),
         tactile_contact_temperature=float(
-            getattr(args, "tactile_contact_temperature", _SPEC_DEFAULTS.tactile_contact_temperature)
+            _arg_or_default("tactile_contact_temperature", _SPEC_DEFAULTS.tactile_contact_temperature)
         ),
         tactile_contact_ema_beta=float(
-            getattr(args, "tactile_contact_ema_beta", _SPEC_DEFAULTS.tactile_contact_ema_beta)
+            _arg_or_default("tactile_contact_ema_beta", _SPEC_DEFAULTS.tactile_contact_ema_beta)
         ),
-        tactile_anchor_prob_on=float(
-            getattr(args, "tactile_anchor_prob_on", _SPEC_DEFAULTS.tactile_anchor_prob_on)
+        tactile_anchor_prob_on=float(_arg_or_default("tactile_anchor_prob_on", _SPEC_DEFAULTS.tactile_anchor_prob_on)),
+        task_visual_reread_topk=int(_arg_or_default("task_visual_reread_topk", _SPEC_DEFAULTS.task_visual_reread_topk)),
+        task_tactile_reread_groups=int(
+            _arg_or_default("task_tactile_reread_groups", _SPEC_DEFAULTS.task_tactile_reread_groups)
         ),
+        task_point_reread_topk=int(_arg_or_default("task_point_reread_topk", _SPEC_DEFAULTS.task_point_reread_topk)),
         action_output_clip=getattr(args, "action_output_clip", None),
-        tokenwise_ff_chunk_size=int(getattr(args, "tokenwise_ff_chunk_size", _SPEC_DEFAULTS.tokenwise_ff_chunk_size)),
+        tokenwise_ff_chunk_size=int(_arg_or_default("tokenwise_ff_chunk_size", _SPEC_DEFAULTS.tokenwise_ff_chunk_size)),
+        require_pi0_action_generator=bool(_arg_or_default("require_pi0_action_generator", _SPEC_DEFAULTS.require_pi0_action_generator)),
     )
     point_feature_extractor = None
     if args.point_backbone == "sonata":
@@ -3653,7 +3840,7 @@ def train(args: argparse.Namespace) -> None:
                 getattr(args, "action_output_clip", None),
             )
             logging.info(
-                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
+                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s task_local_queries=%s task_global_queries=%s task_instruction_queries=%s task_self_layers=%s conditioned_control_queries=%s pi_prefix_queries=%s conditioned_future_queries=%s task_visual_reread_topk=%s task_tactile_reread_groups=%s task_point_reread_topk=%s require_pi0_action_generator=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
                 args.hidden_dim,
                 args.posterior_hidden_dim,
                 args.latent_dim,
@@ -3670,6 +3857,17 @@ def train(args: argparse.Namespace) -> None:
                 args.control_layers,
                 args.control_query_tokens,
                 args.predictive_query_tokens,
+                args.task_local_queries,
+                args.task_global_queries,
+                args.task_instruction_queries,
+                args.task_self_layers,
+                args.conditioned_control_queries,
+                args.pi_prefix_queries,
+                args.conditioned_future_queries,
+                args.task_visual_reread_topk,
+                args.task_tactile_reread_groups,
+                args.task_point_reread_topk,
+                bool(args.require_pi0_action_generator),
                 args.predictive_semantic_reads,
                 args.control_semantic_reads,
                 args.predictive_semantic_dropout_prob,
@@ -4280,10 +4478,25 @@ def main() -> None:
     parser.add_argument("--control-layers", type=int, default=_SPEC_DEFAULTS.control_layers)
     parser.add_argument("--control-query-tokens", type=int, default=_SPEC_DEFAULTS.control_query_tokens)
     parser.add_argument("--predictive-query-tokens", type=int, default=_SPEC_DEFAULTS.predictive_query_tokens)
+    parser.add_argument("--task-local-queries", type=int, default=_SPEC_DEFAULTS.task_local_queries)
+    parser.add_argument("--task-global-queries", type=int, default=_SPEC_DEFAULTS.task_global_queries)
+    parser.add_argument("--task-instruction-queries", type=int, default=_SPEC_DEFAULTS.task_instruction_queries)
+    parser.add_argument("--task-self-layers", type=int, default=_SPEC_DEFAULTS.task_self_layers)
+    parser.add_argument("--conditioned-control-queries", type=int, default=_SPEC_DEFAULTS.conditioned_control_queries)
+    parser.add_argument("--pi-prefix-queries", type=int, default=_SPEC_DEFAULTS.pi_prefix_queries)
+    parser.add_argument("--conditioned-future-queries", type=int, default=_SPEC_DEFAULTS.conditioned_future_queries)
     parser.add_argument("--predictive-semantic-reads", type=int, default=_SPEC_DEFAULTS.predictive_semantic_reads)
     parser.add_argument("--control-semantic-reads", type=int, default=_SPEC_DEFAULTS.control_semantic_reads)
     parser.add_argument("--predictive-semantic-dropout-prob", type=float, default=_SPEC_DEFAULTS.predictive_semantic_dropout_prob)
     parser.add_argument("--semantic-prefix-dropout-prob", type=float, default=_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
+    parser.add_argument("--task-visual-reread-topk", type=int, default=_SPEC_DEFAULTS.task_visual_reread_topk)
+    parser.add_argument("--task-tactile-reread-groups", type=int, default=_SPEC_DEFAULTS.task_tactile_reread_groups)
+    parser.add_argument("--task-point-reread-topk", type=int, default=_SPEC_DEFAULTS.task_point_reread_topk)
+    parser.add_argument(
+        "--require-pi0-action-generator",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.require_pi0_action_generator,
+    )
     parser.add_argument("--tokenwise-ff-chunk-size", type=int, default=_SPEC_DEFAULTS.tokenwise_ff_chunk_size)
     parser.add_argument("--semantic-tokenwise-chunk-size", type=int, default=0)
     parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)

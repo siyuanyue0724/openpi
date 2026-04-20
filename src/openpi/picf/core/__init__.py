@@ -20,6 +20,7 @@ from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.core.training import compute_transition_loss
 from openpi.picf.core.training import detach_core_state
 from openpi.picf.core.training import extract_future_targets
+from openpi.picf.core.training import future_targets_from_current_targets
 from openpi.picf.core.training import PicfAlignmentLossBreakdown
 from openpi.picf.core.training import PicfAlignmentLossConfig
 from openpi.picf.core.training import PicfFutureTargets
@@ -54,4 +55,5 @@ __all__ = [
     "compute_transition_loss",
     "detach_core_state",
     "extract_future_targets",
+    "future_targets_from_current_targets",
 ]

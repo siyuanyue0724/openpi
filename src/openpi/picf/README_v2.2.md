@@ -2,11 +2,50 @@
 
 Date: 2026-04-20
 Repo: `/home/siyuanyue/Documents/openpi`
-Status: current local/cloud v2.2 architecture record after the one-shot
-action/control contract rewrite and the 4x40GB exact-memory full-train
-bring-up that has been directly observed through `step 10`
+Status: current local v2.2 architecture record after the one-shot
+action/control contract rewrite and the current exhaustive local audit
 
-## 0. Document Map
+## 0. Current Audit Snapshot
+
+This file should currently be read as a **local correctness / architecture
+record first**, and only secondarily as a historical record of earlier cloud
+bring-up attempts.
+
+As of the latest local audit pass:
+
+- the v2.2 physical / task-readout / conditioned-control / PI0 action contract
+  is internally consistent
+- future-target supervision is now explicit stop-gradient teacher supervision
+- shared middle frames inside a training window are now reused as detached
+  future targets instead of being redundantly rebuilt
+- the live training policy remains:
+  - one canonical recurrent physical carry
+  - one canonical conditioned control state `C_t`
+  - one final PI0.5 action path
+- no current local regression evidence shows semantic leakage into posterior or
+  innovation
+- no current local regression evidence shows dual control semantics reappearing
+
+Latest fully local verification evidence:
+
+- `pytest -q src/openpi/picf/core/training_test.py` -> `18 passed`
+- `pytest -q src/openpi/picf/paligemma/wrapper_test.py` -> `23 passed`
+- `pytest -q scripts/picf_core_train_test.py` -> `88 passed`
+- `python scripts/verify_picf_contract.py` -> static checks, documentation
+  checks, targeted invariance regressions, core regression suite, and smoke
+  training check all pass
+
+Performance note:
+
+- the current main open issue is still throughput, not mathematical contract
+  correctness
+- the latest measured short-run exact-memory speed evidence remains the
+  historical 5-step probe recorded in
+  [`/tmp/picf_v22_speed_audit_20260420.md`](/tmp/picf_v22_speed_audit_20260420.md)
+- do not read this file as claiming that a full local or cloud `30000`-step run
+  has already completed on the current code unless that evidence is recorded
+  explicitly
+## 1. Document Map
 
 This file is the **current local v2.2 architecture record and implementation
 audit**. The one-shot action/control refactor described below has been deployed
@@ -48,7 +87,7 @@ Historical/archive docs:
 
 - `src/openpi/picf/README_v2.1.md`
 
-### 0.1 Read Order
+### 1.1 Read Order
 
 If you are opening the repo cold, use this order:
 
@@ -63,49 +102,62 @@ If you are opening the repo cold, use this order:
 5. [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
    Historical pre-v2.2 record only.
 
-### 0.2 Temporary Audit Companions
+### 1.2 Temporary Audit Companions
 
-For this local v2.2 rollout, the following temporary audit documents are the
-current deep-verification companions:
+For this local v2.2 rollout, the primary temporary audit documents are:
 
-1. [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md)
-   Current recursive dataflow audit refreshed after the 40GB training-memory investigation.
-2. [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md)
+1. [`/tmp/picf_v22_recursive_dataflow_20260421.md`](/tmp/picf_v22_recursive_dataflow_20260421.md)
+   Recursive current-code dataflow audit for the live trainer/policy/core/loss path, including the one-step lookahead loss wiring.
+2. [`/tmp/picf_v22_theory_reconciliation_20260421.md`](/tmp/picf_v22_theory_reconciliation_20260421.md)
+   Theory-side reconciliation of the current implementation, including detached future-target reuse on internal window frames.
+3. [`/tmp/picf_v22_bug_optimization_register_20260421.md`](/tmp/picf_v22_bug_optimization_register_20260421.md)
+   Explicit bug / optimization register for the current audit pass.
+
+Supporting temporary audit documents for the same rollout:
+
+4. [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md)
+   Prior recursive current-code dataflow audit for the initial 2026-04-20 pass.
+5. [`/tmp/picf_v22_audit_report_20260420.md`](/tmp/picf_v22_audit_report_20260420.md)
+   Prior audit conclusion file: cloud/runtime evidence, real findings, non-findings, and next exact-optimization targets.
+6. [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md)
    Refreshed v2.2 mathematical specification with the canonical recurrent-carry contract.
-3. [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md)
-   Explicit list of design mismatches / unnecessary glue, plus the fixes landed during the current audit.
-4. [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md)
+7. [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md)
+   Explicit list of design mismatches / unnecessary glue, plus the fixes landed during the audit.
+8. [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md)
    Quantitative 4x40GB A100 memory audit and backbone-contribution ranking.
-5. [`/tmp/picf_v22_readme_sync_20260420.md`](/tmp/picf_v22_readme_sync_20260420.md)
-   Final README synchronization audit for the current live deployment profile, observability modes, and GitHub handoff scope.
+9. [`/tmp/picf_v22_speed_audit_20260420.md`](/tmp/picf_v22_speed_audit_20260420.md)
+   Performance-specific historical speed audit for the earlier exact-memory bring-up passes.
+10. [`/tmp/picf_v22_readme_sync_20260420.md`](/tmp/picf_v22_readme_sync_20260420.md)
+   README synchronization audit for the current live deployment profile, observability modes, and GitHub handoff scope.
 
 Historical temp audits from the earlier 2026-04-18 pass are retained only as
 archive context:
 
-6. [`/tmp/picf_v22_current_code_dataflow_20260418.md`](/tmp/picf_v22_current_code_dataflow_20260418.md)
-7. [`/tmp/picf_v22_mathematical_spec_20260418.md`](/tmp/picf_v22_mathematical_spec_20260418.md)
-8. [`/tmp/picf_v22_final_reconciliation_20260418.md`](/tmp/picf_v22_final_reconciliation_20260418.md)
+11. [`/tmp/picf_v22_current_code_dataflow_20260418.md`](/tmp/picf_v22_current_code_dataflow_20260418.md)
+12. [`/tmp/picf_v22_mathematical_spec_20260418.md`](/tmp/picf_v22_mathematical_spec_20260418.md)
+13. [`/tmp/picf_v22_final_reconciliation_20260418.md`](/tmp/picf_v22_final_reconciliation_20260418.md)
 
 These `/tmp` documents are audit artifacts, not persistent maintained docs.
 
-### 0.3 Section Guide
+### 1.3 Section Guide
 
 Use the sections in this file as follows:
 
-- Section 2: recursive audit of the current live implementation
-- Section 3: canonical v2.2 object/state shape
-- Section 4: non-negotiable invariants
-- Section 5: corrections to the earlier external proposal
-- Section 6: detailed end-to-end v2.2 dataflow
-- Section 7: file-by-file implementation map
-- Section 8: checkpoint and compatibility migration
-- Section 9: validation matrix
-- Section 10: rollout gate record
-- Section 11: forbidden regressions
-- Section 12: definition of done
-- Section 13: final recommendation
+- Section 2: scope
+- Section 3: recursive audit of the current live implementation
+- Section 4: canonical v2.2 object/state shape
+- Section 5: non-negotiable invariants
+- Section 6: corrections to the earlier external proposal
+- Section 7: detailed end-to-end v2.2 dataflow
+- Section 8: file-by-file implementation map
+- Section 9: checkpoint and compatibility migration
+- Section 10: validation matrix
+- Section 11: rollout gate record
+- Section 12: forbidden regressions
+- Section 13: definition of done
+- Section 14: final recommendation
 
-### 0.4 Navigation Summary
+### 1.4 Navigation Summary
 
 When verifying the local v2.2 codebase, use this navigation split:
 
@@ -118,14 +170,20 @@ When verifying the local v2.2 codebase, use this navigation split:
 - historical pre-v2.2 reference only:
   - [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
 - temporary deep audits for this local rollout:
-  - [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md)
-  - [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md)
-  - [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md)
-  - [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md)
-  - [`/tmp/picf_v22_readme_sync_20260420.md`](/tmp/picf_v22_readme_sync_20260420.md)
+  - [`/tmp/picf_v22_recursive_dataflow_20260421.md`](/tmp/picf_v22_recursive_dataflow_20260421.md)
+  - [`/tmp/picf_v22_theory_reconciliation_20260421.md`](/tmp/picf_v22_theory_reconciliation_20260421.md)
+  - [`/tmp/picf_v22_bug_optimization_register_20260421.md`](/tmp/picf_v22_bug_optimization_register_20260421.md)
+  - supporting:
+    [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md),
+    [`/tmp/picf_v22_audit_report_20260420.md`](/tmp/picf_v22_audit_report_20260420.md),
+    [`/tmp/picf_v22_mathematical_spec_20260420.md`](/tmp/picf_v22_mathematical_spec_20260420.md),
+    [`/tmp/picf_v22_design_reconciliation_20260420.md`](/tmp/picf_v22_design_reconciliation_20260420.md),
+    [`/tmp/picf_v22_memory_audit_20260420.md`](/tmp/picf_v22_memory_audit_20260420.md),
+    [`/tmp/picf_v22_speed_audit_20260420.md`](/tmp/picf_v22_speed_audit_20260420.md),
+    [`/tmp/picf_v22_readme_sync_20260420.md`](/tmp/picf_v22_readme_sync_20260420.md)
   - archived 2026-04-18 temp audits only when historical comparison matters
 
-## 1. Scope
+## 2. Scope
 
 The goal of v2.2 is **not** to redesign the physical core. The goal is to
 preserve the already-correct physical world-state machinery and perform a
@@ -148,12 +206,12 @@ v2.2 is therefore treated as:
 
 and **not** as a cosmetic cleanup.
 
-## 2. Current Live Code Audit
+## 3. Current Live Code Audit
 
 This section records what was already correct in current code and what the
 v2.2 rewrite changed.
 
-### 2.1 Physical Core: Keep
+### 3.1 Physical Core: Keep
 
 The following pieces were already the right mathematical object and were kept
 structurally unchanged:
@@ -176,7 +234,7 @@ Relevant code:
 - `src/openpi/picf/core/contracts.py`
 - `PICF_FORMAL_CONTRACT.md`
 
-### 2.2 Current-Step Private Dense Memory: Already Present
+### 3.2 Current-Step Private Dense Memory: Already Present
 
 Current code already has:
 
@@ -195,7 +253,7 @@ This matters because v2.2 needs semantic-conditioned readout over:
 
 That substrate already exists. v2.2 reuses it rather than replacing it.
 
-### 2.3 Attention Primitives: Already Sufficient
+### 3.3 Attention Primitives: Already Sufficient
 
 Current core already includes:
 
@@ -213,7 +271,7 @@ This is enough to implement:
 
 without introducing a fourth attention subsystem.
 
-### 2.4 Historical Seam 1: Action Path Used To Be Glue
+### 3.4 Historical Seam 1: Action Path Used To Be Glue
 
 The pre-v2.2 trainer/serve path used to be split across:
 
@@ -235,7 +293,7 @@ The unified policy now owns:
 - PI0.5 flow loss / sampler call
 - executed-action finalization through `finalize_with_action(...)`
 
-### 2.5 Historical Seam 2: Dual Control Semantics Used To Exist
+### 3.5 Historical Seam 2: Dual Control Semantics Used To Exist
 
 Pre-v2.2 `_predictive_state(...)` used to construct two parallel control routes:
 
@@ -254,7 +312,7 @@ Compatibility fields such as `predictive.action_condition_tokens` and
 `predictive.control_query_state` survive only as views/debug aliases of the
 canonical conditioned-control outputs.
 
-### 2.6 Historical Seam 3: Raw Semantic Prefix Used To Enter Core Control/Future
+### 3.6 Historical Seam 3: Raw Semantic Prefix Used To Enter Core Control/Future
 
 Pre-v2.2 `_predictive_state(...)` directly injected the raw semantic prefix
 into:
@@ -271,7 +329,7 @@ is:
 - conditioned future is built from token-level physical predictive tokens plus
   `C_t^{future}`, not from raw semantic-prefix injection
 
-### 2.7 Important Current Code Fact: `fused_tokens` Is Not Full Multimodal Public Memory
+### 3.7 Important Current Code Fact: `fused_tokens` Is Not Full Multimodal Public Memory
 
 Current `_build_token_field(...)` constructs:
 
@@ -295,7 +353,7 @@ This matters because the external proposal said "read full fused tokens". That
 was corrected in v2.2: task-readout public memory is not defined as
 `fused_tokens` alone.
 
-### 2.8 Current State Dataclasses: Exact Audit
+### 3.8 Current State Dataclasses: Exact Audit
 
 Current `src/openpi/picf/core/contracts.py` exposes these load-bearing state
 containers.
@@ -395,7 +453,7 @@ This audit matters because v2.2 is not just adding new objects. It also removes
 the independent semantic meaning of the current control-related fields in
 `PicfPredictiveState`.
 
-### 2.9 Current `PicfFullCore.__init__`: Exact Module Inventory
+### 3.9 Current `PicfFullCore.__init__`: Exact Module Inventory
 
 Current `PicfFullCore` already contains most of the building blocks required by
 the v2.2 patch. The important ones are:
@@ -470,7 +528,7 @@ Current control / future modules:
 This is why v2.2 is a refactor, not a rewrite. Most required primitives
 already existed and were reused.
 
-### 2.10 Current `_build_token_field(...)`: Recursive Flow
+### 3.10 Current `_build_token_field(...)`: Recursive Flow
 
 Current `_build_token_field(...)` already does more than a simple concatenation.
 Its real stages are:
@@ -518,7 +576,7 @@ Consequences for v2.2:
 - current `fused_tokens` must not be mistaken for full multimodal public
   memory
 
-### 2.11 Current `_build_observation_anchors(...)`: Recursive Flow
+### 3.11 Current `_build_observation_anchors(...)`: Recursive Flow
 
 Current observation-anchor construction is already two-stage:
 
@@ -541,7 +599,7 @@ This is a strong base for v2.2. It confirms that:
 - tactile ownership already exists at group level in the physical path
 - semantic does not belong here
 
-### 2.12 Current `_posterior_update(...)`: Recursive Flow
+### 3.12 Current `_posterior_update(...)`: Recursive Flow
 
 Current posterior update is already a multi-source evidence fusion block:
 
@@ -569,7 +627,7 @@ Current posterior update is already a multi-source evidence fusion block:
 This means v2.2 does not re-invent dense reread. It already exists in
 the physical posterior path and remains untouched.
 
-### 2.13 Current `_current_targets(...)` and `_innovation(...)`
+### 3.13 Current `_current_targets(...)` and `_innovation(...)`
 
 Current targets are already denser than the original coarse version:
 
@@ -599,7 +657,7 @@ This confirms:
 - innovation is already correctly world-only
 - v2.2 preserves the current physical innovation semantics exactly
 
-### 2.14 Current `_predictive_state(...)`: Post-v2.2 Role
+### 3.14 Current `_predictive_state(...)`: Post-v2.2 Role
 
 Current `_predictive_state(...)` is no longer the place where control semantics
 are invented. It now has a narrower role:
@@ -619,7 +677,7 @@ The control-semantics split was moved out of `_predictive_state(...)` into:
 - `_build_conditioned_control_state(...)`
 - `finalize_with_action(...)`
 
-### 2.15 Current `refresh_predictive_state_for_action(...)` and `step(...)`
+### 3.15 Current `refresh_predictive_state_for_action(...)` and `step(...)`
 
 `refresh_predictive_state_for_action(...)` now acts as a compatibility bridge
 around the new observe/finalize split. It reconstructs the minimal observed
@@ -635,7 +693,7 @@ path is:
 
 Trainer and serve no longer depend on `step(...)` as the primary action API.
 
-### 2.16 Current Wrapper / PI0.5 Audit
+### 3.16 Current Wrapper / PI0.5 Audit
 
 Current `src/openpi/picf/paligemma/wrapper.py` already restored the PI0.5 stack:
 
@@ -663,7 +721,7 @@ Current wrapper contract already supports:
 Therefore v2.2 does not need to redesign PI0.5 integration. It only needs to
 replace the source of `extra_prefix_tokens`.
 
-### 2.17 Current Trainer Audit
+### 3.17 Current Trainer Audit
 
 Current `scripts/picf_core_train.py` still sequences training manually:
 
@@ -688,7 +746,7 @@ preserves:
 So the trainer is not simplified blindly. Only the action/control glue moved
 behind `PicfPi05Policy`.
 
-### 2.18 Current Serve Audit
+### 3.18 Current Serve Audit
 
 Current `scripts/serve_picf_policy.py` sequences inference manually:
 
@@ -701,7 +759,7 @@ Current `scripts/serve_picf_policy.py` sequences inference manually:
 
 This confirms exactly what the v2.2 exported policy now unifies.
 
-### 2.19 Current Verifier and Tests Audit
+### 3.19 Current Verifier and Tests Audit
 
 Current `scripts/verify_picf_contract.py` is still aligned to the current live
 semantic-prefix-primary core semantics. It currently asserts things such as:
@@ -725,7 +783,7 @@ Current tests already cover:
 This is useful because v2.2 can extend an existing test base rather than
 starting from zero.
 
-### 2.20 Current Default Configuration Snapshot
+### 3.20 Current Default Configuration Snapshot
 
 The current live defaults that v2.2 treats as baseline, not as part of
 the refactor, are:
@@ -765,7 +823,7 @@ Current training/runtime assumptions relevant to v2.2:
 These are operating assumptions to preserve during the refactor, not knobs to
 revisit inside the same patch.
 
-## 3. Canonical v2.2 Shape
+## 4. Canonical v2.2 Shape
 
 The current v2.2 system has exactly these canonical objects:
 
@@ -793,11 +851,11 @@ observation_t
 -> K_t^{cond} = conditioned future from [K_t^{phys}, C_t]
 ```
 
-## 4. Non-Negotiable v2.2 Invariants
+## 5. Non-Negotiable v2.2 Invariants
 
 These are hard constraints, not suggestions.
 
-### 4.1 Physical Core Remains Language-Free
+### 5.1 Physical Core Remains Language-Free
 
 Semantic must not enter:
 
@@ -805,7 +863,7 @@ Semantic must not enter:
 - `_posterior_update(...)`
 - `_innovation(...)`
 
-### 4.2 Innovation Base Remains World-Only
+### 5.2 Innovation Base Remains World-Only
 
 Next-step innovation may read only:
 
@@ -818,7 +876,7 @@ It must not read:
 - `previous.task_readout`
 - semantic-conditioned state of any kind
 
-### 4.3 `C_t` Is the Only Canonical Conditioned Control State
+### 5.3 `C_t` Is the Only Canonical Conditioned Control State
 
 After the refactor, these must no longer exist as independent control
 semantics:
@@ -830,13 +888,13 @@ semantics:
 If any compatibility alias survives, it may only be a view/debug snapshot of
 the canonical `conditioned_control`.
 
-### 4.4 `C_t^{pi}` Is an Interface View, Not a Second Control State
+### 5.4 `C_t^{pi}` Is an Interface View, Not a Second Control State
 
 `C_t^{pi}` is only the prefix representation exported to PI0.5.
 
 It is derived from `C_t` and is not itself a second control-path object.
 
-### 4.5 `task_readout` Is Current-Step Only
+### 5.5 `task_readout` Is Current-Step Only
 
 `task_readout` must not become:
 
@@ -847,7 +905,7 @@ It is derived from `C_t` and is not itself a second control-path object.
 
 It exists only to build `C_t` and conditioned future context.
 
-### 4.6 `K_t^{phys}` Must Be Computed After Executed Action Is Known
+### 5.6 `K_t^{phys}` Must Be Computed After Executed Action Is Known
 
 Training:
 
@@ -866,7 +924,7 @@ K_t^{phys} = P_phys(W_t, a_t^{exec}, proprio_t)
 Never predict `K_t^{phys}` from a placeholder action and then overwrite the
 executed action later.
 
-### 4.7 Serving Must Fail Fast Without PI0.5 Action Generation
+### 5.7 Serving Must Fail Fast Without PI0.5 Action Generation
 
 Formal deployed serving must not silently fall back to placeholder action.
 
@@ -874,12 +932,12 @@ The only valid deployed action path is:
 
 - `PicfPi05Policy.act(...)`
 
-## 5. Implemented Corrections to the External Proposal
+## 6. Implemented Corrections to the External Proposal
 
 The external proposal was directionally correct. These corrections were applied
 in the same patch.
 
-### 5.1 Public Read Memory Must Preserve Existing Public Fusion
+### 6.1 Public Read Memory Must Preserve Existing Public Fusion
 
 Because current `fused_tokens` excludes `visual_tokens`, v2.2 defines a new
 explicit public read memory. That public memory does not bypass the existing
@@ -910,7 +968,7 @@ where:
 dense memory. It does not regress to raw pre-fusion
 `point_tokens/tactile_tokens_active/context_tokens` as its only public memory.
 
-### 5.2 Contract Rewrite Must Be Explicit
+### 6.2 Contract Rewrite Must Be Explicit
 
 Current formal contract is semantic-prefix-primary in core control/future.
 
@@ -922,7 +980,7 @@ v2.2 replaces that with:
 
 This is a contract rewrite, not a minor cleanup.
 
-### 5.3 `C_t` Must Keep Token-Level Richness
+### 6.3 `C_t` Must Keep Token-Level Richness
 
 `C_t` must not collapse too early to one pooled vector.
 
@@ -937,7 +995,7 @@ and only then derive:
 - `pi_prefix_tokens`
 - `future_condition_tokens`
 
-### 5.4 Instruction Query Count Should Not Stay at 1
+### 6.4 Instruction Query Count Should Not Stay at 1
 
 If raw semantic prefix is removed as a direct core control/future input, one
 instruction token is too aggressive a bottleneck.
@@ -949,7 +1007,7 @@ The current live default is:
 This is the conservative default. It keeps instruction semantics richer without
 exploding complexity.
 
-### 5.5 Compat Loader Migration Must Ship in the Same Patch
+### 6.5 Compat Loader Migration Must Ship in the Same Patch
 
 Current trainer uses explicit compat filters for:
 
@@ -967,7 +1025,7 @@ Any v2.2 patch that changes:
 updates compat loading in the same patch. Otherwise warm-start from current
 checkpoints will fail abruptly.
 
-### 5.6 DDP Safety Guards Stay in Trainer/Runtime Layer
+### 6.6 DDP Safety Guards Stay in Trainer/Runtime Layer
 
 `PicfPi05Policy` unifies action/state interfaces. It does **not** absorb
 runtime/DDP-specific guards that are already working in the training script.
@@ -980,9 +1038,9 @@ Those include:
 - current compat checkpoint loader behavior
 - post-sampler predictive refresh timing
 
-## 6. Detailed v2.2 Dataflow
+## 7. Detailed v2.2 Dataflow
 
-### 6.1 Observation and Physical World Update
+### 7.1 Observation and Physical World Update
 
 Unchanged:
 
@@ -996,7 +1054,7 @@ observation_t
 -> innovation_t from previous.K_{t-1}^{phys}
 ```
 
-### 6.2 Semantic-Conditioned Task Readout
+### 7.2 Semantic-Conditioned Task Readout
 
 New:
 
@@ -1016,7 +1074,7 @@ semantic tokens S_t
 
 This stage is current-step only.
 
-### 6.3 Unique Conditioned Control State
+### 7.3 Unique Conditioned Control State
 
 New:
 
@@ -1046,7 +1104,7 @@ C_t^{pi} = pi_prefix_reader(C_t.tokens)
 C_t^{future} = future_condition_reader(C_t.tokens)
 ```
 
-### 6.4 Unique Final Action Path
+### 7.4 Unique Final Action Path
 
 Training:
 
@@ -1069,7 +1127,7 @@ sampled_chunk = semantic_encoder.sample_action_chunk(
 
 No second action path may remain.
 
-### 6.5 Physical Predictive Basis and Conditioned Future
+### 7.5 Physical Predictive Basis and Conditioned Future
 
 ```text
 K_t^{phys} = P_phys(W_t, a_t^{exec}, proprio_t)
@@ -1081,9 +1139,9 @@ This preserves:
 - world-only predictive basis for innovation
 - conditioned future for semantic/task-aware forecasting
 
-## 7. File-by-File v2.2 Implementation Record
+## 8. File-by-File v2.2 Implementation Record
 
-### 7.1 `src/openpi/picf/core/config.py`
+### 8.1 `src/openpi/picf/core/config.py`
 
 Keep unchanged:
 
@@ -1102,7 +1160,6 @@ Current file defines:
 - `task_local_queries: int = 8`
 - `task_global_queries: int = 1`
 - `task_instruction_queries: int = 2`
-- `task_query_rounds: int = 2`
 - `task_self_layers: int = 1`
 - `conditioned_control_queries: int = 4`
 - `pi_prefix_queries: int = 4`
@@ -1112,6 +1169,12 @@ Current file defines:
 - `task_point_reread_topk: int = 32`
 - `require_pi0_action_generator: bool = True`
 
+Reserved / compatibility-only field:
+
+- `task_query_rounds: int = 2`
+  - retained in `PicfCoreConfig` for a not-yet-implemented iterative task-readout variant
+  - not currently consumed by the live v2.2 core/trainer path
+
 Mark as deprecated compatibility-only:
 
 - `predictive_semantic_reads`
@@ -1119,7 +1182,7 @@ Mark as deprecated compatibility-only:
 - `predictive_semantic_dropout_prob`
 - `semantic_prefix_dropout_prob`
 
-### 7.2 `src/openpi/picf/core/contracts.py`
+### 8.2 `src/openpi/picf/core/contracts.py`
 
 Add:
 
@@ -1178,7 +1241,7 @@ compat migration notes:
 - current `predictive.pooled_state`
   -> optional derived debug summary only; no longer canonical state
 
-### 7.3 `src/openpi/picf/core/pipeline.py`
+### 8.3 `src/openpi/picf/core/pipeline.py`
 
 Do not structurally change:
 
@@ -1339,7 +1402,7 @@ Intended split:
 - `finalize_with_action(...)`: canonical post-action stage
 - `step(...)`: compatibility wrapper only
 
-### 7.4 `src/openpi/picf/paligemma/wrapper.py`
+### 8.4 `src/openpi/picf/paligemma/wrapper.py`
 
 Keep action generation logic intact:
 
@@ -1368,7 +1431,7 @@ Wrapper non-goals for v2.2:
 v2.2 changes the source and semantics of action-conditioning tokens, not the
 PI0.5 generator itself.
 
-### 7.5 `src/openpi/picf/policy.py`
+### 8.5 `src/openpi/picf/policy.py`
 
 Current exported policy class:
 
@@ -1438,7 +1501,7 @@ encode semantic
 - serving
 - rollout/eval entrypoints
 
-### 7.6 `scripts/picf_core_train.py`
+### 8.6 `scripts/picf_core_train.py`
 
 The trainer no longer treats this manual distributed glue sequence as the
 canonical action path:
@@ -1452,6 +1515,21 @@ It now uses:
 
 - construct `PicfPi05Policy`
 - call `policy.forward_train_transition(...)`
+
+Loss-side supervision rule:
+
+- `compute_transition_loss(...)` must build future targets from the next
+  observation as stop-gradient teacher signals
+- `extract_future_targets(...)` therefore wraps `core.extract_targets(...)` in
+  `torch.no_grad()`
+- next-observation targets are supervision values, not a second trainable branch
+  of the same transition graph
+- when `unroll_steps > 1`, the window trainer now uses a one-step lookahead:
+  the already-computed `observed.current_targets` from transition `t+1` are
+  detached and reused as the future supervision targets for transition `t`
+- therefore shared middle frames inside one training window are not rebuilt
+  twice on the loss side; only the final frame in the window still needs an
+  explicit `extract_future_targets(...)` pass
 
 Historical trainer glue removed as first-class action integration:
 
@@ -1505,11 +1583,12 @@ Current standard long-run launch profile:
 - transformer-stack entry now materializes every incoming activation once (`x = x.clone()`) before attention. This is mathematically exact and is now part of the 4x40GB contract because many PICF call sites batch tokens via `tokens[None, :]`, while FSDP can also hand stacks storage-sharing tensors whose aliasing is not reliably visible through `_base`; a single stack-entry clone is the clean boundary that prevents autograd multi-view alias failures inside residual attention blocks
 - FSDP grad-norm measurement and percentile clipping on this profile must use an explicit global L2 reduction over local gradient shards instead of `FullyShardedDataParallel.clip_grad_norm_`; the semantic stack intentionally carries both bf16 bulk weights and minority float32 stabilizer parameters, so the stock helper's uniform-dtype assumption is not a valid contract here
 - semantic gradient checkpointing remains enabled on that FSDP path; after routing PI0 flow-loss calls through module `forward(op, ...)` and collapsing the semantic stack to one FSDP boundary, non-reentrant checkpoint recomputation is again the correct memory-saving path rather than a forbidden custom-method re-entry
-- the standard 4x40GB profile now also checkpoints the full `_PicfWindowTrainer.forward(...)` window body during training. That profile simultaneously sets `diagnostic_interval=0`, because the heavy visual-diagnostic branch would otherwise reintroduce an uncheckpointed long-window path every few hundred steps. The checkpoint input is a standalone dummy leaf on the active CUDA device rather than a view into any FSDP flat parameter, so recompute keeps exact training math without feeding full-parameter gradients back into local shard metadata.
+- the training stack still supports checkpointing the full `_PicfWindowTrainer.forward(...)` window body during training. That remains an exact fallback for extra peak-memory reduction, and the checkpoint input is still a standalone dummy leaf on the active CUDA device rather than a view into any FSDP flat parameter, so recompute keeps exact training math without feeding full-parameter gradients back into local shard metadata. It is now an explicit operator knob rather than something the foundation profile silently forces on every launch.
 - the custom PI0/Gemma dual-branch semantic attention path now uses SDPA instead of the eager attention workspace. This is part of the standard 4x40GB profile because the eager path materializes a large attention buffer that fits at step 1 but blows up once optimizer state becomes resident; SDPA preserves the same training objective while removing that workspace peak.
 - core transformer stacks (`token_fusion`, `obs_self`, `posterior_self`, `task_self`, `predictive_world`, `predictive_semantic_world`, `control_world`) now also use train-time non-reentrant activation recompute; this is part of the standard all-backbone v2.2 training path and does not alter the underlying objective
 - the trainable Sonata point backbone and AnyTouch tactile encoder now also use train-time non-reentrant recompute on their main backbone forwards; this keeps all-backbone finetuning mathematically identical while shifting more of the per-rank memory burden from saved activations into recompute
 - tokenwise-only projections and FFNs on the current hottest paths now support exact sequence chunking instead of monolithic execution. On the current profile this is enabled by default as `tokenwise_ff_chunk_size=64` for PICF core transformer/cross-attention FFNs and `semantic_tokenwise_chunk_size=64` for the custom PI0/Gemma dual-branch tokenwise projections/MLPs under FSDP full-shard training. These chunked calls preserve the same parameterization and objective; they only lower local activation residency by evaluating tokenwise maps in smaller sequence slices.
+- the PI0/PaliGemma wrapper no longer adds an extra outer checkpoint around semantic forward blocks when the native language-model / vision-tower / expert-model checkpointing path is already active. This avoids redundant recompute while preserving the same gradients.
 - the PI0/PICF semantic runtime now drops the unused outer causal-LM heads (`paligemma.lm_head`, `gemma_expert.lm_head`) immediately after checkpoint load. The live training path never routes through those logits heads, so removing them from the runtime graph is mathematically exact and prevents dead generation weights from inflating FSDP wrapping.
 - standard multi-rank `FSDP full_shard` training now also standardizes `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; after the backbone recompute cut, the dominant remaining failure mode was allocator fragmentation (`reserved but unallocated` growing much larger than free memory), so v2.2 now treats expandable segments as part of the clean startup contract rather than a post-hoc workaround
 - standard FSDP full-finetune startup no longer serializes checkpoint construction rank-by-rank; each rank builds in parallel, because the serialized path turned one large checkpoint load into a multi-stage startup stall without changing training semantics
@@ -1524,19 +1603,20 @@ Important status note:
 
 - this section records the implemented 4x40GB FSDP training contract and the
   code paths that now exist in `scripts/picf_core_train.py`
-- the current exact-memory profile has now been empirically observed to:
-  - complete a 5-step diagnostic run and save a checkpoint
-  - execute a full-train run far enough to print a real metrics JSON line at
-    `step 10`
-- so the maintained v2.2 README should now be read as describing a live 4x40GB
-  full-train profile, not a merely hypothetical one
+- the maintained v2.2 README should be read as the current operator/developer
+  contract for the 4x40GB full-train path, not as a promise that every listed
+  runtime knob is part of the default launch profile
+- this file records:
+  - what is implemented in code
+  - which runtime measures are standard defaults
+  - which runtime measures are explicit operator fallbacks
 - it still must not overclaim beyond current evidence:
   - this file does **not** claim that `step 2500` or full `30000` completion has
     already been observed unless a later audit explicitly records that fact
 
-### 7.6.1 Current Live 4x40GB Deployment Profile
+### 8.6.1 Current Standard 4x40GB Deployment Profile
 
-The current live cloud training profile is:
+The current standard 4x40GB training profile is:
 
 - `training_strategy=fsdp_full_shard`
 - `optimizer_sharding=none`
@@ -1553,7 +1633,7 @@ The current live cloud training profile is:
 - `tactile_trainable=True`
 - `point_backbone_trainable=True`
 - `semantic_trainable=True`
-- `window_activation_checkpointing=True`
+- `window_activation_checkpointing=False` by default
 - `semantic_gradient_checkpointing=True`
 - `tokenwise_ff_chunk_size=64`
 - `semantic_tokenwise_chunk_size=64`
@@ -1573,10 +1653,10 @@ It also does **not** rely on:
 - CPU offload
 - watchdog restart logic
 
-### 7.6.2 Current Exact-Memory Runtime Measures
+### 8.6.2 Current Exact-Memory Runtime Measures
 
-The current 4x40GB full-train profile fits because the following mathematically
-exact runtime measures are now part of the live contract:
+The current 4x40GB full-train path relies on the following mathematically exact
+runtime measures:
 
 1. tokenwise exact chunking on the hot PICF core FFN/cross-attention FFN paths
 2. tokenwise exact chunking on the hot PI0/Gemma tokenwise projection/MLP paths
@@ -1585,7 +1665,8 @@ exact runtime measures are now part of the live contract:
 5. recursive FSDP subtree splitting on large uniform-dtype subtrees
 6. explicit safe core-stack FSDP child boundaries
 7. global-L2 shard-aware grad norm / percentile clipping
-8. full-window activation checkpointing during training
+8. optional full-window activation checkpointing during training when the
+   operator explicitly enables it
 9. semantic gradient checkpointing
 10. train-time recompute on the core transformer stacks
 11. train-time recompute on the Sonata / AnyTouch backbone forwards
@@ -1593,6 +1674,8 @@ exact runtime measures are now part of the live contract:
 13. allocator contract `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
 14. node-local staging of the shared PI0/PaliGemma checkpoint
 15. compact recurrent-carry instead of forwarding the full `PicfCoreState`
+16. suppression of redundant outer wrapper checkpointing when the native
+    PI0/PaliGemma layer checkpointing path is already active
 
 The current safe nested semantic hot-leaf set is:
 
@@ -1613,7 +1696,41 @@ nested-FSDP-safe under the current image-path alias constraints:
 - `vision_tower`
 - `multi_modal_projector`
 
-### 7.6.3 Operator Display / Observability Modes
+### 8.6.3 Current Throughput Diagnosis
+
+The current exact-memory contract above is mathematically correct, but the
+latest audits now point to a specific throughput problem:
+
+- the dominant slowdown is in semantic execution fragmentation
+- it is not primarily in `task_readout`, conditioned control, or the physical
+  finalize path
+
+Two concrete execution facts matter:
+
+1. nested semantic FSDP is currently very fine-grained
+   - the live runtime-hot semantic set expands to `185` nested leaves:
+     `1 + 18*5 + 18*5 + 4`
+   - this preserves exact training math, but it also means the custom
+     dual-branch semantic path can trigger many small FSDP gather / reshard
+     events
+2. semantic tokenwise chunking is currently one blunt knob
+   - under the standard 4x40GB profile, `semantic_tokenwise_chunk_size=64`
+     applies to `q/k/v/o` projections and `mlp`
+   - for rough live sequence scales near `784` tokens, this implies about `13`
+     chunks per tokenwise op and about `2340` tokenwise operator groups across
+     the 18-layer two-branch semantic path
+
+Current engineering conclusion:
+
+- the exact-memory profile is currently clean but throughput-expensive
+- the next optimization pass should stay mathematically exact and target:
+  - coarser semantic FSDP execution blocks
+  - separated chunk controls for semantic projections vs semantic MLPs
+
+This section is intentionally a diagnosis, not a claim that the throughput
+problem has already been solved.
+
+### 8.6.4 Operator Display / Observability Modes
 
 Two display modes are currently useful and both preserve the same optimization
 math:
@@ -1635,7 +1752,7 @@ Important clarification:
 - `--log-interval` changes only how often the metrics JSON line is printed
 - neither changes training math
 
-### 7.6.4 Current Cloud Launch Templates
+### 8.6.5 Current Cloud Launch Templates
 
 The current standard long-run launch template is:
 
@@ -1685,7 +1802,7 @@ The current early-observability verification template is the same command with:
 - `--log-interval 10`
 - optionally `--no-progress`
 
-### 7.6.5 Operationally Important Knobs
+### 8.6.6 Operationally Important Knobs
 
 The current operator-facing knobs that matter most are:
 
@@ -1721,11 +1838,11 @@ Exact-memory controls:
 
 Interpretation rule:
 
-- if a run must preserve the current live 4x40GB full-train contract, do not
+- if a run must preserve the current standard 4x40GB full-train contract, do not
   change the exact-memory controls casually; those are part of the current fit
   proof, not decorative micro-optimizations
 
-### 7.6.6 GitHub Handoff Scope
+### 8.6.7 GitHub Handoff Scope
 
 For this v2.2 rollout, the GitHub commit scope should include:
 
@@ -1746,7 +1863,7 @@ The `/tmp` audits are intentionally local operator artifacts. They are used to
 derive the maintained README and contract docs, not to replace them in version
 control.
 
-### 7.7 `scripts/serve_picf_policy.py`
+### 8.7 `scripts/serve_picf_policy.py`
 
 Serving no longer treats this manual sequence as the deployed action path:
 
@@ -1769,7 +1886,7 @@ Serving must fail fast if:
 - semantic encoder missing
 - PI0.5 action generation unsupported
 
-### 7.8 `scripts/verify_picf_contract.py`
+### 8.8 `scripts/verify_picf_contract.py`
 
 The verifier was migrated away from semantic-prefix-primary inside core and now
 checks the v2.2 semantics directly.
@@ -1802,11 +1919,11 @@ Also add negative checks:
 14. public task-readout memory includes `visual_tokens`
 15. only one conditioned-control route through `control_world(...)` remains
 
-## 8. Checkpoint and Compatibility Record
+## 9. Checkpoint and Compatibility Record
 
 This is a breaking structural patch. Compatibility is explicit.
 
-### 8.1 Reuse Existing Weights Where Possible
+### 9.1 Reuse Existing Weights Where Possible
 
 Warm-start:
 
@@ -1821,7 +1938,7 @@ Warm-start:
 - `control_world`
 - `predictive_semantic_world`
 
-### 8.2 Reinitialize New v2.2 Modules
+### 9.2 Reinitialize New v2.2 Modules
 
 New modules to initialize:
 
@@ -1837,7 +1954,7 @@ New modules to initialize:
 - new role embeddings
 - new dataclass-carried interface heads
 
-### 8.3 Compat Loader Migration Is Part of v2.2
+### 9.3 Compat Loader Migration Is Part of v2.2
 
 The patch updates:
 
@@ -1856,15 +1973,15 @@ Because current trainer already uses:
 the patch updates those explicitly. Do not assume generic `strict=False`
 loading semantics.
 
-## 9. Validation Matrix
+## 10. Validation Matrix
 
-### 9.1 Mathematical Boundary Tests
+### 10.1 Mathematical Boundary Tests
 
 1. `test_semantic_does_not_change_physical_posterior`
 2. `test_semantic_does_not_change_physical_prediction_basis_when_action_fixed`
 3. `test_previous_conditioned_state_does_not_change_next_innovation`
 
-### 9.2 Task-Readout Structure Tests
+### 10.2 Task-Readout Structure Tests
 
 4. `test_task_readout_reads_public_read_memory_and_private_dense_memory`
 5. `test_task_readout_changes_with_prompt_but_physical_core_does_not`
@@ -1879,7 +1996,7 @@ These tests explicitly cover:
 - `_StepDenseMemory.point_payload`
 - no writes from task-readout outputs into recurrent posterior state
 
-### 9.3 Exported Policy Tests
+### 10.3 Exported Policy Tests
 
 8. `test_policy_act_matches_manual_observe_sample_finalize_sequence`
 9. `test_policy_fails_fast_without_pi05_action_generator`
@@ -1890,13 +2007,13 @@ Add parity tests before deleting old glue:
 - trainer parity: old manual glue vs `PicfPi05Policy.forward_train_transition(...)`
 - serve parity: old manual glue vs `PicfPi05Policy.act(...)`
 
-### 9.4 Loader / Compat Tests
+### 10.4 Loader / Compat Tests
 
 11. shape-changed role embedding migration test
 12. task-readout missing keys allowed during compat warm-start
 13. removed semantic-prefix-primary control/future keys allowed as unexpected
 
-### 9.5 Existing Test Files To Extend
+### 10.5 Existing Test Files To Extend
 
 Primary extension targets:
 
@@ -1907,7 +2024,7 @@ Primary extension targets:
 
 Add new test files only if these become unreadable.
 
-## 10. Rollout Gate Record
+## 11. Rollout Gate Record
 
 Completed local gates:
 
@@ -1923,7 +2040,7 @@ Remaining runtime-stage gates:
 - warm-start and partial-reinit short-run A/B on cloud hardware
 - cloud long run
 
-## 11. Explicit "Do Not Do" List
+## 12. Explicit "Do Not Do" List
 
 Do not:
 
@@ -1936,7 +2053,7 @@ Do not:
 7. turn task readout into recurrent state
 8. silently fall back to placeholder action in serving/export
 
-## 12. Local Completion Criteria
+## 13. Local Completion Criteria
 
 Current local v2.2 satisfies the structural completion criteria when all of the
 following are true:
@@ -1953,7 +2070,7 @@ following are true:
 - train / serve both use the unified policy path
 - new tests for boundaries, structure, compat, and export behavior pass
 
-## 13. Final Local Verdict
+## 14. Final Local Verdict
 
 This refactor was worth doing in one patch because current code already had the
 hard substrate in place:

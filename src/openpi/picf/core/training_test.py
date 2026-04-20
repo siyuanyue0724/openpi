@@ -20,6 +20,8 @@ from openpi.picf.core.pipeline import PicfFullCore
 from openpi.picf.core.training import PicfAlignmentLossConfig
 from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.core.training import compute_transition_loss
+from openpi.picf.core.training import extract_future_targets
+from openpi.picf.core.training import future_targets_from_current_targets
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
 from openpi.picf.test_utils import build_mini_calvin_dataset
@@ -163,6 +165,67 @@ def _empty_point_set() -> PicfPointCloudFrame:
         valid_point_mask=np.zeros((0,), dtype=bool),
         frame_valid=True,
     )
+
+
+def test_extract_future_targets_is_stop_grad_teacher_path() -> None:
+    class _DummyCore:
+        def __init__(self) -> None:
+            self.weight = torch.nn.Parameter(torch.tensor(2.0))
+
+        def extract_targets(self, observation, *, visual_map_override=None):
+            del observation, visual_map_override
+            value = (self.weight * 3.0).reshape(1)
+            targets = {
+                "visual_latent": value,
+                "visual_real": value,
+                "tactile_real": value,
+                "point_real": value,
+            }
+            availability = torch.ones((4,), dtype=value.dtype)
+            return targets, availability
+
+    core = _DummyCore()
+    future = extract_future_targets(
+        core,
+        PicfObservation(
+            rgb_static=np.zeros((2, 2, 3), dtype=np.uint8),
+            depth_static=np.zeros((2, 2), dtype=np.float32),
+            robot_obs=np.zeros((7,), dtype=np.float32),
+            prompt="test",
+            step_id=0,
+            segment_id=0,
+            timestamp_s=0.0,
+            reset_scaffold=True,
+        ),
+    )
+    assert future.visual_latent is not None
+    assert future.visual_latent.requires_grad is False
+    assert future.visual_real is not None
+    assert future.visual_real.requires_grad is False
+    assert future.tactile_real is not None
+    assert future.tactile_real.requires_grad is False
+    assert future.point_real is not None
+    assert future.point_real.requires_grad is False
+    assert future.availability.requires_grad is False
+
+
+def test_future_targets_from_current_targets_detaches_teacher_values() -> None:
+    weight = torch.nn.Parameter(torch.tensor(2.0))
+    value = (weight * 3.0).reshape(1)
+    future = future_targets_from_current_targets(
+        {
+            "visual_latent": value,
+            "visual_real": value,
+            "tactile_real": value,
+            "point_real": value,
+        },
+        torch.ones((4,), dtype=value.dtype, requires_grad=True),
+    )
+    assert future.visual_latent is not None and future.visual_latent.requires_grad is False
+    assert future.visual_real is not None and future.visual_real.requires_grad is False
+    assert future.tactile_real is not None and future.tactile_real.requires_grad is False
+    assert future.point_real is not None and future.point_real.requires_grad is False
+    assert future.availability.requires_grad is False
 
 
 def test_transition_loss_closes_one_step_future_supervision_and_backward(tmp_path: Path) -> None:

@@ -181,7 +181,8 @@ Current v2.2 long-run training profile:
 - `--grad-clip-window 100`
 - `--visual-activation-checkpointing`
 - `--semantic-gradient-checkpointing`
-- `--window-activation-checkpointing`
+- `--window-activation-checkpointing` as an explicit fallback, not a silent
+  foundation-profile default
 - `--diagnostic-interval 0`
 - `--training-strategy fsdp_full_shard` for the current 4x40GB A100 FSDP investigation profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
@@ -192,25 +193,42 @@ Current v2.2 long-run training profile:
 - those safe core transformer stacks are now also explicitly reattached back onto `core` after wrapping; this is part of the 4x40GB contract so the root FSDP wrapper does not silently pull them back into one monolithic flat-parameter shard
 - the root FSDP wrapper now ignores fully frozen backbone subtrees instead of flattening mixed `requires_grad` parameter sets. This is required for `visual_finetune_mode=frozen` and is part of the standard 40GB engineering contract whenever a backbone is frozen under full-shard training.
 - transformer stacks on this profile now materialize every incoming activation once at stack entry before attention. PICF builds many `[1, T, C]` batches via `tokens[None, :]`, and FSDP can also surface storage-sharing tensors whose aliasing is not reliably visible through `_base`; the stack-entry clone is mathematically exact and avoids FSDP/autograd multi-view alias failures inside residual attention blocks
-- the standard 4x40GB profile also checkpoints the full `_PicfWindowTrainer.forward(...)` window body and sets `diagnostic_interval=0`; this is the clean way to recover the optimizer-state headroom lost after step 1 without changing the objective or freezing any backbone. The checkpoint input is a standalone dummy leaf on the active CUDA device rather than a view into any FSDP flat parameter, so recompute does not feed full-parameter gradients back into local shard metadata.
+- the training stack still supports checkpointing the full `_PicfWindowTrainer.forward(...)` window body during training. That remains an exact fallback for extra peak-memory reduction, and the checkpoint input is still a standalone dummy leaf on the active CUDA device rather than a view into any FSDP flat parameter, so recompute keeps exact training math without feeding full-parameter gradients back into local shard metadata. It is now an explicit operator knob rather than something the foundation profile silently forces on every launch.
 - the custom PI0/Gemma dual-branch semantic attention path on this profile uses SDPA instead of the eager attention workspace, which removes the large step-2 attention buffer without changing the training objective.
 - tokenwise-only projections and FFNs on the current hottest paths now support exact sequence chunking. On the present profile this is enabled by default as `tokenwise_ff_chunk_size=64` for PICF core transformer/cross-attention FFNs and `semantic_tokenwise_chunk_size=64` for the custom PI0/Gemma dual-branch tokenwise projections/MLPs under FSDP full-shard training. This is an execution change, not a model-capacity change.
+- the PI0/PaliGemma wrapper no longer adds an extra outer checkpoint around semantic forward blocks when the native language-model / vision-tower / expert-model checkpointing path is already active. This avoids redundant recompute while preserving the same gradients.
 - the PI0/PICF semantic runtime now drops the unused outer causal-LM heads after checkpoint load. Those logits heads are not used by the live action-training path, so removing them from the runtime graph is mathematically exact and prevents dead semantic weights from bloating FSDP wrapping.
 - the FSDP path uses explicit global-L2 grad norm / percentile clipping across local shards instead of `FSDP.clip_grad_norm_`, because the semantic stack deliberately mixes bf16 bulk weights with a small float32 stabilizer subset
 - standard multi-rank FSDP startup now stages the PI0/PaliGemma semantic checkpoint into a node-local cache before rank-local `load_state_dict(...)`; this avoids four ranks faulting the same `/mnt/checkpoints/pi05_base_pytorch` file tree at once without changing model math. Default cache root: `~/.cache/openpi/pi0_checkpoints`. Override with `OPENPI_LOCAL_CHECKPOINT_CACHE_DIR` or disable/force via `OPENPI_STAGE_PI0_CHECKPOINT=off|on|auto`
 - V-JEPA mixed precision on CUDA now uses the same safe autocast rule in both frozen and trainable modes. Keep `visual_dtype=float32` if you want the most conservative frozen path, or use `visual_dtype=bfloat16/float16` with the knowledge that the encoder remains in native fp32 and the forward path is autocast rather than hard-cast.
 - window training on this profile now forwards only the canonical recurrent carry between transitions rather than the full `PicfCoreState`. This keeps the recurrence mathematically exact while removing non-recurrent semantic/control/task-readout state from the cross-step training graph.
+- loss-side future supervision now treats next-observation targets as explicit
+  stop-gradient teacher values, and the window trainer reuses the shared middle
+  frame's already-computed `current_targets` as detached future targets for the
+  preceding transition. This removes duplicated target-building work inside an
+  unrolled window without changing the objective.
+
+Current verification posture:
+
+- this document records the supported v2.2 training / validation knobs and
+  current engineering contract
+- it should not be read as a blanket claim that a full long cloud run is
+  currently active or completed
+- current local verification is stronger than current run-completion evidence:
+  - `training_test.py`, `wrapper_test.py`, and `picf_core_train_test.py` pass
+  - `scripts/verify_picf_contract.py` passes static checks, documentation
+    checks, targeted invariance regressions, the full core regression suite,
+    and a smoke training check
+- the latest exact-memory step-time evidence remains the short-run profiling
+  numbers documented in `/tmp/picf_v22_speed_audit_20260420.md`
 
 Important status note:
 
 - this section records the implemented 4x40GB FSDP training contract and the
   currently supported launch knobs
-- the current exact-memory profile has now been empirically observed to:
-  - complete a 5-step diagnostic run and save a checkpoint
-  - execute a full-train run far enough to print a real metrics JSON line at
-    `step 10`
-- so this document should now be read as describing a live 4x40GB full-train
-  profile rather than a purely investigative one
+- this section should be read as the current 4x40GB full-train contract and
+  tuning surface, not as a claim that every optional memory valve is enabled by
+  default
 - it still does not overclaim beyond current evidence:
   - it does **not** claim that `step 2500` or full `30000` completion has
     already been observed unless a later audit explicitly records that fact

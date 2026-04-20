@@ -13,8 +13,6 @@ from openpi.picf.core import PicfCoreState
 from openpi.picf.core import PicfFullCore
 from openpi.picf.core import PicfPreviousState
 from openpi.picf.fsdp_utils import call_module_forward_or_method
-
-
 @dataclasses.dataclass(frozen=True)
 class PicfPolicyTrainResult:
     output: PicfCoreOutput

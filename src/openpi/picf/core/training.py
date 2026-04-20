@@ -167,13 +167,41 @@ def extract_future_targets(
     *,
     visual_map_override: torch.Tensor | np.ndarray | None = None,
 ) -> PicfFutureTargets:
-    targets, availability = core.extract_targets(observation, visual_map_override=visual_map_override)
+    # Future targets are supervision targets derived from the next observation.
+    # They must be treated as stop-gradient teacher signals rather than a second
+    # trainable branch of the same loss graph.
+    with torch.no_grad():
+        targets, availability = core.extract_targets(observation, visual_map_override=visual_map_override)
     return PicfFutureTargets(
         visual_latent=targets["visual_latent"],
         visual_real=targets["visual_real"],
         tactile_real=targets["tactile_real"],
         point_real=targets["point_real"],
         availability=availability,
+    )
+
+
+def future_targets_from_current_targets(
+    targets: dict[str, torch.Tensor | None],
+    availability: torch.Tensor,
+) -> PicfFutureTargets:
+    """Convert current-step targets into detached teacher targets.
+
+    This is used by the window trainer to reuse the shared middle frame in an
+    unrolled window: transition t+1 already computes the current-step targets
+    for frame_{t+1}, so transition t can consume those same values as detached
+    future supervision instead of rebuilding them a second time.
+    """
+
+    def _maybe_detach(x: torch.Tensor | None) -> torch.Tensor | None:
+        return None if x is None else x.detach()
+
+    return PicfFutureTargets(
+        visual_latent=_maybe_detach(targets.get("visual_latent")),
+        visual_real=_maybe_detach(targets.get("visual_real")),
+        tactile_real=_maybe_detach(targets.get("tactile_real")),
+        point_real=_maybe_detach(targets.get("point_real")),
+        availability=availability.detach(),
     )
 
 
@@ -655,12 +683,17 @@ def compute_transition_loss(
     action_pos_override: torch.Tensor | None = None,
     action_rot_override: torch.Tensor | None = None,
     action_gripper_override: torch.Tensor | None = None,
+    future_targets_override: PicfFutureTargets | None = None,
 ) -> PicfTransitionLossBreakdown:
     cfg = config or PicfTransitionLossConfig()
     predictive = output_t.state.predictive
     pred_cache = predictive.physical_prediction_cache
     semantic_future_cache = predictive.prediction_cache
-    future = extract_future_targets(core, next_observation, visual_map_override=next_visual_map_override)
+    future = (
+        future_targets_override
+        if future_targets_override is not None
+        else extract_future_targets(core, next_observation, visual_map_override=next_visual_map_override)
+    )
     tactile_grid_dim = int(core.config.tactile_real_grid**2)
     alignment = compute_alignment_loss(
         output_t.state,

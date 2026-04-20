@@ -349,6 +349,43 @@ def test_apply_checkpoint_uses_checkpoint_when_inputs_require_grad(
     assert called["value"] is True
 
 
+def test_apply_checkpoint_skips_outer_checkpoint_when_native_gradient_checkpointing_is_active(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _NativeGC(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.gradient_checkpointing = True
+
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    encoder.trainable = True
+    encoder.training = True
+    encoder.gradient_checkpointing_enabled = True
+    encoder.paligemma_with_expert = type(
+        "_Runtime",
+        (),
+        {
+            "paligemma": type(
+                "_Paligemma",
+                (),
+                {
+                    "language_model": _NativeGC(),
+                    "vision_tower": _NativeGC(),
+                },
+            )(),
+            "gemma_expert": type("_Expert", (), {"model": _NativeGC()})(),
+        },
+    )()
+
+    def _boom(*args, **kwargs):
+        raise AssertionError("outer checkpoint should be skipped when native checkpointing is already active")
+
+    monkeypatch.setattr(torch.utils.checkpoint, "checkpoint", _boom)
+    x = torch.zeros(2, requires_grad=True)
+    output = _Pi0PaliGemmaSemanticEncoder._apply_checkpoint(encoder, lambda y: y + 3, x)
+    torch.testing.assert_close(output, torch.full((2,), 3.0))
+
+
 def test_masked_position_ids_keep_valid_positions_and_zero_pad() -> None:
     pad_mask = torch.tensor([[True, True, True, False, False], [True, False, True, False, False]])
 

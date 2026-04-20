@@ -227,9 +227,42 @@ def verify_static_contract() -> list[CheckResult]:
             detail=(
                 "Standard v2.2 FSDP training now reduces backward peak memory with flat-parameter sharding "
                 "(use_orig_params=False), BACKWARD_POST, train-time core transformer activation recompute, "
-                "and checkpointed whole-window recompute on the 40GB full-finetune path, using a standalone "
-                "dummy leaf input instead of a flat-parameter view so recompute does not leak full-parameter "
-                "gradients back into local shard metadata."
+                "and an exact whole-window recompute fallback that uses a standalone dummy leaf input instead "
+                "of a flat-parameter view so recompute does not leak full-parameter gradients back into local "
+                "shard metadata."
+            ),
+        ),
+        CheckResult(
+            name="trainer_threads_v22_live_conditioned_control_knobs",
+            ok=all(
+                text in trainer_source
+                for text in (
+                    'parser.add_argument("--task-local-queries"',
+                    'parser.add_argument("--task-global-queries"',
+                    'parser.add_argument("--task-instruction-queries"',
+                    'parser.add_argument("--task-self-layers"',
+                    'parser.add_argument("--conditioned-control-queries"',
+                    'parser.add_argument("--pi-prefix-queries"',
+                    'parser.add_argument("--conditioned-future-queries"',
+                    'parser.add_argument("--task-visual-reread-topk"',
+                    'parser.add_argument("--task-tactile-reread-groups"',
+                    'parser.add_argument("--task-point-reread-topk"',
+                    'task_local_queries=args.task_local_queries',
+                    'task_global_queries=args.task_global_queries',
+                    'task_instruction_queries=args.task_instruction_queries',
+                    'task_self_layers=args.task_self_layers',
+                    'conditioned_control_queries=args.conditioned_control_queries',
+                    'pi_prefix_queries=args.pi_prefix_queries',
+                    'conditioned_future_queries=args.conditioned_future_queries',
+                    'task_visual_reread_topk=int(',
+                    'task_tactile_reread_groups=int(',
+                    'task_point_reread_topk=int(',
+                    'require_pi0_action_generator=bool(',
+                )
+            ),
+            detail=(
+                "The trainer/parser now exposes and threads the active v2.2 conditioned-control/task-readout "
+                "knobs into PicfCoreConfig instead of leaving them as README-only declarations."
             ),
         ),
         CheckResult(
@@ -854,6 +887,20 @@ def verify_doc_links() -> list[CheckResult]:
                 )
             ),
             detail="README_v2.2 captures the corrected public-read/task-readout/conditioned-future contract.",
+        )
+    )
+    checks.append(
+        CheckResult(
+            name="readme_v22_marks_task_query_rounds_as_reserved_not_live_knob",
+            ok=all(
+                needle in v22_text
+                for needle in (
+                    "Reserved / compatibility-only field:",
+                    "`task_query_rounds: int = 2`",
+                    "not currently consumed by the live v2.2 core/trainer path",
+                )
+            ),
+            detail="README_v2.2 does not overclaim task_query_rounds as a live implemented knob.",
         )
     )
     checks.append(

@@ -28,6 +28,8 @@ class PicfCoreConfig:
     task_local_queries: int = 8
     task_global_queries: int = 1
     task_instruction_queries: int = 2
+    # Reserved compatibility field for an unimplemented iterative task-readout variant.
+    # The live v2.2 path does not currently consume this knob.
     task_query_rounds: int = 2
     task_self_layers: int = 1
     conditioned_control_queries: int = 4

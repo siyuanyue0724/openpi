@@ -72,10 +72,21 @@ def _base_args() -> argparse.Namespace:
         control_layers=2,
         control_query_tokens=1,
         predictive_query_tokens=1,
+        task_local_queries=8,
+        task_global_queries=1,
+        task_instruction_queries=2,
+        task_self_layers=1,
+        conditioned_control_queries=4,
+        pi_prefix_queries=4,
+        conditioned_future_queries=2,
         predictive_semantic_reads=2,
         control_semantic_reads=2,
         predictive_semantic_dropout_prob=0.1,
         semantic_prefix_dropout_prob=0.0,
+        task_visual_reread_topk=32,
+        task_tactile_reread_groups=2,
+        task_point_reread_topk=32,
+        require_pi0_action_generator=True,
         attention_heads=8,
         future_vote_heads=4,
         warmup_steps=None,
@@ -174,11 +185,11 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     assert args.warmup_steps == 600
 
 
-def test_foundation_profile_enables_window_activation_checkpointing() -> None:
+def test_foundation_profile_does_not_force_window_activation_checkpointing() -> None:
     args = _base_args()
     args.use_foundation_backbones = True
     _MODULE._apply_foundation_profile(args)
-    assert args.window_activation_checkpointing is True
+    assert args.window_activation_checkpointing is False
     assert args.diagnostic_interval == 0
 
 
@@ -1446,6 +1457,42 @@ def test_build_model_propagates_final_tactile_runtime_defaults(tmp_path: Path) -
     assert core.config.tactile_anchor_prob_on == pytest.approx(0.8)
 
 
+def test_build_model_propagates_v22_conditioned_control_knobs(tmp_path: Path) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
+    args = _base_args()
+    _MODULE._normalize_train_args(args)
+    args.calvin_root = str(root)
+    args.device = "cpu"
+    args.point_backbone = "rgb"
+    args.task_local_queries = 6
+    args.task_global_queries = 2
+    args.task_instruction_queries = 3
+    args.task_self_layers = 2
+    args.conditioned_control_queries = 5
+    args.pi_prefix_queries = 3
+    args.conditioned_future_queries = 4
+    args.task_visual_reread_topk = 11
+    args.task_tactile_reread_groups = 1
+    args.task_point_reread_topk = 9
+    args.require_pi0_action_generator = False
+
+    core, semantic_encoder, use_visual_override = _MODULE._build_model(args, device=torch.device("cpu"))
+
+    assert semantic_encoder is None
+    assert use_visual_override is True
+    assert core.config.task_local_queries == 6
+    assert core.config.task_global_queries == 2
+    assert core.config.task_instruction_queries == 3
+    assert core.config.task_self_layers == 2
+    assert core.config.conditioned_control_queries == 5
+    assert core.config.pi_prefix_queries == 3
+    assert core.config.conditioned_future_queries == 4
+    assert core.config.task_visual_reread_topk == 11
+    assert core.config.task_tactile_reread_groups == 1
+    assert core.config.task_point_reread_topk == 9
+    assert core.config.require_pi0_action_generator is False
+
+
 def test_collect_nonfinite_gradient_diagnostics_reports_group_and_parameter_name() -> None:
     model = torch.nn.Sequential(torch.nn.Linear(3, 4, bias=False), torch.nn.Linear(4, 2, bias=False))
     optimizer = torch.optim.AdamW(
@@ -1666,6 +1713,129 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
     assert len(result["diagnostic_semantic_visual_real_seq"]) == 1
     assert result["tactile_contact_prob_mean"].item() == pytest.approx(0.25)
     assert result["tactile_active_rate"].item() == pytest.approx(0.5)
+
+
+def test_picf_window_trainer_reuses_middle_frame_targets_with_detached_override() -> None:
+    class _DummyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.device = torch.device("cpu")
+            self.dtype = torch.float32
+            self.config = types.SimpleNamespace(visual_real_grid=4)
+
+    def _dummy_output() -> types.SimpleNamespace:
+        state = types.SimpleNamespace(
+            predictive=types.SimpleNamespace(
+                physical_prediction_cache=types.SimpleNamespace(visual_real=torch.linspace(0.0, 1.0, 48)),
+                prediction_cache=types.SimpleNamespace(visual_real=torch.linspace(1.0, 0.0, 48)),
+            )
+        )
+        return types.SimpleNamespace(
+            state=state,
+            debug={
+                "projective_candidate_density": 0.125,
+                "tactile_contact_prob_mean": 0.25,
+                "tactile_active_rate": 0.5,
+            },
+        )
+
+    class _DummyPolicy:
+        def forward_train_transition(self, *, current, previous=None, visual_map_override=None, action_chunk_target=None):
+            del previous, visual_map_override, action_chunk_target
+            observed = types.SimpleNamespace(
+                current_targets={
+                    "visual_latent": torch.tensor([float(current.step_id)], requires_grad=True),
+                    "visual_real": torch.tensor([float(current.step_id) + 1.0], requires_grad=True),
+                    "tactile_real": torch.tensor([float(current.step_id) + 2.0], requires_grad=True),
+                    "point_real": torch.tensor([float(current.step_id) + 3.0], requires_grad=True),
+                },
+                availability=torch.ones((4,), dtype=torch.float32, requires_grad=True),
+            )
+            return types.SimpleNamespace(
+                output=_dummy_output(),
+                observed=observed,
+                flow_override=None,
+                next_state=f"state-{current.step_id}",
+            )
+
+    dummy_losses = types.SimpleNamespace(
+        total=torch.tensor(1.0),
+        action=torch.tensor(0.1),
+        action_active7=torch.tensor(0.04),
+        action_pos=torch.tensor(0.03),
+        action_rot=torch.tensor(0.04),
+        action_gripper=torch.tensor(0.03),
+        visual_latent=torch.tensor(0.1),
+        visual_real=torch.tensor(0.1),
+        tactile_real=torch.tensor(0.1),
+        tactile_map=torch.tensor(0.05),
+        tactile_aux=torch.tensor(0.05),
+        point_real=torch.tensor(0.1),
+        semantic_future_aux=torch.tensor(0.1),
+        semantic_group_raw=torch.tensor(0.025),
+        semantic_group_capped=torch.tensor(0.02),
+        physical_aux=torch.tensor(0.15),
+        physical_aux_capped=torch.tensor(0.03),
+        alignment=torch.tensor(0.1),
+        alignment_raw=torch.tensor(0.11),
+        total_minus_action=torch.tensor(0.9),
+        anchor_pv=torch.tensor(0.1),
+        pv_weak=torch.tensor(0.1),
+        focus_pv=torch.tensor(0.1),
+        pt=torch.tensor(0.1),
+        physical_aux_budget_scale=torch.tensor(1.0),
+        semantic_aux_budget_scale=torch.tensor(1.0),
+        alignment_budget_scale=torch.tensor(1.0),
+    )
+
+    trainer = _MODULE._PicfWindowTrainer(
+        _DummyCore(),
+        semantic_encoder=None,
+        visual_grid=8,
+        use_visual_override=False,
+    )
+    trainer.policy = _DummyPolicy()
+
+    frame0 = PicfObservation(
+        rgb_static=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth_static=np.zeros((8, 8), dtype=np.float32),
+        robot_obs=np.zeros((15,), dtype=np.float32),
+        prompt="test",
+        step_id=1,
+        segment_id=0,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+        action=np.zeros((7,), dtype=np.float32),
+    )
+    frame1 = dataclasses.replace(frame0, step_id=2, reset_scaffold=False)
+    frame2 = dataclasses.replace(frame0, step_id=3, reset_scaffold=False)
+    window = _MODULE._TransitionWindow(segment_id=0, start_step_id=0, prompt="test", frames=(frame0, frame1, frame2))
+
+    captured: list[tuple[int, bool, float | None, bool | None]] = []
+    original_loss = _MODULE.compute_transition_loss
+    try:
+        def _fake_compute_transition_loss(core, output_t, next_observation, **kwargs):
+            del core, output_t
+            override = kwargs.get("future_targets_override")
+            captured.append(
+                (
+                    int(next_observation.step_id),
+                    override is not None,
+                    None if override is None or override.visual_latent is None else float(override.visual_latent.item()),
+                    None if override is None or override.visual_latent is None else bool(override.visual_latent.requires_grad),
+                )
+            )
+            return dummy_losses
+
+        _MODULE.compute_transition_loss = _fake_compute_transition_loss
+        trainer(window)
+    finally:
+        _MODULE.compute_transition_loss = original_loss
+
+    assert captured == [
+        (2, True, 2.0, False),
+        (3, False, None, None),
+    ]
 
 
 def test_decode_visual_real_prediction_upsamples_grid() -> None:
