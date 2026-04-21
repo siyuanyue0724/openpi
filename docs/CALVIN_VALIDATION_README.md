@@ -153,6 +153,71 @@ python scripts/serve_picf_policy.py \
   --picf-mode ablated
 ```
 
+Current 2x40GB PI0.5-only ablation long-run profile:
+
+```bash
+cd /root/openpi_posterior_vla_clean
+export PYTHONPATH=/root/openpi_posterior_vla_clean/src
+export CUDA_VISIBLE_DEVICES=0,1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+/root/openpi/.venv/bin/torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+  scripts/picf_core_train.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --backend dir \
+  --checkpoint-base-dir /mnt/checkpoints/picf_core \
+  --exp-name picf_v22_ablated_pi05_30000_ckpt2500_print100 \
+  --overwrite \
+  --device cuda \
+  --training-strategy fsdp_full_shard \
+  --optimizer-sharding none \
+  --accum-steps 1 \
+  --unroll-steps 2 \
+  --num-train-steps 30000 \
+  --save-interval 2500 \
+  --log-interval 100 \
+  --grad-clip-mode percentile \
+  --grad-clip-percentile 75 \
+  --grad-clip-window 100 \
+  --wandb-mode disabled \
+  --no-wandb \
+  --picf-mode ablated \
+  --semantic-mode paligemma \
+  --semantic-trainable \
+  --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
+  --action-normalization quantile \
+  --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json
+```
+
+Run-shape interpretation for this profile:
+
+- `world_size=2`
+- `accum_steps=1`
+- `unroll_steps=2`
+- each rank samples one window per optimizer step
+- each window produces two action-only transitions
+- therefore one optimizer step covers two windows and four action-only
+  transition objectives globally
+
+Monitoring:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/debug/picf_v22_ablated_pi05_30000_ckpt2500_print100_*.log
+```
+
+```bash
+watch -n 2 "nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader"
+```
+
+Parity note:
+
+- this run preserves the current PICF trainer/window shell while disabling PICF
+  semantics
+- it is an operational ablation profile, not an exact reproduction of the
+  official/main-branch PI0.5 training definition
+- if exact PI0.5 training-definition parity is required, use `picf_mode=ablated`
+  with `--unroll-steps 1`
+
 Foundation-backbone CUDA smoke:
 
 ```bash

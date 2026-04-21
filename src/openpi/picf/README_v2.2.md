@@ -1720,6 +1720,112 @@ It also does **not** rely on:
 - CPU offload
 - watchdog restart logic
 
+### 8.6.1A Current 2x40GB PI0.5-Only Ablation Profile
+
+The current operator-validated PI0.5-only ablation launch profile is:
+
+- `training_strategy=fsdp_full_shard`
+- `optimizer_sharding=none`
+- `world_size=2`
+- `accum_steps=1`
+- `unroll_steps=2`
+- `num_train_steps=30000`
+- `save_interval=2500`
+- `log_interval=100`
+- `grad_clip_mode=percentile`
+- `grad_clip_percentile=75`
+- `grad_clip_window=100`
+- `picf_mode=ablated`
+- `semantic_mode=paligemma`
+- `semantic_trainable=True`
+- `action_normalization=quantile`
+- `window_activation_checkpointing=False`
+- `semantic_gradient_checkpointing=True`
+- `semantic_tokenwise_chunk_size=64`
+- `semantic_projection_chunk_size=128`
+- `semantic_mlp_chunk_size=64`
+
+This profile is **not** the canonical full PICF training profile above.
+
+It is an operational ablation profile used to answer a narrower question:
+
+- if PICF recurrent/control/future branches are disabled, can the current
+  repository train the native PI0.5 semantic action path cleanly under the
+  PICF trainer/runtime shell?
+
+The current semantics of this run shape are:
+
+- each rank samples `1` training window per optimizer step
+- with `unroll_steps=2`, each sampled window contains `3` frames and produces
+  `2` action-only transitions
+- with `world_size=2` and `accum_steps=1`, one optimizer step therefore covers:
+  - `2` sampled windows globally
+  - `4` action-only transition objectives globally
+
+Interpretation rule:
+
+- this is the current **operational** ablation profile because it preserves the
+  present PICF window trainer shape while disabling PICF semantics
+- it is **not** identical to the main-branch PI0.5 training definition
+- if the goal is exact training-definition parity with the official/main-branch
+  PI0.5 stack, the cleaner baseline is `picf_mode=ablated` with
+  `unroll_steps=1`
+- if the goal is "same trainer shell, same loader shape, same optimizer loop,
+  but no PICF semantics", then the current `unroll_steps=2` ablation profile is
+  a legitimate control experiment
+
+Current cloud launch command for this profile:
+
+```bash
+cd /root/openpi_posterior_vla_clean
+export PYTHONPATH=/root/openpi_posterior_vla_clean/src
+export CUDA_VISIBLE_DEVICES=0,1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+/root/openpi/.venv/bin/torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+  scripts/picf_core_train.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --backend dir \
+  --checkpoint-base-dir /mnt/checkpoints/picf_core \
+  --exp-name picf_v22_ablated_pi05_30000_ckpt2500_print100 \
+  --overwrite \
+  --device cuda \
+  --training-strategy fsdp_full_shard \
+  --optimizer-sharding none \
+  --accum-steps 1 \
+  --unroll-steps 2 \
+  --num-train-steps 30000 \
+  --save-interval 2500 \
+  --log-interval 100 \
+  --grad-clip-mode percentile \
+  --grad-clip-percentile 75 \
+  --grad-clip-window 100 \
+  --wandb-mode disabled \
+  --no-wandb \
+  --picf-mode ablated \
+  --semantic-mode paligemma \
+  --semantic-trainable \
+  --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
+  --action-normalization quantile \
+  --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json
+```
+
+Recommended live monitoring commands:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/debug/picf_v22_ablated_pi05_30000_ckpt2500_print100_*.log
+```
+
+```bash
+watch -n 2 "nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader"
+```
+
+Operational checkpoint rule:
+
+- on this profile, `save_interval=2500` is the maintained default because it is
+  frequent enough for early checkpoint inspection without changing the training
+  objective or runtime mode
+
 ### 8.6.2 Current Exact-Memory Runtime Measures
 
 The current 4x40GB full-train path relies on the following mathematically exact
