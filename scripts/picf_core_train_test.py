@@ -2483,6 +2483,14 @@ def test_checkpoint_save_and_load_supports_ablated_semantic_only_lazy_core(tmp_p
     torch.testing.assert_close(reloaded.semantic_encoder.weight, trainer.semantic_encoder.weight)
 
 
+def test_should_save_optimizer_state_defaults_to_model_only_for_ablated_auto() -> None:
+    args = _base_args()
+    args.picf_mode = "ablated"
+    args.optimizer_checkpoint_mode = "auto"
+
+    assert _MODULE._should_save_optimizer_state(args=args) is False
+
+
 def test_fsdp_checkpoint_roundtrip_supports_ablated_semantic_only_lazy_core(tmp_path: Path) -> None:
     if _MODULE.FullyShardedDataParallel is None:
         pytest.skip("FSDP is not available in this torch build.")
@@ -2549,6 +2557,37 @@ def test_fsdp_checkpoint_roundtrip_supports_ablated_semantic_only_lazy_core(tmp_
         )
 
         assert step == 5
+
+
+def test_ablated_auto_checkpoint_skips_optimizer_state(tmp_path: Path) -> None:
+    class _LazyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lazy = torch.nn.LazyLinear(4, bias=False)
+
+    trainer = torch.nn.Module()
+    trainer.core = _LazyCore()
+    _MODULE._freeze_initialized_module_parameters(trainer.core)
+    trainer.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    optimizer = torch.optim.AdamW(trainer.semantic_encoder.parameters(), lr=1e-3)
+
+    args = argparse.Namespace(picf_mode="ablated", optimizer_checkpoint_mode="auto")
+    ckpt_root = tmp_path / "ablated_auto_model_only"
+    ckpt_root.mkdir(parents=True, exist_ok=True)
+
+    _MODULE._save_checkpoint(
+        output_dir=ckpt_root,
+        model=trainer,
+        optimizer=optimizer,
+        step=3,
+        args=args,
+        save_optimizer_state=_MODULE._should_save_optimizer_state(args=args),
+    )
+
+    ckpt_dir = ckpt_root / "3"
+    assert not (ckpt_dir / "optimizer.pt").exists()
+    metadata = torch.load(ckpt_dir / "metadata.pt", map_location="cpu", weights_only=False)
+    assert metadata["optimizer_state_saved"] is False
 
 
 def test_load_state_dict_picf_compat_skips_shape_mismatches_and_keeps_matching_weights() -> None:

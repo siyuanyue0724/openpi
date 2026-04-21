@@ -104,6 +104,9 @@ Runtime-mode note:
 - ablated checkpoints intentionally serialize only the live PI0.5 semantic
   subtree plus optimizer state; they do not force-save the frozen lazy PICF
   core just to satisfy generic trainer checkpoint traversal
+- with `optimizer_checkpoint_mode=auto`, ablated runs now default to model-only
+  checkpoints; pass `--optimizer-checkpoint-mode full` only if optimizer-state
+  resume is required
 - `scripts/serve_picf_policy.py` now also accepts `--picf-mode {enabled,ablated}`;
   if omitted, serving uses the checkpoint's saved `picf_mode`
 - when serving overrides checkpoint mode, runtime args are re-normalized before

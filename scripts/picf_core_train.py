@@ -2997,6 +2997,11 @@ def _should_save_optimizer_state(*, args: argparse.Namespace) -> bool:
         return False
     if mode != "auto":
         raise ValueError(f"Unsupported optimizer checkpoint mode: {mode!r}.")
+    if not _picf_mode_enabled(args):
+        # PI0.5-only ablation checkpoints are primarily used for parity/eval
+        # runs. Saving full optimizer state for the semantic stack is both
+        # unnecessary in the default case and extremely expensive.
+        return False
     return str(getattr(args, "optimizer_sharding", "none")).lower() != "zero1"
 
 
