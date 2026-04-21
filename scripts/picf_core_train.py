@@ -3040,7 +3040,11 @@ def _build_ablated_semantic_only_model_state(
         raise RuntimeError(
             "picf_mode=ablated checkpointing requires a semantic_encoder module."
         )
-    semantic_state = semantic_encoder.state_dict()
+    if _is_fsdp_model(semantic_encoder):
+        with _fsdp_full_state_dict_context(semantic_encoder, rank0_only=True):
+            semantic_state = semantic_encoder.state_dict()
+    else:
+        semantic_state = semantic_encoder.state_dict()
     return {
         "checkpoint_model_format": _ABLATED_SEMANTIC_ONLY_CHECKPOINT_FORMAT,
         "semantic_encoder": semantic_state,
@@ -3065,7 +3069,48 @@ def _load_ablated_semantic_only_model_state(
         raise RuntimeError(
             "Ablated semantic-only checkpoint load requires the target model to expose semantic_encoder."
         )
-    semantic_encoder.load_state_dict(model_state["semantic_encoder"], strict=True)
+    if _is_fsdp_model(semantic_encoder):
+        with _fsdp_full_state_dict_context(semantic_encoder, rank0_only=False):
+            semantic_encoder.load_state_dict(model_state["semantic_encoder"], strict=True)
+    else:
+        semantic_encoder.load_state_dict(model_state["semantic_encoder"], strict=True)
+
+
+def _ablated_semantic_only_optimizer_state(
+    *,
+    module: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    rank0_only: bool,
+) -> dict[str, Any]:
+    semantic_encoder = getattr(module, "semantic_encoder", None)
+    if not isinstance(semantic_encoder, torch.nn.Module):
+        raise RuntimeError(
+            "Ablated semantic-only optimizer checkpointing requires the target model to expose semantic_encoder."
+        )
+    if _is_fsdp_model(semantic_encoder):
+        with _fsdp_full_state_dict_context(semantic_encoder, rank0_only=rank0_only):
+            return FullyShardedDataParallel.optim_state_dict(semantic_encoder, optimizer)
+    return optimizer.state_dict()
+
+
+def _load_ablated_semantic_only_optimizer_state(
+    *,
+    module: torch.nn.Module,
+    optimizer: torch.optim.Optimizer,
+    optimizer_state: dict[str, Any],
+) -> None:
+    semantic_encoder = getattr(module, "semantic_encoder", None)
+    if not isinstance(semantic_encoder, torch.nn.Module):
+        raise RuntimeError(
+            "Ablated semantic-only optimizer checkpoint load requires the target model to expose semantic_encoder."
+        )
+    if _is_fsdp_model(semantic_encoder):
+        with _fsdp_full_state_dict_context(semantic_encoder, rank0_only=False):
+            optimizer.load_state_dict(
+                FullyShardedDataParallel.optim_state_dict_to_load(semantic_encoder, optimizer, optimizer_state)
+            )
+    else:
+        optimizer.load_state_dict(optimizer_state)
 
 
 def _save_checkpoint(
@@ -3093,12 +3138,15 @@ def _save_checkpoint(
     if _is_fsdp_model(model):
         if _ablated_semantic_only_checkpoint_enabled(args=args, module=module):
             model_state = _build_ablated_semantic_only_model_state(module=module)
-            with _fsdp_full_state_dict_context(model, rank0_only=True):
-                optimizer_state = (
-                    None
-                    if not save_optimizer_state
-                    else FullyShardedDataParallel.optim_state_dict(model, optimizer)
+            optimizer_state = (
+                None
+                if not save_optimizer_state
+                else _ablated_semantic_only_optimizer_state(
+                    module=module,
+                    optimizer=optimizer,
+                    rank0_only=True,
                 )
+            )
         else:
             with _fsdp_full_state_dict_context(model, rank0_only=True):
                 model_state = model.state_dict()
@@ -3238,10 +3286,11 @@ def _load_checkpoint(
             if _is_ablated_semantic_only_model_state(model_state):
                 _load_ablated_semantic_only_model_state(module=module, model_state=model_state)
                 if optimizer_loaded:
-                    with _fsdp_full_state_dict_context(model, rank0_only=False):
-                        optimizer.load_state_dict(
-                            FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_state)
-                        )
+                    _load_ablated_semantic_only_optimizer_state(
+                        module=module,
+                        optimizer=optimizer,
+                        optimizer_state=optimizer_state,
+                    )
             else:
                 with _fsdp_full_state_dict_context(model, rank0_only=False):
                     try:
@@ -3312,10 +3361,11 @@ def _load_checkpoint(
             _load_ablated_semantic_only_model_state(module=module, model_state=payload["model"])
             optimizer_payload = payload.get("optimizer")
             if optimizer_loaded and optimizer_payload is not None:
-                with _fsdp_full_state_dict_context(model, rank0_only=False):
-                    optimizer.load_state_dict(
-                        FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_payload)
-                    )
+                _load_ablated_semantic_only_optimizer_state(
+                    module=module,
+                    optimizer=optimizer,
+                    optimizer_state=optimizer_payload,
+                )
             elif optimizer_loaded:
                 logging.info("No optimizer payload found in checkpoint; optimizer will be reinitialized.")
         else:

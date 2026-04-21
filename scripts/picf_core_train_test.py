@@ -2483,6 +2483,74 @@ def test_checkpoint_save_and_load_supports_ablated_semantic_only_lazy_core(tmp_p
     torch.testing.assert_close(reloaded.semantic_encoder.weight, trainer.semantic_encoder.weight)
 
 
+def test_fsdp_checkpoint_roundtrip_supports_ablated_semantic_only_lazy_core(tmp_path: Path) -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _LazyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.point_feature_extractor = torch.nn.LazyLinear(4, bias=False)
+            self.visual_encoder = torch.nn.LazyLinear(4, bias=False)
+            self.tactile_encoder = torch.nn.LazyLinear(4, bias=False)
+
+    class _AblatedTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = _LazyCore()
+            _MODULE._freeze_initialized_module_parameters(self.core)
+            self.semantic_encoder = torch.nn.Linear(4, 4, bias=False)
+            self.policy = types.SimpleNamespace(semantic_encoder=self.semantic_encoder)
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            return self.semantic_encoder(inputs).sum()
+
+    args = _base_args()
+    args.training_strategy = "fsdp_full_shard"
+    args.optimizer_sharding = "none"
+    args.picf_mode = "ablated"
+
+    with _single_rank_process_group():
+        trainer = _AblatedTrainer()
+        wrapped = _MODULE._wrap_model_for_training_strategy(trainer, args=args, device=torch.device("cpu"))
+        optimizer, _ = _MODULE._build_optimizer(_MODULE._unwrap_training_model(wrapped), args=args)
+        loss = wrapped(torch.randn(2, 4))
+        loss.backward()
+        optimizer.step()
+
+        output_dir = tmp_path / "fsdp_ablated_ckpt"
+        output_dir.mkdir(parents=True, exist_ok=True)
+        _MODULE._save_checkpoint(
+            output_dir=output_dir,
+            model=wrapped,
+            optimizer=optimizer,
+            step=5,
+            args=args,
+            rank=0,
+            device=torch.device("cpu"),
+        )
+
+        model_payload = torch.load(output_dir / "5" / "model.pt", map_location="cpu", weights_only=False)
+        assert model_payload["checkpoint_model_format"] == "picf_ablated_semantic_only_v1"
+        assert list(model_payload["semantic_encoder"]) == ["weight"]
+
+        reloaded = _AblatedTrainer()
+        wrapped_reloaded = _MODULE._wrap_model_for_training_strategy(
+            reloaded,
+            args=args,
+            device=torch.device("cpu"),
+        )
+        reloaded_optimizer, _ = _MODULE._build_optimizer(_MODULE._unwrap_training_model(wrapped_reloaded), args=args)
+        step = _MODULE._load_checkpoint(
+            path=output_dir / "5",
+            model=wrapped_reloaded,
+            optimizer=reloaded_optimizer,
+            device=torch.device("cpu"),
+        )
+
+        assert step == 5
+
+
 def test_load_state_dict_picf_compat_skips_shape_mismatches_and_keeps_matching_weights() -> None:
     class _OldCore(torch.nn.Module):
         def __init__(self) -> None:
