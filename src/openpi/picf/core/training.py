@@ -234,6 +234,61 @@ def _zero_weight_sum(reference: torch.Tensor, *preds: torch.Tensor | None) -> to
     return loss if used else _zero_like(reference)
 
 
+def make_action_only_transition_loss(
+    *,
+    reference: torch.Tensor,
+    action_loss_override: torch.Tensor,
+    action_pos_override: torch.Tensor | None = None,
+    action_rot_override: torch.Tensor | None = None,
+    action_gripper_override: torch.Tensor | None = None,
+    availability_dim: int = 4,
+) -> PicfTransitionLossBreakdown:
+    """Build a transition-loss record for PI0.5-only ablation runs.
+
+    The ablated mode removes PICF future/alignment supervision entirely but the
+    trainer and metric logger still expect the canonical loss dictionary shape.
+    This helper keeps that contract stable while making every non-action branch
+    an exact zero tensor on the correct device and dtype.
+    """
+
+    zero = _zero_like(reference)
+    action_pos = action_pos_override if action_pos_override is not None else action_loss_override
+    action_rot = action_rot_override if action_rot_override is not None else action_loss_override
+    action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_override
+    action_active7 = _action_active7_loss(action_pos, action_rot, action_gripper)
+    availability = torch.zeros((int(availability_dim),), device=reference.device, dtype=reference.dtype)
+    return PicfTransitionLossBreakdown(
+        total=action_loss_override,
+        action=action_loss_override,
+        action_active7=action_active7,
+        action_pos=action_pos,
+        action_rot=action_rot,
+        action_gripper=action_gripper,
+        visual_latent=zero,
+        visual_real=zero,
+        tactile_real=zero,
+        tactile_map=zero,
+        tactile_aux=zero,
+        point_real=zero,
+        semantic_future_aux=zero,
+        semantic_group_raw=zero,
+        semantic_group_capped=zero,
+        physical_aux=zero,
+        physical_aux_capped=zero,
+        alignment=zero,
+        alignment_raw=zero,
+        total_minus_action=zero,
+        anchor_pv=zero,
+        pv_weak=zero,
+        focus_pv=zero,
+        pt=zero,
+        availability=availability,
+        physical_aux_budget_scale=zero,
+        semantic_aux_budget_scale=zero,
+        alignment_budget_scale=zero,
+    )
+
+
 def _sanitize_probability_tensor(x: torch.Tensor, *, eps: float, interior: bool) -> torch.Tensor:
     if x.numel() == 0:
         return x

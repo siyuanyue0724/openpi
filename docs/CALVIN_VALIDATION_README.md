@@ -5,7 +5,9 @@ present PICF codebase.
 
 The canonical architecture and deployment handoff is:
 
+- [`README.md`](/home/siyuanyue/Documents/openpi/README.md)
 - [`README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md)
+- [`src/openpi/picf/README.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md)
 
 The formal contract is:
 
@@ -18,6 +20,8 @@ Important status note:
   regression tests enforce
 - `README_v2.1.md` is retained only as the archived pre-v2.2 deployment record
 - the current active document set is:
+  - `README.md`
+  - `src/openpi/picf/README.md`
   - `src/openpi/picf/README_v2.2.md`
   - `PICF_FORMAL_CONTRACT.md`
   - `docs/CALVIN_VALIDATION_README.md`
@@ -90,6 +94,19 @@ Current live-code contract meaning:
 - `posterior.global_post` explicitly enters conditioned control
 - core no longer uses a direct trainable `7D` action head
 
+Runtime-mode note:
+
+- `--picf-mode enabled` is the canonical v2.2 deployment path
+- `--picf-mode ablated` disables PICF recurrent/control/future branches and
+  runs PI0.5-only action training / serving with `extra_prefix_tokens=None`
+- ablated mode is intended for parity checks against the main-branch PI0.5
+  baseline, not as a replacement for the v2.2 contract
+- `scripts/serve_picf_policy.py` now also accepts `--picf-mode {enabled,ablated}`;
+  if omitted, serving uses the checkpoint's saved `picf_mode`
+- when serving overrides checkpoint mode, runtime args are re-normalized before
+  model/source construction so ablated serve does not retain enabled-mode
+  tactile/visual branch assumptions
+
 This section describes the deployed live baseline.
 
 ## 3. Trainer Smoke Validation
@@ -102,6 +119,32 @@ python scripts/picf_core_train_smoke.py \
   --backend dir \
   --segment-index 0 \
   --device cpu
+```
+
+PI0.5-only ablation smoke:
+
+```bash
+python scripts/picf_core_train.py \
+  --calvin-root /home/siyuanyue/datasets/calvin/dataset/task_ABCD_D \
+  --backend dir \
+  --checkpoint-base-dir /tmp \
+  --exp-name picf_ablation_smoke \
+  --semantic-mode paligemma \
+  --semantic-trainable \
+  --picf-mode ablated \
+  --num-train-steps 2 \
+  --save-interval 2 \
+  --log-interval 1 \
+  --no-wandb
+```
+
+PI0.5-only ablation serve smoke:
+
+```bash
+python scripts/serve_picf_policy.py \
+  --checkpoint /path/to/checkpoint_or_latest_dir \
+  --device cpu \
+  --picf-mode ablated
 ```
 
 Foundation-backbone CUDA smoke:
@@ -195,7 +238,7 @@ Current v2.2 long-run training profile:
 - transformer stacks on this profile now materialize every incoming activation once at stack entry before attention. PICF builds many `[1, T, C]` batches via `tokens[None, :]`, and FSDP can also surface storage-sharing tensors whose aliasing is not reliably visible through `_base`; the stack-entry clone is mathematically exact and avoids FSDP/autograd multi-view alias failures inside residual attention blocks
 - the training stack still supports checkpointing the full `_PicfWindowTrainer.forward(...)` window body during training. That remains an exact fallback for extra peak-memory reduction, and the checkpoint input is still a standalone dummy leaf on the active CUDA device rather than a view into any FSDP flat parameter, so recompute keeps exact training math without feeding full-parameter gradients back into local shard metadata. It is now an explicit operator knob rather than something the foundation profile silently forces on every launch.
 - the custom PI0/Gemma dual-branch semantic attention path on this profile uses SDPA instead of the eager attention workspace, which removes the large step-2 attention buffer without changing the training objective.
-- tokenwise-only projections and FFNs on the current hottest paths now support exact sequence chunking. On the present profile this is enabled by default as `tokenwise_ff_chunk_size=64` for PICF core transformer/cross-attention FFNs and `semantic_tokenwise_chunk_size=64` for the custom PI0/Gemma dual-branch tokenwise projections/MLPs under FSDP full-shard training. This is an execution change, not a model-capacity change.
+- tokenwise-only projections and FFNs on the current hottest paths now support exact sequence chunking. On the present profile this is enabled by default as `tokenwise_ff_chunk_size=64` for PICF core transformer/cross-attention FFNs and `semantic_tokenwise_chunk_size=64` as the semantic compatibility knob. The live trainer also resolves that semantic compatibility knob into `semantic_projection_chunk_size=128` and `semantic_mlp_chunk_size=64` on the standard 4x40GB full-shard profile, so future semantic backbones can tune projection-heavy and MLP-heavy regions independently without changing model math. This is an execution change, not a model-capacity change.
 - the PI0/PaliGemma wrapper no longer adds an extra outer checkpoint around semantic forward blocks when the native language-model / vision-tower / expert-model checkpointing path is already active. This avoids redundant recompute while preserving the same gradients.
 - the PI0/PICF semantic runtime now drops the unused outer causal-LM heads after checkpoint load. Those logits heads are not used by the live action-training path, so removing them from the runtime graph is mathematically exact and prevents dead semantic weights from bloating FSDP wrapping.
 - the FSDP path uses explicit global-L2 grad norm / percentile clipping across local shards instead of `FSDP.clip_grad_norm_`, because the semantic stack deliberately mixes bf16 bulk weights with a small float32 stabilizer subset

@@ -122,7 +122,15 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         self._trainer = trainer.eval()
         self._core = trainer.core
         self._semantic_encoder = trainer.semantic_encoder
-        self._policy = getattr(trainer, "policy", PicfPi05Policy(core=trainer.core, semantic_encoder=trainer.semantic_encoder))
+        self._policy = getattr(
+            trainer,
+            "policy",
+            PicfPi05Policy(
+                core=trainer.core,
+                semantic_encoder=trainer.semantic_encoder,
+                picf_enabled=str(getattr(trainer, "picf_mode", "enabled")).lower().replace("-", "_") == "enabled",
+            ),
+        )
         self._action_normalizer = action_normalizer
         self._frame_dt_s = float(frame_dt_s)
         self._segment_id = 0
@@ -179,20 +187,30 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
                 visual_map_override=visual_override,
             )
         output = act_result.output
-        self._previous = output.state
+        self._previous = None if output is None else output.state
         action = act_result.action.detach().to(device="cpu", dtype=torch.float32).numpy()
         if self._action_normalizer is not None:
             action = self._action_normalizer.unnormalize_np(action)
         self._step_id += 1
         return {
             "actions": action[None, :],
-            "debug": output.debug,
+            "debug": act_result.debug,
         }
 
 
-def _build_policy(*, checkpoint_path: Path, device: torch.device) -> _PicfCheckpointPolicy:
+def _build_policy(
+    *,
+    checkpoint_path: Path,
+    device: torch.device,
+    picf_mode_override: str | None = None,
+) -> _PicfCheckpointPolicy:
     output_dir, checkpoint_dir = _resolve_checkpoint_dir(checkpoint_path)
     args = _load_runtime_args(checkpoint_dir)
+    if picf_mode_override is not None:
+        args.picf_mode = str(picf_mode_override).lower().replace("-", "_")
+        _trainer._normalize_train_args(args)
+        _trainer._validate_train_args(args)
+        _trainer._validate_backbone_args(args)
     args.device = str(device)
     core, semantic_encoder, use_visual_override = _trainer._build_model(args, device=device)
     trainer = _trainer._PicfWindowTrainer(
@@ -201,6 +219,7 @@ def _build_policy(*, checkpoint_path: Path, device: torch.device) -> _PicfCheckp
         visual_grid=int(args.visual_grid),
         use_visual_override=use_visual_override,
         loss_config=_trainer._build_loss_config(args),
+        picf_mode=getattr(args, "picf_mode", "enabled"),
     ).to(device)
     action_normalizer = _trainer._resolve_action_normalizer(args)
     backgrounds = _trainer._load_tactile_backgrounds_npz(getattr(args, "tactile_backgrounds_path", None))
@@ -237,13 +256,27 @@ def main() -> None:
     parser.add_argument("--host", default="0.0.0.0")
     parser.add_argument("--port", type=int, default=8000)
     parser.add_argument("--device", default="cuda:0")
+    parser.add_argument(
+        "--picf-mode",
+        choices=["enabled", "ablated"],
+        default=None,
+        help=(
+            "Optional runtime override. By default serving uses the checkpoint's saved "
+            "picf_mode. Use 'ablated' to force PI0.5-only action serving without PICF "
+            "recurrent/control/future branches."
+        ),
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
     if device.type == "cuda":
         torch.cuda.set_device(device)
 
-    policy = _build_policy(checkpoint_path=Path(args.checkpoint), device=device)
+    policy = _build_policy(
+        checkpoint_path=Path(args.checkpoint),
+        device=device,
+        picf_mode_override=args.picf_mode,
+    )
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)
     logging.info("Creating PICF server (host: %s, ip: %s)", hostname, local_ip)

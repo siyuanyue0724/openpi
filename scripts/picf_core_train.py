@@ -64,6 +64,7 @@ from openpi.picf.core import PicfTransitionLossBreakdown
 from openpi.picf.core import PicfTransitionLossConfig
 from openpi.picf.core import compute_transition_loss
 from openpi.picf.core import future_targets_from_current_targets
+from openpi.picf.core import make_action_only_transition_loss
 from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticEncoder
 from openpi.picf.policy import PicfPi05Policy
@@ -84,6 +85,12 @@ _RETRYABLE_FIRST_STEP_ERRORS = (
     "PICF core requires non-empty local xyzrgb support on the first control step.",
     "PICF core requires non-empty local xyzrgb support on window step",
 )
+
+
+def _picf_mode_enabled(value: str | argparse.Namespace | None) -> bool:
+    if isinstance(value, argparse.Namespace):
+        value = getattr(value, "picf_mode", "enabled")
+    return str("enabled" if value is None else value).lower().replace("-", "_") == "enabled"
 _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.semantic_prefix_proj.*",
     "core.posterior_to_control_proj.*",
@@ -799,6 +806,7 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
 
 def _normalize_train_args(args: argparse.Namespace) -> None:
     args.training_strategy = str(getattr(args, "training_strategy", "ddp")).lower().replace("-", "_")
+    args.picf_mode = str(getattr(args, "picf_mode", "enabled")).lower().replace("-", "_")
     if getattr(args, "grad_clip_mode", None) is None:
         args.grad_clip_mode = "percentile"
     else:
@@ -816,6 +824,17 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         )
     args.visual_finetune_mode = visual_finetune_mode
     args.visual_trainable = bool(visual_finetune_mode == "full")
+    if not _picf_mode_enabled(args):
+        args.point_backbone = "rgb"
+        args.point_backbone_trainable = False
+        args.visual_mode = "stub"
+        args.visual_finetune_mode = "frozen"
+        args.visual_trainable = False
+        args.tactile_mode = "stub"
+        args.tactile_trainable = False
+        args.use_tactile = False
+        args.use_scene_obs = False
+        args.require_pi0_action_generator = True
     if getattr(args, "grad_clip_percentile", None) is None:
         args.grad_clip_percentile = 75.0
     else:
@@ -890,15 +909,33 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.semantic_tokenwise_chunk_size = 0
     else:
         args.semantic_tokenwise_chunk_size = int(args.semantic_tokenwise_chunk_size)
+    semantic_projection_chunk_was_none = getattr(args, "semantic_projection_chunk_size", None) is None
+    semantic_mlp_chunk_was_none = getattr(args, "semantic_mlp_chunk_size", None) is None
+    if semantic_projection_chunk_was_none:
+        args.semantic_projection_chunk_size = int(args.semantic_tokenwise_chunk_size)
+    else:
+        args.semantic_projection_chunk_size = int(args.semantic_projection_chunk_size)
+    if semantic_mlp_chunk_was_none:
+        args.semantic_mlp_chunk_size = int(args.semantic_tokenwise_chunk_size)
+    else:
+        args.semantic_mlp_chunk_size = int(args.semantic_mlp_chunk_size)
     if args.training_strategy == "fsdp_full_shard":
         if int(args.tokenwise_ff_chunk_size) <= 0:
             args.tokenwise_ff_chunk_size = 64
         if (
             str(getattr(args, "semantic_mode", "zero")) == "paligemma"
             and bool(getattr(args, "semantic_trainable", False))
-            and int(args.semantic_tokenwise_chunk_size) <= 0
         ):
-            args.semantic_tokenwise_chunk_size = 64
+            if int(args.semantic_tokenwise_chunk_size) <= 0:
+                args.semantic_tokenwise_chunk_size = 64
+            if semantic_projection_chunk_was_none and int(args.semantic_projection_chunk_size) <= 0:
+                args.semantic_projection_chunk_size = 128
+            elif int(args.semantic_projection_chunk_size) <= 0:
+                args.semantic_projection_chunk_size = int(args.semantic_tokenwise_chunk_size)
+            if semantic_mlp_chunk_was_none and int(args.semantic_mlp_chunk_size) <= 0:
+                args.semantic_mlp_chunk_size = 64
+            elif int(args.semantic_mlp_chunk_size) <= 0:
+                args.semantic_mlp_chunk_size = int(args.semantic_tokenwise_chunk_size)
     if args.warmup_steps is None:
         args.warmup_steps = max(1, int(round(0.02 * float(args.num_train_steps))))
     else:
@@ -960,6 +997,11 @@ def _warn_single_gpu_foundation_accum_risk(
 
 
 def _validate_train_args(args: argparse.Namespace) -> None:
+    if str(getattr(args, "picf_mode", "enabled")) not in {"enabled", "ablated"}:
+        raise ValueError(
+            "picf_mode must be one of {'enabled', 'ablated'}, "
+            f"got {getattr(args, 'picf_mode', None)!r}."
+        )
     positive_int_fields = (
         "num_train_steps",
         "log_interval",
@@ -1069,6 +1111,16 @@ def _validate_train_args(args: argparse.Namespace) -> None:
             "semantic_tokenwise_chunk_size must be >= 0, "
             f"got {args.semantic_tokenwise_chunk_size}."
         )
+    if int(getattr(args, "semantic_projection_chunk_size", 0)) < 0:
+        raise ValueError(
+            "semantic_projection_chunk_size must be >= 0, "
+            f"got {args.semantic_projection_chunk_size}."
+        )
+    if int(getattr(args, "semantic_mlp_chunk_size", 0)) < 0:
+        raise ValueError(
+            "semantic_mlp_chunk_size must be >= 0, "
+            f"got {args.semantic_mlp_chunk_size}."
+        )
     if getattr(args, "action_output_clip", None) is not None and float(args.action_output_clip) <= 0.0:
         raise ValueError(f"action_output_clip must be > 0 when provided, got {args.action_output_clip}.")
     if float(args.crop_radius_m) <= 0.0:
@@ -1164,6 +1216,10 @@ def _validate_train_args(args: argparse.Namespace) -> None:
                 "Action normalization requires a valid norm_stats.json. "
                 f"Got action_norm_stats_path={path!r}."
             )
+    if not _picf_mode_enabled(args) and str(getattr(args, "semantic_mode", "zero")) != "paligemma":
+        raise ValueError(
+            "picf_mode=ablated requires semantic_mode=paligemma so the PI0.5 action path remains available."
+        )
 
 
 def _validate_backbone_args(args: argparse.Namespace) -> None:
@@ -2234,11 +2290,17 @@ class _PicfWindowTrainer(torch.nn.Module):
         visual_grid: int,
         use_visual_override: bool,
         loss_config: PicfTransitionLossConfig | None = None,
+        picf_mode: str = "enabled",
     ) -> None:
         super().__init__()
         self.core = core
         self.semantic_encoder = semantic_encoder
-        self.policy = PicfPi05Policy(core=core, semantic_encoder=semantic_encoder)
+        self.picf_mode = str(picf_mode).lower().replace("-", "_")
+        self.policy = PicfPi05Policy(
+            core=core,
+            semantic_encoder=semantic_encoder,
+            picf_enabled=_picf_mode_enabled(self.picf_mode),
+        )
         self.visual_grid = int(visual_grid)
         self.use_visual_override = bool(use_visual_override)
         self.loss_config = loss_config or PicfTransitionLossConfig()
@@ -2252,6 +2314,148 @@ class _PicfWindowTrainer(torch.nn.Module):
             return None
         return future_targets_from_current_targets(current_targets, availability)
 
+    @staticmethod
+    def _loss_metrics(
+        losses: PicfTransitionLossBreakdown,
+        *,
+        candidate_density: torch.Tensor,
+        tactile_contact_prob_mean: torch.Tensor,
+        tactile_active_rate: torch.Tensor,
+    ) -> dict[str, torch.Tensor]:
+        return {
+            "loss_action": losses.action,
+            "loss_action_active7": losses.action_active7,
+            "loss_action_pos": losses.action_pos,
+            "loss_action_rot": losses.action_rot,
+            "loss_action_gripper": losses.action_gripper,
+            "loss_visual_latent": losses.visual_latent,
+            "loss_visual_real": losses.visual_real,
+            "loss_tactile_real": losses.tactile_real,
+            "loss_tactile_map": losses.tactile_map,
+            "loss_tactile_aux": losses.tactile_aux,
+            "loss_point_real": losses.point_real,
+            "loss_semantic_future_aux": losses.semantic_future_aux,
+            "loss_semantic_group_raw": losses.semantic_group_raw,
+            "loss_semantic_group_capped": losses.semantic_group_capped,
+            "loss_physical_aux": losses.physical_aux,
+            "loss_physical_aux_capped": losses.physical_aux_capped,
+            "loss_alignment": losses.alignment,
+            "loss_alignment_raw": losses.alignment_raw,
+            "loss_total_minus_action": losses.total_minus_action,
+            "loss_anchor_pv": losses.anchor_pv,
+            "loss_pv_weak": losses.pv_weak,
+            "loss_focus_pv": losses.focus_pv,
+            "loss_pt": losses.pt,
+            "physical_aux_budget_scale": losses.physical_aux_budget_scale,
+            "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
+            "alignment_budget_scale": losses.alignment_budget_scale,
+            "projective_candidate_density": candidate_density,
+            "tactile_contact_prob_mean": tactile_contact_prob_mean,
+            "tactile_active_rate": tactile_active_rate,
+        }
+
+    @staticmethod
+    def _accumulate_loss_metrics(
+        metrics: dict[str, torch.Tensor] | None,
+        update: dict[str, torch.Tensor],
+    ) -> dict[str, torch.Tensor]:
+        if metrics is None:
+            return update
+        for key, value in update.items():
+            metrics[key] = metrics[key] + value
+        return metrics
+
+    def _forward_action_only_window(
+        self,
+        window: _TransitionWindow,
+        *,
+        capture_visual_diagnostics: bool = False,
+        debug_phase_label: str | None = None,
+    ) -> dict[str, Any]:
+        totals: list[torch.Tensor] = []
+        metrics: dict[str, torch.Tensor] | None = None
+        for index in range(len(window.frames) - 1):
+            if debug_phase_label is not None:
+                logging.info("%s transition=%s begin", debug_phase_label, index)
+            current = dataclasses.replace(window.frames[index], reset_scaffold=(index == 0))
+            step_start = time.perf_counter()
+            action_chunk_target = current.action_chunk if current.action_chunk is not None else current.action
+            policy_forward = self.policy.forward_train_transition(
+                previous=None,
+                current=current,
+                visual_map_override=None,
+                action_chunk_target=action_chunk_target,
+            )
+            policy_forward_sec = time.perf_counter() - step_start
+            if debug_phase_label is not None:
+                logging.info(
+                    "%s transition=%s policy_forward_sec=%.3f",
+                    debug_phase_label,
+                    index,
+                    policy_forward_sec,
+                )
+            if policy_forward.flow_override is None:
+                raise RuntimeError(
+                    "picf_mode=ablated expects PI0.5 flow loss outputs on every training transition."
+                )
+            reference = policy_forward.flow_override["predicted_action"]
+            zero = torch.zeros((), device=reference.device, dtype=reference.dtype)
+            losses = make_action_only_transition_loss(
+                reference=reference,
+                action_loss_override=policy_forward.flow_override["total"],
+                action_pos_override=policy_forward.flow_override["action_pos"],
+                action_rot_override=policy_forward.flow_override["action_rot"],
+                action_gripper_override=policy_forward.flow_override["action_gripper"],
+            )
+            totals.append(losses.total)
+            metrics = self._accumulate_loss_metrics(
+                metrics,
+                self._loss_metrics(
+                    losses,
+                    candidate_density=zero,
+                    tactile_contact_prob_mean=zero,
+                    tactile_active_rate=zero,
+                ),
+            )
+        assert metrics is not None
+        denom = float(len(window.frames) - 1)
+        result: dict[str, Any] = {
+            "loss_total": torch.stack(totals).mean(),
+            "loss_action": metrics["loss_action"] / denom,
+            "loss_action_active7": metrics["loss_action_active7"] / denom,
+            "loss_action_pos": metrics["loss_action_pos"] / denom,
+            "loss_action_rot": metrics["loss_action_rot"] / denom,
+            "loss_action_gripper": metrics["loss_action_gripper"] / denom,
+            "loss_visual_latent": metrics["loss_visual_latent"] / denom,
+            "loss_visual_real": metrics["loss_visual_real"] / denom,
+            "loss_tactile_real": metrics["loss_tactile_real"] / denom,
+            "loss_tactile_map": metrics["loss_tactile_map"] / denom,
+            "loss_tactile_aux": metrics["loss_tactile_aux"] / denom,
+            "loss_point_real": metrics["loss_point_real"] / denom,
+            "loss_semantic_future_aux": metrics["loss_semantic_future_aux"] / denom,
+            "loss_semantic_group_raw": metrics["loss_semantic_group_raw"] / denom,
+            "loss_semantic_group_capped": metrics["loss_semantic_group_capped"] / denom,
+            "loss_physical_aux": metrics["loss_physical_aux"] / denom,
+            "loss_physical_aux_capped": metrics["loss_physical_aux_capped"] / denom,
+            "loss_alignment": metrics["loss_alignment"] / denom,
+            "loss_alignment_raw": metrics["loss_alignment_raw"] / denom,
+            "loss_total_minus_action": metrics["loss_total_minus_action"] / denom,
+            "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
+            "loss_pv_weak": metrics["loss_pv_weak"] / denom,
+            "loss_focus_pv": metrics["loss_focus_pv"] / denom,
+            "loss_pt": metrics["loss_pt"] / denom,
+            "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
+            "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
+            "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
+            "projective_candidate_density": metrics["projective_candidate_density"] / denom,
+            "tactile_contact_prob_mean": metrics["tactile_contact_prob_mean"] / denom,
+            "tactile_active_rate": metrics["tactile_active_rate"] / denom,
+        }
+        if capture_visual_diagnostics:
+            result["diagnostic_physical_visual_real_seq"] = []
+            result["diagnostic_semantic_visual_real_seq"] = []
+        return result
+
     def forward(
         self,
         window: _TransitionWindow,
@@ -2259,6 +2463,12 @@ class _PicfWindowTrainer(torch.nn.Module):
         capture_visual_diagnostics: bool = False,
         debug_phase_label: str | None = None,
     ) -> dict[str, Any]:
+        if not bool(getattr(self.policy, "picf_enabled", True)):
+            return self._forward_action_only_window(
+                window,
+                capture_visual_diagnostics=capture_visual_diagnostics,
+                debug_phase_label=debug_phase_label,
+            )
         previous = None
         metrics: dict[str, torch.Tensor] | None = None
         totals: list[torch.Tensor] = []
@@ -3154,6 +3364,8 @@ def _build_model_sequential_across_ranks(
 
 
 def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[PicfFullCore, torch.nn.Module | None, bool]:
+    picf_enabled = _picf_mode_enabled(args)
+
     def _arg_or_default(name: str, default: Any) -> Any:
         value = getattr(args, name, None)
         return default if value is None else value
@@ -3211,7 +3423,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         require_pi0_action_generator=bool(_arg_or_default("require_pi0_action_generator", _SPEC_DEFAULTS.require_pi0_action_generator)),
     )
     point_feature_extractor = None
-    if args.point_backbone == "sonata":
+    if picf_enabled and args.point_backbone == "sonata":
         point_feature_extractor = SonataPointFeatureExtractor(
             SonataPointConfig(
                 checkpoint_path=args.sonata_checkpoint_path,
@@ -3224,7 +3436,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             )
         )
 
-    if args.visual_mode == "encoder":
+    if picf_enabled and args.visual_mode == "encoder":
         visual_config = VjepaVisualConfig(
             model_name=args.visual_model_name,
             checkpoint_path=args.visual_checkpoint_path,
@@ -3252,11 +3464,11 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             dtype="float32",
         )
         visual_encoder = _NullVisualEncoder()
-        use_visual_override = True
+        use_visual_override = bool(picf_enabled)
 
     tactile_config = None
     tactile_encoder = None
-    if args.tactile_mode == "encoder":
+    if picf_enabled and args.tactile_mode == "encoder":
         tactile_contact_stats = _load_tactile_contact_stats_json(args.tactile_contact_stats_path)
         tactile_config = AnyTouchConfig(
             checkpoint_path=args.tactile_checkpoint_path,
@@ -3291,6 +3503,8 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 max_length=args.semantic_max_length,
                 action_horizon=int(args.action_horizon),
                 tokenwise_chunk_size=int(getattr(args, "semantic_tokenwise_chunk_size", 0)),
+                projection_chunk_size=int(getattr(args, "semantic_projection_chunk_size", 0)),
+                mlp_chunk_size=int(getattr(args, "semantic_mlp_chunk_size", 0)),
             )
         )
     else:
@@ -3305,6 +3519,8 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         tactile_config=tactile_config,
         tactile_encoder=tactile_encoder,
     )
+    if not picf_enabled:
+        core.requires_grad_(False)
     return core, semantic_encoder, use_visual_override
 
 
@@ -3359,7 +3575,8 @@ def _materialize_model_parameters(
     with torch.no_grad():
         _ = model(warmup_window)
         core = model.core
-        if isinstance(core.tactile_token_proj.weight, UninitializedParameter):
+        picf_enabled = bool(getattr(getattr(model, "policy", None), "picf_enabled", True))
+        if picf_enabled and isinstance(core.tactile_token_proj.weight, UninitializedParameter):
             # picf_core_train uses a null tactile encoder, so tactile lazy layers
             # need an explicit placeholder init before DDP inspects parameters.
             tactile_pooled_dim = 4 * 768
@@ -3370,35 +3587,35 @@ def _materialize_model_parameters(
             )
             tactile_tokens = core.tactile_token_proj(tactile_sensor_in)
             _ = core.tactile_align_proj(tactile_tokens)
-        if isinstance(core.tactile_error_encoder.weight, UninitializedParameter):
+        if picf_enabled and isinstance(core.tactile_error_encoder.weight, UninitializedParameter):
             tactile_error_in = torch.zeros(
                 (1, 3 * core.config.tactile_real_dim),
                 device=core.device,
                 dtype=core.dtype,
             )
             _ = core.tactile_error_encoder(tactile_error_in)
-        if isinstance(core.visual_error_encoder.weight, UninitializedParameter):
+        if picf_enabled and isinstance(core.visual_error_encoder.weight, UninitializedParameter):
             visual_error_in = torch.zeros(
                 (1, 3 * core.config.hidden_dim),
                 device=core.device,
                 dtype=core.dtype,
             )
             _ = core.visual_error_encoder(visual_error_in)
-        if isinstance(core.visual_real_error_encoder.weight, UninitializedParameter):
+        if picf_enabled and isinstance(core.visual_real_error_encoder.weight, UninitializedParameter):
             visual_real_error_in = torch.zeros(
                 (1, 3 * core.config.visual_real_dim),
                 device=core.device,
                 dtype=core.dtype,
             )
             _ = core.visual_real_error_encoder(visual_real_error_in)
-        if isinstance(core.point_error_encoder.weight, UninitializedParameter):
+        if picf_enabled and isinstance(core.point_error_encoder.weight, UninitializedParameter):
             point_error_in = torch.zeros(
                 (1, 3 * core.config.point_real_dim),
                 device=core.device,
                 dtype=core.dtype,
             )
             _ = core.point_error_encoder(point_error_in)
-        if isinstance(core.innovation_proj.weight, UninitializedParameter):
+        if picf_enabled and isinstance(core.innovation_proj.weight, UninitializedParameter):
             branch_dim = max(core.config.hidden_dim // 4, 32)
             innovation_in = torch.zeros(
                 (1, (4 * branch_dim) + 4),
@@ -3406,7 +3623,7 @@ def _materialize_model_parameters(
                 dtype=core.dtype,
             )
             _ = core.innovation_proj(innovation_in)
-        if isinstance(core.tactile_route_reread.key_proj.weight, UninitializedParameter):
+        if picf_enabled and isinstance(core.tactile_route_reread.key_proj.weight, UninitializedParameter):
             tactile_dense_dim = _infer_tactile_dense_dim(core)
             dummy_queries = torch.zeros(
                 (1, core.config.tactile_group_proposals, core.config.hidden_dim),
@@ -3419,7 +3636,7 @@ def _materialize_model_parameters(
                 dtype=core.dtype,
             )
             _ = core.tactile_route_reread(dummy_queries, dummy_keys)
-        if isinstance(core.task_tactile_reread.key_proj.weight, UninitializedParameter):
+        if picf_enabled and isinstance(core.task_tactile_reread.key_proj.weight, UninitializedParameter):
             tactile_dense_dim = _infer_tactile_dense_dim(core)
             task_query_count = max(
                 int(core.config.task_local_queries)
@@ -3440,7 +3657,9 @@ def _materialize_model_parameters(
             _ = core.task_tactile_reread(dummy_queries, dummy_keys)
     model.zero_grad(set_to_none=True)
     remaining_uninitialized = [
-        name for name, param in model.named_parameters() if isinstance(param, UninitializedParameter)
+        name
+        for name, param in model.named_parameters()
+        if isinstance(param, UninitializedParameter) and bool(getattr(param, "requires_grad", False))
     ]
     if remaining_uninitialized:
         raise RuntimeError(
@@ -3724,6 +3943,7 @@ def train(args: argparse.Namespace) -> None:
             visual_grid=args.visual_grid,
             use_visual_override=use_visual_override,
             loss_config=_build_loss_config(args),
+            picf_mode=args.picf_mode,
         ).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
         model = _wrap_model_for_training_strategy(model, args=args, device=device)
@@ -3808,9 +4028,10 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s picf_mode=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s wandb=%s",
                 world_size,
                 args.training_strategy,
+                args.picf_mode,
                 args.accum_steps,
                 effective_global_batch,
                 args.num_train_steps,
@@ -3880,9 +4101,11 @@ def train(args: argparse.Namespace) -> None:
                 args.semantic_dim,
             )
             logging.info(
-                "Tokenwise exact-memory contract: core_ff_chunk_size=%s semantic_tokenwise_chunk_size=%s",
+                "Tokenwise exact-memory contract: core_ff_chunk_size=%s semantic_tokenwise_chunk_size=%s semantic_projection_chunk_size=%s semantic_mlp_chunk_size=%s",
                 int(getattr(args, "tokenwise_ff_chunk_size", 0)),
                 int(getattr(args, "semantic_tokenwise_chunk_size", 0)),
+                int(getattr(args, "semantic_projection_chunk_size", 0)),
+                int(getattr(args, "semantic_mlp_chunk_size", 0)),
             )
             logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
@@ -3897,6 +4120,10 @@ def train(args: argparse.Namespace) -> None:
                 args.semantic_mode,
                 bool(args.semantic_trainable),
             )
+            if not _picf_mode_enabled(args):
+                logging.info(
+                    "PI0.5-only ablation contract: PICF recurrent/control/future branches are disabled; the trainer builds the native PI0.5 semantic action path, freezes unused PICF core parameters, and uses extra_prefix_tokens=None."
+                )
             compact_startup_logging = bool(use_ddp and not verbose_startup_logs)
             logging.info("Startup logging: compact=%s", compact_startup_logging)
             if bool(getattr(args, "semantic_gradient_checkpointing_disabled_for_accum", False)):
@@ -3977,6 +4204,8 @@ def train(args: argparse.Namespace) -> None:
                 (args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0))
                 or ((step + 1) == args.num_train_steps)
             )
+            if not trainer_module.policy.picf_enabled:
+                capture_visual_diagnostics = False
             use_window_activation_checkpointing = bool(
                 getattr(args, "window_activation_checkpointing", False)
                 and not capture_visual_diagnostics
@@ -4019,7 +4248,10 @@ def train(args: argparse.Namespace) -> None:
                         )
                     try:
                         ensure_start = time.perf_counter()
-                        window_point_counts = _ensure_window_has_valid_first_step_xyzrgb_support(trainer_module, window)
+                        if trainer_module.policy.picf_enabled:
+                            window_point_counts = _ensure_window_has_valid_first_step_xyzrgb_support(trainer_module, window)
+                        else:
+                            window_point_counts = tuple()
                         if debug_phase_enabled:
                             logging.info(
                                 "phase step=%s micro=%s rank=%s sample_validate_sec=%.3f ensure_sec=%.3f flat_index=%s segment=%s start_step=%s prompt=%r point_counts=%s",
@@ -4326,6 +4558,15 @@ def main() -> None:
     parser.add_argument("--crop-radius-m", type=float, default=0.10)
     parser.add_argument("--point-focus-sigma-m", type=float, default=_SPEC_DEFAULTS.point_focus_sigma_m)
     parser.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--picf-mode",
+        choices=["enabled", "ablated"],
+        default="enabled",
+        help=(
+            "'enabled' runs the full PICF v2.2 control/future contract; "
+            "'ablated' disables PICF recurrent/control/future branches and trains only the native PI0.5 semantic action path."
+        ),
+    )
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--min-lr", type=float, default=2e-5)
     parser.add_argument("--warmup-steps", type=int, default=None)
@@ -4499,6 +4740,8 @@ def main() -> None:
     )
     parser.add_argument("--tokenwise-ff-chunk-size", type=int, default=_SPEC_DEFAULTS.tokenwise_ff_chunk_size)
     parser.add_argument("--semantic-tokenwise-chunk-size", type=int, default=0)
+    parser.add_argument("--semantic-projection-chunk-size", type=int, default=None)
+    parser.add_argument("--semantic-mlp-chunk-size", type=int, default=None)
     parser.add_argument("--attention-heads", type=int, default=_SPEC_DEFAULTS.attention_heads)
     parser.add_argument("--future-vote-heads", type=int, default=_SPEC_DEFAULTS.future_vote_heads)
     parser.set_defaults(

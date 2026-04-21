@@ -105,6 +105,9 @@ def verify_static_contract() -> list[CheckResult]:
     trainer_source = _read(TRAINER_SCRIPT_PATH)
     serve_source = _read(SERVE_SCRIPT_PATH)
     policy_source = _read(POLICY_PATH)
+    policy_test_source = _read(REPO_ROOT / "src" / "openpi" / "picf" / "policy_test.py")
+    readme_v22_source = _read(V22_README_PATH)
+    calvin_readme_source = _read(CALVIN_README_PATH)
     contracts_source = _read(CORE_CONTRACTS_PATH)
     gemma_pytorch_source = _read(GEMMA_PYTORCH_PATH)
     sonata_wrapper_source = _read(SONATA_WRAPPER_PATH)
@@ -379,11 +382,14 @@ def verify_static_contract() -> list[CheckResult]:
             ok=(
                 "tokenwise_ff_chunk_size" in trainer_source
                 and "semantic_tokenwise_chunk_size" in trainer_source
+                and "semantic_projection_chunk_size" in trainer_source
+                and "semantic_mlp_chunk_size" in trainer_source
                 and "def _apply_tokenwise_in_chunks(" in source
                 and "def _apply_tokenwise_in_chunks(" in gemma_pytorch_source
                 and "tokenwise_chunk_size =" in wrapper_source
                 and 'self.__dict__.get("config")' in wrapper_source
-                and "chunk_size=self.tokenwise_chunk_size" in gemma_pytorch_source
+                and "chunk_size=self.projection_chunk_size" in gemma_pytorch_source
+                and "chunk_size=self.mlp_chunk_size" in gemma_pytorch_source
                 and "chunk_size=self.ff_chunk_size" in source
             ),
             detail=(
@@ -752,7 +758,8 @@ def verify_static_contract() -> list[CheckResult]:
         CheckResult(
             name="serve_primary_action_path_uses_policy_act",
             ok=(
-                "self._policy = getattr(trainer, \"policy\", PicfPi05Policy(" in serve_source
+                "self._policy = getattr(" in serve_source
+                and "PicfPi05Policy(" in serve_source
                 and "act_result = self._policy.act(" in serve_source
                 and "output = act_result.output" in serve_source
                 and "refresh_predictive_state_for_action(" not in serve_source
@@ -770,11 +777,26 @@ def verify_static_contract() -> list[CheckResult]:
             name="policy_training_resolves_teacher_forced_action_future_explicitly",
             ok=(
                 "def _teacher_forced_action_future(" in policy_source
-                and "if observation.action is not None:" in policy_source
                 and "if action_chunk_target is not None:" in policy_source
+                and "if observation.action is not None:" in policy_source
                 and "action_future=self._teacher_forced_action_future(" in policy_source
             ),
-            detail="Policy training path resolves teacher-forced executed action explicitly from observation.action first, then action_chunk_target.",
+            detail="Policy training path resolves teacher-forced executed action explicitly from action_chunk_target first, then observation.action.",
+        ),
+        CheckResult(
+            name="picf_ablation_mode_is_explicit_across_policy_trainer_and_docs",
+            ok=(
+                '"--picf-mode"' in trainer_source
+                and '"--picf-mode"' in serve_source
+                and "_normalize_train_args(args)" in serve_source
+                and "_validate_train_args(args)" in serve_source
+                and "picf_enabled=False" in policy_test_source
+                and "_forward_action_only_window(" in trainer_source
+                and "extra_prefix_tokens=None" in policy_source
+                and "picf_mode=ablated" in readme_v22_source
+                and "--picf-mode ablated" in calvin_readme_source
+            ),
+            detail="The repo exposes a first-class PI0.5-only ablation mode instead of relying on implicit PICF bypasses.",
         ),
         CheckResult(
             name="core_no_longer_uses_direct_7d_action_head",
@@ -911,6 +933,8 @@ def verify_doc_links() -> list[CheckResult]:
                 for needle in (
                     "tokenwise_ff_chunk_size=64",
                     "semantic_tokenwise_chunk_size=64",
+                    "semantic_projection_chunk_size=128",
+                    "semantic_mlp_chunk_size=64",
                 )
             )
             and all(
@@ -918,9 +942,11 @@ def verify_doc_links() -> list[CheckResult]:
                 for needle in (
                     "tokenwise_ff_chunk_size=64",
                     "semantic_tokenwise_chunk_size=64",
+                    "semantic_projection_chunk_size=128",
+                    "semantic_mlp_chunk_size=64",
                 )
             ),
-            detail="README_v2.2 and CALVIN validation doc both record the exact tokenwise chunking contract.",
+            detail="README_v2.2 and CALVIN validation doc both record the exact tokenwise chunking contract, including split semantic projection/MLP controls.",
         )
     )
     checks.append(

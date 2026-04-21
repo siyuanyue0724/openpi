@@ -1,3 +1,7 @@
+import os
+
+os.environ["JAX_PLATFORMS"] = "cpu"
+
 import dataclasses
 
 import jax

@@ -5,6 +5,21 @@ Repo: `/home/siyuanyue/Documents/openpi`
 Status: current local v2.2 architecture record after the one-shot
 action/control contract rewrite and the current exhaustive local audit
 
+## Quick Navigation
+
+- [`README.md`](/home/siyuanyue/Documents/openpi/README.md)
+  Repo-level entry point.
+- [`src/openpi/picf/README.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md)
+  PICF entry pointer that routes readers to the current and archived PICF docs.
+- [`src/openpi/picf/README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md)
+  Current live PICF v2.2 architecture and deployment record.
+- [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
+  Historical pre-v2.2 record.
+- [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
+  Compact executable contract for the live code.
+- [`docs/CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+  Training, serving, and CALVIN validation workflow.
+
 ## 0. Current Audit Snapshot
 
 This file should currently be read as a **local correctness / architecture
@@ -15,6 +30,9 @@ As of the latest local audit pass:
 
 - the v2.2 physical / task-readout / conditioned-control / PI0 action contract
   is internally consistent
+- the runtime surface now has two explicit modes:
+  - `picf_mode=enabled`: full v2.2 PICF path
+  - `picf_mode=ablated`: PI0.5-only ablation path with PICF branches disabled
 - future-target supervision is now explicit stop-gradient teacher supervision
 - shared middle frames inside a training window are now reused as detached
   future targets instead of being redundantly rebuilt
@@ -31,6 +49,10 @@ Latest fully local verification evidence:
 - `pytest -q src/openpi/picf/core/training_test.py` -> `18 passed`
 - `pytest -q src/openpi/picf/paligemma/wrapper_test.py` -> `23 passed`
 - `pytest -q scripts/picf_core_train_test.py` -> `88 passed`
+- `pytest -q src/openpi/picf/policy_test.py scripts/serve_picf_policy_test.py` ->
+  policy/serve ablation coverage passes
+- `pytest -q scripts/serve_picf_policy_test.py src/openpi/picf/policy_test.py scripts/picf_core_train_test.py src/openpi/picf/core/training_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/paligemma/wrapper_test.py scripts/picf_resume_train_test.py`
+  -> `203 passed`
 - `python scripts/verify_picf_contract.py` -> static checks, documentation
   checks, targeted invariance regressions, core regression suite, and smoke
   training check all pass
@@ -54,7 +76,11 @@ implemented contract rewrite and the reasoning behind it.
 
 Relevant documents:
 
-1. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md`
+1. `/home/siyuanyue/Documents/openpi/README.md`
+   Repo-level entry point. Use this if you are opening the repository cold and
+   want the broad project context before diving into PICF-specific docs.
+
+2. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md`
    This file. Current v2.2 architecture record. It records:
    - what the current live code implements
    - what changed in the v2.2 contract rewrite
@@ -62,17 +88,17 @@ Relevant documents:
    - file-by-file implementation scope and rationale
    - migration, testing, and rollout gates used to validate the patch
 
-2. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md`
+3. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md`
    Historical v2.1 deployment record from before the v2.2 refactor landed.
 
-3. `/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md`
+4. `/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md`
    Current concise executable contract enforced by regression tests. It is the
    compact version of the live v2.2 semantics described in this file.
 
-4. `/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md`
+5. `/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md`
    Current training / validation / rollout / serving workflow document.
 
-5. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md`
+6. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md`
    Directory entry / pointer file. It points at both the current live
    record (`README_v2.2.md`) and the archived v2.1 record so neither is lost.
 
@@ -92,23 +118,25 @@ Historical/archive docs:
 If you are opening the repo cold, use this order:
 
 1. [`README.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md)
-   Entry pointer only.
-2. [`README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md)
+   PICF entry pointer only.
+2. [`/home/siyuanyue/Documents/openpi/README.md`](/home/siyuanyue/Documents/openpi/README.md)
+   Repo-level entry point.
+3. [`README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md)
    Current live architecture record and implementation audit.
-3. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
+4. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
    Concise executable contract for the current code.
-4. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+5. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
    Runtime / training / rollout workflow.
-5. [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
+6. [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
    Historical pre-v2.2 record only.
 
 ### 1.2 Temporary Audit Companions
 
 For this local v2.2 rollout, the primary temporary audit documents are:
 
-1. [`/tmp/picf_v22_recursive_dataflow_20260421.md`](/tmp/picf_v22_recursive_dataflow_20260421.md)
+1. [`/tmp/picf_v22_temp_current_dataflow.md`](/tmp/picf_v22_temp_current_dataflow.md)
    Recursive current-code dataflow audit for the live trainer/policy/core/loss path, including the one-step lookahead loss wiring.
-2. [`/tmp/picf_v22_theory_reconciliation_20260421.md`](/tmp/picf_v22_theory_reconciliation_20260421.md)
+2. [`/tmp/picf_v22_temp_theory_reconciliation.md`](/tmp/picf_v22_temp_theory_reconciliation.md)
    Theory-side reconciliation of the current implementation, including detached future-target reuse on internal window frames.
 3. [`/tmp/picf_v22_bug_optimization_register_20260421.md`](/tmp/picf_v22_bug_optimization_register_20260421.md)
    Explicit bug / optimization register for the current audit pass.
@@ -170,8 +198,8 @@ When verifying the local v2.2 codebase, use this navigation split:
 - historical pre-v2.2 reference only:
   - [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
 - temporary deep audits for this local rollout:
-  - [`/tmp/picf_v22_recursive_dataflow_20260421.md`](/tmp/picf_v22_recursive_dataflow_20260421.md)
-  - [`/tmp/picf_v22_theory_reconciliation_20260421.md`](/tmp/picf_v22_theory_reconciliation_20260421.md)
+  - [`/tmp/picf_v22_temp_current_dataflow.md`](/tmp/picf_v22_temp_current_dataflow.md)
+  - [`/tmp/picf_v22_temp_theory_reconciliation.md`](/tmp/picf_v22_temp_theory_reconciliation.md)
   - [`/tmp/picf_v22_bug_optimization_register_20260421.md`](/tmp/picf_v22_bug_optimization_register_20260421.md)
   - supporting:
     [`/tmp/picf_v22_current_code_dataflow_20260420.md`](/tmp/picf_v22_current_code_dataflow_20260420.md),
@@ -197,6 +225,36 @@ The intended one-shot result is:
 - semantic used for task-relevant current-step readout, not for physical world
   state update
 - world-only predictive basis kept clean for next-step innovation
+
+### 2.1 Runtime Modes
+
+The live trainer / serve stack now has two explicit runtime modes.
+
+`picf_mode=enabled`
+
+- canonical v2.2 path
+- builds and trains the PICF recurrent/task-readout/conditioned-control/future
+  branches
+- PI0.5 action generation consumes `conditioned_control.pi_prefix_tokens`
+
+`picf_mode=ablated`
+
+- PI0.5-only ablation path for parity checks against the main-branch PI0.5
+  baseline
+- PICF recurrent/control/future losses are disabled
+- trainer uses only PI0.5 flow loss and serve uses only the PI0.5 sampler
+- PICF core parameters are frozen and excluded from the optimizer
+- PICF-only point/visual/tactile backbone branches are normalized back to the
+  stub/off path so the ablation does not pay for unused foundation modules
+- PI0.5 is called with `extra_prefix_tokens=None`
+- if serving overrides an enabled checkpoint with `--picf-mode ablated`, the
+  runtime args are re-normalized and re-validated before model/source
+  construction so enabled-mode tactile/visual branch assumptions do not leak
+  into the ablation path
+
+The architectural contract described in the rest of this document remains the
+canonical contract for `picf_mode=enabled`. The ablated mode is a deliberate
+control experiment, not a second canonical PICF semantics.
 
 v2.2 is therefore treated as:
 
@@ -1587,7 +1645,7 @@ Current standard long-run launch profile:
 - the custom PI0/Gemma dual-branch semantic attention path now uses SDPA instead of the eager attention workspace. This is part of the standard 4x40GB profile because the eager path materializes a large attention buffer that fits at step 1 but blows up once optimizer state becomes resident; SDPA preserves the same training objective while removing that workspace peak.
 - core transformer stacks (`token_fusion`, `obs_self`, `posterior_self`, `task_self`, `predictive_world`, `predictive_semantic_world`, `control_world`) now also use train-time non-reentrant activation recompute; this is part of the standard all-backbone v2.2 training path and does not alter the underlying objective
 - the trainable Sonata point backbone and AnyTouch tactile encoder now also use train-time non-reentrant recompute on their main backbone forwards; this keeps all-backbone finetuning mathematically identical while shifting more of the per-rank memory burden from saved activations into recompute
-- tokenwise-only projections and FFNs on the current hottest paths now support exact sequence chunking instead of monolithic execution. On the current profile this is enabled by default as `tokenwise_ff_chunk_size=64` for PICF core transformer/cross-attention FFNs and `semantic_tokenwise_chunk_size=64` for the custom PI0/Gemma dual-branch tokenwise projections/MLPs under FSDP full-shard training. These chunked calls preserve the same parameterization and objective; they only lower local activation residency by evaluating tokenwise maps in smaller sequence slices.
+- tokenwise-only projections and FFNs on the current hottest paths now support exact sequence chunking instead of monolithic execution. On the current profile this is enabled by default as `tokenwise_ff_chunk_size=64` for PICF core transformer/cross-attention FFNs and `semantic_tokenwise_chunk_size=64` as the legacy semantic compatibility knob. The live trainer now also exposes `semantic_projection_chunk_size` and `semantic_mlp_chunk_size` as finer-grained execution controls; under the standard 4x40GB full-shard profile, the balanced default is `semantic_projection_chunk_size=128` and `semantic_mlp_chunk_size=64`. This preserves the old semantic compatibility surface while giving the heavier semantic MLP path and the lighter projection path different exact-memory execution policies.
 - the PI0/PaliGemma wrapper no longer adds an extra outer checkpoint around semantic forward blocks when the native language-model / vision-tower / expert-model checkpointing path is already active. This avoids redundant recompute while preserving the same gradients.
 - the PI0/PICF semantic runtime now drops the unused outer causal-LM heads (`paligemma.lm_head`, `gemma_expert.lm_head`) immediately after checkpoint load. The live training path never routes through those logits heads, so removing them from the runtime graph is mathematically exact and prevents dead generation weights from inflating FSDP wrapping.
 - standard multi-rank `FSDP full_shard` training now also standardizes `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`; after the backbone recompute cut, the dominant remaining failure mode was allocator fragmentation (`reserved but unallocated` growing much larger than free memory), so v2.2 now treats expandable segments as part of the clean startup contract rather than a post-hoc workaround
@@ -1637,6 +1695,8 @@ The current standard 4x40GB training profile is:
 - `semantic_gradient_checkpointing=True`
 - `tokenwise_ff_chunk_size=64`
 - `semantic_tokenwise_chunk_size=64`
+- `semantic_projection_chunk_size=128`
+- `semantic_mlp_chunk_size=64`
 
 This is a **full-train** profile.
 
@@ -1715,14 +1775,28 @@ Two concrete execution facts matter:
      events
 2. semantic tokenwise chunking is currently one blunt knob
    - under the standard 4x40GB profile, `semantic_tokenwise_chunk_size=64`
-     applies to `q/k/v/o` projections and `mlp`
-   - for rough live sequence scales near `784` tokens, this implies about `13`
-     chunks per tokenwise op and about `2340` tokenwise operator groups across
-     the 18-layer two-branch semantic path
+     remains the compatibility default
+   - the live trainer now resolves that compatibility knob into:
+     - `semantic_projection_chunk_size`
+     - `semantic_mlp_chunk_size`
+   - under the current balanced full-shard default, those resolve to:
+     - `semantic_projection_chunk_size=128`
+     - `semantic_mlp_chunk_size=64`
+   - if an operator explicitly sets the split knobs, those explicit values win
+   - for rough live sequence scales near `784` tokens, this implies about:
+     - `7` chunks per projection-family tokenwise op
+     - `13` chunks per MLP-family tokenwise op
+   - the old single-knob arithmetic therefore overestimates projection-side
+     launch count once the split controls are active
 
 Current engineering conclusion:
 
 - the exact-memory profile is currently clean but throughput-expensive
+- direct training-side prefix-KV reuse must **not** be assumed to be exact under
+  the current contract, because the PI0 semantic path still appends
+  `extra_prefix_tokens` into a bidirectional prefix-LM block; any future prefix
+  runtime reuse therefore needs an explicit capability contract from the
+  semantic backbone rather than a hard-coded PaliGemma-specific shortcut
 - the next optimization pass should stay mathematically exact and target:
   - coarser semantic FSDP execution blocks
   - separated chunk controls for semantic projections vs semantic MLPs
@@ -1885,6 +1959,13 @@ Serving must fail fast if:
 
 - semantic encoder missing
 - PI0.5 action generation unsupported
+
+Serving also accepts an explicit runtime override:
+
+- `python scripts/serve_picf_policy.py --checkpoint ... --picf-mode enabled`
+- `python scripts/serve_picf_policy.py --checkpoint ... --picf-mode ablated`
+
+If `--picf-mode` is omitted, serving uses the checkpoint's saved runtime mode.
 
 ### 8.8 `scripts/verify_picf_contract.py`
 

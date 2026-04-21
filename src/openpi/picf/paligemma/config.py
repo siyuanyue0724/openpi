@@ -24,3 +24,5 @@ class PaliGemmaSemanticConfig:
     denoise_steps: int = 10
     inject_state_into_prompt: bool = True
     tokenwise_chunk_size: int = 0
+    projection_chunk_size: int | None = None
+    mlp_chunk_size: int | None = None

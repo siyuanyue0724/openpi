@@ -41,6 +41,30 @@ except Exception:
 logger = logging.getLogger("openpi")
 
 
+def _resolve_point_window_ids(
+    point_start_id: int | None,
+    point_end_id: int | None,
+    *,
+    vocab_size: int,
+) -> tuple[int, int]:
+    expected_start = int(vocab_size - 2)
+    expected_end = int(vocab_size - 1)
+    if (point_start_id is None) and (point_end_id is None):
+        return expected_start, expected_end
+    if (point_start_id is None) != (point_end_id is None):
+        raise RuntimeError(
+            "point_start_id and point_end_id must be set together (or both left as None)."
+        )
+    resolved_start = int(point_start_id)
+    resolved_end = int(point_end_id)
+    if (resolved_start != expected_start) or (resolved_end != expected_end):
+        raise RuntimeError(
+            f"point_start_id/point_end_id mismatch tokenizer: got ({resolved_start},{resolved_end}), "
+            f"expected ({expected_start},{expected_end}). 请将其设置为 vocab_size-2 / vocab_size-1。"
+        )
+    return resolved_start, resolved_end
+
+
 def make_attn_mask(input_mask, mask_ar):
     """Adapted from big_vision.
 
@@ -165,6 +189,31 @@ class _TorchSonataRunner:
         self._inner = sonata_encoder.Sonata(**sp_cfg).to(self._device).eval()  # type: ignore
         if use_pretrained:
             self._maybe_load_pretrained(ckpt_path)
+
+    def _static_identity(self) -> tuple[object, ...]:
+        return (
+            int(self._cap),
+            int(self._enc_out_dim),
+            int(self._in_channels),
+            str(self._device),
+            type(self._inner).__name__,
+        )
+
+    def __eq__(self, other: object) -> bool:
+        if not isinstance(other, _TorchSonataRunner):
+            return NotImplemented
+        return self._static_identity() == other._static_identity()
+
+    def __hash__(self) -> int:
+        return hash(self._static_identity())
+
+    def __repr__(self) -> str:
+        cap, enc_out_dim, in_channels, device, inner_name = self._static_identity()
+        return (
+            "_TorchSonataRunner("
+            f"cap={cap}, enc_out_dim={enc_out_dim}, in_channels={in_channels}, "
+            f"device={device!r}, inner={inner_name!r})"
+        )
 
     @property
     def cap(self) -> int:
@@ -375,7 +424,7 @@ def _pure_insert_points(
 class Pi0(_model.BaseModel):
     def __init__(self, config: pi0_config.Pi0Config, rngs: nnx.Rngs):
         super().__init__(config.action_dim, config.action_horizon, config.max_token_len)
-        self.config = config  # <-- 必须：embed_prefix() 里读取 point_start_id/point_end_id 要用
+        self.config = config
         self.pi05 = config.pi05
         paligemma_config = _gemma.get_config(config.paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
@@ -405,9 +454,16 @@ class Pi0(_model.BaseModel):
             enable_pc = True
         if _PBT is not None and getattr(config, "point_backbone_type", None) == getattr(_PBT, "SONATA", None):
             enable_pc = True
+        self.point_start_id = getattr(config, "point_start_id", None)
+        self.point_end_id = getattr(config, "point_end_id", None)
         self._sonata_runner = None
         self._pt_projector = None
         if enable_pc:
+            self.point_start_id, self.point_end_id = _resolve_point_window_ids(
+                self.point_start_id,
+                self.point_end_id,
+                vocab_size=int(_gemma.PALIGEMMA_VOCAB_SIZE),
+            )
             if (torch is None) or (sonata_encoder is None) or (pure_callback is None):
                 raise RuntimeError("启用了点云分支但缺少依赖（torch/sonata_encoder/pure_callback）——fail fast。")
             self._sonata_runner = _TorchSonataRunner(
@@ -513,14 +569,15 @@ class Pi0(_model.BaseModel):
 
         # add language (aka tokenized inputs)
         if obs.tokenized_prompt is not None:
-            text_emb  = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
+            text_emb = self.PaliGemma.llm(obs.tokenized_prompt, method="embed")
             text_mask = obs.tokenized_prompt_mask
             if self._sonata_runner is not None:
                 # 原位插入到 <point_start>/<point_end> 窗口（backup 语义）
-                start_id = getattr(self.config, "point_start_id", None)
-                end_id   = getattr(self.config, "point_end_id", None)
+                start_id = self.point_start_id
+                end_id = self.point_end_id
                 if (start_id is None) or (end_id is None):
                     raise RuntimeError("enable_sonata=True 但未设置 Pi0Config.point_start_id/point_end_id（fail fast）。")
+
                 # （可选强约束）窗口中不得出现可见文本，保持与 backup 一致
                 def _host_check_no_visible_between(prompt_np, mask_np, s_id, e_id):
                     P = np.asarray(prompt_np, dtype=np.int32)
@@ -539,15 +596,20 @@ class Pi0(_model.BaseModel):
                     if bad:
                         raise RuntimeError(f"Visible tokens between <point_start> and <point_end> in samples: {bad[:8]}")
                     return np.int32(0)
+
                 _ = pure_callback(  # type: ignore
                     _host_check_no_visible_between,
                     jax.ShapeDtypeStruct((), jnp.int32),
                     obs.tokenized_prompt, text_mask, int(start_id), int(end_id),
                 )
                 fused_text, fused_mask = _pure_insert_points(
-                    text_emb, text_mask, obs.tokenized_prompt,
-                    pt_tokens, pt_mask,
-                    int(start_id), int(end_id),
+                    text_emb,
+                    text_mask,
+                    obs.tokenized_prompt,
+                    pt_tokens,
+                    pt_mask,
+                    int(start_id),
+                    int(end_id),
                 )
                 tokens.append(fused_text)
                 input_mask.append(fused_mask)
@@ -557,10 +619,9 @@ class Pi0(_model.BaseModel):
                 tokens.append(text_emb)
                 input_mask.append(text_mask)
                 ar_mask += [False] * int(text_emb.shape[1])
-        else:
-            if self._sonata_runner is not None:
-                # 启用点云但无文本窗口 → 直接失败（与 backup 行为一致）
-                raise RuntimeError("启用 Sonata 但缺少文本（无法进行 <point_start>/<point_end> 插入）。")
+        elif self._sonata_runner is not None:
+            # 启用点云但无文本窗口 → 直接失败（与 backup 行为一致）
+            raise RuntimeError("启用 Sonata 但缺少文本（无法进行 <point_start>/<point_end> 插入）。")
 
         tokens = jnp.concatenate(tokens, axis=1)
         input_mask = jnp.concatenate(input_mask, axis=1)

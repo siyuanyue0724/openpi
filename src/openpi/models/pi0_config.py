@@ -56,8 +56,11 @@ class Pi0Config(_model.BaseModelConfig):
     pi05: bool = False
 
     # ===== Point cloud (Sonata) 配置（严格 fail-fast） =====
-    # 旧布尔开关（向后兼容）：是否启用点云（PyTorch 路线中 None 会在模型里按“默认开启”解析）。
-    enable_sonata: Optional[bool] = True
+    # 旧布尔开关（向后兼容）：是否启用点云。
+    # `None` 表示“交由具体后端解释默认值”：
+    # - PyTorch 路线默认开启
+    # - JAX 路线默认关闭，除非显式要求或 point_backbone_type=SONATA
+    enable_sonata: Optional[bool] = None
     # 新枚举（推荐）：选择点云后端（存在即用）
     point_backbone_type: Optional["PointBackboneType"] = None  # type: ignore[name-defined]
     # feats = [xyz(3) + extras]，常见 xyz+rgb => 6；Observation 的最后一维为 3 + point_feat_dim

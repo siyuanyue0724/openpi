@@ -145,6 +145,9 @@ def _base_args() -> argparse.Namespace:
         window_activation_checkpointing=False,
         semantic_use_gripper=True,
         semantic_max_length=256,
+        semantic_tokenwise_chunk_size=0,
+        semantic_projection_chunk_size=None,
+        semantic_mlp_chunk_size=None,
         visual_mode="stub",
         visual_finetune_mode="auto",
         tactile_mode="stub",
@@ -183,6 +186,85 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     args = _base_args()
     _MODULE._normalize_train_args(args)
     assert args.warmup_steps == 600
+
+
+def test_normalize_train_args_splits_semantic_chunk_knobs_from_legacy_default() -> None:
+    args = _base_args()
+    args.training_strategy = "fsdp_full_shard"
+    args.semantic_mode = "paligemma"
+    args.semantic_trainable = True
+    args.semantic_tokenwise_chunk_size = 64
+    args.semantic_projection_chunk_size = None
+    args.semantic_mlp_chunk_size = None
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.semantic_tokenwise_chunk_size == 64
+    assert args.semantic_projection_chunk_size == 64
+    assert args.semantic_mlp_chunk_size == 64
+
+
+def test_normalize_train_args_uses_balanced_default_semantic_chunk_split_for_fsdp_profile() -> None:
+    args = _base_args()
+    args.training_strategy = "fsdp_full_shard"
+    args.semantic_mode = "paligemma"
+    args.semantic_trainable = True
+    args.semantic_tokenwise_chunk_size = 0
+    args.semantic_projection_chunk_size = None
+    args.semantic_mlp_chunk_size = None
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.semantic_tokenwise_chunk_size == 64
+    assert args.semantic_projection_chunk_size == 128
+    assert args.semantic_mlp_chunk_size == 64
+
+
+def test_normalize_train_args_preserves_explicit_semantic_chunk_split() -> None:
+    args = _base_args()
+    args.training_strategy = "fsdp_full_shard"
+    args.semantic_mode = "paligemma"
+    args.semantic_trainable = True
+    args.semantic_tokenwise_chunk_size = 64
+    args.semantic_projection_chunk_size = 128
+    args.semantic_mlp_chunk_size = 48
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.semantic_tokenwise_chunk_size == 64
+    assert args.semantic_projection_chunk_size == 128
+    assert args.semantic_mlp_chunk_size == 48
+
+
+def test_normalize_train_args_ablated_disables_picf_backbone_paths() -> None:
+    args = _base_args()
+    args.picf_mode = "ablated"
+    args.use_foundation_backbones = True
+    args.point_backbone = "sonata"
+    args.visual_mode = "encoder"
+    args.tactile_mode = "encoder"
+    args.use_tactile = True
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.point_backbone == "rgb"
+    assert args.point_backbone_trainable is False
+    assert args.visual_mode == "stub"
+    assert args.visual_trainable is False
+    assert args.tactile_mode == "stub"
+    assert args.tactile_trainable is False
+    assert args.use_tactile is False
+    assert args.use_scene_obs is False
+    assert args.require_pi0_action_generator is True
+
+
+def test_validate_train_args_ablated_requires_paligemma() -> None:
+    args = _base_args()
+    args.picf_mode = "ablated"
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="semantic_mode=paligemma"):
+        _MODULE._validate_train_args(args)
 
 
 def test_foundation_profile_does_not_force_window_activation_checkpointing() -> None:
@@ -396,6 +478,24 @@ def test_validate_train_args_rejects_invalid_grad_clip_window() -> None:
     _MODULE._normalize_train_args(args)
 
     with pytest.raises(ValueError, match="grad_clip_window"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_rejects_negative_semantic_projection_chunk_size() -> None:
+    args = _base_args()
+    args.semantic_projection_chunk_size = -1
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="semantic_projection_chunk_size"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_rejects_negative_semantic_mlp_chunk_size() -> None:
+    args = _base_args()
+    args.semantic_mlp_chunk_size = -1
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="semantic_mlp_chunk_size"):
         _MODULE._validate_train_args(args)
 
 
@@ -1836,6 +1936,71 @@ def test_picf_window_trainer_reuses_middle_frame_targets_with_detached_override(
         (2, True, 2.0, False),
         (3, False, None, None),
     ]
+
+
+def test_picf_window_trainer_ablated_uses_action_only_metrics() -> None:
+    class _DummyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.device = torch.device("cpu")
+            self.dtype = torch.float32
+            self.config = types.SimpleNamespace(visual_real_grid=4)
+
+    class _DummyPolicy:
+        picf_enabled = False
+
+        def forward_train_transition(self, *, current, previous=None, visual_map_override=None, action_chunk_target=None):
+            del previous, visual_map_override
+            target = torch.as_tensor(action_chunk_target, dtype=torch.float32)
+            return types.SimpleNamespace(
+                output=None,
+                observed=None,
+                flow_override={
+                    "total": torch.tensor(0.25),
+                    "action_pos": torch.tensor(0.10),
+                    "action_rot": torch.tensor(0.10),
+                    "action_gripper": torch.tensor(0.05),
+                    "predicted_action": target[0] if target.ndim > 1 else target,
+                    "predicted_chunk": target,
+                },
+                next_state=None,
+            )
+
+    trainer = _MODULE._PicfWindowTrainer(
+        _DummyCore(),
+        semantic_encoder=None,
+        visual_grid=8,
+        use_visual_override=False,
+        picf_mode="ablated",
+    )
+    trainer.policy = _DummyPolicy()
+
+    frame0 = PicfObservation(
+        rgb_static=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth_static=np.zeros((8, 8), dtype=np.float32),
+        robot_obs=np.zeros((15,), dtype=np.float32),
+        prompt="test",
+        step_id=1,
+        segment_id=0,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+        action=np.zeros((7,), dtype=np.float32),
+        action_chunk=np.zeros((2, 7), dtype=np.float32),
+    )
+    frame1 = dataclasses.replace(frame0, step_id=2, reset_scaffold=False)
+    frame2 = dataclasses.replace(frame0, step_id=3, reset_scaffold=False)
+    window = _MODULE._TransitionWindow(segment_id=0, start_step_id=0, prompt="test", frames=(frame0, frame1, frame2))
+
+    result = trainer(window, capture_visual_diagnostics=True)
+
+    assert result["loss_total"].item() == pytest.approx(0.25)
+    assert result["loss_action"].item() == pytest.approx(0.25)
+    assert result["loss_total_minus_action"].item() == pytest.approx(0.0)
+    assert result["loss_semantic_future_aux"].item() == pytest.approx(0.0)
+    assert result["loss_alignment"].item() == pytest.approx(0.0)
+    assert result["projective_candidate_density"].item() == pytest.approx(0.0)
+    assert result["diagnostic_physical_visual_real_seq"] == []
+    assert result["diagnostic_semantic_visual_real_seq"] == []
 
 
 def test_decode_visual_real_prediction_upsamples_grid() -> None:

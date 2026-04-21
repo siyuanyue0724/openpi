@@ -1,3 +1,7 @@
+import os
+
+os.environ["JAX_PLATFORMS"] = "cpu"
+
 from flax import nnx
 import jax
 import pytest

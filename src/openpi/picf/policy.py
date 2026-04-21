@@ -15,26 +15,33 @@ from openpi.picf.core import PicfPreviousState
 from openpi.picf.fsdp_utils import call_module_forward_or_method
 @dataclasses.dataclass(frozen=True)
 class PicfPolicyTrainResult:
-    output: PicfCoreOutput
+    output: PicfCoreOutput | None
     observed: Any | None
     semantic_override: Any | None
     flow_override: dict[str, torch.Tensor] | None
-    next_state: PicfPreviousState
+    next_state: PicfPreviousState | None
 
 
 @dataclasses.dataclass(frozen=True)
 class PicfPolicyActResult:
     action: torch.Tensor
     action_chunk: torch.Tensor | None
-    state: PicfCoreState
+    state: PicfCoreState | None
     debug: dict[str, float]
-    output: PicfCoreOutput
+    output: PicfCoreOutput | None
 
 
 class PicfPi05Policy:
-    def __init__(self, *, core: PicfFullCore, semantic_encoder: torch.nn.Module | None) -> None:
+    def __init__(
+        self,
+        *,
+        core: PicfFullCore,
+        semantic_encoder: torch.nn.Module | None,
+        picf_enabled: bool = True,
+    ) -> None:
         self.core = core
         self.semantic_encoder = semantic_encoder
+        self.picf_enabled = bool(picf_enabled)
 
     def _supports_action_generation(self) -> bool:
         return bool(
@@ -69,10 +76,51 @@ class PicfPi05Policy:
             return None
         return call_module_forward_or_method(self.semantic_encoder, "encode_observation", "encode_observation", observation)
 
-    def recurrent_state(self, state: PicfCoreState) -> PicfPreviousState:
+    def recurrent_state(self, state: PicfCoreState | None) -> PicfPreviousState | None:
+        if state is None:
+            return None
         if hasattr(self.core, "make_recurrent_carry"):
             return self.core.make_recurrent_carry(state)
         return state
+
+    def _pi05_only_train_transition(
+        self,
+        current: PicfObservation,
+        *,
+        semantic_override: Any | None,
+        action_chunk_target: torch.Tensor | np.ndarray | None,
+    ) -> PicfPolicyTrainResult:
+        self._require_action_generation()
+        teacher_action = self._teacher_forced_action_future(
+            current,
+            action_chunk_target=action_chunk_target,
+        )
+        if teacher_action is None:
+            raise RuntimeError(
+                "PI0.5-only ablation training requires a teacher-forced action or action chunk target."
+            )
+        flow_override = call_module_forward_or_method(
+            self.semantic_encoder,
+            "compute_action_flow_loss",
+            "compute_action_flow_loss",
+            semantic_override,
+            extra_prefix_tokens=None,
+            action_chunk_target=teacher_action,
+        )
+        return PicfPolicyTrainResult(
+            output=None,
+            observed=None,
+            semantic_override=semantic_override,
+            flow_override=flow_override,
+            next_state=None,
+        )
+
+    @staticmethod
+    def _action_from_sampled_chunk(action_chunk: torch.Tensor | np.ndarray) -> tuple[torch.Tensor, torch.Tensor]:
+        chunk = torch.as_tensor(action_chunk)
+        if chunk.ndim == 1:
+            return chunk[:7], chunk
+        return chunk[0, :7], chunk
 
     def _legacy_core_step(
         self,
@@ -104,10 +152,10 @@ class PicfPi05Policy:
         *,
         action_chunk_target: torch.Tensor | np.ndarray | None,
     ) -> torch.Tensor | np.ndarray | None:
-        if observation.action is not None:
-            return observation.action
         if action_chunk_target is not None:
             return action_chunk_target
+        if observation.action is not None:
+            return observation.action
         return None
 
     def forward_train_transition(
@@ -122,6 +170,12 @@ class PicfPi05Policy:
     ) -> PicfPolicyTrainResult:
         if semantic_override is None and self.semantic_encoder is not None:
             semantic_override = self.encode_semantic(current)
+        if not self.picf_enabled:
+            return self._pi05_only_train_transition(
+                current,
+                semantic_override=semantic_override,
+                action_chunk_target=action_chunk_target,
+            )
         if not hasattr(self.core, "observe_step"):
             output = self._legacy_core_step(
                 current,
@@ -201,6 +255,23 @@ class PicfPi05Policy:
     ) -> PicfPolicyActResult:
         if semantic_override is None:
             semantic_override = self.encode_semantic(observation)
+        if not self.picf_enabled:
+            self._require_action_generation()
+            action_chunk = call_module_forward_or_method(
+                self.semantic_encoder,
+                "sample_action_chunk",
+                "sample_action_chunk",
+                semantic_override,
+                extra_prefix_tokens=None,
+            )
+            action, normalized_chunk = self._action_from_sampled_chunk(action_chunk)
+            return PicfPolicyActResult(
+                action=action,
+                action_chunk=normalized_chunk,
+                state=None,
+                debug={"picf_enabled": 0.0},
+                output=None,
+            )
         if not hasattr(self.core, "observe_step"):
             self._require_action_generation()
             output = self._legacy_core_step(

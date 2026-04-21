@@ -278,3 +278,78 @@ def test_policy_forward_train_transition_legacy_core_uses_flow_override_when_ava
     torch.testing.assert_close(semantic.seen_prefix, core.prefix)
     torch.testing.assert_close(result.output.state.predictive.action, torch.full((7,), 2.0, dtype=torch.float32))
     torch.testing.assert_close(result.output.state.predictive.action_chunk, target + 1.0)
+
+
+def test_policy_forward_train_transition_ablated_bypasses_picf_prefix_and_state() -> None:
+    class _DummyCore:
+        def __init__(self) -> None:
+            self.config = types.SimpleNamespace(require_pi0_action_generator=True)
+
+    class _SemanticEncoder:
+        def __init__(self) -> None:
+            self.seen_prefix = "unset"
+
+        def encode_observation(self, _observation):
+            return torch.zeros((2, 8), dtype=torch.float32)
+
+        def supports_pi0_action_generation(self):
+            return True
+
+        def compute_action_flow_loss(self, semantic_override, *, extra_prefix_tokens, action_chunk_target):
+            assert semantic_override.shape == (2, 8)
+            self.seen_prefix = extra_prefix_tokens
+            target = torch.as_tensor(action_chunk_target, dtype=torch.float32)
+            return {
+                "total": torch.tensor(0.25),
+                "action_pos": torch.tensor(0.1),
+                "action_rot": torch.tensor(0.1),
+                "action_gripper": torch.tensor(0.05),
+                "predicted_action": target[0],
+                "predicted_chunk": target,
+            }
+
+    target = torch.arange(14, dtype=torch.float32).reshape(2, 7)
+    semantic = _SemanticEncoder()
+    policy = PicfPi05Policy(core=_DummyCore(), semantic_encoder=semantic, picf_enabled=False)
+
+    result = policy.forward_train_transition(
+        _dummy_observation(),
+        action_chunk_target=target,
+    )
+
+    assert semantic.seen_prefix is None
+    assert result.output is None
+    assert result.next_state is None
+    torch.testing.assert_close(result.flow_override["predicted_chunk"], target)
+
+
+def test_policy_act_ablated_samples_without_picf_state() -> None:
+    class _DummyCore:
+        def __init__(self) -> None:
+            self.config = types.SimpleNamespace(require_pi0_action_generator=True)
+
+    class _SemanticEncoder:
+        def __init__(self) -> None:
+            self.seen_prefix = "unset"
+
+        def encode_observation(self, _observation):
+            return torch.ones((2, 8), dtype=torch.float32)
+
+        def supports_pi0_action_generation(self):
+            return True
+
+        def sample_action_chunk(self, semantic_override, *, extra_prefix_tokens):
+            assert semantic_override.shape == (2, 8)
+            self.seen_prefix = extra_prefix_tokens
+            return torch.arange(14, dtype=torch.float32).reshape(2, 7)
+
+    semantic = _SemanticEncoder()
+    policy = PicfPi05Policy(core=_DummyCore(), semantic_encoder=semantic, picf_enabled=False)
+
+    result = policy.act(_dummy_observation())
+
+    assert semantic.seen_prefix is None
+    assert result.state is None
+    assert result.output is None
+    torch.testing.assert_close(result.action, torch.arange(7, dtype=torch.float32))
+    torch.testing.assert_close(result.action_chunk, torch.arange(14, dtype=torch.float32).reshape(2, 7))

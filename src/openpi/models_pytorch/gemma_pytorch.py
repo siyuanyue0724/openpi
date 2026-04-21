@@ -53,6 +53,8 @@ class PaliGemmaWithExpertModel(nn.Module):
         use_adarms=None,
         precision: Literal["bfloat16", "float32"] = "bfloat16",
         tokenwise_chunk_size: int = 0,
+        projection_chunk_size: int | None = None,
+        mlp_chunk_size: int | None = None,
     ):
         if use_adarms is None:
             use_adarms = [False, False]
@@ -107,6 +109,10 @@ class PaliGemmaWithExpertModel(nn.Module):
         self.gemma_expert = RuntimeGemmaForCausalLM(config=action_expert_config_hf)
         self.gemma_expert.model.embed_tokens = None
         self.tokenwise_chunk_size = int(tokenwise_chunk_size)
+        self.projection_chunk_size = int(
+            self.tokenwise_chunk_size if projection_chunk_size is None else projection_chunk_size
+        )
+        self.mlp_chunk_size = int(self.tokenwise_chunk_size if mlp_chunk_size is None else mlp_chunk_size)
 
         self.to_bfloat16_for_selected_params(precision)
 
@@ -205,17 +211,17 @@ class PaliGemmaWithExpertModel(nn.Module):
                     query_state = _apply_tokenwise_in_chunks(
                         hidden_states,
                         layer.self_attn.q_proj,
-                        chunk_size=self.tokenwise_chunk_size,
+                        chunk_size=self.projection_chunk_size,
                     ).view(hidden_shape).transpose(1, 2)
                     key_state = _apply_tokenwise_in_chunks(
                         hidden_states,
                         layer.self_attn.k_proj,
-                        chunk_size=self.tokenwise_chunk_size,
+                        chunk_size=self.projection_chunk_size,
                     ).view(hidden_shape).transpose(1, 2)
                     value_state = _apply_tokenwise_in_chunks(
                         hidden_states,
                         layer.self_attn.v_proj,
-                        chunk_size=self.tokenwise_chunk_size,
+                        chunk_size=self.projection_chunk_size,
                     ).view(hidden_shape).transpose(1, 2)
 
                     query_states.append(query_state)
@@ -274,7 +280,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                     out_emb = _apply_tokenwise_in_chunks(
                         att_output[:, start_pos:end_pos],
                         layer.self_attn.o_proj,
-                        chunk_size=self.tokenwise_chunk_size,
+                        chunk_size=self.projection_chunk_size,
                     )
 
                     # first residual
@@ -288,7 +294,7 @@ class PaliGemmaWithExpertModel(nn.Module):
                     out_emb = _apply_tokenwise_in_chunks(
                         out_emb,
                         layer.mlp,
-                        chunk_size=self.tokenwise_chunk_size,
+                        chunk_size=self.mlp_chunk_size,
                     )
                     # second residual
                     out_emb = _gated_residual(after_first_residual, out_emb, gate)
