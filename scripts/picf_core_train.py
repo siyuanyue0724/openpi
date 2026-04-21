@@ -1440,11 +1440,14 @@ def _module_has_trainable_params(module: torch.nn.Module | None) -> bool:
 def _fsdp_root_ignored_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Module]:
     core = model.core
     ignored: list[torch.nn.Module] = []
+    ignore_core = isinstance(core, torch.nn.Module) and not _is_fsdp_model(core) and not _module_has_trainable_params(core)
+    if ignore_core:
+        ignored.append(core)
     for module in (
         model.semantic_encoder if isinstance(model.semantic_encoder, torch.nn.Module) else None,
-        getattr(core, "point_feature_extractor", None),
-        getattr(core, "visual_encoder", None),
-        getattr(core, "tactile_encoder", None),
+        None if ignore_core else getattr(core, "point_feature_extractor", None),
+        None if ignore_core else getattr(core, "visual_encoder", None),
+        None if ignore_core else getattr(core, "tactile_encoder", None),
     ):
         if not isinstance(module, torch.nn.Module):
             continue

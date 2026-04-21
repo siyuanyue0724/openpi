@@ -636,6 +636,32 @@ def test_fsdp_root_ignored_modules_collects_fully_frozen_backbones() -> None:
     assert trainer.core.tactile_encoder not in ignored
 
 
+def test_fsdp_root_ignored_modules_collects_fully_frozen_core() -> None:
+    class _Core(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.point_feature_extractor = torch.nn.Linear(4, 4)
+            self.visual_encoder = torch.nn.Linear(4, 4)
+            self.tactile_encoder = torch.nn.Linear(4, 4)
+
+    class _DummyTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.semantic_encoder = torch.nn.Linear(4, 4)
+            self.core = _Core()
+
+    trainer = _DummyTrainer()
+    _MODULE._freeze_initialized_module_parameters(trainer.core)
+
+    ignored = _MODULE._fsdp_root_ignored_modules(trainer)
+
+    assert trainer.core in ignored
+    assert trainer.semantic_encoder not in ignored
+    assert trainer.core.point_feature_extractor not in ignored
+    assert trainer.core.visual_encoder not in ignored
+    assert trainer.core.tactile_encoder not in ignored
+
+
 def test_load_tactile_backgrounds_npz_roundtrip(tmp_path: Path) -> None:
     bg_path = tmp_path / "tactile_backgrounds.npz"
     np.savez(
