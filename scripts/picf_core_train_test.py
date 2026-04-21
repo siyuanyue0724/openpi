@@ -1593,7 +1593,7 @@ def test_build_model_propagates_v22_conditioned_control_knobs(tmp_path: Path) ->
     assert core.config.require_pi0_action_generator is False
 
 
-def test_build_model_ablated_defers_core_freeze_until_after_materialization(tmp_path: Path) -> None:
+def test_build_model_ablated_safely_freezes_lazy_core_parameters(tmp_path: Path) -> None:
     root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
     args = _base_args()
     args.picf_mode = "ablated"
@@ -1608,10 +1608,10 @@ def test_build_model_ablated_defers_core_freeze_until_after_materialization(tmp_
     assert isinstance(use_visual_override, bool)
     lazy_params = [param for param in core.parameters() if isinstance(param, torch.nn.parameter.UninitializedParameter)]
     assert lazy_params
-    assert all(bool(getattr(param, "requires_grad", False)) for param in lazy_params)
+    assert all(not bool(getattr(param, "requires_grad", False)) for param in lazy_params)
 
 
-def test_freeze_initialized_module_parameters_skips_uninitialized_lazy_params() -> None:
+def test_freeze_initialized_module_parameters_handles_uninitialized_lazy_params() -> None:
     class _LazyContainer(torch.nn.Module):
         def __init__(self) -> None:
             super().__init__()
@@ -1623,7 +1623,7 @@ def test_freeze_initialized_module_parameters_skips_uninitialized_lazy_params() 
     _MODULE._freeze_initialized_module_parameters(model)
 
     assert model.ready.weight.requires_grad is False
-    assert model.lazy.weight.requires_grad is True
+    assert model.lazy.weight.requires_grad is False
 
 
 def test_collect_nonfinite_gradient_diagnostics_reports_group_and_parameter_name() -> None:
