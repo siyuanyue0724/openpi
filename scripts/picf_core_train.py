@@ -3017,6 +3017,57 @@ def _fsdp_full_state_dict_context(
     )
 
 
+_ABLATED_SEMANTIC_ONLY_CHECKPOINT_FORMAT = "picf_ablated_semantic_only_v1"
+
+
+def _ablated_semantic_only_checkpoint_enabled(
+    *,
+    args: argparse.Namespace | None,
+    module: torch.nn.Module,
+) -> bool:
+    if args is not None and _picf_mode_enabled(args):
+        return False
+    semantic_encoder = getattr(module, "semantic_encoder", None)
+    return isinstance(semantic_encoder, torch.nn.Module)
+
+
+def _build_ablated_semantic_only_model_state(
+    *,
+    module: torch.nn.Module,
+) -> dict[str, Any]:
+    semantic_encoder = getattr(module, "semantic_encoder", None)
+    if not isinstance(semantic_encoder, torch.nn.Module):
+        raise RuntimeError(
+            "picf_mode=ablated checkpointing requires a semantic_encoder module."
+        )
+    semantic_state = semantic_encoder.state_dict()
+    return {
+        "checkpoint_model_format": _ABLATED_SEMANTIC_ONLY_CHECKPOINT_FORMAT,
+        "semantic_encoder": semantic_state,
+    }
+
+
+def _is_ablated_semantic_only_model_state(state: Any) -> bool:
+    return bool(
+        isinstance(state, dict)
+        and state.get("checkpoint_model_format") == _ABLATED_SEMANTIC_ONLY_CHECKPOINT_FORMAT
+        and "semantic_encoder" in state
+    )
+
+
+def _load_ablated_semantic_only_model_state(
+    *,
+    module: torch.nn.Module,
+    model_state: dict[str, Any],
+) -> None:
+    semantic_encoder = getattr(module, "semantic_encoder", None)
+    if not isinstance(semantic_encoder, torch.nn.Module):
+        raise RuntimeError(
+            "Ablated semantic-only checkpoint load requires the target model to expose semantic_encoder."
+        )
+    semantic_encoder.load_state_dict(model_state["semantic_encoder"], strict=True)
+
+
 def _save_checkpoint(
     *,
     output_dir: Path,
@@ -3040,20 +3091,32 @@ def _save_checkpoint(
         device = getattr(module, "device", torch.device("cpu"))
 
     if _is_fsdp_model(model):
-        with _fsdp_full_state_dict_context(model, rank0_only=True):
-            model_state = model.state_dict()
-            optimizer_state = (
-                None
-                if not save_optimizer_state
-                else FullyShardedDataParallel.optim_state_dict(model, optimizer)
-            )
+        if _ablated_semantic_only_checkpoint_enabled(args=args, module=module):
+            model_state = _build_ablated_semantic_only_model_state(module=module)
+            with _fsdp_full_state_dict_context(model, rank0_only=True):
+                optimizer_state = (
+                    None
+                    if not save_optimizer_state
+                    else FullyShardedDataParallel.optim_state_dict(model, optimizer)
+                )
+        else:
+            with _fsdp_full_state_dict_context(model, rank0_only=True):
+                model_state = model.state_dict()
+                optimizer_state = (
+                    None
+                    if not save_optimizer_state
+                    else FullyShardedDataParallel.optim_state_dict(model, optimizer)
+                )
         _distributed_barrier(use_ddp=dist.is_initialized(), device=device)
         if not is_main:
             return
     else:
         if not is_main:
             return
-        model_state = module.state_dict()
+        if _ablated_semantic_only_checkpoint_enabled(args=args, module=module):
+            model_state = _build_ablated_semantic_only_model_state(module=module)
+        else:
+            model_state = module.state_dict()
         optimizer_state = optimizer.state_dict() if save_optimizer_state else None
 
     if tmp_dir.exists():
@@ -3172,42 +3235,39 @@ def _load_checkpoint(
         )
         optimizer_loaded = optimizer_state is not None
         if _is_fsdp_model(model):
-            with _fsdp_full_state_dict_context(model, rank0_only=False):
-                try:
-                    model.load_state_dict(model_state, strict=True)
-                except RuntimeError as exc:
-                    raise RuntimeError(
-                        "FSDP checkpoint load failed. Compatibility migration is not supported for "
-                        "training_strategy=fsdp_full_shard; load a checkpoint written by the same architecture."
-                    ) from exc
+            if _is_ablated_semantic_only_model_state(model_state):
+                _load_ablated_semantic_only_model_state(module=module, model_state=model_state)
                 if optimizer_loaded:
-                    optimizer.load_state_dict(
-                        FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_state)
-                    )
+                    with _fsdp_full_state_dict_context(model, rank0_only=False):
+                        optimizer.load_state_dict(
+                            FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_state)
+                        )
+            else:
+                with _fsdp_full_state_dict_context(model, rank0_only=False):
+                    try:
+                        model.load_state_dict(model_state, strict=True)
+                    except RuntimeError as exc:
+                        raise RuntimeError(
+                            "FSDP checkpoint load failed. Compatibility migration is not supported for "
+                            "training_strategy=fsdp_full_shard; load a checkpoint written by the same architecture."
+                        ) from exc
+                    if optimizer_loaded:
+                        optimizer.load_state_dict(
+                            FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_state)
+                        )
             if grad_clip_controller is not None and not grad_clip_controller.load_state_dict(metadata.get("grad_clip_controller")):
                 logging.info("Gradient clip controller state not restored from checkpoint; starting with fresh history.")
             return int(metadata.get("step", 0))
-        try:
-            module.load_state_dict(model_state, strict=True)
-        except RuntimeError:
+        if _is_ablated_semantic_only_model_state(model_state):
+            _load_ablated_semantic_only_model_state(module=module, model_state=model_state)
+        else:
             try:
-                missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(module, model_state)
-                logging.warning(
-                    "Loaded PICF trainer checkpoint with compatibility migration. "
-                    "missing_keys=%s unexpected_keys=%s shape_mismatch_keys=%s. "
-                    "Optimizer state will be reinitialized.",
-                    missing,
-                    unexpected,
-                    shape_mismatches,
-                )
-                optimizer_loaded = False
+                module.load_state_dict(model_state, strict=True)
             except RuntimeError:
                 try:
-                    module.core.load_state_dict(model_state, strict=True)
-                except RuntimeError:
-                    missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(module.core, model_state)
+                    missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(module, model_state)
                     logging.warning(
-                        "Loaded PICF core-only checkpoint with compatibility migration. "
+                        "Loaded PICF trainer checkpoint with compatibility migration. "
                         "missing_keys=%s unexpected_keys=%s shape_mismatch_keys=%s. "
                         "Optimizer state will be reinitialized.",
                         missing,
@@ -3215,6 +3275,20 @@ def _load_checkpoint(
                         shape_mismatches,
                     )
                     optimizer_loaded = False
+                except RuntimeError:
+                    try:
+                        module.core.load_state_dict(model_state, strict=True)
+                    except RuntimeError:
+                        missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(module.core, model_state)
+                        logging.warning(
+                            "Loaded PICF core-only checkpoint with compatibility migration. "
+                            "missing_keys=%s unexpected_keys=%s shape_mismatch_keys=%s. "
+                            "Optimizer state will be reinitialized.",
+                            missing,
+                            unexpected,
+                            shape_mismatches,
+                        )
+                        optimizer_loaded = False
         if optimizer_loaded:
             try:
                 optimizer.load_state_dict(optimizer_state)
@@ -3234,45 +3308,45 @@ def _load_checkpoint(
         return _load_checkpoint(path=Path(checkpoint_dir), model=model, optimizer=optimizer, device=device)
     optimizer_loaded = True
     if _is_fsdp_model(model):
-        with _fsdp_full_state_dict_context(model, rank0_only=False):
-            try:
-                model.load_state_dict(payload["model"], strict=True)
-            except RuntimeError as exc:
-                raise RuntimeError(
-                    "FSDP payload load failed. Compatibility migration is not supported for "
-                    "training_strategy=fsdp_full_shard; load a checkpoint written by the same architecture."
-                ) from exc
+        if _is_ablated_semantic_only_model_state(payload["model"]):
+            _load_ablated_semantic_only_model_state(module=module, model_state=payload["model"])
             optimizer_payload = payload.get("optimizer")
             if optimizer_loaded and optimizer_payload is not None:
-                optimizer.load_state_dict(
-                    FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_payload)
-                )
+                with _fsdp_full_state_dict_context(model, rank0_only=False):
+                    optimizer.load_state_dict(
+                        FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_payload)
+                    )
             elif optimizer_loaded:
                 logging.info("No optimizer payload found in checkpoint; optimizer will be reinitialized.")
+        else:
+            with _fsdp_full_state_dict_context(model, rank0_only=False):
+                try:
+                    model.load_state_dict(payload["model"], strict=True)
+                except RuntimeError as exc:
+                    raise RuntimeError(
+                        "FSDP payload load failed. Compatibility migration is not supported for "
+                        "training_strategy=fsdp_full_shard; load a checkpoint written by the same architecture."
+                    ) from exc
+                optimizer_payload = payload.get("optimizer")
+                if optimizer_loaded and optimizer_payload is not None:
+                    optimizer.load_state_dict(
+                        FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_payload)
+                    )
+                elif optimizer_loaded:
+                    logging.info("No optimizer payload found in checkpoint; optimizer will be reinitialized.")
         if grad_clip_controller is not None and not grad_clip_controller.load_state_dict(payload.get("grad_clip_controller")):
             logging.info("Gradient clip controller state not restored from payload; starting with fresh history.")
         return int(payload.get("step", 0))
-    try:
-        module.load_state_dict(payload["model"], strict=True)
-    except RuntimeError:
+    if _is_ablated_semantic_only_model_state(payload["model"]):
+        _load_ablated_semantic_only_model_state(module=module, model_state=payload["model"])
+    else:
         try:
-            missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(module, payload["model"])
-            logging.warning(
-                "Loaded PICF trainer payload with compatibility migration. "
-                "missing_keys=%s unexpected_keys=%s shape_mismatch_keys=%s. "
-                "Optimizer state will be reinitialized.",
-                missing,
-                unexpected,
-                shape_mismatches,
-            )
-            optimizer_loaded = False
+            module.load_state_dict(payload["model"], strict=True)
         except RuntimeError:
             try:
-                module.core.load_state_dict(payload["model"], strict=True)
-            except RuntimeError:
-                missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(module.core, payload["model"])
+                missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(module, payload["model"])
                 logging.warning(
-                    "Loaded PICF core payload with compatibility migration. "
+                    "Loaded PICF trainer payload with compatibility migration. "
                     "missing_keys=%s unexpected_keys=%s shape_mismatch_keys=%s. "
                     "Optimizer state will be reinitialized.",
                     missing,
@@ -3280,6 +3354,20 @@ def _load_checkpoint(
                     shape_mismatches,
                 )
                 optimizer_loaded = False
+            except RuntimeError:
+                try:
+                    module.core.load_state_dict(payload["model"], strict=True)
+                except RuntimeError:
+                    missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(module.core, payload["model"])
+                    logging.warning(
+                        "Loaded PICF core payload with compatibility migration. "
+                        "missing_keys=%s unexpected_keys=%s shape_mismatch_keys=%s. "
+                        "Optimizer state will be reinitialized.",
+                        missing,
+                        unexpected,
+                        shape_mismatches,
+                    )
+                    optimizer_loaded = False
     optimizer_payload = payload.get("optimizer")
     if optimizer_loaded and optimizer_payload is not None:
         try:

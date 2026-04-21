@@ -101,6 +101,9 @@ Runtime-mode note:
   runs PI0.5-only action training / serving with `extra_prefix_tokens=None`
 - ablated mode is intended for parity checks against the main-branch PI0.5
   baseline, not as a replacement for the v2.2 contract
+- ablated checkpoints intentionally serialize only the live PI0.5 semantic
+  subtree plus optimizer state; they do not force-save the frozen lazy PICF
+  core just to satisfy generic trainer checkpoint traversal
 - `scripts/serve_picf_policy.py` now also accepts `--picf-mode {enabled,ablated}`;
   if omitted, serving uses the checkpoint's saved `picf_mode`
 - when serving overrides checkpoint mode, runtime args are re-normalized before

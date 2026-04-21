@@ -247,6 +247,10 @@ The live trainer / serve stack now has two explicit runtime modes.
 - PICF-only point/visual/tactile backbone branches are normalized back to the
   stub/off path so the ablation does not pay for unused foundation modules
 - PI0.5 is called with `extra_prefix_tokens=None`
+- checkpoint save/load in this mode is semantic-only by construction:
+  `model.pt` stores the PI0.5 semantic subtree and optimizer state, while the
+  frozen lazy PICF core is deliberately omitted instead of being force-
+  materialized for serialization
 - if serving overrides an enabled checkpoint with `--picf-mode ablated`, the
   runtime args are re-normalized and re-validated before model/source
   construction so enabled-mode tactile/visual branch assumptions do not leak

@@ -2432,6 +2432,57 @@ def test_checkpoint_loader_accepts_legacy_core_only_state(tmp_path: Path) -> Non
     torch.testing.assert_close(reloaded.core.proj.weight, trainer.core.proj.weight)
 
 
+def test_checkpoint_save_and_load_supports_ablated_semantic_only_lazy_core(tmp_path: Path) -> None:
+    class _LazyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.lazy = torch.nn.LazyLinear(4, bias=False)
+
+    trainer = torch.nn.Module()
+    trainer.core = _LazyCore()
+    _MODULE._freeze_initialized_module_parameters(trainer.core)
+    trainer.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        trainer.semantic_encoder.weight.fill_(1.5)
+    optimizer = torch.optim.AdamW(trainer.semantic_encoder.parameters(), lr=1e-3)
+
+    args = argparse.Namespace(picf_mode="ablated", optimizer_checkpoint_mode="auto")
+    ckpt_root = tmp_path / "ablated_semantic_only"
+    ckpt_root.mkdir(parents=True, exist_ok=True)
+
+    _MODULE._save_checkpoint(
+        output_dir=ckpt_root,
+        model=trainer,
+        optimizer=optimizer,
+        step=7,
+        args=args,
+        save_optimizer_state=False,
+    )
+
+    ckpt_dir = ckpt_root / "7"
+    model_state = torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=False)
+    assert model_state["checkpoint_model_format"] == "picf_ablated_semantic_only_v1"
+    assert list(model_state["semantic_encoder"]) == ["weight"]
+
+    reloaded = torch.nn.Module()
+    reloaded.core = _LazyCore()
+    _MODULE._freeze_initialized_module_parameters(reloaded.core)
+    reloaded.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    with torch.no_grad():
+        reloaded.semantic_encoder.weight.zero_()
+    reloaded_optimizer = torch.optim.AdamW(reloaded.semantic_encoder.parameters(), lr=1e-3)
+
+    step = _MODULE._load_checkpoint(
+        path=ckpt_dir,
+        model=reloaded,
+        optimizer=reloaded_optimizer,
+        device=torch.device("cpu"),
+    )
+
+    assert step == 7
+    torch.testing.assert_close(reloaded.semantic_encoder.weight, trainer.semantic_encoder.weight)
+
+
 def test_load_state_dict_picf_compat_skips_shape_mismatches_and_keeps_matching_weights() -> None:
     class _OldCore(torch.nn.Module):
         def __init__(self) -> None:
