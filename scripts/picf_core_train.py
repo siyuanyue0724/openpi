@@ -3519,8 +3519,6 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         tactile_config=tactile_config,
         tactile_encoder=tactile_encoder,
     )
-    if not picf_enabled:
-        core.requires_grad_(False)
     return core, semantic_encoder, use_visual_override
 
 
@@ -3718,6 +3716,15 @@ def _collect_trainable_params(module: torch.nn.Module | None) -> list[torch.nn.P
     if module is None:
         return []
     return [param for param in module.parameters() if getattr(param, "requires_grad", False)]
+
+
+def _freeze_initialized_module_parameters(module: torch.nn.Module | None) -> None:
+    if module is None:
+        return
+    for param in module.parameters():
+        if isinstance(param, UninitializedParameter):
+            continue
+        param.requires_grad_(False)
 
 
 def _split_optimizer_groups_by_dense_type(groups: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -3946,6 +3953,8 @@ def train(args: argparse.Namespace) -> None:
             picf_mode=args.picf_mode,
         ).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
+        if not _picf_mode_enabled(args):
+            _freeze_initialized_module_parameters(model.core)
         model = _wrap_model_for_training_strategy(model, args=args, device=device)
         optimizer, optimizer_group_info = _build_optimizer(model, args=args)
         grad_clip_controller = _GradClipController.from_args(args)
