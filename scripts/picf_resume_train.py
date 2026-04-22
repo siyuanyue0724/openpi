@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 from pathlib import Path
 import sys
@@ -16,6 +17,14 @@ import picf_core_train as _trainer
 
 def _as_sensor_names_arg(value: object) -> str:
     if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("(", "[")):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                return value
+            if isinstance(parsed, (list, tuple)):
+                return ",".join(str(item) for item in parsed)
         return value
     if isinstance(value, (list, tuple)):
         return ",".join(str(item) for item in value)
@@ -24,7 +33,15 @@ def _as_sensor_names_arg(value: object) -> str:
 
 def _as_sensor_offsets_arg(value: object) -> str:
     if isinstance(value, str):
-        return value
+        text = value.strip()
+        if text.startswith(("(", "[")):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                return value
+            value = parsed
+        else:
+            return value
     if isinstance(value, (list, tuple)):
         blocks: list[str] = []
         for item in value:

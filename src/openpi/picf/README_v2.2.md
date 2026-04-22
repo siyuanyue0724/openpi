@@ -19,6 +19,8 @@ action/control contract rewrite and the current exhaustive local audit
   Compact executable contract for the live code.
 - [`docs/CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
   Training, serving, and CALVIN validation workflow.
+  The current cloud-tested 20-sequence video evaluation recipe is recorded in
+  [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation).
 
 ## 0. Current Audit Snapshot
 
@@ -127,6 +129,12 @@ If you are opening the repo cold, use this order:
    Concise executable contract for the current code.
 5. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
    Runtime / training / rollout workflow.
+   For the current validated cloud rollout/video test recipe, jump directly to
+   [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation).
+   For the current 2x40GB ablated training definition and the explicit
+   `2500 current optimizer steps ~= 5000 historical no-Sonata PI0.5 steps`
+   comparison rule, use the ablated long-run profile in
+   [`Section 3`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#3-trainer-smoke-validation).
 6. [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
    Historical pre-v2.2 record only.
 

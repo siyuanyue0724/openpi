@@ -198,6 +198,14 @@ Run-shape interpretation for this profile:
 - each window produces two action-only transitions
 - therefore one optimizer step covers two windows and four action-only
   transition objectives globally
+- relative to a historical 2-GPU PI0.5 no-Sonata run with `unroll_steps=1`,
+  one optimizer step on this ablated profile covers twice as many global
+  action-training objectives
+- therefore:
+  - current ablated `2500` optimizer steps
+  - should be compared against about `5000` optimizer steps from the historical
+    2-GPU no-Sonata PI0.5 baseline
+  - when the comparison is framed in terms of total global action objectives
 
 Monitoring:
 
@@ -370,6 +378,174 @@ The serving path must preserve:
 
 - normalized action inside the core
 - unnormalized action at environment execution
+
+### 6.1 Current Cloud CALVIN Video Evaluation
+
+The current validated cloud-side evaluation recipe for the PI0.5-only ablation
+path is:
+
+- serve the ablated checkpoint over websocket with
+  `scripts/serve_picf_policy.py`
+- run `scripts/calvin/evaluate_picf_policy.py` from the `calvin38`
+  environment
+- save videos to a local disk path such as `/tmp/...` during evaluation
+- after the run finishes, copy videos and logs back into the desired `/mnt`
+  checkpoint/eval directory
+
+This is the validated operational recipe for the current cloud image. It is not
+just a historical sketch.
+
+Validated example checkpoint:
+
+- `/mnt/checkpoints/picf_core/picf_core/picf_v22_ablated_pi05_30000_ckpt2500_print100_20260421_r2/2500`
+
+Validated example result directory:
+
+- `/mnt/checkpoints/picf_core/eval/picf_v22_ablated_step2500_eval20_video_20260422_r1`
+
+Important current cloud notes:
+
+- some cloud images currently carry a damaged
+  `/mnt/calvin/calvin_env/calvin_env/utils/utils.py`; if that file is broken,
+  the validated workaround is to prepend a shadow patch package such as
+  `/root/calvin_patch` to `PYTHONPATH`
+- on the same cloud image, `cv2.VideoWriter` may fail when writing directly into
+  `/mnt/...`; the validated workaround is to write videos to `/tmp/...` first
+  and copy them back into `/mnt` after the evaluator completes
+- if `/mnt` quota is exhausted, video generation may appear to run but final
+  artifact persistence will still fail; check `df -h /mnt` before assuming the
+  evaluator path is wrong
+
+#### 6.1.1 Serve The Checkpoint
+
+```bash
+cd /root/openpi_posterior_vla_clean
+export PYTHONPATH=/root/openpi_posterior_vla_clean/src:/root/openpi_posterior_vla_clean/packages/openpi-client/src
+
+/root/openpi/.venv/bin/python scripts/serve_picf_policy.py \
+  --checkpoint /mnt/checkpoints/picf_core/picf_core/picf_v22_ablated_pi05_30000_ckpt2500_print100_20260421_r2/2500 \
+  --device cuda:0 \
+  --port 8000 \
+  --picf-mode ablated
+```
+
+Operational note:
+
+- startup is not instantaneous; wait for the server to bind before launching the
+  evaluator
+- on the validated cloud run, the server process stayed resident as:
+  `scripts/serve_picf_policy.py --checkpoint .../2500 --device cuda:0 --port 8000 --picf-mode ablated`
+
+Useful checks:
+
+```bash
+ss -ltnp | grep :8000
+ps -ef | grep -E 'serve_picf_policy.py' | grep -v grep
+```
+
+#### 6.1.2 Run The 20-Sequence Evaluator With Video
+
+```bash
+cd /root/openpi_posterior_vla_clean
+
+eval "$(/root/bin/micromamba shell hook -s bash)"
+micromamba activate calvin38
+
+export PYTHONUNBUFFERED=1
+export PYTHONPATH=/root/calvin_patch:/mnt/calvin/calvin_env:/root/openpi_posterior_vla_clean/src:/root/openpi_posterior_vla_clean/packages/openpi-client/src
+
+python scripts/calvin/evaluate_picf_policy.py \
+  --dataset_path /mnt/calvin_data/task_ABC_D \
+  --eval_log_dir /tmp/picf_eval_2500_dir_local \
+  --num_sequences 20 \
+  --save_video \
+  --video_dir /tmp/picf_eval_2500_localvideo
+```
+
+Notes:
+
+- this recipe uses the wrapper `scripts/calvin/evaluate_picf_policy.py`; do not
+  edit upstream CALVIN evaluator code just to change `NUM_SEQUENCES`
+- `--num_sequences 20` is passed directly through the wrapper to the upstream
+  evaluator
+- the validated path writes videos into `/tmp/picf_eval_2500_localvideo` during
+  runtime because that path is known-good for `cv2.VideoWriter` on the current
+  cloud image
+
+#### 6.1.3 Monitor Progress And Final Success Rate
+
+While the evaluator is running:
+
+```bash
+tail -f /tmp/picf_eval_2500_localvideo.log
+```
+
+Count videos as they are produced:
+
+```bash
+watch -n 5 'find /tmp/picf_eval_2500_localvideo -maxdepth 1 -type f -name "*.mp4" | wc -l'
+```
+
+After the run finishes, inspect the final success summary:
+
+```bash
+grep -A20 'Results for Epoch' /tmp/picf_eval_2500_localvideo.log
+```
+
+Validated example final summary for checkpoint `2500` in ablated mode:
+
+- `Average successful sequence length: 0.0`
+- `1: 0.0%`
+- `2: 0.0%`
+- `3: 0.0%`
+- `4: 0.0%`
+- `5: 0.0%`
+
+That run completed all `20/20` sequences and produced `20` rollout videos.
+
+#### 6.1.4 Copy Videos And Logs Back Into `/mnt`
+
+After the evaluator finishes successfully:
+
+```bash
+base=/mnt/checkpoints/picf_core/eval/picf_v22_ablated_step2500_eval20_video_20260422_r1
+mkdir -p "$base/videos" "$base/logs"
+
+cp -f /tmp/picf_eval_2500_localvideo/*.mp4 "$base/videos"/
+cp -f /tmp/picf_eval_2500_localvideo.log "$base/logs/eval_calvin38_full.log"
+cp -f /tmp/picf_eval_2500_localvideo.log "$base/eval_calvin38_full.log"
+```
+
+To also preserve a single-file archive:
+
+```bash
+mkdir -p /root/calvin_eval_videos/picf_v22_ablated_step2500_20260422
+cp -f /tmp/picf_eval_2500_localvideo/*.mp4 /root/calvin_eval_videos/picf_v22_ablated_step2500_20260422/
+
+cd /root/calvin_eval_videos
+tar -czf picf_v22_ablated_step2500_20260422.tar.gz picf_v22_ablated_step2500_20260422
+cp -f /root/calvin_eval_videos/picf_v22_ablated_step2500_20260422.tar.gz "$base"/
+```
+
+Useful final checks:
+
+```bash
+find /mnt/checkpoints/picf_core/eval/picf_v22_ablated_step2500_eval20_video_20260422_r1/videos -maxdepth 1 -type f -name '*.mp4' | wc -l
+```
+
+```bash
+tail -f /mnt/checkpoints/picf_core/eval/picf_v22_ablated_step2500_eval20_video_20260422_r1/logs/eval_calvin38_full.log
+```
+
+```bash
+grep -A20 'Results for Epoch' /mnt/checkpoints/picf_core/eval/picf_v22_ablated_step2500_eval20_video_20260422_r1/logs/eval_calvin38_full.log
+```
+
+The validated completed artifact set under `/mnt` is:
+
+- `/mnt/checkpoints/picf_core/eval/picf_v22_ablated_step2500_eval20_video_20260422_r1/videos`
+- `/mnt/checkpoints/picf_core/eval/picf_v22_ablated_step2500_eval20_video_20260422_r1/logs/eval_calvin38_full.log`
+- `/mnt/checkpoints/picf_core/eval/picf_v22_ablated_step2500_eval20_video_20260422_r1/picf_v22_ablated_step2500_20260422.tar.gz`
 
 ## 7. Historical Notes
 

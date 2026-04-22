@@ -15,8 +15,16 @@ def test_as_sensor_names_arg_from_sequence() -> None:
     assert sut._as_sensor_names_arg(["digit", "gelsight_mini"]) == "digit,gelsight_mini"
 
 
+def test_as_sensor_names_arg_from_stringified_tuple() -> None:
+    assert sut._as_sensor_names_arg("('digit', 'gelsight_mini')") == "digit,gelsight_mini"
+
+
 def test_as_sensor_offsets_arg_from_sequence() -> None:
     assert sut._as_sensor_offsets_arg(((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))) == "0.01,0.0,0.0;-0.01,0.0,0.0"
+
+
+def test_as_sensor_offsets_arg_from_stringified_tuple() -> None:
+    assert sut._as_sensor_offsets_arg("((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))") == "0.01,0.0,0.0;-0.01,0.0,0.0"
 
 
 def test_resolve_checkpoint_dir_from_step_dir(tmp_path) -> None:
@@ -149,6 +157,31 @@ def test_load_model_state_only_uses_compat_loader_on_shape_mismatch(tmp_path, mo
     step = sut._load_model_state_only(checkpoint_dir=ckpt, model=_DummyModule(), device=torch.device("cpu"))
     assert step == 123
     assert compat_calls == ["_DummyModule"]
+
+
+def test_load_model_state_only_accepts_ablated_semantic_only_checkpoint(tmp_path) -> None:
+    ckpt = tmp_path / "5000"
+    ckpt.mkdir(parents=True)
+    torch.save({"step": 2500}, ckpt / "metadata.pt")
+    torch.save(
+        {
+            "checkpoint_model_format": "picf_ablated_semantic_only_v1",
+            "semantic_encoder": {"weight": torch.tensor([[1.5, -2.0]])},
+        },
+        ckpt / "model.pt",
+    )
+
+    class _DummyModule(torch.nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.semantic_encoder = torch.nn.Linear(2, 1, bias=False)
+
+    model = _DummyModule()
+    with torch.no_grad():
+        model.semantic_encoder.weight.zero_()
+    step = sut._load_model_state_only(checkpoint_dir=ckpt, model=model, device=torch.device("cpu"))
+    assert step == 2500
+    torch.testing.assert_close(model.semantic_encoder.weight, torch.tensor([[1.5, -2.0]]))
 
 
 def test_checkpoint_policy_infer_unnormalizes_actions() -> None:

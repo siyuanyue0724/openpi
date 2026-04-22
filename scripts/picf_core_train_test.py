@@ -188,6 +188,17 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     assert args.warmup_steps == 600
 
 
+def test_parse_tactile_sensor_names_accepts_stringified_tuple() -> None:
+    assert _MODULE._parse_tactile_sensor_names("('digit', 'gelsight_mini')") == ("digit", "gelsight_mini")
+
+
+def test_parse_tactile_sensor_offsets_accepts_stringified_tuple() -> None:
+    assert _MODULE._parse_tactile_sensor_offsets("((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))") == (
+        (0.01, 0.0, 0.0),
+        (-0.01, 0.0, 0.0),
+    )
+
+
 def test_normalize_train_args_splits_semantic_chunk_knobs_from_legacy_default() -> None:
     args = _base_args()
     args.training_strategy = "fsdp_full_shard"

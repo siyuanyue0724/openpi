@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 from pathlib import Path
 
@@ -108,23 +109,52 @@ def _default_sonata_checkpoint() -> str | None:
     return str(candidate) if candidate.is_file() else None
 
 
-def _parse_tactile_sensor_names(raw: str) -> tuple[str, ...]:
-    names = tuple(part.strip() for part in str(raw).split(",") if part.strip())
+def _parse_tactile_sensor_names(raw: str | tuple[str, ...] | list[str]) -> tuple[str, ...]:
+    if isinstance(raw, (list, tuple)):
+        names = tuple(str(part).strip() for part in raw if str(part).strip())
+    else:
+        parsed = None
+        text = str(raw).strip()
+        if text.startswith(("(", "[")):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
+        if isinstance(parsed, (list, tuple)):
+            names = tuple(str(part).strip() for part in parsed if str(part).strip())
+        else:
+            names = tuple(part.strip() for part in text.split(",") if part.strip())
     if not names:
         raise ValueError("Expected at least one tactile sensor name.")
     return names
 
 
-def _parse_tactile_sensor_offsets(raw: str) -> tuple[tuple[float, float, float], ...]:
+def _parse_tactile_sensor_offsets(
+    raw: str | tuple[tuple[float, float, float], ...] | list[tuple[float, float, float]]
+) -> tuple[tuple[float, float, float], ...]:
+    parsed = raw if isinstance(raw, (list, tuple)) else None
+    if parsed is None:
+        text = str(raw).strip()
+        if text.startswith(("(", "[")):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
     offsets = []
-    for block in str(raw).split(";"):
-        block = block.strip()
-        if not block:
-            continue
-        values = [float(piece.strip()) for piece in block.split(",") if piece.strip()]
-        if len(values) != 3:
-            raise ValueError(f"Expected 3 tactile offset values per sensor, got {block!r}.")
-        offsets.append((values[0], values[1], values[2]))
+    if isinstance(parsed, (list, tuple)):
+        for item in parsed:
+            if not isinstance(item, (list, tuple)) or len(item) != 3:
+                raise ValueError(f"Expected 3 tactile offset values per sensor, got {item!r}.")
+            offsets.append((float(item[0]), float(item[1]), float(item[2])))
+    else:
+        for block in str(raw).split(";"):
+            block = block.strip()
+            if not block:
+                continue
+            values = [float(piece.strip()) for piece in block.split(",") if piece.strip()]
+            if len(values) != 3:
+                raise ValueError(f"Expected 3 tactile offset values per sensor, got {block!r}.")
+            offsets.append((values[0], values[1], values[2]))
     if not offsets:
         raise ValueError("Expected at least one tactile sensor offset triplet.")
     return tuple(offsets)

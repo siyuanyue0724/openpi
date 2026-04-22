@@ -54,6 +54,32 @@ def _seed_everything(seed: int) -> None:
         torch.cuda.manual_seed_all(seed)
 
 
+def _patch_calvin_git_hash_lookup() -> None:
+    try:
+        import calvin_env.utils.utils as calvin_utils
+    except Exception:
+        return
+
+    original = getattr(calvin_utils, "get_git_commit_hash", None)
+    if not callable(original):
+        return
+
+    def _safe_get_git_commit_hash(repo_path):
+        try:
+            return original(repo_path)
+        except Exception as exc:
+            print(f"WARNING unable to resolve calvin_env git hash: {exc}")
+            return "unknown"
+
+    calvin_utils.get_git_commit_hash = _safe_get_git_commit_hash
+    try:
+        import calvin_env.envs.play_table_env as play_table_env
+
+        play_table_env.get_git_commit_hash = _safe_get_git_commit_hash
+    except Exception:
+        pass
+
+
 class _PicfCalvinModel:
     def __init__(self, *, host: str, port: int):
         self.policy = WebsocketClientPolicy(host=host, port=port)
@@ -99,6 +125,7 @@ def main() -> None:
     import evaluation.evaluate_policy as upstream_eval
 
     _seed_everything(0)
+    _patch_calvin_git_hash_lookup()
     upstream_eval.NUM_SEQUENCES = int(args.num_sequences)
     if args.save_video:
         os.environ["CALVIN_SAVE_VIDEO"] = "1"

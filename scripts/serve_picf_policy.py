@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import logging
 import socket
@@ -27,6 +28,14 @@ from openpi.serving.websocket_policy_server import WebsocketPolicyServer
 
 def _as_sensor_names_arg(value: Any) -> str:
     if isinstance(value, str):
+        text = value.strip()
+        if text.startswith(("(", "[")):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                return value
+            if isinstance(parsed, (list, tuple)):
+                return ",".join(str(item) for item in parsed)
         return value
     if isinstance(value, (list, tuple)):
         return ",".join(str(item) for item in value)
@@ -35,7 +44,15 @@ def _as_sensor_names_arg(value: Any) -> str:
 
 def _as_sensor_offsets_arg(value: Any) -> str:
     if isinstance(value, str):
-        return value
+        text = value.strip()
+        if text.startswith(("(", "[")):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                return value
+            value = parsed
+        else:
+            return value
     if isinstance(value, (list, tuple)):
         blocks: list[str] = []
         for item in value:
@@ -87,6 +104,9 @@ def _load_model_state_only(
     module = model.module if isinstance(model, torch.nn.parallel.DistributedDataParallel) else model
     model_state = torch.load(checkpoint_dir / "model.pt", map_location=device, weights_only=False)
     metadata = torch.load(checkpoint_dir / "metadata.pt", map_location="cpu", weights_only=False)
+    if bool(getattr(_trainer, "_is_ablated_semantic_only_model_state", lambda _state: False)(model_state)):
+        _trainer._load_ablated_semantic_only_model_state(module=module, model_state=model_state)
+        return int(metadata.get("step", 0))
     try:
         module.load_state_dict(model_state, strict=True)
     except RuntimeError:
