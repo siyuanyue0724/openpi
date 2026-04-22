@@ -1737,15 +1737,20 @@ The current operator-validated PI0.5-only ablation launch profile is:
 - `world_size=2`
 - `accum_steps=1`
 - `unroll_steps=2`
+- `action_horizon=16`
 - `num_train_steps=30000`
 - `save_interval=2500`
 - `log_interval=100`
+- `lr=2e-4`
+- `min_lr=2e-5`
+- `warmup_steps=600`
 - `grad_clip_mode=percentile`
 - `grad_clip_percentile=75`
 - `grad_clip_window=100`
 - `picf_mode=ablated`
 - `semantic_mode=paligemma`
 - `semantic_trainable=True`
+- `semantic_max_length=256`
 - `action_normalization=quantile`
 - `window_activation_checkpointing=False`
 - `semantic_gradient_checkpointing=True`
@@ -1770,14 +1775,55 @@ The current semantics of this run shape are:
   - `2` sampled windows globally
   - `4` action-only transition objectives globally
 
+Current training-definition bugfixes that now apply globally to both
+`picf_mode=enabled` and `picf_mode=ablated`:
+
+- `action_horizon` has been restored to `16` by default
+  - this re-aligns the maintained training contract with the historical CALVIN
+    PI0.5 chunk contract
+- `_CalvinTransitionSource` no longer samples uniformly over all valid window
+  starts
+  - it now samples segments uniformly first, then samples a valid start within
+    the chosen segment
+  - this matches the historical CALVIN dataset semantics more closely and is the
+    maintained sampling contract for both full PICF and PI0.5-only ablations
+
 Interpretation rule:
 
 - this is the current **operational** ablation profile because it preserves the
   present PICF window trainer shape while disabling PICF semantics
 - it is **not** identical to the main-branch PI0.5 training definition
+- it is also **not** identical to the historical `pi0.5_sonata` model path,
+  because `picf_mode=ablated` does not instantiate the live PICF point / visual /
+  tactile backbones:
+  - Sonata point feature extractor is not built
+  - V-JEPA visual encoder is replaced by the null visual encoder
+  - AnyTouch tactile encoder is replaced by the null tactile encoder
+  - the PICF core is frozen and only the PI0.5 semantic/action path remains live
+- it is also **not** identical to the preserved historical 2-GPU PI0.5 runtime
+  shell:
+  - the maintained ablation launch uses `training_strategy=fsdp_full_shard`
+  - the preserved historical PI0.5 CALVIN baselines were run through the direct
+    DDP trainer in `scripts/train_pytorch.py`
+- it is also **not** identical to the preserved PI0.5 CALVIN prompt budget:
+  - the maintained ablation launch uses `semantic_max_length=256`
+  - the historical CALVIN PI0.5 configs use `max_token_len=200`
+- it is also **not** identical to the preserved PI0.5 CALVIN optimizer regime:
+  - the maintained ablation launch uses `lr=2e-4`, `min_lr=2e-5`,
+    `warmup_steps=600`
+  - the preserved cloud `pi05_calvin_nosonata/abc_train_nosonata_full_ddp2`
+    run used `warmup=10000`, `peak_lr=5e-5`, `end_lr=5e-5`
+  - the generic codebase `CosineDecaySchedule` default is
+    `peak_lr=2.5e-5`, `decay_lr=2.5e-6`, `warmup_steps=1000`
+  - these are not the same reference, so optimizer-parity claims should cite
+    which historical baseline they mean
 - if the goal is exact training-definition parity with the official/main-branch
   PI0.5 stack, the cleaner baseline is `picf_mode=ablated` with
-  `unroll_steps=1`
+  `unroll_steps=1`, `semantic_max_length=200`, and the exact optimizer regime of
+  the PI0.5 reference being compared
+- if the goal is exact `pi0.5_sonata` parity, the current `picf_mode=ablated`
+  profile is not sufficient by itself because it does not preserve the old
+  Sonata prefix-injection path
 - if the goal is "same trainer shell, same loader shape, same optimizer loop,
   but no PICF semantics", then the current `unroll_steps=2` ablation profile is
   a legitimate control experiment
@@ -1802,9 +1848,13 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   --optimizer-sharding none \
   --accum-steps 1 \
   --unroll-steps 2 \
+  --action-horizon 16 \
   --num-train-steps 30000 \
   --save-interval 2500 \
   --log-interval 100 \
+  --lr 2e-4 \
+  --min-lr 2e-5 \
+  --warmup-steps 600 \
   --grad-clip-mode percentile \
   --grad-clip-percentile 75 \
   --grad-clip-window 100 \
@@ -1813,6 +1863,7 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   --picf-mode ablated \
   --semantic-mode paligemma \
   --semantic-trainable \
+  --semantic-max-length 256 \
   --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
   --action-normalization quantile \
   --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json

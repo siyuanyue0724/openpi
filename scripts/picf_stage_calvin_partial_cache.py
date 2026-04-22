@@ -28,27 +28,38 @@ def _required_step_ids(
     ranks: list[int],
     steps_per_rank: int,
 ) -> tuple[set[int], dict[int, dict[str, int]]]:
+    def _resolve_window_metadata(flat_index: int, *, rng: np.random.Generator | None = None) -> tuple[int, int]:
+        if hasattr(source, "sample_window_metadata"):
+            return source.sample_window_metadata(int(flat_index), rng=rng)
+        segment_id, start_step_id = source.window_index[int(flat_index)]
+        return int(segment_id), int(start_step_id)
+
     step_ids: set[int] = set()
     summary: dict[int, dict[str, int]] = {}
     for rank in ranks:
         rng = np.random.default_rng(int(seed) + 17 * int(rank))
-        flat_indices = [int(rng.integers(0, len(source))) for _ in range(int(steps_per_rank))]
+        sampled_flat_indices = [int(rng.integers(0, len(source))) for _ in range(int(steps_per_rank))]
         # picf_core_train does a pre-DDP lazy-module warmup with source.window(rank),
         # so the partial cache must include that deterministic initialization path too.
         warmup_flat_index = int(rank) % max(len(source), 1)
-        flat_indices.append(warmup_flat_index)
         rank_steps: set[int] = set()
         rank_segments: set[int] = set()
-        for flat_index in flat_indices:
-            segment_id, start_step_id = source.window_index[flat_index]
+        for flat_index in sampled_flat_indices:
+            segment_id, start_step_id = _resolve_window_metadata(flat_index, rng=rng)
             rank_segments.add(int(segment_id))
             for offset in range(source.unroll_steps + 1):
                 step_id = int(start_step_id + offset)
                 rank_steps.add(step_id)
                 step_ids.add(step_id)
+        warmup_segment_id, warmup_start_step_id = _resolve_window_metadata(warmup_flat_index)
+        rank_segments.add(int(warmup_segment_id))
+        for offset in range(source.unroll_steps + 1):
+            step_id = int(warmup_start_step_id + offset)
+            rank_steps.add(step_id)
+            step_ids.add(step_id)
         summary[int(rank)] = {
             "num_windows": int(steps_per_rank),
-            "unique_flat_indices": int(len(set(flat_indices))),
+            "unique_flat_indices": int(len(set(sampled_flat_indices + [warmup_flat_index]))),
             "unique_segments": int(len(rank_segments)),
             "unique_step_ids": int(len(rank_steps)),
             "warmup_flat_index": int(warmup_flat_index),

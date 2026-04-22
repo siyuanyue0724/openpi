@@ -1994,6 +1994,17 @@ class _TransitionWindow:
 
 
 @dataclasses.dataclass(frozen=True)
+class _SegmentSamplingSlot:
+    segment_id: int
+    first_valid_start_step_id: int
+    valid_start_exclusive: int
+
+    @property
+    def num_valid_starts(self) -> int:
+        return int(self.valid_start_exclusive - self.first_valid_start_step_id)
+
+
+@dataclasses.dataclass(frozen=True)
 class _PendingTransitionLoss:
     index: int
     output: Any
@@ -2039,7 +2050,7 @@ class _CalvinTransitionSource:
         split: str,
         backend: str,
         unroll_steps: int,
-        action_horizon: int = 1,
+        action_horizon: int = 16,
         use_wrist_rgb: bool = True,
         use_tactile: bool = False,
         tactile_sensor_names: tuple[str, ...] = _DEFAULT_TACTILE_SENSOR_NAMES,
@@ -2086,19 +2097,32 @@ class _CalvinTransitionSource:
         self.use_scene_obs = bool(use_scene_obs)
         self.frame_dt_s = float(frame_dt_s)
         self.action_normalizer = action_normalizer
+        # Keep the exhaustive valid window-start index for diagnostics and
+        # compatibility utilities, but do not use it as the training sampling
+        # distribution. Training should remain segment-uniform, matching the
+        # historical CALVIN dataset contract more closely.
         self.window_index: list[tuple[int, int]] = []
+        self.segment_sampling_slots: list[_SegmentSamplingSlot] = []
         for segment_id, segment in enumerate(self.segments):
             max_start_exclusive = segment.end - (self.unroll_steps + self.action_horizon - 1)
             for step_id in range(segment.start, max_start_exclusive):
                 self.window_index.append((segment_id, step_id))
-        if not self.window_index:
+            if segment.start < max_start_exclusive:
+                self.segment_sampling_slots.append(
+                    _SegmentSamplingSlot(
+                        segment_id=int(segment_id),
+                        first_valid_start_step_id=int(segment.start),
+                        valid_start_exclusive=int(max_start_exclusive),
+                    )
+                )
+        if not self.segment_sampling_slots:
             raise RuntimeError(
                 "No valid CALVIN transition windows found for "
                 f"split={split}, backend={backend}, unroll_steps={unroll_steps}, action_horizon={action_horizon}."
             )
 
     def __len__(self) -> int:
-        return len(self.window_index)
+        return len(self.segment_sampling_slots)
 
     def close(self) -> None:
         self.reader.close()
@@ -2156,8 +2180,21 @@ class _CalvinTransitionSource:
             tactile=tactile,
         )
 
-    def window(self, flat_index: int) -> _TransitionWindow:
-        segment_id, start_step_id = self.window_index[int(flat_index)]
+    def sample_window_metadata(
+        self,
+        slot_index: int,
+        *,
+        rng: np.random.Generator | None = None,
+    ) -> tuple[int, int]:
+        slot = self.segment_sampling_slots[int(slot_index)]
+        if rng is None:
+            start_step_id = int(slot.first_valid_start_step_id)
+        else:
+            start_step_id = int(rng.integers(slot.first_valid_start_step_id, slot.valid_start_exclusive))
+        return int(slot.segment_id), int(start_step_id)
+
+    def window(self, flat_index: int, *, rng: np.random.Generator | None = None) -> _TransitionWindow:
+        segment_id, start_step_id = self.sample_window_metadata(int(flat_index), rng=rng)
         frames = tuple(
             self._load_frame(
                 segment_id,
@@ -4422,7 +4459,7 @@ def train(args: argparse.Namespace) -> None:
                             flat_index,
                         )
                     window_load_start = time.perf_counter()
-                    window = source.window(flat_index)
+                    window = source.window(flat_index, rng=rng)
                     if debug_phase_enabled:
                         logging.info(
                             "phase step=%s micro=%s rank=%s window_load_sec=%.3f flat_index=%s segment=%s start_step=%s prompt=%r",
@@ -4736,7 +4773,7 @@ def main() -> None:
     parser.add_argument(
         "--action-horizon",
         type=int,
-        default=1,
+        default=16,
         help=(
             "Dataset action horizon to request from CALVIN. "
             "This affects `PicfObservation.action_chunk` construction and valid window start indices."

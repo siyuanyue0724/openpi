@@ -44,7 +44,7 @@ def _base_args() -> argparse.Namespace:
         accum_steps=1,
         max_empty_window_retries=32,
         unroll_steps=2,
-        action_horizon=1,
+        action_horizon=16,
         stride=4,
         max_points=1024,
         crop_radius_m=0.10,
@@ -729,6 +729,7 @@ def test_calvin_transition_source_emits_dynamic_tactile_packet_and_extra_fields(
         split="training",
         backend="dir",
         unroll_steps=2,
+        action_horizon=1,
         use_tactile=True,
         tactile_backgrounds_by_sensor=backgrounds,
         use_scene_obs=True,
@@ -761,6 +762,7 @@ def test_calvin_transition_source_normalizes_actions_when_requested(tmp_path: Pa
         split="training",
         backend="dir",
         unroll_steps=1,
+        action_horizon=1,
         action_normalizer=_Normalizer(),
     )
 
@@ -788,6 +790,33 @@ def test_calvin_transition_source_emits_action_chunk_when_action_horizon_request
     assert frame.action_chunk is not None
     assert frame.action_chunk.ndim == 2
     assert frame.action_chunk.shape[0] == 3
+    source.close()
+
+
+def test_calvin_transition_source_samples_segments_uniformly_but_picks_start_within_segment(tmp_path: Path) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
+
+    source = _MODULE._CalvinTransitionSource(
+        str(root),
+        split="training",
+        backend="dir",
+        unroll_steps=1,
+        action_horizon=1,
+    )
+
+    assert len(source) == 2
+    assert len(source.window_index) == 6
+    assert source.sample_window_metadata(0) == (0, 0)
+    assert source.sample_window_metadata(1) == (1, 4)
+
+    rng = np.random.default_rng(0)
+    seg0_starts = {source.sample_window_metadata(0, rng=rng)[1] for _ in range(24)}
+    seg1_starts = {source.sample_window_metadata(1, rng=rng)[1] for _ in range(24)}
+
+    assert seg0_starts <= {0, 1, 2}
+    assert seg1_starts <= {4, 5, 6}
+    assert len(seg0_starts) > 1
+    assert len(seg1_starts) > 1
     source.close()
 
 

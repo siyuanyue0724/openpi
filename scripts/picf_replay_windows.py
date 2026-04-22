@@ -622,7 +622,7 @@ def main() -> None:
                 while accepted_counter < accepted_target:
                     raw_draw_counter += 1
                     flat_index = int(rng.integers(0, len(source)))
-                    window = source.window(flat_index)
+                    window = source.window(flat_index, rng=rng)
                     record = {
                         "replay_step": int(accepted_counter + 1),
                         "repeat": int(accepted_counter // max(int(args.rng_num_windows), 1)),

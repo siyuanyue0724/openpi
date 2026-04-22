@@ -101,6 +101,11 @@ Runtime-mode note:
   runs PI0.5-only action training / serving with `extra_prefix_tokens=None`
 - ablated mode is intended for parity checks against the main-branch PI0.5
   baseline, not as a replacement for the v2.2 contract
+- current `picf_mode=ablated` is not a `pi0.5_sonata` replica:
+  - the Sonata point feature extractor is not built
+  - the visual branch falls back to the null visual encoder
+  - the tactile branch falls back to the null tactile encoder
+  - the PICF core is frozen and only the PI0.5 semantic/action path remains live
 - ablated checkpoints intentionally serialize only the live PI0.5 semantic
   subtree plus optimizer state; they do not force-save the frozen lazy PICF
   core just to satisfy generic trainer checkpoint traversal
@@ -223,6 +228,10 @@ Parity note:
   semantics
 - it is an operational ablation profile, not an exact reproduction of the
   official/main-branch PI0.5 training definition
+- it also does not reproduce the preserved historical 2-GPU PI0.5 execution
+  shell exactly:
+  - the maintained ablation run uses `training_strategy=fsdp_full_shard`
+  - the historical PI0.5 CALVIN baselines used the direct DDP trainer
 - if exact PI0.5 training-definition parity is required, use `picf_mode=ablated`
   with `--unroll-steps 1`
 
@@ -394,6 +403,34 @@ path is:
 
 This is the validated operational recipe for the current cloud image. It is not
 just a historical sketch.
+
+Important interpretation note:
+
+- the validated checkpoint below is the maintained **operational**
+  `picf_mode=ablated` profile
+- it is not an exact historical PI0.5 CALVIN parity run
+- the older maintained ablation run referenced below was trained before two
+  training-definition bugfixes landed globally:
+  - `action_horizon` has now been restored to `16` by default
+  - `_CalvinTransitionSource` now samples segment-first instead of uniformly
+    over all valid window starts
+- the maintained current ablation profile still differs from historical PI0.5
+  in several other ways:
+  - `semantic_max_length=256`
+  - `lr=2e-4`, `min_lr=2e-5`, `warmup_steps=600`
+  - `unroll_steps=2`
+  - `training_strategy=fsdp_full_shard`
+- the preserved cloud `pi05_calvin_nosonata/abc_train_nosonata_full_ddp2` run
+  used:
+  - `action_horizon=16`
+  - `max_token_len=200`
+  - `warmup=10000`, `peak_lr=5e-5`, `end_lr=5e-5`
+- the generic codebase `CosineDecaySchedule` default is a different reference:
+  - `peak_lr=2.5e-5`, `decay_lr=2.5e-6`, `warmup_steps=1000`
+
+So this evaluation recipe is valid for the current operational ablation
+checkpoint, but it should not be over-interpreted as an exact old-PI0.5 parity
+measurement.
 
 Validated example checkpoint:
 
