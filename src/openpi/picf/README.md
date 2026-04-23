@@ -13,6 +13,10 @@ Current PICF documents:
    The executable live-code contract enforced by regression tests.
 4. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
    The runtime, training, rollout, and validation workflow.
+   Use [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
+   for the current canonical full PICF long-run training command, and
+   [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
+   for the current cloud-tested CALVIN video evaluation recipe.
 
 Use `README_v2.2.md` for the current live system, `PICF_FORMAL_CONTRACT.md` for
 the concise executable contract, and `README_v2.1.md` only as the archived

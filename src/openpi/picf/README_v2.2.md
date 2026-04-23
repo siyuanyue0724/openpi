@@ -19,6 +19,8 @@ action/control contract rewrite and the current exhaustive local audit
   Compact executable contract for the live code.
 - [`docs/CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
   Training, serving, and CALVIN validation workflow.
+  The current canonical full PICF long-run training command is recorded in
+  [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch).
   The current cloud-tested 20-sequence video evaluation recipe is recorded in
   [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation).
 
@@ -129,6 +131,8 @@ If you are opening the repo cold, use this order:
    Concise executable contract for the current code.
 5. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
    Runtime / training / rollout workflow.
+   For the current canonical full PICF long-run launch, jump directly to
+   [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch).
    For the current validated cloud rollout/video test recipe, jump directly to
    [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation).
    For the current 2x40GB ablated training definition and the explicit
@@ -203,6 +207,10 @@ When verifying the local v2.2 codebase, use this navigation split:
   - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
 - runtime / training / rollout workflow:
   - [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+  - current canonical full PICF long-run launch:
+    [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
+  - current cloud 20-sequence CALVIN video evaluation:
+    [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
 - historical pre-v2.2 reference only:
   - [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
 - temporary deep audits for this local rollout:
@@ -270,6 +278,39 @@ The live trainer / serve stack now has two explicit runtime modes.
 The architectural contract described in the rest of this document remains the
 canonical contract for `picf_mode=enabled`. The ablated mode is a deliberate
 control experiment, not a second canonical PICF semantics.
+
+### 2.2 Shared Trainer-Shell Contract
+
+The runtime mode switch does **not** create a second trainer shell.
+
+Inside `scripts/picf_core_train.py`, the following operational knobs are shared
+by both `picf_mode=enabled` and `picf_mode=ablated`:
+
+- `--save-interval`
+- `--log-interval`
+- `--accum-steps`
+- `--unroll-steps`
+- `--action-horizon`
+- progress-bar cadence
+- `metrics.jsonl` write cadence
+- `_CalvinTransitionSource` window sampling contract
+
+What changes with runtime mode is narrower:
+
+- the per-window semantic/PICF execution path inside `PicfPi05Policy` and
+  `_PicfWindowTrainer`
+- the default checkpoint payload policy under
+  `--optimizer-checkpoint-mode auto`
+
+Operational rule:
+
+- if you change `--save-interval 2500` or `--log-interval 100` for an ablation
+  run, the same flags work the same way for `picf_mode=enabled`
+- if you change `--action-horizon` or `--unroll-steps`, the same parser and
+  window source own those flags for both modes
+- do **not** infer from this that `picf_mode=ablated` is operationally
+  identical to the preserved `pi0.5_sonata` trainer; it only means both PICF
+  runtime modes share one maintained training shell
 
 v2.2 is therefore treated as:
 
@@ -885,6 +926,22 @@ the refactor, are:
 - `action_horizon = 16`
 - `denoise_steps = 10`
 - `inject_state_into_prompt = True`
+- `prompt_state_normalization = quantile` for CALVIN-aligned training
+- `prompt_state_norm_stats_path = same CALVIN norm_stats.json used by action normalization`
+
+Important boundary:
+
+- prompt-state normalization is applied only on the semantic prompt-tokenization
+  path before state discretization
+- prompt-state tokenization uses the live CALVIN `robot_obs` / `proprio`
+  dimensionality, matching the reference transform order where
+  `TokenizePrompt(...)` runs before `PadStatesAndActions(...)`
+- the zero padding to `action_dim = 32` is only for the model state/action tensor
+  contract, not for the text prompt's discretized state string
+- raw `robot_obs` / `proprio` stay untouched for the PICF physical core
+- this preserves the PICF physical boundary while matching the reference
+  `pi0.5_sonata` preprocessing contract, where `Normalize(norm_stats)` happens
+  before `TokenizePrompt(...)`
 
 Current training/runtime assumptions relevant to v2.2:
 
@@ -1752,6 +1809,7 @@ The current operator-validated PI0.5-only ablation launch profile is:
 - `semantic_trainable=True`
 - `semantic_max_length=256`
 - `action_normalization=quantile`
+- `prompt_state_normalization=inherit`
 - `window_activation_checkpointing=False`
 - `semantic_gradient_checkpointing=True`
 - `semantic_tokenwise_chunk_size=64`
@@ -1787,6 +1845,14 @@ Current training-definition bugfixes that now apply globally to both
     the chosen segment
   - this matches the historical CALVIN dataset semantics more closely and is the
     maintained sampling contract for both full PICF and PI0.5-only ablations
+- prompt-state tokenization now reuses the shared CALVIN `norm_stats.json`
+  contract instead of clipping raw `robot_obs`
+  - `state` is normalized before prompt discretization, matching the reference
+    PI0.5 preprocessing path
+  - state is **not** padded to `action_dim = 32` before prompt tokenization;
+    reference PI0.5 tokenizes the normalized live state first and pads only
+    after tokenization
+  - raw physical-core `robot_obs` remains unnormalized
 
 Interpretation rule:
 
@@ -1866,7 +1932,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   --semantic-max-length 256 \
   --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
   --action-normalization quantile \
-  --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json
+  --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json \
+  --prompt-state-normalization inherit \
+  --prompt-state-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json
 ```
 
 Recommended live monitoring commands:
@@ -1884,6 +1952,18 @@ Operational checkpoint rule:
 - on this profile, `save_interval=2500` is the maintained default because it is
   frequent enough for early checkpoint inspection without changing the training
   objective or runtime mode
+
+Shared-shell reminder:
+
+- the launch block above is an ablation launch, but the shell-level controls it
+  demonstrates are still owned by the shared `scripts/picf_core_train.py`
+  parser/runtime
+- in practice, `--save-interval`, `--log-interval`, `--accum-steps`,
+  `--unroll-steps`, and `--action-horizon` can be applied to
+  `picf_mode=enabled` as well
+- what changes between modes is the inner policy/core path and the default
+  checkpoint payload under `--optimizer-checkpoint-mode auto`, not the outer
+  training-loop cadence semantics
 
 ### 8.6.2 Current Exact-Memory Runtime Measures
 

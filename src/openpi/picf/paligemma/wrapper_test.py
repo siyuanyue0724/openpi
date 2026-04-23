@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import numpy as np
 import pytest
 import torch
 
@@ -8,6 +9,8 @@ from openpi.models_pytorch.transformers_replace.models.paligemma.safe_ops import
 from openpi.models_pytorch.gemma_pytorch import _apply_tokenwise_in_chunks as _gemma_apply_tokenwise_in_chunks
 from openpi.models_pytorch.gemma_pytorch import _gated_residual
 from openpi.models_pytorch.pi0_pytorch import _ensure_transformers_replace_is_ready
+from openpi.picf.action_normalization import PicfStateNormalizer
+from openpi.picf.contracts import PicfObservation
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
 from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
 from openpi.picf.paligemma.wrapper import _masked_position_ids
@@ -360,6 +363,52 @@ def test_prepare_image_accepts_resize_with_pad_batch1_squeeze(monkeypatch: pytes
     image = torch.zeros((32, 48, 3), dtype=torch.float32).numpy()
     out = _Pi0PaliGemmaSemanticEncoder._prepare_image(encoder, image)
     assert tuple(out.shape) == (1, 3, 224, 224)
+
+
+def test_state_for_prompt_uses_state_normalizer_when_configured() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    encoder.model_action_dim = 4
+    encoder.prompt_state_normalizer = PicfStateNormalizer(
+        mean=np.zeros((2,), dtype=np.float32),
+        std=np.ones((2,), dtype=np.float32),
+        q01=np.asarray([-1.0, 0.0], dtype=np.float32),
+        q99=np.asarray([1.0, 2.0], dtype=np.float32),
+        mode="quantile",
+    )
+    observation = PicfObservation(
+        rgb_static=np.zeros((2, 2, 3), dtype=np.uint8),
+        depth_static=np.zeros((2, 2), dtype=np.float32),
+        robot_obs=np.asarray([0.0, 2.0], dtype=np.float32),
+        prompt="task",
+        step_id=0,
+        segment_id=0,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+    )
+
+    state = _Pi0PaliGemmaSemanticEncoder._state_for_prompt(encoder, observation)
+
+    np.testing.assert_allclose(state, np.asarray([0.0, 1.0], dtype=np.float32), atol=1e-6)
+
+
+def test_state_for_prompt_falls_back_to_legacy_clip_without_state_normalizer() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    encoder.model_action_dim = 4
+    encoder.prompt_state_normalizer = None
+    observation = PicfObservation(
+        rgb_static=np.zeros((2, 2, 3), dtype=np.uint8),
+        depth_static=np.zeros((2, 2), dtype=np.float32),
+        robot_obs=np.asarray([2.5, -3.0], dtype=np.float32),
+        prompt="task",
+        step_id=0,
+        segment_id=0,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+    )
+
+    state = _Pi0PaliGemmaSemanticEncoder._state_for_prompt(encoder, observation)
+
+    np.testing.assert_allclose(state, np.asarray([1.0, -1.0], dtype=np.float32), atol=1e-6)
 
 
 def test_checkpoint_inputs_require_grad_detects_tensor_inputs() -> None:

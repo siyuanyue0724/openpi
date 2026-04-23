@@ -18,7 +18,7 @@ def default_calvin_action_norm_stats_path() -> Path:
 
 
 @dataclasses.dataclass(frozen=True)
-class PicfActionNormalizer:
+class _PicfVectorNormalizer:
     mean: np.ndarray
     std: np.ndarray
     q01: np.ndarray | None
@@ -26,13 +26,19 @@ class PicfActionNormalizer:
     mode: ActionNormalizationMode
 
     @classmethod
-    def from_path(cls, path: str | Path, *, mode: ActionNormalizationMode) -> "PicfActionNormalizer":
+    def _from_path_key(
+        cls,
+        path: str | Path,
+        *,
+        mode: ActionNormalizationMode,
+        key: str,
+    ) -> "_PicfVectorNormalizer":
         resolved = Path(path).expanduser()
         stats_root = resolved.parent if resolved.is_file() else resolved
         stats = _normalize.load(stats_root)
-        if "actions" not in stats:
-            raise KeyError(f"norm_stats at {path!s} does not contain an 'actions' entry.")
-        action_stats = stats["actions"]
+        if key not in stats:
+            raise KeyError(f"norm_stats at {path!s} does not contain a {key!r} entry.")
+        action_stats = stats[key]
         return cls(
             mean=np.asarray(action_stats.mean, dtype=np.float32),
             std=np.asarray(action_stats.std, dtype=np.float32),
@@ -106,3 +112,21 @@ class PicfActionNormalizer:
         q99 = torch.as_tensor(self.q99[:dims], device=x.device, dtype=x.dtype)
         out[..., :dims] = ((out[..., :dims] + 1.0) * 0.5 * (q99 - q01 + 1e-6)) + q01
         return out
+
+
+@dataclasses.dataclass(frozen=True)
+class PicfActionNormalizer(_PicfVectorNormalizer):
+    @classmethod
+    def from_path(cls, path: str | Path, *, mode: ActionNormalizationMode) -> "PicfActionNormalizer":
+        normalizer = cls._from_path_key(path, mode=mode, key="actions")
+        assert isinstance(normalizer, cls)
+        return normalizer
+
+
+@dataclasses.dataclass(frozen=True)
+class PicfStateNormalizer(_PicfVectorNormalizer):
+    @classmethod
+    def from_path(cls, path: str | Path, *, mode: ActionNormalizationMode) -> "PicfStateNormalizer":
+        normalizer = cls._from_path_key(path, mode=mode, key="state")
+        assert isinstance(normalizer, cls)
+        return normalizer

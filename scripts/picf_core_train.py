@@ -926,6 +926,12 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.action_output_clip = float(args.action_output_clip)
     if getattr(args, "action_normalization", "quantile") != "none" and getattr(args, "action_norm_stats_path", None) is None:
         args.action_norm_stats_path = _default_action_norm_stats_path()
+    prompt_state_mode = str(getattr(args, "prompt_state_normalization", "inherit")).lower()
+    if prompt_state_mode == "inherit":
+        prompt_state_mode = str(getattr(args, "action_normalization", "quantile")).lower()
+    args.prompt_state_normalization = prompt_state_mode
+    if args.prompt_state_normalization != "none" and getattr(args, "prompt_state_norm_stats_path", None) is None:
+        args.prompt_state_norm_stats_path = getattr(args, "action_norm_stats_path", None) or _default_action_norm_stats_path()
     if getattr(args, "tactile_aux_pose_scale", None) is None:
         args.tactile_aux_pose_scale = float(getattr(args, "crop_radius_m", _SPEC_DEFAULTS.crop_radius_m))
     if getattr(args, "tactile_aux_huber_delta", None) is None:
@@ -1248,6 +1254,13 @@ def _validate_train_args(args: argparse.Namespace) -> None:
             raise FileNotFoundError(
                 "Action normalization requires a valid norm_stats.json. "
                 f"Got action_norm_stats_path={path!r}."
+            )
+    if str(getattr(args, "prompt_state_normalization", "none")) != "none":
+        path = getattr(args, "prompt_state_norm_stats_path", None)
+        if path is None or not Path(path).expanduser().is_file():
+            raise FileNotFoundError(
+                "Prompt-state normalization requires a valid norm_stats.json. "
+                f"Got prompt_state_norm_stats_path={path!r}."
             )
     if not _picf_mode_enabled(args) and str(getattr(args, "semantic_mode", "zero")) != "paligemma":
         raise ValueError(
@@ -3717,6 +3730,8 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 gradient_checkpointing=bool(args.semantic_gradient_checkpointing),
                 include_gripper_image=bool(args.semantic_use_gripper),
                 max_length=args.semantic_max_length,
+                prompt_state_normalization=str(getattr(args, "prompt_state_normalization", "none")),
+                prompt_state_norm_stats_path=getattr(args, "prompt_state_norm_stats_path", None),
                 action_horizon=int(args.action_horizon),
                 tokenwise_chunk_size=int(getattr(args, "semantic_tokenwise_chunk_size", 0)),
                 projection_chunk_size=int(getattr(args, "semantic_projection_chunk_size", 0)),
@@ -4287,6 +4302,12 @@ def train(args: argparse.Namespace) -> None:
                 getattr(args, "action_output_clip", None),
             )
             logging.info(
+                "Prompt-state contract: normalization=%s norm_stats=%s inject_state_into_prompt=%s",
+                getattr(args, "prompt_state_normalization", "none"),
+                getattr(args, "prompt_state_norm_stats_path", None),
+                True,
+            )
+            logging.info(
                 "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s task_local_queries=%s task_global_queries=%s task_instruction_queries=%s task_self_layers=%s conditioned_control_queries=%s pi_prefix_queries=%s conditioned_future_queries=%s task_visual_reread_topk=%s task_tactile_reread_groups=%s task_point_reread_topk=%s require_pi0_action_generator=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
                 args.hidden_dim,
                 args.posterior_hidden_dim,
@@ -4831,6 +4852,12 @@ def main() -> None:
     parser.add_argument("--action-normalization", choices=["none", "zscore", "quantile"], default="quantile")
     parser.add_argument("--action-norm-stats-path", default=None)
     parser.add_argument("--action-output-clip", type=float, default=None)
+    parser.add_argument(
+        "--prompt-state-normalization",
+        choices=["inherit", "none", "zscore", "quantile"],
+        default="inherit",
+    )
+    parser.add_argument("--prompt-state-norm-stats-path", default=None)
     parser.add_argument("--lambda-action-pos", type=float, default=2.0)
     parser.add_argument("--lambda-action-rot", type=float, default=2.0)
     parser.add_argument("--lambda-action-gripper", type=float, default=2.0)

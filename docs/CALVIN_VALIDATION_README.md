@@ -13,6 +13,13 @@ The formal contract is:
 
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
 
+Direct execution entry points in this document:
+
+- current canonical full PICF long-run training:
+  [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
+- current cloud-tested 20-sequence CALVIN video evaluation:
+  [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
+
 Important status note:
 
 - `README_v2.2.md` is the current local architecture and deployment document
@@ -191,7 +198,9 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   --semantic-trainable \
   --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
   --action-normalization quantile \
-  --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json
+  --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json \
+  --prompt-state-normalization inherit \
+  --prompt-state-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json
 ```
 
 Run-shape interpretation for this profile:
@@ -267,7 +276,104 @@ Required outputs:
 - `tactile_contact_stats.json`
 - `tactile_fingertip_calibration.json`
 
-## 5. Historical Baseline Training Command
+## 5. Full PICF Training And Historical Baseline
+
+### 5.1 Current Canonical Full PICF Long-Run Launch
+
+This is the current canonical long-run launch template for the **full**
+`picf_mode=enabled` v2.2 path on the maintained 4x40GB A100 profile.
+
+It is the command to use when the goal is:
+
+- full PICF recurrent/control/future training
+- foundation backbones enabled
+- tactile enabled
+- PI0.5 action path active
+- checkpoint cadence every `2500` optimizer steps
+- progress/loss printed every `100` optimizer steps
+
+Current canonical launch:
+
+```bash
+cd /root/openpi_run_latest
+export PYTHONPATH=/root/openpi_run_latest/src
+export WANDB_MODE=disabled
+export PYTHONUNBUFFERED=1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+/root/openpi/.venv/bin/torchrun \
+  --standalone \
+  --nnodes=1 \
+  --nproc_per_node=4 \
+  scripts/picf_core_train.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --backend dir \
+  --checkpoint-base-dir /mnt/checkpoints/picf_core \
+  --exp-name <exp_name> \
+  --overwrite \
+  --device cuda \
+  --picf-mode enabled \
+  --use-foundation-backbones \
+  --use-tactile \
+  --training-strategy fsdp_full_shard \
+  --optimizer-sharding none \
+  --accum-steps 1 \
+  --num-train-steps 30000 \
+  --save-interval 2500 \
+  --log-interval 100 \
+  --diagnostic-interval 0 \
+  --grad-clip-mode percentile \
+  --grad-clip-percentile 75 \
+  --grad-clip-window 100 \
+  --visual-finetune-mode full \
+  --visual-activation-checkpointing \
+  --semantic-gradient-checkpointing \
+  --wandb-mode disabled \
+  --no-wandb \
+  --visual-checkpoint-path /root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt \
+  --tactile-checkpoint-path /root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth \
+  --tactile-calibration-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_fingertip_calibration.json \
+  --tactile-backgrounds-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_backgrounds.npz \
+  --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
+  --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
+  --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
+  --action-normalization quantile \
+  --action-norm-stats-path /root/openpi_run_latest/assets/pi05_calvin_sonata/calvin/norm_stats.json \
+  --prompt-state-normalization inherit \
+  --prompt-state-norm-stats-path /root/openpi_run_latest/assets/pi05_calvin_sonata/calvin/norm_stats.json \
+  --tokenwise-ff-chunk-size 64 \
+  --semantic-tokenwise-chunk-size 64 \
+  --semantic-projection-chunk-size 128 \
+  --semantic-mlp-chunk-size 64
+```
+
+Interpretation notes:
+
+- `--picf-mode enabled` is the explicit canonical full PICF mode
+- `--save-interval 2500` is the maintained operational checkpoint cadence
+- `--log-interval 100` is the maintained loss-print cadence
+- `--diagnostic-interval 0` avoids extra diagnostic spam on the long-run path
+- `--window-activation-checkpointing` is **not** part of this canonical launch;
+  it remains an explicit fallback knob when the operator needs more peak-memory
+  relief
+
+Recommended live monitoring:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/debug/<exp_name>.log
+```
+
+```bash
+watch -n 2 "nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader"
+```
+
+If the operator wants early proof that the run crossed step 10 without changing
+training math, keep the same command and temporarily add:
+
+- `--log-interval 10`
+- optionally `--no-progress`
+
+### 5.2 Historical Baseline Training Command
 
 The command below is preserved as a historical baseline from the pre-v2.2
 semantic-prefix-primary mixed-width implementation.
@@ -414,6 +520,13 @@ Important interpretation note:
   - `action_horizon` has now been restored to `16` by default
   - `_CalvinTransitionSource` now samples segment-first instead of uniformly
     over all valid window starts
+- the maintained runtime now also normalizes prompt-state inputs from the shared
+  CALVIN `norm_stats.json` before PI0.5 prompt discretization, matching the
+  reference PI0.5 preprocessing contract without changing PICF physical-core
+  inputs
+- prompt-state tokenization keeps the live CALVIN state dimensionality and does
+  not pad the text prompt state to `action_dim = 32`; padding remains a later
+  state/action tensor contract, matching the reference transform order
 - the maintained current ablation profile still differs from historical PI0.5
   in several other ways:
   - `semantic_max_length=256`

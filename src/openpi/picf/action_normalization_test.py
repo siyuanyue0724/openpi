@@ -5,6 +5,7 @@ import numpy as np
 import torch
 
 from openpi.picf.action_normalization import PicfActionNormalizer
+from openpi.picf.action_normalization import PicfStateNormalizer
 
 
 def test_quantile_action_normalizer_roundtrip() -> None:
@@ -40,6 +41,12 @@ def test_from_path_accepts_norm_stats_file_path(tmp_path: Path) -> None:
     stats_dir.mkdir(parents=True)
     payload = {
         "norm_stats": {
+            "state": {
+                "mean": [0.0, 1.0],
+                "std": [2.0, 4.0],
+                "q01": [-1.0, -3.0],
+                "q99": [1.0, 5.0],
+            },
             "actions": {
                 "mean": [0.0, 1.0],
                 "std": [2.0, 4.0],
@@ -56,3 +63,31 @@ def test_from_path_accepts_norm_stats_file_path(tmp_path: Path) -> None:
     normalized = normalizer.normalize_np(sample)
     restored = normalizer.unnormalize_np(normalized)
     np.testing.assert_allclose(restored, sample, atol=1e-5)
+
+
+def test_state_normalizer_from_path_uses_state_entry(tmp_path: Path) -> None:
+    stats_dir = tmp_path / "calvin"
+    stats_dir.mkdir(parents=True)
+    payload = {
+        "norm_stats": {
+            "state": {
+                "mean": [0.0, 0.0],
+                "std": [1.0, 1.0],
+                "q01": [-2.0, -1.0],
+                "q99": [2.0, 3.0],
+            },
+            "actions": {
+                "mean": [100.0, 100.0],
+                "std": [10.0, 10.0],
+                "q01": [0.0, 0.0],
+                "q99": [1.0, 1.0],
+            },
+        }
+    }
+    stats_path = stats_dir / "norm_stats.json"
+    stats_path.write_text(json.dumps(payload), encoding="utf-8")
+
+    normalizer = PicfStateNormalizer.from_path(stats_path, mode="quantile")
+    sample = np.asarray([0.0, 1.0], dtype=np.float32)
+    normalized = normalizer.normalize_np(sample)
+    np.testing.assert_allclose(normalized, np.asarray([0.0, 0.0], dtype=np.float32), atol=1e-5)

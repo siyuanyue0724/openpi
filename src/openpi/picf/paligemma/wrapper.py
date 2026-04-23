@@ -27,6 +27,7 @@ from openpi.models_pytorch.gemma_pytorch import PaliGemmaWithExpertModel
 from openpi.models_pytorch.pi0_pytorch import create_sinusoidal_pos_embedding
 from openpi.models_pytorch.pi0_pytorch import make_att_2d_masks
 from openpi.models_pytorch.pi0_pytorch import _ensure_transformers_replace_is_ready
+from openpi.picf.action_normalization import PicfStateNormalizer
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.fsdp_utils import module_num_embeddings
 from openpi.picf.fsdp_utils import module_parameter_dtype
@@ -538,6 +539,13 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         self._drop_unused_generation_heads()
         self.to(device=self.device)
         self.tokenizer = PaligemmaTokenizer(max_len=max_token_len)
+        prompt_state_mode = str(getattr(config, "prompt_state_normalization", "none")).lower()
+        prompt_state_path = getattr(config, "prompt_state_norm_stats_path", None)
+        self.prompt_state_normalizer = (
+            None
+            if prompt_state_mode == "none" or prompt_state_path is None
+            else PicfStateNormalizer.from_path(prompt_state_path, mode=prompt_state_mode)
+        )
         if self.trainable:
             if hasattr(self.paligemma_with_expert.paligemma, "gradient_checkpointing_disable"):
                 self.paligemma_with_expert.paligemma.gradient_checkpointing_disable()
@@ -746,11 +754,9 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             observation.proprio if observation.proprio is not None else observation.robot_obs,
             dtype=np.float32,
         ).reshape(-1)
-        state = np.zeros((self.model_action_dim,), dtype=np.float32)
-        take = min(int(raw.shape[0]), self.model_action_dim)
-        if take > 0:
-            state[:take] = raw[:take]
-        return np.clip(state, -1.0, 1.0)
+        if self.prompt_state_normalizer is not None:
+            return self.prompt_state_normalizer.normalize_np(raw)
+        return np.clip(raw, -1.0, 1.0)
 
     def _prepare_prompt(self, prompt: str, observation: PicfObservation) -> tuple[torch.Tensor, torch.Tensor]:
         debug_prompt = os.environ.get("OPENPI_DEBUG_PALIGEMMA_PROMPT", "").strip() not in {"", "0", "false", "False"}

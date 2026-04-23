@@ -99,6 +99,11 @@ def _base_args() -> argparse.Namespace:
         grad_clip_mode="percentile",
         grad_clip_percentile=75.0,
         grad_clip_window=100,
+        action_normalization="quantile",
+        action_norm_stats_path=None,
+        action_output_clip=None,
+        prompt_state_normalization="inherit",
+        prompt_state_norm_stats_path=None,
         lambda_action_pos=2.0,
         lambda_action_rot=2.0,
         lambda_action_gripper=2.0,
@@ -188,6 +193,15 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     assert args.warmup_steps == 600
 
 
+def test_normalize_train_args_inherits_prompt_state_normalization_from_action_contract() -> None:
+    args = _base_args()
+    _MODULE._normalize_train_args(args)
+
+    assert args.action_normalization == "quantile"
+    assert args.prompt_state_normalization == "quantile"
+    assert args.prompt_state_norm_stats_path == args.action_norm_stats_path
+
+
 def test_parse_tactile_sensor_names_accepts_stringified_tuple() -> None:
     assert _MODULE._parse_tactile_sensor_names("('digit', 'gelsight_mini')") == ("digit", "gelsight_mini")
 
@@ -275,6 +289,16 @@ def test_validate_train_args_ablated_requires_paligemma() -> None:
     _MODULE._normalize_train_args(args)
 
     with pytest.raises(ValueError, match="semantic_mode=paligemma"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_requires_prompt_state_norm_stats_when_enabled() -> None:
+    args = _base_args()
+    args.prompt_state_normalization = "quantile"
+    args.prompt_state_norm_stats_path = "/tmp/does-not-exist.json"
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(FileNotFoundError, match="Prompt-state normalization requires a valid norm_stats.json"):
         _MODULE._validate_train_args(args)
 
 
@@ -2529,6 +2553,54 @@ def test_should_save_optimizer_state_defaults_to_model_only_for_ablated_auto() -
     args.optimizer_checkpoint_mode = "auto"
 
     assert _MODULE._should_save_optimizer_state(args=args) is False
+
+
+def test_should_save_optimizer_state_defaults_to_full_state_for_enabled_auto() -> None:
+    args = _base_args()
+    args.picf_mode = "enabled"
+    args.optimizer_checkpoint_mode = "auto"
+    args.optimizer_sharding = "none"
+
+    assert _MODULE._should_save_optimizer_state(args=args) is True
+
+
+def test_enabled_auto_checkpoint_saves_full_model_and_optimizer_state(tmp_path: Path) -> None:
+    class _Core(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.proj = torch.nn.Linear(3, 2, bias=False)
+
+    trainer = torch.nn.Module()
+    trainer.core = _Core()
+    trainer.semantic_encoder = torch.nn.Linear(4, 2, bias=False)
+    optimizer = torch.optim.AdamW(trainer.parameters(), lr=1e-3)
+
+    args = _base_args()
+    args.picf_mode = "enabled"
+    args.optimizer_checkpoint_mode = "auto"
+    args.optimizer_sharding = "none"
+
+    ckpt_root = tmp_path / "enabled_auto_full_state"
+    ckpt_root.mkdir(parents=True, exist_ok=True)
+
+    _MODULE._save_checkpoint(
+        output_dir=ckpt_root,
+        model=trainer,
+        optimizer=optimizer,
+        step=11,
+        args=args,
+        save_optimizer_state=_MODULE._should_save_optimizer_state(args=args),
+    )
+
+    ckpt_dir = ckpt_root / "11"
+    model_state = torch.load(ckpt_dir / "model.pt", map_location="cpu", weights_only=False)
+    metadata = torch.load(ckpt_dir / "metadata.pt", map_location="cpu", weights_only=False)
+
+    assert (ckpt_dir / "optimizer.pt").exists()
+    assert "checkpoint_model_format" not in model_state
+    assert "core.proj.weight" in model_state
+    assert "semantic_encoder.weight" in model_state
+    assert metadata["optimizer_state_saved"] is True
 
 
 def test_fsdp_checkpoint_roundtrip_supports_ablated_semantic_only_lazy_core(tmp_path: Path) -> None:

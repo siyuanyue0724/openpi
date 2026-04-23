@@ -23,6 +23,8 @@ class PaliGemmaSemanticConfig:
     action_horizon: int = 16
     denoise_steps: int = 10
     inject_state_into_prompt: bool = True
+    prompt_state_normalization: str = "none"
+    prompt_state_norm_stats_path: str | None = None
     tokenwise_chunk_size: int = 0
     projection_chunk_size: int | None = None
     mlp_chunk_size: int | None = None
