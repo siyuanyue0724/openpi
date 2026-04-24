@@ -2669,6 +2669,8 @@ def test_fsdp_checkpoint_roundtrip_supports_ablated_semantic_only_lazy_core(tmp_
         )
 
         assert step == 5
+        forward_value = wrapped_reloaded(torch.randn(2, 4))
+        assert torch.isfinite(forward_value).item()
 
 
 def test_ablated_auto_checkpoint_skips_optimizer_state(tmp_path: Path) -> None:

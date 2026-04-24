@@ -3108,6 +3108,28 @@ def _fsdp_full_state_dict_context(
 _ABLATED_SEMANTIC_ONLY_CHECKPOINT_FORMAT = "picf_ablated_semantic_only_v1"
 
 
+def _reset_child_fsdp_root_markers(module: torch.nn.Module) -> None:
+    """Undo child-only FSDP lazy-root marking after nested state-dict operations.
+
+    The ablated semantic-only checkpoint path intentionally talks only to the
+    nested ``semantic_encoder`` subtree so that a lazy PICF core can remain
+    uninitialized. However, entering ``FULL_STATE_DICT`` context on that child
+    FSDP subtree may lazily mark the child wrapper as a temporary local root.
+    If we leave that marker behind, the outer trainer-level FSDP root will hit
+    PyTorch's ``Non-root FSDP instance's `_is_root` ...`` assertion on the next
+    forward after reload.
+
+    Resetting only the temporarily promoted child roots restores the pre-forward
+    lazy-init state without weakening the checkpoint contract or changing the
+    saved tensor values.
+    """
+    if FullyShardedDataParallel is None:
+        return
+    for submodule in module.modules():
+        if isinstance(submodule, FullyShardedDataParallel) and getattr(submodule, "_is_root", None) is True:
+            submodule._is_root = None
+
+
 def _ablated_semantic_only_checkpoint_enabled(
     *,
     args: argparse.Namespace | None,
@@ -3131,6 +3153,7 @@ def _build_ablated_semantic_only_model_state(
     if _is_fsdp_model(semantic_encoder):
         with _fsdp_full_state_dict_context(semantic_encoder, rank0_only=True):
             semantic_state = semantic_encoder.state_dict()
+        _reset_child_fsdp_root_markers(semantic_encoder)
     else:
         semantic_state = semantic_encoder.state_dict()
     return {
@@ -3160,6 +3183,7 @@ def _load_ablated_semantic_only_model_state(
     if _is_fsdp_model(semantic_encoder):
         with _fsdp_full_state_dict_context(semantic_encoder, rank0_only=False):
             semantic_encoder.load_state_dict(model_state["semantic_encoder"], strict=True)
+        _reset_child_fsdp_root_markers(semantic_encoder)
     else:
         semantic_encoder.load_state_dict(model_state["semantic_encoder"], strict=True)
 
@@ -3177,7 +3201,9 @@ def _ablated_semantic_only_optimizer_state(
         )
     if _is_fsdp_model(semantic_encoder):
         with _fsdp_full_state_dict_context(semantic_encoder, rank0_only=rank0_only):
-            return FullyShardedDataParallel.optim_state_dict(semantic_encoder, optimizer)
+            optimizer_state = FullyShardedDataParallel.optim_state_dict(semantic_encoder, optimizer)
+        _reset_child_fsdp_root_markers(semantic_encoder)
+        return optimizer_state
     return optimizer.state_dict()
 
 
@@ -3197,6 +3223,7 @@ def _load_ablated_semantic_only_optimizer_state(
             optimizer.load_state_dict(
                 FullyShardedDataParallel.optim_state_dict_to_load(semantic_encoder, optimizer, optimizer_state)
             )
+        _reset_child_fsdp_root_markers(semantic_encoder)
     else:
         optimizer.load_state_dict(optimizer_state)
 
