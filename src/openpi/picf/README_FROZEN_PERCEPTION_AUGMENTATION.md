@@ -71,6 +71,32 @@ picf_photometric_strength=conservative
 save_interval=5000
 ```
 
+Fast 2x40GB speed profile:
+
+```text
+picf_mode=enabled
+training_strategy=fsdp_full_shard
+optimizer_sharding=none
+world_size=2
+accum_steps=1
+unroll_steps=1
+burnin_steps=0
+action_horizon=16
+semantic_max_length=200
+semantic_trainable=True
+semantic_gradient_checkpointing=False
+perception_finetune_mode=frozen
+visual_feature_mode=hierarchical
+picf_augmentation_mode=photometric
+picf_photometric_strength=conservative
+save_interval=5000
+```
+
+This speed profile is exact for its stated objective, but it is not equivalent
+to the maintained `unroll_steps=3` full-BPTT recurrent objective. Use it when
+throughput is the priority and evaluate CALVIN quality separately before
+promoting it over the default.
+
 Trainable modules:
 
 - PaliGemma / PI0.5 semantic-action path
@@ -98,6 +124,13 @@ Rationale:
   fixed.
 - `unroll_steps=3` is the current maximum validated full-BPTT window on 2x40GB.
   `unroll_steps=4` and `8` were tested and OOMed on this profile.
+- Direct DDP/no-FSDP was tested on the same 2x40GB frozen-perception setup and
+  OOMed in the trainable PaliGemma/Gemma forward MLP. FSDP remains required
+  unless the semantic path is frozen, LoRA-adapted, shortened, or otherwise
+  changed.
+- The fastest capacity-preserving 2x40GB probe kept FSDP, used
+  `unroll_steps=1`, and disabled semantic gradient checkpointing. It reached
+  about `0.107-0.114 steps/sec` after step 1, roughly `8.8-9.3 s/step`.
 - Conservative photometric augmentation is geometry-preserving. It changes RGB
   intensities without moving pixels, point coordinates, camera geometry, robot
   state, or action labels.
@@ -125,6 +158,8 @@ Operational notes:
 - `state_only` burn-in is implemented as an experimental speed path, but the
   maintained long-run profile remains full-BPTT `unroll_steps=3` until burn-in
   has a separate CALVIN quality comparison
+- the `unroll_steps=1` fast profile is a throughput profile, not a hidden
+  replacement for recurrent full-BPTT training
 
 Do not rely on implicit defaults for this profile. The launch log must print:
 

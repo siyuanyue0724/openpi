@@ -136,6 +136,7 @@ Current training profiles:
 | 6x40GB full PICF | Full cotrain when enough GPUs are available | `picf_mode=enabled`, `nproc_per_node=6`, `accum_steps=1`, `unroll_steps=2`, `action_horizon=16`, `save_interval=2500` | Same v2.2 objective, larger global batch than 4x40GB |
 | 4x40GB full PICF | Standard all-backbone full-train reference | `picf_mode=enabled`, `fsdp_full_shard`, all foundation backbones trainable, `save_interval=2500` | Valid full-train profile, memory tight |
 | 2x40GB frozen-perception PICF | Cost-controlled full PICF without full perception cotrain | `perception_finetune_mode=frozen`, `unroll_steps=3`, `action_horizon=16`, `semantic_max_length=200`, conservative photometric augmentation, `save_interval=5000` | Maintained 2x40GB long-run profile |
+| 2x40GB frozen-perception fast PICF | Throughput-first full-PICF probe | `perception_finetune_mode=frozen`, `unroll_steps=1`, `semantic_gradient_checkpointing=False`, `action_horizon=16`, `semantic_max_length=200` | Reached about `8.8-9.3 s/step`; not equivalent to `unroll_steps=3` recurrent full-BPTT |
 | 2x40GB state-only burn-in | Faster long-context recurrent-state probe | `unroll_steps=1`, `burnin_steps=8`, `burnin_mode=state_only` | Smoke-tested through step10/final checkpoint; needs CALVIN quality comparison before becoming default |
 | PI0.5-only ablation | Test the PI0.5 action path without PICF branches | `picf_mode=ablated`, `extra_prefix_tokens=None`, PICF core frozen | Maintained ablation profile, not full PICF |
 
@@ -143,10 +144,15 @@ Default recommendation:
 
 - use full-BPTT `unroll_steps=3` for the current 2x40GB frozen-perception long
   run when quality is the priority
+- use the fast `unroll_steps=1` profile only when the immediate target is
+  `~10 s/step` throughput; it keeps the PICF architecture enabled but does not
+  train multi-step recurrent BPTT like `unroll_steps=3`
 - use `state_only` burn-in only when explicitly testing speed/context tradeoffs
 - do not treat `state_only` as equivalent to full-BPTT over
   `burnin_steps + unroll_steps`; it trains suffix losses on a longer recurrent
   context but does not backpropagate credit through the burn-in transitions
+- do not disable FSDP on the 2x40GB trainable-PaliGemma profile; direct DDP was
+  tested and OOMed in the PaliGemma/Gemma forward MLP
 - keep `semantic_max_length=200` for CALVIN parity-style runs unless a separate
   prompt-length experiment is intended
 - keep `action_horizon=16` for CALVIN PI0.5/PICF action training unless a

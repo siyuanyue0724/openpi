@@ -4051,6 +4051,42 @@ def _materialize_model_parameters(
         _ = model(warmup_window)
         core = model.core
         picf_enabled = bool(getattr(getattr(model, "policy", None), "picf_enabled", True))
+        if picf_enabled and any(
+            isinstance(param, UninitializedParameter)
+            for name, param in model.named_parameters()
+            if name.startswith("core.prior_")
+        ):
+            # A valid unroll_steps=1 training run never calls the recurrent
+            # prior during the normal warmup window. Materialize that lazy
+            # branch explicitly with one no-grad recurrent transition rather
+            # than weakening the uninitialized-parameter check.
+            first = dataclasses.replace(warmup_window.frames[0], reset_scaffold=True)
+            second_index = min(1, len(warmup_window.frames) - 1)
+            second = dataclasses.replace(warmup_window.frames[second_index], reset_scaffold=False)
+            first_visual = (
+                _rgb_visual_override(first.rgb_static, grid=model.visual_grid)
+                if model.use_visual_override
+                else None
+            )
+            second_visual = (
+                _rgb_visual_override(second.rgb_static, grid=model.visual_grid)
+                if model.use_visual_override
+                else None
+            )
+            first_action_chunk = first.action_chunk if first.action_chunk is not None else first.action
+            second_action_chunk = second.action_chunk if second.action_chunk is not None else second.action
+            first_forward = model.policy.forward_train_transition(
+                previous=None,
+                current=first,
+                visual_map_override=first_visual,
+                action_chunk_target=first_action_chunk,
+            )
+            _ = model.policy.forward_train_transition(
+                previous=first_forward.next_state,
+                current=second,
+                visual_map_override=second_visual,
+                action_chunk_target=second_action_chunk,
+            )
         if picf_enabled and isinstance(core.tactile_token_proj.weight, UninitializedParameter):
             # picf_core_train uses a null tactile encoder, so tactile lazy layers
             # need an explicit placeholder init before DDP inspects parameters.
