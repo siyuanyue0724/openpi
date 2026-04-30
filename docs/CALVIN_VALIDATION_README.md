@@ -17,6 +17,8 @@ Direct execution entry points in this document:
 
 - current canonical full PICF long-run training:
   [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
+- current 2x40GB frozen-perception full PICF and state-only burn-in speed path:
+  [`Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile)
 - current cloud-tested 20-sequence CALVIN video evaluation, including the
   full PICF `step=7500` recipe and the maintained PI0.5-only ablation recipe:
   [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
@@ -323,10 +325,12 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   --save-interval 2500 \
   --log-interval 100 \
   --diagnostic-interval 0 \
+  --unroll-steps 2 \
+  --action-horizon 16 \
   --grad-clip-mode percentile \
   --grad-clip-percentile 75 \
   --grad-clip-window 100 \
-  --visual-finetune-mode full \
+  --perception-finetune-mode full \
   --visual-activation-checkpointing \
   --semantic-gradient-checkpointing \
   --wandb-mode disabled \
@@ -383,6 +387,149 @@ training math, keep the same command and temporarily add:
   `effective_global_batch=4`
 - this is a valid same-objective full-PICF run, but loss curves should not be
   interpreted as the exact same optimizer trajectory as the 4-GPU profile
+
+### 5.1A Current 2x40GB Frozen-Perception Full-PICF Profile
+
+- use this when the operator wants full PICF on a smaller 2x40GB node while
+  freezing the heavy perception feature extractors
+- this is **not** PI0.5-only ablation; keep `--picf-mode enabled`
+- freeze Sonata, V-JEPA, and AnyTouch through
+  `--perception-finetune-mode frozen`
+- keep PaliGemma / PI0.5 action generation trainable
+- use `--semantic-max-length 200` to match the PI0.5 prompt-length contract
+- use only conservative photometric augmentation:
+  `--picf-augmentation-mode photometric --picf-photometric-strength conservative`
+- do not use RGB crop / rotation on full PICF unless point/depth/tactile
+  geometry is transformed coherently as well
+- keep `--accum-steps 1`, `--unroll-steps 3`, and `--action-horizon 16` on
+  2x40GB; `unroll_steps=3` is the maximum setting validated on the current
+  frozen-perception profile
+- `unroll_steps=8` was tested and failed with CUDA OOM during `step=1`
+  backward
+- `unroll_steps=4` was tested and failed with CUDA OOM during `step=2`
+  backward
+- do not use `4` or `8` on this profile without changing memory strategy
+- if `unroll_steps=3` later OOMs from sample variability, fall back to
+  `unroll_steps=2`
+- the maintained checkpoint cadence for this profile is `--save-interval 5000`
+
+Current 2x40GB frozen-perception long-run template:
+
+```bash
+cd /root/openpi_posterior_vla_clean
+export PYTHONPATH=/root/openpi_posterior_vla_clean/src
+export CUDA_VISIBLE_DEVICES=0,1
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export WANDB_MODE=disabled
+export TORCHDYNAMO_DISABLE=1
+export OPENPI_DISABLE_TORCH_COMPILE=1
+
+/root/openpi/.venv/bin/torchrun --standalone --nnodes=1 --nproc_per_node=2 \
+  scripts/picf_core_train.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --backend dir \
+  --checkpoint-base-dir /mnt/checkpoints/picf_core \
+  --exp-name picf_v22_frozen2x40_photometric_30000_YYYYMMDD_rN \
+  --overwrite \
+  --device cuda \
+  --picf-mode enabled \
+  --use-foundation-backbones \
+  --perception-finetune-mode frozen \
+  --point-backbone sonata \
+  --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
+  --visual-mode encoder \
+  --visual-checkpoint-path /root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt \
+  --visual-feature-mode hierarchical \
+  --tactile-mode encoder \
+  --tactile-checkpoint-path /root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth \
+  --tactile-backgrounds-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_backgrounds.npz \
+  --tactile-calibration-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_fingertip_calibration.json \
+  --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
+  --training-strategy fsdp_full_shard \
+  --optimizer-sharding none \
+  --accum-steps 1 \
+  --unroll-steps 3 \
+  --action-horizon 16 \
+  --semantic-max-length 200 \
+  --picf-augmentation-mode photometric \
+  --picf-photometric-strength conservative \
+  --num-train-steps 30000 \
+  --save-interval 5000 \
+  --log-interval 100 \
+  --grad-clip-mode percentile \
+  --grad-clip-percentile 75 \
+  --grad-clip-window 100 \
+  --semantic-gradient-checkpointing \
+  --visual-activation-checkpointing \
+  --no-wandb
+```
+
+Live monitoring for the current 2026-04-30 run:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/debug/picf_v22_frozen2x40_photometric_unroll3_30000_20260430_r1.log
+```
+
+```bash
+watch -n 2 "nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=csv,noheader"
+```
+
+Observed bring-up evidence:
+
+- an `unroll_steps=2` smoke run reached `step >= 10`
+- an `unroll_steps=3` smoke run reached early steps and became the maintained
+  long-run setting
+- the `unroll_steps=3` long-run reached `step >= 10`
+- `unroll_steps=8` failed with CUDA OOM during `step=1` backward
+- `unroll_steps=4` failed with CUDA OOM during `step=2` backward
+- early `unroll_steps=3` speed was approximately `24-27 s/step`
+- sampled inter-step memory can look lower, but probe peaks reached the 40GB
+  limit; treat this as a tight configuration
+
+Experimental burn-in speed probe:
+
+- keep the same frozen-perception full-PICF command, but replace the full-BPTT
+  unroll setting with:
+
+```bash
+  --unroll-steps 1 \
+  --burnin-steps 8 \
+  --burnin-mode state_only \
+```
+
+- this samples `9` transitions per window, runs the first `8` transitions as
+  no-grad PICF recurrent burn-in, and backpropagates only through the final
+  transition
+- `burnin-mode=state_only` advances only the canonical recurrent carry:
+  runtime metadata, tactile carry, posterior, executed teacher action, and
+  world-only `physical_prediction_cache`
+- `state_only` skips semantic task readout, conditioned control, PI0.5 flow
+  loss, and conditioned future cache during burn-in because those objects are
+  not retained by `make_recurrent_carry(...)`
+- `loss_total` and all logged loss averages are computed over the trainable
+  suffix only, not over the burn-in transitions
+- this is intended for speed/memory exploration on 2x40GB nodes; it preserves
+  the v2.2 state/action architecture but is not equivalent to full-BPTT
+  `unroll_steps=9`
+- current 2026-04-30 cloud evidence: the fixed smoke
+  `picf_v22_stateonly_burnin8_fixed_smoke_20260430_r3` ran with
+  `burnin_steps=8`, `burnin_mode=state_only`, `unroll_steps=1`, reached
+  ordinary `step=10`, completed final `step=11`, and saved a full checkpoint at
+  `.../picf_v22_stateonly_burnin8_fixed_smoke_20260430_r3/11`
+- observed speed was about `0.055-0.061 steps/sec` (`16.4-18.3 s/step`) with
+  eight no-grad burn-in transitions and one trainable suffix transition
+- the previous rank-liveness failure was not a burn-in math issue; it was traced
+  to main-rank-only final visual diagnostics and duplicate post-clip FSDP grad
+  scanning. Final visual diagnostics are now interval-only, and logging reuses
+  the existing clip result instead of launching a second grad scan
+- `state_only` is therefore a valid experimental speed path, but it is still not
+  the maintained long-run default until it has a CALVIN quality comparison
+- do not use `--burnin-steps` with `--picf-mode ablated`; the trainer rejects it
+  because the ablated PI0.5 path has no PICF recurrent carry
+- recommended sweep order:
+  - compare `burnin_steps=4/8/12` for speed and CALVIN quality
+  - avoid promoting any state-only burn-in setting without a separate speed and
+    evaluation check
 
 Detached cloud launch rule:
 
@@ -456,12 +603,22 @@ Current v2.2 long-run training profile:
 - `--diagnostic-interval 0`
 - `--training-strategy fsdp_full_shard` for the current 4x40GB A100 FSDP investigation profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
-- `--visual-finetune-mode full|frozen` is the supported visual-backbone switch on this profile. `full` is the default all-backbone route; `frozen` keeps V-JEPA fixed while leaving the rest of the stack unchanged.
+- `--perception-finetune-mode full|frozen` is the supported operator-facing
+  backbone trainability switch on this profile. `full` is the default
+  all-backbone route; `frozen` freezes Sonata, V-JEPA, and AnyTouch while
+  leaving the PI0.5 semantic/action stack and PICF heads trainable.
+- `--visual-finetune-mode full|frozen` remains a lower-level visual-only
+  compatibility switch; prefer the top-level perception switch for maintained
+  launch profiles.
 - the standard FSDP profile uses flat-parameter mode (`use_orig_params=False`) together with `backward_prefetch=BACKWARD_POST` and `limit_all_gathers=True`, so the 4x40GB job reduces parameter-view residency before changing anything about the optimization objective
 - the semantic FSDP path now pre-wraps the directly called PI0/PaliGemma runtime hot leaves as nested exact shards (`embed_tokens`, per-layer `q/k/v/o`, per-layer `mlp`, and PI0 action/time projections), then applies the mixed-dtype semantic root wrapper only to the remaining parameters; the SigLIP vision tower and multimodal projector currently stay under the outer semantic root because their current image-path implementations are not yet nested-FSDP-safe under the present view-alias constraints
 - the standard FSDP profile now recursively splits large uniform-dtype subtrees with a 512MiB parameter-storage budget per boundary, and it shards the safe core transformer stacks (`token_fusion`, `obs_self`, `posterior_self`, `task_self`, `predictive_world`, `predictive_semantic_world`, `control_world`) before the root wrapper so the remaining root shard stays light
 - those safe core transformer stacks are now also explicitly reattached back onto `core` after wrapping; this is part of the 4x40GB contract so the root FSDP wrapper does not silently pull them back into one monolithic flat-parameter shard
-- the root FSDP wrapper now ignores fully frozen backbone subtrees instead of flattening mixed `requires_grad` parameter sets. This is required for `visual_finetune_mode=frozen` and is part of the standard 40GB engineering contract whenever a backbone is frozen under full-shard training.
+- the root FSDP wrapper now ignores fully frozen backbone subtrees instead of
+  flattening mixed `requires_grad` parameter sets. This is required for
+  `perception_finetune_mode=frozen` and is part of the standard 40GB
+  engineering contract whenever perception backbones are frozen under
+  full-shard training.
 - transformer stacks on this profile now materialize every incoming activation once at stack entry before attention. PICF builds many `[1, T, C]` batches via `tokens[None, :]`, and FSDP can also surface storage-sharing tensors whose aliasing is not reliably visible through `_base`; the stack-entry clone is mathematically exact and avoids FSDP/autograd multi-view alias failures inside residual attention blocks
 - the training stack still supports checkpointing the full `_PicfWindowTrainer.forward(...)` window body during training. That remains an exact fallback for extra peak-memory reduction, and the checkpoint input is still a standalone dummy leaf on the active CUDA device rather than a view into any FSDP flat parameter, so recompute keeps exact training math without feeding full-parameter gradients back into local shard metadata. It is now an explicit operator knob rather than something the foundation profile silently forces on every launch.
 - the custom PI0/Gemma dual-branch semantic attention path on this profile uses SDPA instead of the eager attention workspace, which removes the large step-2 attention buffer without changing the training objective.

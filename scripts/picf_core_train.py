@@ -897,6 +897,9 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
 def _normalize_train_args(args: argparse.Namespace) -> None:
     args.training_strategy = str(getattr(args, "training_strategy", "ddp")).lower().replace("-", "_")
     args.picf_mode = str(getattr(args, "picf_mode", "enabled")).lower().replace("-", "_")
+    args.burnin_mode = str(getattr(args, "burnin_mode", "full")).lower().replace("-", "_")
+    args.burnin_steps = int(getattr(args, "burnin_steps", 0) or 0)
+    args.effective_unroll_steps = int(getattr(args, "unroll_steps", 1)) + int(args.burnin_steps)
     perception_finetune_mode = str(getattr(args, "perception_finetune_mode", "auto")).lower().replace("-", "_")
     if perception_finetune_mode not in {"auto", "full", "frozen"}:
         raise ValueError(
@@ -1178,6 +1181,23 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         value = int(getattr(args, name))
         if value < 1:
             raise ValueError(f"{name} must be >= 1, got {value}.")
+    if int(getattr(args, "burnin_steps", 0)) < 0:
+        raise ValueError(f"burnin_steps must be >= 0, got {args.burnin_steps}.")
+    if str(getattr(args, "burnin_mode", "full")) not in {"full", "state_only"}:
+        raise ValueError(
+            "burnin_mode must be one of {'full', 'state_only'}, "
+            f"got {getattr(args, 'burnin_mode', None)!r}."
+        )
+    if int(getattr(args, "effective_unroll_steps", 0)) != (
+        int(args.unroll_steps) + int(getattr(args, "burnin_steps", 0))
+    ):
+        raise ValueError(
+            "effective_unroll_steps must equal burnin_steps + unroll_steps, "
+            f"got effective_unroll_steps={getattr(args, 'effective_unroll_steps', None)} "
+            f"burnin_steps={getattr(args, 'burnin_steps', None)} unroll_steps={args.unroll_steps}."
+        )
+    if int(args.burnin_steps) > 0 and not _picf_mode_enabled(args):
+        raise ValueError("burnin_steps > 0 requires picf_mode=enabled; ablated PI0.5 has no PICF carry to burn in.")
     if int(args.warmup_steps) < 0:
         raise ValueError(f"warmup_steps must be >= 0, got {args.warmup_steps}.")
     if float(args.lr) <= 0.0:
@@ -1930,6 +1950,20 @@ def _clip_grad_norm_for_training_model(model: torch.nn.Module, *, max_norm: floa
     return float(torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=float(max_norm)))
 
 
+def _postclip_grad_norm_for_logging(
+    *,
+    preclip_grad_norm: float,
+    grad_clip_threshold: float | None,
+    grad_clip_applied: bool,
+) -> float:
+    """Return the post-clip norm estimate without issuing another distributed grad scan."""
+
+    preclip = float(preclip_grad_norm)
+    if not bool(grad_clip_applied) or grad_clip_threshold is None:
+        return preclip
+    return float(min(preclip, float(grad_clip_threshold)))
+
+
 @dataclasses.dataclass
 class _GradClipController:
     mode: str
@@ -2506,11 +2540,15 @@ class _PicfWindowTrainer(torch.nn.Module):
         use_visual_override: bool,
         loss_config: PicfTransitionLossConfig | None = None,
         picf_mode: str = "enabled",
+        burnin_steps: int = 0,
+        burnin_mode: str = "full",
     ) -> None:
         super().__init__()
         self.core = core
         self.semantic_encoder = semantic_encoder
         self.picf_mode = str(picf_mode).lower().replace("-", "_")
+        self.burnin_steps = int(burnin_steps)
+        self.burnin_mode = str(burnin_mode).lower().replace("-", "_")
         self.policy = PicfPi05Policy(
             core=core,
             semantic_encoder=semantic_encoder,
@@ -2690,13 +2728,61 @@ class _PicfWindowTrainer(torch.nn.Module):
         physical_visual_real_seq: list[torch.Tensor | None] = []
         semantic_visual_real_seq: list[torch.Tensor | None] = []
         pending: _PendingTransitionLoss | None = None
-        for index in range(len(window.frames) - 1):
+        transition_count = len(window.frames) - 1
+        train_start_index = min(max(int(self.burnin_steps), 0), transition_count - 1)
+        for index in range(transition_count):
             if debug_phase_label is not None:
                 logging.info("%s transition=%s begin", debug_phase_label, index)
             current = dataclasses.replace(window.frames[index], reset_scaffold=(index == 0))
             nxt = dataclasses.replace(window.frames[index + 1], reset_scaffold=False)
             current_visual = _rgb_visual_override(current.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
             next_visual = _rgb_visual_override(nxt.rgb_static, grid=self.visual_grid) if self.use_visual_override else None
+            if index < train_start_index:
+                step_start = time.perf_counter()
+                with torch.no_grad():
+                    if self.burnin_mode == "state_only":
+                        burnin_state = self.policy.burnin_recurrent_transition(
+                            previous=previous,
+                            current=current,
+                            visual_map_override=current_visual,
+                        )
+                        burnin_forward = None
+                    else:
+                        burnin_forward = self.policy.forward_train_transition(
+                            previous=previous,
+                            current=current,
+                            visual_map_override=current_visual,
+                            action_chunk_target=None,
+                        )
+                        burnin_state = burnin_forward.next_state
+                burnin_forward_sec = time.perf_counter() - step_start
+                if debug_phase_label is not None:
+                    logging.info(
+                        "%s transition=%s burnin_mode=%s burnin_forward_sec=%.3f",
+                        debug_phase_label,
+                        index,
+                        self.burnin_mode,
+                        burnin_forward_sec,
+                    )
+                if burnin_state is None:
+                    raise RuntimeError("PICF burn-in transition did not produce a recurrent state.")
+                if capture_visual_diagnostics and burnin_forward is not None:
+                    physical_visual_real = burnin_forward.output.state.predictive.physical_prediction_cache.visual_real
+                    semantic_visual_real = burnin_forward.output.state.predictive.prediction_cache.visual_real
+                    physical_visual_real_seq.append(
+                        None if physical_visual_real is None else physical_visual_real.detach().to(device="cpu")
+                    )
+                    semantic_visual_real_seq.append(
+                        None if semantic_visual_real is None else semantic_visual_real.detach().to(device="cpu")
+                    )
+                elif capture_visual_diagnostics:
+                    physical_visual_real = burnin_state.predictive.physical_prediction_cache.visual_real
+                    physical_visual_real_seq.append(
+                        None if physical_visual_real is None else physical_visual_real.detach().to(device="cpu")
+                    )
+                    semantic_visual_real_seq.append(None)
+                previous = burnin_state
+                continue
             step_start = time.perf_counter()
             action_chunk_target = current.action_chunk if current.action_chunk is not None else current.action
             policy_forward = self.policy.forward_train_transition(
@@ -2942,7 +3028,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + pending.tactile_active_rate
 
         assert metrics is not None
-        denom = float(len(window.frames) - 1)
+        denom = float(len(totals))
         mean_total = torch.stack(totals).mean()
         result: dict[str, Any] = {
             "loss_total": mean_total,
@@ -4318,7 +4404,7 @@ def train(args: argparse.Namespace) -> None:
             args.calvin_root,
             split=args.split,
             backend=args.backend,
-            unroll_steps=args.unroll_steps,
+            unroll_steps=args.effective_unroll_steps,
             action_horizon=args.action_horizon,
             use_tactile=bool(args.use_tactile),
             tactile_sensor_names=args.tactile_sensor_names,
@@ -4345,6 +4431,8 @@ def train(args: argparse.Namespace) -> None:
             use_visual_override=use_visual_override,
             loss_config=_build_loss_config(args),
             picf_mode=args.picf_mode,
+            burnin_steps=args.burnin_steps,
+            burnin_mode=args.burnin_mode,
         ).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
         model = _wrap_model_for_training_strategy(model, args=args, device=device)
@@ -4429,7 +4517,7 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s picf_mode=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s picf_mode=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s wandb=%s",
                 world_size,
                 args.training_strategy,
                 args.picf_mode,
@@ -4440,6 +4528,10 @@ def train(args: argparse.Namespace) -> None:
                 args.min_lr,
                 args.warmup_steps,
                 args.save_interval,
+                args.unroll_steps,
+                args.burnin_steps,
+                args.burnin_mode,
+                args.effective_unroll_steps,
                 args.optimizer_sharding,
                 args.optimizer_checkpoint_mode,
                 bool(getattr(args, "window_activation_checkpointing", False)),
@@ -4615,8 +4707,7 @@ def train(args: argparse.Namespace) -> None:
                 logging.info("phase step=%s rank=%s zero_grad_done", int(step + 1), rank)
             trainer_module = _unwrap_training_model(model)
             capture_visual_diagnostics = bool(
-                (args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0))
-                or ((step + 1) == args.num_train_steps)
+                args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0)
             )
             if not trainer_module.policy.picf_enabled:
                 capture_visual_diagnostics = False
@@ -4849,21 +4940,14 @@ def train(args: argparse.Namespace) -> None:
                 pbar.update(1)
                 pbar.set_postfix({"loss": f"{current_total:.4f}", "lr": f"{lr:.2e}", "step": int(step + 1)})
 
-            if is_main and capture_visual_diagnostics:
-                _save_visual_diagnostics(
-                    output_dir=output_dir,
-                    step=step + 1,
-                    window=window,
-                    physical_visual_real_seq=list(outputs.get("diagnostic_physical_visual_real_seq", [])),
-                    semantic_visual_real_seq=list(outputs.get("diagnostic_semantic_visual_real_seq", [])),
-                    visual_real_grid=trainer_module.core.config.visual_real_grid,
-                    visual_real_upscale=args.diagnostic_visual_upscale,
-                )
-
             should_log = ((step + 1) % args.log_interval == 0) or ((step + 1) == args.num_train_steps)
             if should_log:
                 elapsed = max(time.time() - interval_start, 1e-6)
-                local_grad = _grad_norm_for_training_model(model)
+                local_grad = _postclip_grad_norm_for_logging(
+                    preclip_grad_norm=preclip_local_grad,
+                    grad_clip_threshold=grad_clip_threshold,
+                    grad_clip_applied=grad_clip_applied,
+                )
                 averages = metric_accum.averages()
                 retried_windows = float(retried_windows_interval)
                 if world_size > 1:
@@ -4900,6 +4984,21 @@ def train(args: argparse.Namespace) -> None:
                 interval_start = time.time()
                 steps_in_interval = 0
                 retried_windows_interval = 0
+
+            if is_main and capture_visual_diagnostics:
+                if debug_phase_enabled:
+                    logging.info("phase step=%s rank=%s visual_diagnostics_begin", int(step + 1), rank)
+                _save_visual_diagnostics(
+                    output_dir=output_dir,
+                    step=step + 1,
+                    window=window,
+                    physical_visual_real_seq=list(outputs.get("diagnostic_physical_visual_real_seq", [])),
+                    semantic_visual_real_seq=list(outputs.get("diagnostic_semantic_visual_real_seq", [])),
+                    visual_real_grid=trainer_module.core.config.visual_real_grid,
+                    visual_real_upscale=args.diagnostic_visual_upscale,
+                )
+                if debug_phase_enabled:
+                    logging.info("phase step=%s rank=%s visual_diagnostics_done", int(step + 1), rank)
 
             should_save = ((step + 1) % args.save_interval == 0) or ((step + 1) == args.num_train_steps)
             if should_save:
@@ -4958,6 +5057,27 @@ def main() -> None:
     parser.add_argument("--accum-steps", type=int, default=1)
     parser.add_argument("--max-empty-window-retries", type=int, default=32)
     parser.add_argument("--unroll-steps", type=int, default=2)
+    parser.add_argument(
+        "--burnin-steps",
+        type=int,
+        default=0,
+        help=(
+            "PICF-only no-grad recurrent warmup transitions before the trainable suffix. "
+            "When this is >0, --unroll-steps remains the number of transitions that receive "
+            "flow/transition losses and gradients; the effective sampled window length is "
+            "burnin_steps + unroll_steps."
+        ),
+    )
+    parser.add_argument(
+        "--burnin-mode",
+        choices=["full", "state_only"],
+        default="full",
+        help=(
+            "Burn-in execution path. 'full' preserves the original full no-grad PICF policy forward. "
+            "'state_only' advances only the recurrent carry needed by future physical posterior/innovation, "
+            "skipping semantic task readout, conditioned control, PI0.5 flow loss, and conditioned future cache."
+        ),
+    )
     parser.add_argument(
         "--action-horizon",
         type=int,

@@ -2818,6 +2818,96 @@ class PicfFullCore(nn.Module):
             ),
         )
 
+    def recurrent_burnin_step(
+        self,
+        observation: PicfObservation,
+        previous: PicfPreviousState | None = None,
+        *,
+        point_features_override: torch.Tensor | np.ndarray | None = None,
+        visual_map_override: torch.Tensor | np.ndarray | None = None,
+        action_future: torch.Tensor | np.ndarray | None = None,
+    ) -> PicfRecurrentCarryState:
+        """Advance only the canonical recurrent carry for suffix-gradient burn-in.
+
+        This deliberately skips semantic task readout, conditioned control,
+        PI0.5 action flow loss, and conditioned future cache construction. Those
+        objects are current-step control views and are not retained by
+        `make_recurrent_carry(...)`; the recurrent carry is posterior +
+        tactile-contact carry + world-only physical predictive cache.
+        """
+        if observation.G_t is None:
+            observation.G_t = self.local_frame.make_transform(observation.robot_obs)
+        if observation.point_set is None:
+            focus_centers_world = _focus_centers_world_from_observation(observation)
+            observation.point_set = self.pointcloud_builder(
+                {
+                    "rgb_static": observation.rgb_static,
+                    "depth_static": observation.depth_static,
+                    "rgb_gripper": observation.rgb_gripper,
+                    "depth_gripper": observation.depth_gripper,
+                    "robot_obs": observation.robot_obs,
+                    "focus_centers_world": focus_centers_world,
+                    "focus_radius_m": self.config.crop_radius_m,
+                }
+            )
+        if observation.reset_scaffold:
+            previous = None
+        meta = self._build_runtime_meta(observation, previous.runtime_meta if previous is not None else None)
+        if previous is None and not meta.point_contract_ok:
+            raise RuntimeError("PICF core requires a valid xyzrgb point cloud on the first control step.")
+        frame_context = self._point_subset(observation) if meta.point_contract_ok else None
+        if previous is None and frame_context is not None and frame_context.points_local.shape[0] == 0:
+            raise RuntimeError("PICF core requires non-empty local xyzrgb support on the first control step.")
+        point_features = (
+            self._extract_point_features(frame_context, point_features_override)
+            if frame_context is not None
+            else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
+        )
+        visual_map = self._visual_map(observation, visual_map_override, meta)
+        tactile_bundle = self._tactile_features(observation, meta)
+        token_field, dense_memory = self._build_token_field(
+            observation,
+            frame_context,
+            point_features,
+            visual_map,
+            tactile_bundle,
+            meta,
+            previous,
+        )
+        observation_anchors = self._build_observation_anchors(token_field, dense_memory)
+        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory)
+        proprio = _to_tensor(
+            np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
+            device=self.device,
+            dtype=self.dtype,
+        )
+        proprio_token = self.proprio_proj(proprio[None, :])[0]
+        action_source = (
+            action_future
+            if action_future is not None
+            else (observation.action_chunk if observation.action_chunk is not None else observation.action)
+        )
+        default_action, _ = self._default_predictive_action(action_source)
+        executed_action = self._executed_action(observation, default_action)
+        _, _, physical_prediction_cache = self._build_physical_predictive_basis(
+            posterior,
+            proprio_token=proprio_token,
+            executed_action=executed_action,
+        )
+        return PicfRecurrentCarryState(
+            runtime_meta=meta,
+            token_field=PicfRecurrentTokenFieldState(
+                tactile_contact_gate=token_field.tactile_contact_gate,
+                tactile_anchor_mask=token_field.tactile_anchor_mask,
+                tactile_contact_score_ema=token_field.tactile_contact_score_ema,
+            ),
+            posterior=posterior,
+            predictive=PicfRecurrentPredictiveState(
+                executed_action=executed_action,
+                physical_prediction_cache=physical_prediction_cache,
+            ),
+        )
+
     def _predictive_state(
         self,
         observation: PicfObservation,

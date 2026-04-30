@@ -44,6 +44,8 @@ def _base_args() -> argparse.Namespace:
         accum_steps=1,
         max_empty_window_retries=32,
         unroll_steps=2,
+        burnin_steps=0,
+        burnin_mode="full",
         action_horizon=16,
         stride=4,
         max_points=1024,
@@ -195,6 +197,38 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     args = _base_args()
     _MODULE._normalize_train_args(args)
     assert args.warmup_steps == 600
+
+
+def test_normalize_train_args_tracks_burnin_effective_window_length() -> None:
+    args = _base_args()
+    args.unroll_steps = 1
+    args.burnin_steps = 8
+    args.burnin_mode = "state-only"
+    _MODULE._normalize_train_args(args)
+
+    assert args.unroll_steps == 1
+    assert args.burnin_steps == 8
+    assert args.burnin_mode == "state_only"
+    assert args.effective_unroll_steps == 9
+
+
+def test_validate_train_args_rejects_burnin_for_ablated_mode() -> None:
+    args = _base_args()
+    args.picf_mode = "ablated"
+    args.burnin_steps = 8
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="burnin_steps > 0 requires picf_mode=enabled"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_rejects_unknown_burnin_mode() -> None:
+    args = _base_args()
+    args.burnin_mode = "surprise"
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="burnin_mode must be one of"):
+        _MODULE._validate_train_args(args)
 
 
 def test_normalize_train_args_inherits_prompt_state_normalization_from_action_contract() -> None:
@@ -1846,6 +1880,24 @@ def test_collect_nonfinite_diagnostics_ignore_uninitialized_lazy_parameters() ->
     assert param_diag["samples"][0]["group"] == "ready"
 
 
+def test_postclip_grad_norm_for_logging_avoids_second_grad_scan() -> None:
+    assert _MODULE._postclip_grad_norm_for_logging(
+        preclip_grad_norm=3.0,
+        grad_clip_threshold=None,
+        grad_clip_applied=False,
+    ) == pytest.approx(3.0)
+    assert _MODULE._postclip_grad_norm_for_logging(
+        preclip_grad_norm=3.0,
+        grad_clip_threshold=1.25,
+        grad_clip_applied=True,
+    ) == pytest.approx(1.25)
+    assert _MODULE._postclip_grad_norm_for_logging(
+        preclip_grad_norm=0.5,
+        grad_clip_threshold=1.25,
+        grad_clip_applied=True,
+    ) == pytest.approx(0.5)
+
+
 def test_metric_accumulator_reports_tactile_contact_observability() -> None:
     accum = _MODULE._MetricAccumulator(
         tactile_contact_prob_mean=0.6,
@@ -2124,6 +2176,120 @@ def test_picf_window_trainer_reuses_middle_frame_targets_with_detached_override(
         (2, True, 2.0, False),
         (3, False, None, None),
     ]
+
+
+def test_picf_window_trainer_state_only_burnin_skips_policy_flow_until_suffix() -> None:
+    class _DummyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.device = torch.device("cpu")
+            self.dtype = torch.float32
+            self.config = types.SimpleNamespace(visual_real_grid=4)
+
+    def _dummy_output() -> types.SimpleNamespace:
+        return types.SimpleNamespace(
+            state=types.SimpleNamespace(
+                predictive=types.SimpleNamespace(
+                    physical_prediction_cache=types.SimpleNamespace(visual_real=None),
+                    prediction_cache=types.SimpleNamespace(visual_real=None),
+                )
+            ),
+            debug={
+                "projective_candidate_density": 0.125,
+                "tactile_contact_prob_mean": 0.25,
+                "tactile_active_rate": 0.5,
+            },
+        )
+
+    class _DummyPolicy:
+        picf_enabled = True
+
+        def __init__(self) -> None:
+            self.burnin_calls: list[tuple[int, object]] = []
+            self.train_calls: list[tuple[int, object]] = []
+
+        def burnin_recurrent_transition(self, *, current, previous=None, visual_map_override=None):
+            del visual_map_override
+            self.burnin_calls.append((int(current.step_id), previous))
+            return f"burnin-state-{current.step_id}"
+
+        def forward_train_transition(self, *, current, previous=None, visual_map_override=None, action_chunk_target=None):
+            del visual_map_override, action_chunk_target
+            self.train_calls.append((int(current.step_id), previous))
+            return types.SimpleNamespace(
+                output=_dummy_output(),
+                observed=None,
+                flow_override=None,
+                next_state=f"train-state-{current.step_id}",
+            )
+
+    dummy_losses = types.SimpleNamespace(
+        total=torch.tensor(1.0),
+        action=torch.tensor(0.1),
+        action_active7=torch.tensor(0.04),
+        action_pos=torch.tensor(0.03),
+        action_rot=torch.tensor(0.04),
+        action_gripper=torch.tensor(0.03),
+        visual_latent=torch.tensor(0.1),
+        visual_real=torch.tensor(0.1),
+        tactile_real=torch.tensor(0.1),
+        tactile_map=torch.tensor(0.05),
+        tactile_aux=torch.tensor(0.05),
+        point_real=torch.tensor(0.1),
+        semantic_future_aux=torch.tensor(0.1),
+        semantic_group_raw=torch.tensor(0.025),
+        semantic_group_capped=torch.tensor(0.02),
+        physical_aux=torch.tensor(0.15),
+        physical_aux_capped=torch.tensor(0.03),
+        alignment=torch.tensor(0.1),
+        alignment_raw=torch.tensor(0.11),
+        total_minus_action=torch.tensor(0.9),
+        anchor_pv=torch.tensor(0.1),
+        pv_weak=torch.tensor(0.1),
+        focus_pv=torch.tensor(0.1),
+        pt=torch.tensor(0.1),
+        physical_aux_budget_scale=torch.tensor(1.0),
+        semantic_aux_budget_scale=torch.tensor(1.0),
+        alignment_budget_scale=torch.tensor(1.0),
+    )
+
+    trainer = _MODULE._PicfWindowTrainer(
+        _DummyCore(),
+        semantic_encoder=None,
+        visual_grid=8,
+        use_visual_override=False,
+        burnin_steps=1,
+        burnin_mode="state_only",
+    )
+    policy = _DummyPolicy()
+    trainer.policy = policy
+
+    frame0 = PicfObservation(
+        rgb_static=np.zeros((8, 8, 3), dtype=np.uint8),
+        depth_static=np.zeros((8, 8), dtype=np.float32),
+        robot_obs=np.zeros((15,), dtype=np.float32),
+        prompt="test",
+        step_id=1,
+        segment_id=0,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+        action=np.zeros((7,), dtype=np.float32),
+    )
+    frame1 = dataclasses.replace(frame0, step_id=2, reset_scaffold=False)
+    frame2 = dataclasses.replace(frame0, step_id=3, reset_scaffold=False)
+    window = _MODULE._TransitionWindow(segment_id=0, start_step_id=0, prompt="test", frames=(frame0, frame1, frame2))
+
+    original_loss = _MODULE.compute_transition_loss
+    try:
+        _MODULE.compute_transition_loss = lambda *args, **kwargs: dummy_losses
+        result = trainer(window)
+    finally:
+        _MODULE.compute_transition_loss = original_loss
+
+    assert policy.burnin_calls == [(1, None)]
+    assert policy.train_calls == [(2, "burnin-state-1")]
+    assert result["loss_total"].item() == pytest.approx(1.0)
+    assert result["loss_action"].item() == pytest.approx(0.1)
 
 
 def test_picf_window_trainer_ablated_uses_action_only_metrics() -> None:

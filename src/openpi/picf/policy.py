@@ -83,6 +83,35 @@ class PicfPi05Policy:
             return self.core.make_recurrent_carry(state)
         return state
 
+    def burnin_recurrent_transition(
+        self,
+        current: PicfObservation,
+        *,
+        previous: PicfPreviousState | None = None,
+        point_features_override: torch.Tensor | np.ndarray | None = None,
+        visual_map_override: torch.Tensor | np.ndarray | None = None,
+    ) -> PicfPreviousState:
+        if not self.picf_enabled:
+            raise RuntimeError("PICF recurrent burn-in requires picf_enabled=True.")
+        if not hasattr(self.core, "recurrent_burnin_step"):
+            fallback = self.forward_train_transition(
+                current,
+                previous=previous,
+                point_features_override=point_features_override,
+                visual_map_override=visual_map_override,
+                action_chunk_target=None,
+            )
+            if fallback.next_state is None:
+                raise RuntimeError("PICF burn-in fallback did not produce a recurrent state.")
+            return fallback.next_state
+        return self.core.recurrent_burnin_step(
+            current,
+            previous=previous,
+            point_features_override=point_features_override,
+            visual_map_override=visual_map_override,
+            action_future=current.action_chunk if current.action_chunk is not None else current.action,
+        )
+
     def _pi05_only_train_transition(
         self,
         current: PicfObservation,

@@ -1,9 +1,10 @@
 # PICF v2.2
 
-Date: 2026-04-20
+Date: 2026-04-30
 Repo: `/home/siyuanyue/Documents/openpi`
 Status: current local v2.2 architecture record after the one-shot
-action/control contract rewrite and the current exhaustive local audit
+action/control contract rewrite, the frozen-perception bring-up, and the
+current recurrent burn-in speed-path audit
 
 ## Quick Navigation
 
@@ -33,6 +34,9 @@ action/control contract rewrite and the current exhaustive local audit
   Training, serving, and CALVIN validation workflow.
   The current canonical full PICF long-run training command is recorded in
   [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch).
+  The frozen-perception profile and experimental burn-in / suffix-gradient
+  `state_only` speed path are recorded in
+  [`Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile).
   The current cloud-tested 20-sequence video evaluation recipes, including the
   full PICF `step=7500` run and the maintained PI0.5-only ablation run, are
   recorded in
@@ -64,27 +68,89 @@ As of the latest local audit pass:
 
 Latest fully local verification evidence:
 
-- `pytest -q src/openpi/picf/core/training_test.py` -> `18 passed`
-- `pytest -q src/openpi/picf/paligemma/wrapper_test.py` -> `23 passed`
-- `pytest -q scripts/picf_core_train_test.py` -> `88 passed`
-- `pytest -q src/openpi/picf/policy_test.py scripts/serve_picf_policy_test.py` ->
-  policy/serve ablation coverage passes
-- `pytest -q scripts/serve_picf_policy_test.py src/openpi/picf/policy_test.py scripts/picf_core_train_test.py src/openpi/picf/core/training_test.py src/openpi/picf/core/pipeline_test.py src/openpi/picf/paligemma/wrapper_test.py scripts/picf_resume_train_test.py`
-  -> `203 passed`
+- local syntax / diff hygiene:
+  - `python -m py_compile scripts/picf_core_train.py scripts/picf_core_train_test.py src/openpi/picf/policy.py src/openpi/picf/core/pipeline.py`
+  - `git diff --check`
+- remote targeted burn-in tests:
+  - `pytest -q scripts/picf_core_train_test.py -k "burnin or state_only or postclip"`
+  - `5 passed`
 - `python scripts/verify_picf_contract.py` -> static checks, documentation
   checks, targeted invariance regressions, core regression suite, and smoke
   training check all pass
+  - latest remote verifier evidence: `231 passed` in the core regression suite
+
+Latest 2x40GB frozen-perception burn-in smoke evidence:
+
+- run name:
+  `picf_v22_stateonly_burnin8_fixed_smoke_20260430_r3`
+- command shape:
+  `--unroll-steps 1 --burnin-steps 8 --burnin-mode state_only`
+- result:
+  - ordinary `step=10` completed
+  - final `step=11` completed
+  - full checkpoint saved at
+    `/mnt/checkpoints/picf_core/picf_core/picf_v22_stateonly_burnin8_fixed_smoke_20260430_r3/11`
+- observed speed:
+  - about `0.055-0.061 steps/sec`
+  - about `16.4-18.3 s/step`
 
 Performance note:
 
 - the current main open issue is still throughput, not mathematical contract
   correctness
-- the latest measured short-run exact-memory speed evidence remains the
-  historical 5-step probe recorded in
-  [`/tmp/picf_v22_speed_audit_20260420.md`](/tmp/picf_v22_speed_audit_20260420.md)
 - do not read this file as claiming that a full local or cloud `30000`-step run
   has already completed on the current code unless that evidence is recorded
   explicitly
+
+### 0.1 Current Training / Model Summary
+
+Use this subsection as the fast operator summary. The detailed command blocks
+remain in
+[`docs/CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md).
+
+Current full PICF model contract:
+
+- physical core:
+  - language-free observation anchors
+  - language-free physical posterior `W_t`
+  - world-only innovation from previous `K_{t-1}^{phys}`
+- semantic/control layer:
+  - PaliGemma / PI0.5 semantic tokens remain native-width and trainable unless
+    explicitly frozen by a future experiment
+  - semantic enters PICF through current-step task readout, not by raw semantic
+    prefix injection into the physical posterior or innovation
+  - one canonical conditioned control state `C_t`
+  - `C_t^{pi}` is a PI0.5 prefix view of `C_t`, not a second control state
+- final action:
+  - only PI0.5 flow matching / sampler is the final action path
+  - the old PICF-local direct 7D action head is not the live action generator
+- prediction:
+  - `K_t^{phys}` is computed after the teacher/executed action is known
+  - `K_t^{cond}` is token-level conditioned future cache built from physical
+    prediction tokens plus future-condition tokens
+
+Current training profiles:
+
+| Profile | Use Case | Main Settings | Status |
+| --- | --- | --- | --- |
+| 6x40GB full PICF | Full cotrain when enough GPUs are available | `picf_mode=enabled`, `nproc_per_node=6`, `accum_steps=1`, `unroll_steps=2`, `action_horizon=16`, `save_interval=2500` | Same v2.2 objective, larger global batch than 4x40GB |
+| 4x40GB full PICF | Standard all-backbone full-train reference | `picf_mode=enabled`, `fsdp_full_shard`, all foundation backbones trainable, `save_interval=2500` | Valid full-train profile, memory tight |
+| 2x40GB frozen-perception PICF | Cost-controlled full PICF without full perception cotrain | `perception_finetune_mode=frozen`, `unroll_steps=3`, `action_horizon=16`, `semantic_max_length=200`, conservative photometric augmentation, `save_interval=5000` | Maintained 2x40GB long-run profile |
+| 2x40GB state-only burn-in | Faster long-context recurrent-state probe | `unroll_steps=1`, `burnin_steps=8`, `burnin_mode=state_only` | Smoke-tested through step10/final checkpoint; needs CALVIN quality comparison before becoming default |
+| PI0.5-only ablation | Test the PI0.5 action path without PICF branches | `picf_mode=ablated`, `extra_prefix_tokens=None`, PICF core frozen | Maintained ablation profile, not full PICF |
+
+Default recommendation:
+
+- use full-BPTT `unroll_steps=3` for the current 2x40GB frozen-perception long
+  run when quality is the priority
+- use `state_only` burn-in only when explicitly testing speed/context tradeoffs
+- do not treat `state_only` as equivalent to full-BPTT over
+  `burnin_steps + unroll_steps`; it trains suffix losses on a longer recurrent
+  context but does not backpropagate credit through the burn-in transitions
+- keep `semantic_max_length=200` for CALVIN parity-style runs unless a separate
+  prompt-length experiment is intended
+- keep `action_horizon=16` for CALVIN PI0.5/PICF action training unless a
+  separate horizon sweep is intended
 ## 1. Document Map
 
 This file is the **current local v2.2 architecture record and implementation
@@ -150,10 +216,10 @@ Historical/archive docs:
 
 If you are opening the repo cold, use this order:
 
-1. [`README.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md)
-   PICF entry pointer only.
-2. [`/home/siyuanyue/Documents/openpi/README.md`](/home/siyuanyue/Documents/openpi/README.md)
+1. [`/home/siyuanyue/Documents/openpi/README.md`](/home/siyuanyue/Documents/openpi/README.md)
    Repo-level entry point.
+2. [`src/openpi/picf/README.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md)
+   PICF directory entry pointer.
 3. [`README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md)
    Current live architecture record and implementation audit.
 4. [`README_FROZEN_PERCEPTION_AUGMENTATION.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_FROZEN_PERCEPTION_AUGMENTATION.md)
@@ -165,6 +231,9 @@ If you are opening the repo cold, use this order:
    Runtime / training / rollout workflow.
    For the current canonical full PICF long-run launch, jump directly to
    [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch).
+   For the 2x40GB frozen-perception profile and state-only burn-in speed path,
+   jump directly to
+   [`Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile).
    For the current validated cloud rollout/video test recipes, including
    full PICF `step=7500` serving/evaluation, single-rollout GPU usage, and
    `/tmp` to `/mnt` artifact mirroring, jump directly to
@@ -173,7 +242,7 @@ If you are opening the repo cold, use this order:
    `2500 current optimizer steps ~= 5000 historical no-Sonata PI0.5 steps`
    comparison rule, use the ablated long-run profile in
    [`Section 3`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#3-trainer-smoke-validation).
-6. [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
+7. [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
    Historical pre-v2.2 record only.
 
 ### 1.2 Temporary Audit Companions
@@ -243,6 +312,8 @@ When verifying the local v2.2 codebase, use this navigation split:
   - [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
   - current canonical full PICF long-run launch:
     [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
+  - 2x40GB frozen-perception full PICF and state-only burn-in speed path:
+    [`Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile)
   - current cloud 20-sequence CALVIN video evaluation:
     [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
     This section records that one CALVIN rollout uses one policy-server GPU plus
@@ -1741,12 +1812,22 @@ Current standard long-run launch profile:
 - `--diagnostic-interval 0`
 - `--training-strategy fsdp_full_shard` for the current 4x40GB A100 FSDP investigation profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
-- `--visual-finetune-mode full|frozen` is now the canonical visual-backbone contract. `full` preserves the default all-backbone profile; `frozen` keeps the V-JEPA encoder weights fixed without changing the rest of the training graph.
+- `--perception-finetune-mode auto|full|frozen` is now the canonical
+  operator-facing backbone trainability contract. `full` preserves the default
+  all-backbone profile; `frozen` freezes Sonata, V-JEPA, and AnyTouch while
+  leaving the PI0.5 semantic/action stack and PICF heads trainable.
+- `--visual-finetune-mode full|frozen` remains a lower-level visual-backbone
+  compatibility knob; prefer the top-level perception switch for maintained
+  launch profiles.
 - semantic FSDP wrapping now uses a two-level exact contract: directly called PI0/PaliGemma runtime hot leaves (`embed_tokens`, per-layer `q/k/v/o` projections, per-layer `mlp`, and PI0 action/time projections) are wrapped first as explicit nested leaves, and the remaining semantic root still uses `ignored_states` for the minority float32 stabilizer parameters. The SigLIP vision tower and multimodal projector currently remain under the outer semantic root because their current image-path implementations are not yet nested-FSDP-safe under the present view-alias constraints.
 - FSDP full-shard on this profile should use flat-parameter mode (`use_orig_params=False`) together with `backward_prefetch=BACKWARD_POST` and `limit_all_gathers=True`; the goal is to reduce parameter-view residency and backward all-gather overlap peaks without changing model math
 - standard 4x40GB FSDP sharding is now recursive for large uniform-dtype subtrees with a 512MiB parameter-storage budget per boundary; this lets point/visual/tactile backbone wrappers and safe internal stacks split into smaller shards instead of wrapping an entire uniform subtree as one flat unit
 - safe core stacks are now explicit FSDP child boundaries on this profile: `token_fusion`, `obs_self`, `posterior_self`, `task_self`, `predictive_world`, `predictive_semantic_world`, and `control_world`; the trainer now reattaches those wrapped children back onto `core` before the root wrap, so root FSDP only carries the remaining lighter core/projection parameters instead of one monolithic core shard
-- the root FSDP boundary now explicitly ignores fully frozen backbone subtrees instead of flattening mixed `requires_grad` parameter sets. This is required for `visual_finetune_mode=frozen` and is the mature contract for any future frozen backbone mode, because `use_orig_params=False` root flattening is only valid over uniform trainability.
+- the root FSDP boundary now explicitly ignores fully frozen backbone subtrees
+  instead of flattening mixed `requires_grad` parameter sets. This is required
+  for `perception_finetune_mode=frozen` and is the mature contract for any
+  future frozen backbone mode, because `use_orig_params=False` root flattening
+  is only valid over uniform trainability.
 - transformer-stack entry now materializes every incoming activation once (`x = x.clone()`) before attention. This is mathematically exact and is now part of the 4x40GB contract because many PICF call sites batch tokens via `tokens[None, :]`, while FSDP can also hand stacks storage-sharing tensors whose aliasing is not reliably visible through `_base`; a single stack-entry clone is the clean boundary that prevents autograd multi-view alias failures inside residual attention blocks
 - FSDP grad-norm measurement and percentile clipping on this profile must use an explicit global L2 reduction over local gradient shards instead of `FullyShardedDataParallel.clip_grad_norm_`; the semantic stack intentionally carries both bf16 bulk weights and minority float32 stabilizer parameters, so the stock helper's uniform-dtype assumption is not a valid contract here
 - semantic gradient checkpointing remains enabled on that FSDP path; after routing PI0 flow-loss calls through module `forward(op, ...)` and collapsing the semantic stack to one FSDP boundary, non-reentrant checkpoint recomputation is again the correct memory-saving path rather than a forbidden custom-method re-entry
@@ -1795,6 +1876,7 @@ The current standard 4x40GB training profile is:
 - `grad_clip_window=100`
 - `use_foundation_backbones=True`
 - `use_tactile=True`
+- `perception_finetune_mode=full`
 - `visual_finetune_mode=full`
 - `visual_trainable=True`
 - `tactile_trainable=True`
@@ -1862,6 +1944,155 @@ The 6-GPU extension does not change:
 - physical posterior / innovation boundary
 - task-readout / conditioned-control contract
 - checkpoint cadence
+
+### 8.6.1F Current 2x40GB Frozen-Perception Full-PICF Profile
+
+The current 2x40GB A100 profile is a **full PICF** profile with frozen
+perception backbones. It is intended for cost-controlled runs where the PICF
+architecture, PI0.5 action path, recurrent carry, task readout, conditioned
+control, and future supervision all stay enabled, while the heavy perception
+encoders are treated as fixed feature extractors.
+
+Current cloud-tested operator profile:
+
+- `world_size=2`
+- `training_strategy=fsdp_full_shard`
+- `optimizer_sharding=none`
+- `picf_mode=enabled`
+- `accum_steps=1`
+- `unroll_steps=3`
+- `action_horizon=16`
+- `num_train_steps=30000`
+- `save_interval=5000`
+- `log_interval=100`
+- `semantic_max_length=200`
+- `perception_finetune_mode=frozen`
+- `point_backbone=sonata`
+- `visual_mode=encoder`
+- `visual_feature_mode=hierarchical`
+- `tactile_mode=encoder`
+- `picf_augmentation_mode=photometric`
+- `picf_photometric_strength=conservative`
+- `semantic_gradient_checkpointing=True`
+- `visual_activation_checkpointing=True`
+- `window_activation_checkpointing=False`
+
+Trainability contract:
+
+- Sonata point backbone is frozen.
+- V-JEPA visual backbone is frozen.
+- AnyTouch tactile backbone is frozen.
+- PaliGemma / PI0.5 semantic-action stack remains trainable.
+- PICF task-readout, conditioned-control, posterior/predictive/future heads,
+  and auxiliary losses remain active.
+
+This is **not** the PI0.5-only ablation. It keeps `picf_mode=enabled`.
+
+Geometry-safe augmentation contract:
+
+- the enabled augmentation is conservative photometric augmentation only
+- it does not apply crop / rotation / spatial warps
+- this is intentional because full PICF uses image, point/depth, tactile, and
+  geometric readout streams together; spatially warping RGB alone would break
+  cross-modal geometry unless the same transform were applied coherently to all
+  aligned modalities
+- the augmentation is therefore safe for frozen-perception feature robustness
+  without changing the physical anchor / posterior / innovation contract
+
+Current 2x40GB evidence:
+
+- an initial `unroll_steps=2` smoke run on two A100 40GB GPUs reached
+  `step >= 10`
+- `unroll_steps=3` was then smoke-tested and promoted to the maintained
+  2x40GB long-run setting
+- the maintained `unroll_steps=3` run reached `step >= 10` and continued as a
+  `30000`-step run with `save_interval=5000`
+- `unroll_steps=8` was tested and failed with CUDA OOM during `step=1`
+  backward
+- `unroll_steps=4` was tested and failed with CUDA OOM during `step=2`
+  backward
+- do not run `unroll_steps=4` or `8` on this 2x40GB profile without changing
+  memory strategy
+- early `unroll_steps=3` speed was approximately `24-27 s/step`
+- sampled inter-step memory can look much lower, but probe peaks reached the
+  40GB limit; treat `unroll_steps=3` as the maximum validated setting, not as a
+  roomy configuration
+- if future sample variability causes OOM, fall back to `unroll_steps=2`
+- do not increase `accum_steps` or `action_horizon` on 2x40GB without a fresh
+  smoke test
+
+Experimental burn-in / suffix-gradient mode:
+
+- the trainer also supports `--burnin-steps N`
+- burn-in has two explicit execution modes:
+  - `--burnin-mode full`: original full no-grad PICF policy forward
+  - `--burnin-mode state_only`: recurrent-carry-only burn-in
+- when `burnin_steps > 0`, `--unroll-steps K` means **K trainable suffix
+  transitions**, not total sampled transitions
+- the effective sampled window length is:
+
+```text
+effective_window_steps = burnin_steps + unroll_steps
+```
+
+- burn-in transitions run under `torch.no_grad()`
+- `burnin_mode=full` still executes the full PICF observe/action-finalize
+  state update, using teacher actions to advance the recurrent carry
+- `burnin_mode=state_only` computes only the objects retained by
+  `make_recurrent_carry(...)`:
+  - runtime freshness metadata
+  - tactile contact carry
+  - physical posterior anchors
+  - executed teacher action
+  - world-only `physical_prediction_cache`
+- `state_only` deliberately skips semantic task readout, conditioned control
+  `C_t`, PI0.5 action flow loss, and conditioned future cache during burn-in
+  because these are current-step control views and are not stored in the
+  recurrent carry
+- burn-in transitions do **not** receive PI0.5 flow loss, transition loss, or
+  gradient
+- only the suffix `unroll_steps` transitions are included in `loss_total` and
+  metric denominators
+- this is standard RNN-style truncated BPTT with burn-in: it exposes the suffix
+  loss to a longer recurrent context without multiplying backward memory and
+  time by the full context length
+- it is not identical to full-BPTT `unroll_steps = burnin_steps + K`, because
+  credit assignment does not flow through the burn-in transitions
+- it is only valid for `picf_mode=enabled`; `picf_mode=ablated` has no PICF
+  recurrent carry to burn in, and the trainer rejects that combination
+
+Current status on 2x40GB:
+
+- `state_only` is implemented, unit-tested, and has passed a clean 2026-04-30
+  2x40GB cloud smoke with
+  `--unroll-steps 1 --burnin-steps 8 --burnin-mode state_only`
+- the fixed smoke run
+  `picf_v22_stateonly_burnin8_fixed_smoke_20260430_r3` reached ordinary
+  `step=10`, completed final `step=11`, and saved a full checkpoint at
+  `.../picf_v22_stateonly_burnin8_fixed_smoke_20260430_r3/11`
+- observed speed was about `0.055-0.061 steps/sec` (`16.4-18.3 s/step`) with
+  eight no-grad recurrent burn-in transitions and one trainable suffix
+  transition
+- the previous rank-liveness issue was traced to main-rank-only final visual
+  diagnostics and duplicate post-clip FSDP gradient scanning; final diagnostics
+  are now interval-only, and logging reuses the already computed pre/post clip
+  norm instead of launching a second FSDP grad scan
+- therefore the maintained 2x40GB long-run profile remains full-BPTT
+  `unroll_steps=3` until `state_only` has a CALVIN quality comparison
+- before using `state_only` for a real run, compare `burnin_steps=4/8/12`
+  against full-BPTT
+  `unroll_steps=3` for both speed and CALVIN quality
+- do not promote `burnin_steps=16` until smaller burn-in settings have passed
+  speed and CALVIN checks; it covers more context but can waste forward time
+
+Operator note:
+
+- this profile is the recommended way to approximate JEPA-style frozen
+  perception while preserving the v2.2 PICF control/action architecture
+- if future backbones replace Sonata / V-JEPA / AnyTouch, the same contract
+  should be kept at the interface level: frozen feature extractors feed the
+  same PICF task-readout and PI0.5 action path, rather than adding
+  backbone-specific glue into the recurrent physical core
 
 ### 8.6.1A Current 2x40GB PI0.5-Only Ablation Profile
 
@@ -2158,48 +2389,19 @@ Important clarification:
 
 ### 8.6.5 Current Cloud Launch Templates
 
-The current standard long-run launch template is:
+The executable launch commands are maintained in
+[`docs/CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+to avoid duplicated shell blocks drifting out of sync.
 
-```bash
-cd /root/openpi_run_latest
-export PYTHONPATH=/root/openpi_run_latest/src
-export WANDB_MODE=disabled
-export PYTHONUNBUFFERED=1
+Use:
 
-/root/openpi/.venv/bin/torchrun \
-  --standalone \
-  --nnodes=1 \
-  --nproc_per_node=4 \
-  scripts/picf_core_train.py \
-  --calvin-root /mnt/calvin_data/task_ABC_D \
-  --backend dir \
-  --checkpoint-base-dir /mnt/checkpoints/picf_core \
-  --exp-name <exp_name> \
-  --overwrite \
-  --device cuda \
-  --use-foundation-backbones \
-  --use-tactile \
-  --training-strategy fsdp_full_shard \
-  --optimizer-sharding none \
-  --accum-steps 1 \
-  --num-train-steps 30000 \
-  --save-interval 2500 \
-  --log-interval 100 \
-  --grad-clip-mode percentile \
-  --grad-clip-percentile 75 \
-  --grad-clip-window 100 \
-  --wandb-mode disabled \
-  --no-wandb \
-  --visual-checkpoint-path /root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt \
-  --tactile-checkpoint-path /root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth \
-  --tactile-calibration-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_fingertip_calibration.json \
-  --tactile-backgrounds-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_backgrounds.npz \
-  --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
-  --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
-  --semantic-checkpoint-path /mnt/checkpoints/pi05_base_pytorch \
-  --tokenwise-ff-chunk-size 64 \
-  --semantic-tokenwise-chunk-size 64
-```
+- current canonical 4x40GB full-PICF long-run launch:
+  [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
+- current 2x40GB frozen-perception full-PICF launch and state-only burn-in
+  speed path:
+  [`Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile)
+- current cloud CALVIN video evaluation:
+  [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
 
 The current early-observability verification template is the same command with:
 
@@ -2264,6 +2466,7 @@ Backbone trainability:
 
 - `--use-foundation-backbones`
 - `--use-tactile`
+- `--perception-finetune-mode`
 - `--visual-finetune-mode`
 
 Exact-memory controls:

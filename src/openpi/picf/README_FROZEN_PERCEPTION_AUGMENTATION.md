@@ -1,16 +1,19 @@
 # PICF Frozen Perception And Augmentation Design
 
 Date: 2026-04-30
-Status: design record for the next 2x40GB / frozen-perception profile
+Status: implemented operator contract for the current 2x40GB frozen-perception
+PICF profile and geometry-safe augmentation policy
 
 This document records the intended engineering contract for two related topics:
 
 - freezing large perception backbones without changing the PICF architecture
 - adding train-time augmentation without breaking PICF's multimodal geometry
 
-It is a design and operator contract. It does not claim that every switch below
-is already implemented in the live CLI. When a switch is listed as "needed", it
-must be added before treating the profile as production-ready.
+It is an implementation and operator contract. The executable launch commands
+are maintained in
+[`docs/CALVIN_VALIDATION_README.md Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile).
+The architecture summary and status are maintained in
+[`README_v2.2.md Section 0.1`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md#01-current-training--model-summary).
 
 ## 1. Goal
 
@@ -55,15 +58,17 @@ training_strategy=fsdp_full_shard
 optimizer_sharding=none
 world_size=2
 accum_steps=1
-unroll_steps=2
+unroll_steps=3
 action_horizon=16
 semantic_max_length=200
 semantic_trainable=True
-visual_finetune_mode=frozen
+perception_finetune_mode=frozen
 visual_feature_mode=hierarchical
 point_backbone_trainable=False
 tactile_trainable=False
-picf_augmentation_mode=off
+picf_augmentation_mode=photometric
+picf_photometric_strength=conservative
+save_interval=5000
 ```
 
 Trainable modules:
@@ -91,8 +96,13 @@ Rationale:
 - This is not a model-architecture ablation. The PICF readout and control
   routes still consume the modality evidence; only the backbone weights are
   fixed.
+- `unroll_steps=3` is the current maximum validated full-BPTT window on 2x40GB.
+  `unroll_steps=4` and `8` were tested and OOMed on this profile.
+- Conservative photometric augmentation is geometry-preserving. It changes RGB
+  intensities without moving pixels, point coordinates, camera geometry, robot
+  state, or action labels.
 
-## 3. Current Code Support Versus Needed Cleanup
+## 3. Current Code Support
 
 Already supported:
 
@@ -106,10 +116,15 @@ Already supported:
 - `--picf-photometric-strength conservative|reference`
 - `picf_mode=enabled|ablated`
 
-Needed for a clean profile:
+Operational notes:
 
-- a named launcher/profile for `picf_frozen_perception_2x40`
-- README/CALVIN command snippets once the CLI surface is finalized
+- the maintained command snippets live in
+  [`docs/CALVIN_VALIDATION_README.md Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile)
+- named shell wrappers are optional convenience only; the CLI contract itself is
+  the maintained interface
+- `state_only` burn-in is implemented as an experimental speed path, but the
+  maintained long-run profile remains full-BPTT `unroll_steps=3` until burn-in
+  has a separate CALVIN quality comparison
 
 Do not rely on implicit defaults for this profile. The launch log must print:
 
@@ -119,7 +134,8 @@ visual=encoder(finetune_mode=frozen trainable=False)
 tactile=encoder(trainable=False)
 semantic=paligemma(trainable=True)
 semantic_max_length=200
-picf_augmentation_mode=off
+picf_augmentation_mode=photometric
+picf_photometric_strength=conservative
 ```
 
 ## 4. V-JEPA2.1 Freeze Contract
@@ -131,19 +147,20 @@ PICF receives.
 Current implementation fact:
 
 - `VjepaVisualConfig.trainable=False` disables gradients.
-- The live wrapper currently derives hierarchical output behavior from
-  `trainable`.
+- hierarchical output is controlled by `visual_feature_mode`, not implicitly by
+  whether the backbone is trainable
 
-Required contract:
+Implemented contract:
 
 ```text
 trainable controls gradients.
 feature_mode controls output layout.
 ```
 
-Recommended future fields:
+Current fields:
 
 ```text
+perception_finetune_mode = auto | full | frozen
 visual_finetune_mode = full | frozen
 visual_feature_mode = hierarchical | final
 ```
@@ -178,7 +195,9 @@ preserves the multimodal geometry contract.
 
 ### 5.1 Safe By Default
 
-These can be introduced first, but should still default to `off`:
+These can be introduced first. The repo-wide CLI default remains `off`, while
+the maintained 2x40GB frozen-perception profile explicitly enables
+conservative `photometric`:
 
 - brightness jitter
 - contrast jitter
@@ -200,7 +219,14 @@ Recommended first production option:
 picf_augmentation_mode=off | photometric
 ```
 
-Default:
+Conservative 2x40GB default:
+
+```text
+picf_augmentation_mode=photometric
+picf_photometric_strength=conservative
+```
+
+Pure no-augmentation control runs should explicitly use:
 
 ```text
 picf_augmentation_mode=off
@@ -277,14 +303,27 @@ Current implementation status:
 - `multimodal_geometry` is a reserved fail-fast mode until synchronized
   RGB/depth/point/camera transforms exist
 
-## 7. Recommended Implementation Order
+## 7. Validation Status And Remaining Work
 
-1. Add a named launcher/profile for `picf_frozen_perception_2x40`.
-2. Change that 2x40GB frozen-perception profile to `semantic_max_length=200`.
-3. Add tests proving that `off` is bitwise/shape equivalent to the current path.
-4. Add tests proving that photometric augmentation does not alter point
-   coordinates, robot state, action labels, or camera geometry.
-5. Only then consider a synchronized multimodal geometry augmentation mode.
+Implemented and validated:
+
+- CLI support for `perception_finetune_mode=frozen`
+- CLI support for `semantic_max_length=200`
+- CLI support for `picf_augmentation_mode=off|photometric|multimodal_geometry`
+- fail-fast behavior for reserved `multimodal_geometry`
+- tests proving that `off` preserves the existing path
+- tests proving that photometric augmentation changes image intensities without
+  changing point coordinates, robot state, action labels, or camera geometry
+- cloud smoke tests for the 2x40GB frozen-perception path
+
+Remaining work before promotion beyond the current profile:
+
+- run CALVIN comparisons for photometric-on versus photometric-off
+- run CALVIN comparisons for full-BPTT `unroll_steps=3` versus
+  `state_only` burn-in
+- implement synchronized multimodal geometry transforms only if a future
+  experiment needs crop/rotation and can transform RGB, depth, points, camera
+  intrinsics, and patch coordinate metadata together
 
 ## 8. Acceptance Tests
 
@@ -308,13 +347,16 @@ Required tests before enabling any non-off augmentation in long runs:
 
 ## 9. Operational Recommendation
 
-For the next 2x40GB experiment, use:
+For the maintained 2x40GB full-PICF experiment, use:
 
 ```text
-frozen perception + no augmentation + semantic_max_length=200
+frozen perception + conservative photometric augmentation + semantic_max_length=200
+unroll_steps=3 + action_horizon=16 + save_interval=5000
 ```
 
-Command skeleton:
+The canonical command is maintained in
+[`docs/CALVIN_VALIDATION_README.md Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile).
+The short skeleton below is only a shape reference:
 
 ```bash
 cd /root/openpi_posterior_vla_clean
@@ -336,11 +378,12 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   --training-strategy fsdp_full_shard \
   --optimizer-sharding none \
   --accum-steps 1 \
-  --unroll-steps 2 \
+  --unroll-steps 3 \
   --action-horizon 16 \
   --semantic-max-length 200 \
   --visual-feature-mode hierarchical \
-  --picf-augmentation-mode off \
+  --picf-augmentation-mode photometric \
+  --picf-photometric-strength conservative \
   --num-train-steps 10 \
   --save-interval 10 \
   --log-interval 1 \
@@ -360,4 +403,6 @@ log_interval=1
 ```
 
 Only after memory, speed, and loss are stable should `photometric` augmentation
-be enabled as a separate controlled experiment.
+be compared against `off` as a controlled quality experiment. Do not replace the
+full-BPTT `unroll_steps=3` default with `state_only` burn-in without a separate
+CALVIN quality comparison.
