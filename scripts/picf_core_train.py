@@ -512,6 +512,63 @@ def _rgb_uint8(rgb: np.ndarray) -> np.ndarray:
     return array
 
 
+def _apply_picf_photometric_augmentation(
+    image: np.ndarray,
+    *,
+    rng: np.random.Generator,
+    strength: str,
+) -> np.ndarray:
+    """Apply geometry-preserving RGB jitter for full-PICF training.
+
+    This deliberately avoids crop/rotation/warp. PICF point/depth/camera
+    geometry must stay aligned with the image evidence.
+    """
+    source = np.asarray(image)
+    if source.ndim != 3 or source.shape[-1] != 3:
+        raise ValueError(f"Expected HWC RGB image for photometric augmentation, got shape={source.shape}.")
+    if str(strength).lower().replace("-", "_") == "reference":
+        brightness = float(rng.uniform(0.7, 1.3))
+        contrast = float(rng.uniform(0.6, 1.4))
+        saturation = float(rng.uniform(0.5, 1.5))
+    elif str(strength).lower().replace("-", "_") == "conservative":
+        brightness = float(rng.uniform(0.85, 1.15))
+        contrast = float(rng.uniform(0.8, 1.2))
+        saturation = float(rng.uniform(0.75, 1.25))
+    else:
+        raise ValueError(f"picf_photometric_strength must be one of {{'conservative', 'reference'}}, got {strength!r}.")
+
+    dtype = source.dtype
+    if dtype == np.uint8:
+        x = source.astype(np.float32) / 255.0
+        output_scale = 255.0
+    else:
+        x = source.astype(np.float32)
+        if float(np.nanmax(x)) > 1.5:
+            x = x / 255.0
+            output_scale = 255.0
+        elif float(np.nanmin(x)) < -0.1:
+            x = (x + 1.0) * 0.5
+            output_scale = None
+        else:
+            output_scale = None
+
+    x = np.clip(x, 0.0, 1.0)
+    x = x * brightness
+    mean = np.mean(x, axis=(0, 1), keepdims=True)
+    x = (x - mean) * contrast + mean
+    gray = np.mean(x, axis=-1, keepdims=True)
+    x = gray + (x - gray) * saturation
+    x = np.clip(x, 0.0, 1.0)
+
+    if dtype == np.uint8:
+        return np.clip(np.round(x * 255.0), 0.0, 255.0).astype(np.uint8)
+    if output_scale == 255.0:
+        return np.clip(x * 255.0, 0.0, 255.0).astype(dtype, copy=False)
+    if float(np.nanmin(source.astype(np.float32))) < -0.1:
+        return (x * 2.0 - 1.0).astype(dtype, copy=False)
+    return x.astype(dtype, copy=False)
+
+
 def _decode_visual_real_prediction(
     visual_real: torch.Tensor | None,
     *,
@@ -840,6 +897,23 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
 def _normalize_train_args(args: argparse.Namespace) -> None:
     args.training_strategy = str(getattr(args, "training_strategy", "ddp")).lower().replace("-", "_")
     args.picf_mode = str(getattr(args, "picf_mode", "enabled")).lower().replace("-", "_")
+    perception_finetune_mode = str(getattr(args, "perception_finetune_mode", "auto")).lower().replace("-", "_")
+    if perception_finetune_mode not in {"auto", "full", "frozen"}:
+        raise ValueError(
+            "perception_finetune_mode must be one of {'auto', 'full', 'frozen'}, "
+            f"got {getattr(args, 'perception_finetune_mode', None)!r}."
+        )
+    args.perception_finetune_mode = perception_finetune_mode
+    augmentation_mode = str(getattr(args, "picf_augmentation_mode", "off")).lower().replace("-", "_")
+    if augmentation_mode not in {"off", "photometric", "multimodal_geometry"}:
+        raise ValueError(
+            "picf_augmentation_mode must be one of {'off', 'photometric', 'multimodal_geometry'}, "
+            f"got {getattr(args, 'picf_augmentation_mode', None)!r}."
+        )
+    args.picf_augmentation_mode = augmentation_mode
+    args.picf_photometric_strength = str(
+        getattr(args, "picf_photometric_strength", "conservative")
+    ).lower().replace("-", "_")
     if getattr(args, "grad_clip_mode", None) is None:
         args.grad_clip_mode = "percentile"
     else:
@@ -847,6 +921,16 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
     args.optimizer_sharding = str(getattr(args, "optimizer_sharding", "none")).lower()
     optimizer_checkpoint_mode = str(getattr(args, "optimizer_checkpoint_mode", "auto")).lower().replace("-", "_")
     args.optimizer_checkpoint_mode = optimizer_checkpoint_mode
+    if perception_finetune_mode == "frozen":
+        args.point_backbone_trainable = False
+        args.tactile_trainable = False
+        args.visual_trainable = False
+        args.visual_finetune_mode = "frozen"
+    elif perception_finetune_mode == "full":
+        args.point_backbone_trainable = True
+        args.tactile_trainable = True
+        args.visual_trainable = True
+        args.visual_finetune_mode = "full"
     visual_finetune_mode = str(getattr(args, "visual_finetune_mode", "auto")).lower().replace("-", "_")
     if visual_finetune_mode == "auto":
         visual_finetune_mode = "full" if bool(getattr(args, "visual_trainable", False)) else "frozen"
@@ -1265,6 +1349,16 @@ def _validate_train_args(args: argparse.Namespace) -> None:
     if not _picf_mode_enabled(args) and str(getattr(args, "semantic_mode", "zero")) != "paligemma":
         raise ValueError(
             "picf_mode=ablated requires semantic_mode=paligemma so the PI0.5 action path remains available."
+        )
+    if str(getattr(args, "picf_augmentation_mode", "off")) == "multimodal_geometry":
+        raise NotImplementedError(
+            "picf_augmentation_mode=multimodal_geometry is reserved for a future synchronized "
+            "RGB/depth/point/camera augmentation path. Use 'off' or 'photometric'."
+        )
+    if str(getattr(args, "picf_photometric_strength", "conservative")) not in {"conservative", "reference"}:
+        raise ValueError(
+            "picf_photometric_strength must be one of {'conservative', 'reference'}, "
+            f"got {getattr(args, 'picf_photometric_strength', None)!r}."
         )
 
 
@@ -2073,6 +2167,8 @@ class _CalvinTransitionSource:
         use_scene_obs: bool = False,
         frame_dt_s: float = 1.0 / 30.0,
         action_normalizer: PicfActionNormalizer | None = None,
+        augmentation_mode: str = "off",
+        photometric_strength: str = "conservative",
     ) -> None:
         if int(unroll_steps) < 1:
             raise ValueError(f"unroll_steps must be >= 1, got {unroll_steps}")
@@ -2110,6 +2206,18 @@ class _CalvinTransitionSource:
         self.use_scene_obs = bool(use_scene_obs)
         self.frame_dt_s = float(frame_dt_s)
         self.action_normalizer = action_normalizer
+        self.augmentation_mode = str(augmentation_mode).lower().replace("-", "_")
+        self.photometric_strength = str(photometric_strength).lower().replace("-", "_")
+        if self.augmentation_mode not in {"off", "photometric", "multimodal_geometry"}:
+            raise ValueError(
+                "augmentation_mode must be one of {'off', 'photometric', 'multimodal_geometry'}, "
+                f"got {augmentation_mode!r}."
+            )
+        if self.augmentation_mode == "multimodal_geometry":
+            raise NotImplementedError(
+                "picf_augmentation_mode=multimodal_geometry is intentionally not implemented yet. "
+                "Full PICF requires synchronized RGB/depth/point/camera transforms."
+            )
         # Keep the exhaustive valid window-start index for diagnostics and
         # compatibility utilities, but do not use it as the training sampling
         # distribution. Training should remain segment-uniform, matching the
@@ -2140,7 +2248,14 @@ class _CalvinTransitionSource:
     def close(self) -> None:
         self.reader.close()
 
-    def _load_frame(self, segment_id: int, step_id: int, *, reset_scaffold: bool) -> PicfObservation:
+    def _load_frame(
+        self,
+        segment_id: int,
+        step_id: int,
+        *,
+        reset_scaffold: bool,
+        rng: np.random.Generator | None = None,
+    ) -> PicfObservation:
         segment = self.segments[segment_id]
         keys = ["rgb_static", "depth_static", "depth_gripper", "robot_obs", "rel_actions"]
         if self.use_wrist_rgb:
@@ -2150,6 +2265,19 @@ class _CalvinTransitionSource:
         if self.use_scene_obs:
             keys.append("scene_obs")
         frame = self.reader.read_npz(step_id, keys=keys)
+        if self.augmentation_mode == "photometric":
+            jitter_rng = rng if rng is not None else np.random.default_rng()
+            frame["rgb_static"] = _apply_picf_photometric_augmentation(
+                frame["rgb_static"],
+                rng=jitter_rng,
+                strength=self.photometric_strength,
+            )
+            if self.use_wrist_rgb and frame.get("rgb_gripper") is not None:
+                frame["rgb_gripper"] = _apply_picf_photometric_augmentation(
+                    frame["rgb_gripper"],
+                    rng=jitter_rng,
+                    strength=self.photometric_strength,
+                )
         timestamp_s = float(step_id) * self.frame_dt_s
         action = frame.get("rel_actions")
         action_chunk = _load_action_chunk(
@@ -2213,6 +2341,7 @@ class _CalvinTransitionSource:
                 segment_id,
                 start_step_id + offset,
                 reset_scaffold=(offset == 0),
+                rng=rng,
             )
             for offset in range(self.unroll_steps + 1)
         )
@@ -3701,6 +3830,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             device=str(device),
             dtype=args.visual_dtype,
             trainable=bool(args.visual_trainable),
+            feature_mode=args.visual_feature_mode,
             use_activation_checkpointing=bool(args.visual_activation_checkpointing),
             img_size=args.visual_img_size,
             num_frames=args.visual_num_frames,
@@ -3718,6 +3848,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             num_frames=4,
             device=str(device),
             dtype="float32",
+            feature_mode=args.visual_feature_mode,
         )
         visual_encoder = _NullVisualEncoder()
         use_visual_override = bool(picf_enabled)
@@ -4196,6 +4327,8 @@ def train(args: argparse.Namespace) -> None:
             tactile_backgrounds_by_sensor=_load_tactile_backgrounds_npz(args.tactile_backgrounds_path),
             use_scene_obs=bool(args.use_scene_obs),
             action_normalizer=action_normalizer,
+            augmentation_mode=args.picf_augmentation_mode,
+            photometric_strength=args.picf_photometric_strength,
         )
 
         core, semantic_encoder, use_visual_override = _build_model_sequential_across_ranks(
@@ -4393,6 +4526,13 @@ def train(args: argparse.Namespace) -> None:
                 bool(args.tactile_trainable),
                 args.semantic_mode,
                 bool(args.semantic_trainable),
+            )
+            logging.info(
+                "Frozen-perception/augmentation contract: perception_finetune_mode=%s picf_augmentation_mode=%s photometric_strength=%s semantic_max_length=%s",
+                args.perception_finetune_mode,
+                args.picf_augmentation_mode,
+                args.picf_photometric_strength,
+                int(args.semantic_max_length),
             )
             if not _picf_mode_enabled(args):
                 logging.info(
@@ -4928,6 +5068,32 @@ def main() -> None:
     parser.add_argument("--no-progress", dest="progress", action="store_false")
     parser.add_argument("--visual-grid", type=int, default=8)
     parser.add_argument("--use-foundation-backbones", action="store_true")
+    parser.add_argument(
+        "--perception-finetune-mode",
+        choices=["auto", "full", "frozen"],
+        default="auto",
+        help=(
+            "High-level perception backbone trainability profile. 'auto' preserves existing per-module flags; "
+            "'full' trains V-JEPA/Sonata/AnyTouch; 'frozen' freezes those perception backbones while leaving "
+            "semantic/action and PICF adaptation modules trainable."
+        ),
+    )
+    parser.add_argument(
+        "--picf-augmentation-mode",
+        choices=["off", "photometric", "multimodal_geometry"],
+        default="off",
+        help=(
+            "Full-PICF train-time augmentation policy. 'off' is the default. 'photometric' applies "
+            "geometry-preserving RGB color jitter. 'multimodal_geometry' is reserved and fail-fast until "
+            "synchronized RGB/depth/point/camera transforms are implemented."
+        ),
+    )
+    parser.add_argument(
+        "--picf-photometric-strength",
+        choices=["conservative", "reference"],
+        default="conservative",
+        help="Photometric jitter strength when --picf-augmentation-mode=photometric.",
+    )
     parser.add_argument("--point-backbone", choices=["rgb", "sonata"], default="rgb")
     parser.add_argument("--point-backbone-trainable", action="store_true")
     parser.add_argument("--sonata-checkpoint-path", default=None)
@@ -4942,6 +5108,17 @@ def main() -> None:
     parser.add_argument("--visual-checkpoint-path", default=None)
     parser.add_argument("--visual-checkpoint-key", default=None)
     parser.add_argument("--visual-dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
+    parser.add_argument(
+        "--visual-feature-mode",
+        choices=["auto", "hierarchical", "final"],
+        default="auto",
+        help=(
+            "V-JEPA feature layout. 'auto' preserves historical behavior "
+            "(hierarchical when trainable, final when frozen). Use 'hierarchical' "
+            "with --perception-finetune-mode frozen when PICF should keep the same "
+            "visual feature contract as the full-train profile."
+        ),
+    )
     parser.add_argument("--visual-lr-scale", type=float, default=0.25)
     parser.add_argument("--visual-activation-checkpointing", action="store_true")
     parser.add_argument("--visual-img-size", type=int, default=384)

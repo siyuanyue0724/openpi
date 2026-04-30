@@ -17,7 +17,8 @@ Direct execution entry points in this document:
 
 - current canonical full PICF long-run training:
   [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
-- current cloud-tested 20-sequence CALVIN video evaluation:
+- current cloud-tested 20-sequence CALVIN video evaluation, including the
+  full PICF `step=7500` recipe and the maintained PI0.5-only ablation recipe:
   [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
 
 Important status note:
@@ -373,6 +374,38 @@ training math, keep the same command and temporarily add:
 - `--log-interval 10`
 - optionally `--no-progress`
 
+6x40GB extension:
+
+- use the same command and change `--nproc_per_node=6`
+- set `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5`
+- keep `--accum-steps 1`, `--save-interval 2500`, and `--log-interval 100`
+- the run then has `effective_global_batch=6` instead of the 4-GPU profile's
+  `effective_global_batch=4`
+- this is a valid same-objective full-PICF run, but loss curves should not be
+  interpreted as the exact same optimizer trajectory as the 4-GPU profile
+
+Detached cloud launch rule:
+
+- for rented cloud long runs, do not rely on a plain SSH-attached `torchrun`
+  process, even with a trailing `&`
+- the observed failure mode is
+  `torch.distributed.elastic.multiprocessing.api.SignalException: ... signal: 1`,
+  which is an external SIGHUP to the elastic launcher rather than a model,
+  optimizer, OOM, or dataflow failure
+- write the exact `torchrun` command into a launch script and start it with
+  `nohup setsid "$RUN" </dev/null > "$LOG" 2>&1 &`
+- after reconnecting, check that the launcher has no controlling TTY:
+
+```bash
+ps -o pid,ppid,sid,tty,etime,stat,cmd -C torchrun
+```
+
+Expected healthy state:
+
+- `TTY=?`
+- `PPID=1` or otherwise detached from the interactive SSH shell
+- workers still visible in `ps -ef | grep picf_core_train.py`
+
 ### 5.2 Historical Baseline Training Command
 
 The command below is preserved as a historical baseline from the pre-v2.2
@@ -496,10 +529,15 @@ The serving path must preserve:
 
 ### 6.1 Current Cloud CALVIN Video Evaluation
 
-The current validated cloud-side evaluation recipe for the PI0.5-only ablation
-path is:
+This section is the current cloud-side CALVIN video evaluation recipe for both:
 
-- serve the ablated checkpoint over websocket with
+- full PICF checkpoints, for example the current `step=7500` full-PICF
+  checkpoint
+- PI0.5-only ablation checkpoints
+
+The operational pattern is the same:
+
+- serve the checkpoint over websocket with
   `scripts/serve_picf_policy.py`
 - run `scripts/calvin/evaluate_picf_policy.py` from the `calvin38`
   environment
@@ -509,6 +547,157 @@ path is:
 
 This is the validated operational recipe for the current cloud image. It is not
 just a historical sketch.
+
+#### 6.1.0 GPU Usage And Current Full-PICF 7500 Artifact Paths
+
+CALVIN video evaluation is **not** the same parallel shape as FSDP training.
+
+The current serving/evaluation topology is:
+
+```text
+CALVIN env step -> websocket request -> one policy server inference -> CALVIN env step
+```
+
+For one 20-sequence evaluation job, this is a single online rollout stream. It
+does not automatically use all GPUs.
+
+Current validated GPU allocation:
+
+- `cuda:0`: full PICF policy server
+- `cuda:1`: CALVIN EGL / evaluator process
+- remaining GPUs: idle unless the operator intentionally starts additional
+  independent server/evaluator shards on different ports and output folders
+
+Do not interpret idle GPUs during a single CALVIN rollout as a training
+configuration failure. It is an evaluation scheduling property. Multi-GPU speedup
+requires multiple independent evaluator shards, not one server process.
+
+Current full-PICF 7500 checkpoint:
+
+```text
+/mnt/checkpoints/picf_core/picf_core/picf_v22_full_picf_a6_30000_ckpt2500_print100_p192_20260424_r2/7500
+```
+
+Current full-PICF 7500 video-eval output directory:
+
+```text
+/mnt/checkpoints/picf_core/eval/picf_v22_full_picf_step7500_eval20_video_20260427_r1
+```
+
+Current full-PICF 7500 monitor commands:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/eval/picf_v22_full_picf_step7500_eval20_video_20260427_r1/logs/eval_calvin38_full.log
+```
+
+```bash
+watch -n 5 'find /mnt/checkpoints/picf_core/eval/picf_v22_full_picf_step7500_eval20_video_20260427_r1/videos -maxdepth 1 -type f -name "*.mp4" -printf "%f %s\n" | sort | tail -n 20'
+```
+
+```bash
+grep -A20 'Results for Epoch' /mnt/checkpoints/picf_core/eval/picf_v22_full_picf_step7500_eval20_video_20260427_r1/logs/eval_calvin38_full.log
+```
+
+Operational note from the current cloud image:
+
+- the server has been validated to answer a direct websocket inference request
+  from the full-PICF `7500` checkpoint
+- a single full-PICF inference call is much slower than ablated PI0.5-only
+  serving, so the CALVIN progress bar can remain at `0/20` while the first
+  sequence is still stepping
+- videos are valid only if their size is non-trivial; `44B` files are broken
+  placeholders, while the current first full-PICF video observed under `/tmp`
+  was about `524KB`
+
+#### 6.1.1 Serve The Full-PICF 7500 Checkpoint
+
+```bash
+cd /root/openpi_posterior_vla_clean
+export PYTHONPATH=/root/openpi_posterior_vla_clean/src:/root/openpi_posterior_vla_clean/packages/openpi-client/src
+export CUDA_VISIBLE_DEVICES=0
+export WANDB_MODE=disabled
+export TORCHDYNAMO_DISABLE=1
+export OPENPI_DISABLE_TORCH_COMPILE=1
+
+/root/openpi/.venv/bin/python scripts/serve_picf_policy.py \
+  --checkpoint /mnt/checkpoints/picf_core/picf_core/picf_v22_full_picf_a6_30000_ckpt2500_print100_p192_20260424_r2/7500 \
+  --device cuda:0 \
+  --port 8000 \
+  --picf-mode enabled
+```
+
+Useful checks:
+
+```bash
+ss -ltnp | grep :8000
+ps -ef | grep -E 'serve_picf_policy.py' | grep -v grep
+```
+
+#### 6.1.2 Run The Full-PICF 20-Sequence Evaluator With Video
+
+The most robust current recipe writes runtime videos to `/tmp` and mirrors them
+back to `/mnt`. This avoids cloud-image issues where `cv2.VideoWriter` or remote
+filesystem buffering can produce invalid tiny files when writing videos directly
+into `/mnt`.
+
+```bash
+base=/mnt/checkpoints/picf_core/eval/picf_v22_full_picf_step7500_eval20_video_20260427_r1
+tmp=/tmp/picf_v22_full_7500_eval20_video_20260427_r1
+mkdir -p "$base/videos" "$base/logs" "$base/eval_logs" "$tmp/videos" "$tmp/eval_logs"
+
+cd /mnt/calvin/calvin_models/calvin_agent
+eval "$(/root/bin/micromamba shell hook -s bash)"
+micromamba activate calvin38
+
+export PYTHONUNBUFFERED=1
+export PYOPENGL_PLATFORM=egl
+export CUDA_VISIBLE_DEVICES=1
+export EGL_VISIBLE_DEVICES=1
+export OPENPI_SERVER_HOST=127.0.0.1
+export OPENPI_SERVER_PORT=8000
+export OPENPI_EVAL_TAG=picf_v22_full_7500
+export PYTHONPATH=/root/calvin_patch:/mnt/calvin/calvin_env:/root/openpi_posterior_vla_clean:/root/openpi_posterior_vla_clean/src:/root/openpi_posterior_vla_clean/packages/openpi-client/src:/mnt/calvin/calvin_models/calvin_agent
+
+python /root/openpi_posterior_vla_clean/scripts/calvin/evaluate_picf_policy.py \
+  --dataset_path /mnt/calvin_data/task_ABC_D \
+  --eval_log_dir "$tmp/eval_logs" \
+  --num_sequences 20 \
+  --save_video \
+  --video_dir "$tmp/videos" \
+  > "$tmp/eval_calvin38_full.log" 2>&1
+```
+
+After or during evaluation, mirror outputs to `/mnt`:
+
+```bash
+base=/mnt/checkpoints/picf_core/eval/picf_v22_full_picf_step7500_eval20_video_20260427_r1
+tmp=/tmp/picf_v22_full_7500_eval20_video_20260427_r1
+mkdir -p "$base/videos" "$base/logs" "$base/eval_logs"
+cp -f "$tmp/eval_calvin38_full.log" "$base/logs/eval_calvin38_full.log"
+cp -f "$tmp/eval_calvin38_full.log" "$base/eval_calvin38_full.log"
+cp -f "$tmp"/eval_logs/* "$base/eval_logs"/ 2>/dev/null || true
+
+for src in "$tmp"/videos/*.mp4; do
+  [ -f "$src" ] || continue
+  name=$(basename "$src")
+  dst="$base/videos/$name"
+  src_size=$(stat -c %s "$src")
+  dst_size=$(stat -c %s "$dst" 2>/dev/null || echo 0)
+  if [ "$src_size" -gt 4096 ] && [ "$src_size" -gt "$dst_size" ]; then
+    cp -f "$src" "$dst.tmp" && mv -f "$dst.tmp" "$dst"
+  fi
+done
+```
+
+Do not use `cp -n` or `rsync --ignore-existing` for video mirroring. If an
+earlier direct `/mnt` write created a tiny placeholder such as a `44B` `.mp4`,
+ignore-existing copy modes will preserve the broken file forever instead of
+replacing it with the valid `/tmp` output.
+
+#### 6.1.3 Legacy Maintained Ablation Example
+
+The current validated cloud-side evaluation recipe for the PI0.5-only ablation
+path is preserved below.
 
 Important interpretation note:
 
@@ -566,7 +755,7 @@ Important current cloud notes:
   artifact persistence will still fail; check `df -h /mnt` before assuming the
   evaluator path is wrong
 
-#### 6.1.1 Serve The Checkpoint
+#### 6.1.4 Serve The Ablated Checkpoint
 
 ```bash
 cd /root/openpi_posterior_vla_clean
@@ -593,7 +782,7 @@ ss -ltnp | grep :8000
 ps -ef | grep -E 'serve_picf_policy.py' | grep -v grep
 ```
 
-#### 6.1.2 Run The 20-Sequence Evaluator With Video
+#### 6.1.5 Run The Ablated 20-Sequence Evaluator With Video
 
 ```bash
 cd /root/openpi_posterior_vla_clean
@@ -622,7 +811,7 @@ Notes:
   runtime because that path is known-good for `cv2.VideoWriter` on the current
   cloud image
 
-#### 6.1.3 Monitor Progress And Final Success Rate
+#### 6.1.6 Monitor Progress And Final Success Rate
 
 While the evaluator is running:
 
@@ -653,7 +842,7 @@ Validated example final summary for checkpoint `2500` in ablated mode:
 
 That run completed all `20/20` sequences and produced `20` rollout videos.
 
-#### 6.1.4 Copy Videos And Logs Back Into `/mnt`
+#### 6.1.7 Copy Videos And Logs Back Into `/mnt`
 
 After the evaluator finishes successfully:
 

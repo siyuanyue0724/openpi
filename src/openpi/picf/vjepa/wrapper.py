@@ -194,7 +194,18 @@ class Vjepa2VisualEncoder(nn.Module):
             pixel_values = pixel_values.to(device=self.device, dtype=self.dtype)
         video = pixel_values.permute(0, 2, 1, 3, 4).contiguous()
         use_grad = bool(self.trainable and self.training)
-        use_hierarchical = bool(self.trainable)
+        feature_mode = str(getattr(self.config, "feature_mode", "auto")).lower().replace("-", "_")
+        if feature_mode == "auto":
+            use_hierarchical = bool(self.trainable)
+        elif feature_mode == "hierarchical":
+            use_hierarchical = True
+        elif feature_mode == "final":
+            use_hierarchical = False
+        else:
+            raise ValueError(
+                "VjepaVisualConfig.feature_mode must be one of {'auto', 'hierarchical', 'final'}, "
+                f"got {getattr(self.config, 'feature_mode', None)!r}."
+            )
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
             previous_return_hierarchical = getattr(self.encoder, "return_hierarchical", None)

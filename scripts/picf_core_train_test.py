@@ -161,6 +161,7 @@ def _base_args() -> argparse.Namespace:
         visual_checkpoint_path=None,
         visual_checkpoint_key=None,
         visual_dtype="bfloat16",
+        visual_feature_mode="auto",
         tactile_checkpoint_path=None,
         tactile_dtype="float32",
         tactile_sensor_names="digit,gelsight_mini",
@@ -175,6 +176,9 @@ def _base_args() -> argparse.Namespace:
         tactile_anchor_prob_on=0.8,
         use_scene_obs=False,
         use_foundation_backbones=False,
+        perception_finetune_mode="auto",
+        picf_augmentation_mode="off",
+        picf_photometric_strength="conservative",
     )
 
 
@@ -628,6 +632,40 @@ def test_foundation_profile_enables_semantic_and_trainable_backbones() -> None:
     assert args.semantic_trainable is True
 
 
+def test_perception_finetune_mode_frozen_overrides_foundation_backbone_trainability() -> None:
+    args = _base_args()
+    args.use_foundation_backbones = True
+    args.perception_finetune_mode = "frozen"
+    _MODULE._apply_foundation_profile(args)
+    _MODULE._normalize_train_args(args)
+
+    assert args.semantic_mode == "paligemma"
+    assert args.semantic_trainable is True
+    assert args.point_backbone == "sonata"
+    assert args.point_backbone_trainable is False
+    assert args.visual_mode == "encoder"
+    assert args.visual_finetune_mode == "frozen"
+    assert args.visual_trainable is False
+    assert args.visual_feature_mode == "auto"
+    assert args.tactile_mode == "encoder"
+    assert args.tactile_trainable is False
+    assert args.use_tactile is True
+
+
+def test_perception_finetune_mode_full_forces_foundation_backbone_trainability() -> None:
+    args = _base_args()
+    args.use_foundation_backbones = True
+    args.perception_finetune_mode = "full"
+    args.visual_finetune_mode = "frozen"
+    _MODULE._apply_foundation_profile(args)
+    _MODULE._normalize_train_args(args)
+
+    assert args.point_backbone_trainable is True
+    assert args.visual_finetune_mode == "full"
+    assert args.visual_trainable is True
+    assert args.tactile_trainable is True
+
+
 def test_normalize_train_args_resolves_visual_finetune_mode() -> None:
     args = _base_args()
     args.visual_finetune_mode = "frozen"
@@ -646,6 +684,33 @@ def test_normalize_train_args_resolves_visual_finetune_mode() -> None:
 
     assert args.visual_finetune_mode == "full"
     assert args.visual_trainable is True
+
+
+def test_picf_photometric_augmentation_preserves_geometry_related_fields() -> None:
+    rng = np.random.default_rng(7)
+    image = np.full((4, 5, 3), 128, dtype=np.uint8)
+    augmented = _MODULE._apply_picf_photometric_augmentation(
+        image,
+        rng=rng,
+        strength="conservative",
+    )
+
+    assert augmented.shape == image.shape
+    assert augmented.dtype == image.dtype
+    assert not np.array_equal(augmented, image)
+
+
+def test_validate_train_args_rejects_unimplemented_multimodal_geometry_augmentation(tmp_path: Path) -> None:
+    stats = tmp_path / "norm_stats.json"
+    stats.write_text("{}", encoding="utf-8")
+    args = _base_args()
+    args.picf_augmentation_mode = "multimodal_geometry"
+    args.action_norm_stats_path = str(stats)
+    args.prompt_state_norm_stats_path = str(stats)
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(NotImplementedError, match="multimodal_geometry"):
+        _MODULE._validate_train_args(args)
 
 
 def test_fsdp_root_ignored_modules_collects_fully_frozen_backbones() -> None:

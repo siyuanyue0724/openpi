@@ -13,6 +13,18 @@ action/control contract rewrite and the current exhaustive local audit
   PICF entry pointer that routes readers to the current and archived PICF docs.
 - [`src/openpi/picf/README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md)
   Current live PICF v2.2 architecture and deployment record.
+- [`src/openpi/picf/README_PI05_PARITY_AUDIT.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_PI05_PARITY_AUDIT.md)
+  Local code-level audit comparing reference PI0.5 / PI0.5+Sonata dataflow
+  against current PICF enabled and PI0.5-only ablated modes.
+- [`src/openpi/picf/README_FROZEN_PERCEPTION_AUGMENTATION.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_FROZEN_PERCEPTION_AUGMENTATION.md)
+  Design record for the 2x40GB frozen-perception profile and geometry-safe
+  augmentation policy. Use this before freezing V-JEPA/Sonata/AnyTouch or
+  enabling any train-time augmentation in full PICF.
+  The live CLI now exposes `--perception-finetune-mode auto|full|frozen`,
+  `--visual-feature-mode auto|hierarchical|final`,
+  `--picf-augmentation-mode off|photometric|multimodal_geometry`, and
+  `--picf-photometric-strength conservative|reference`; the default remains
+  `auto/off`.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
@@ -21,7 +33,9 @@ action/control contract rewrite and the current exhaustive local audit
   Training, serving, and CALVIN validation workflow.
   The current canonical full PICF long-run training command is recorded in
   [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch).
-  The current cloud-tested 20-sequence video evaluation recipe is recorded in
+  The current cloud-tested 20-sequence video evaluation recipes, including the
+  full PICF `step=7500` run and the maintained PI0.5-only ablation run, are
+  recorded in
   [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation).
 
 ## 0. Current Audit Snapshot
@@ -95,20 +109,35 @@ Relevant documents:
 3. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md`
    Historical v2.1 deployment record from before the v2.2 refactor landed.
 
-4. `/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md`
+4. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_PI05_PARITY_AUDIT.md`
+   Detailed local audit of reference PI0.5 / PI0.5+Sonata dataflow versus the
+   current PICF enabled and PI0.5-only ablated paths. Use it when interpreting
+   ablation quality, CALVIN loss comparability, normalization, preprocessing,
+   and parity claims.
+
+5. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_FROZEN_PERCEPTION_AUGMENTATION.md`
+   Design record for the planned `picf_frozen_perception_2x40` profile. It
+   documents which perception modules may be frozen without changing the PICF
+   architecture, why full PI0.5 RGB geometry augmentation cannot be blindly
+   copied into full PICF, and which augmentation modes are safe to make
+   configurable.
+
+6. `/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md`
    Current concise executable contract enforced by regression tests. It is the
    compact version of the live v2.2 semantics described in this file.
 
-5. `/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md`
+7. `/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md`
    Current training / validation / rollout / serving workflow document.
 
-6. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md`
+8. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README.md`
    Directory entry / pointer file. It points at both the current live
    record (`README_v2.2.md`) and the archived v2.1 record so neither is lost.
 
 Maintained/current docs:
 
 - `src/openpi/picf/README_v2.2.md`
+- `src/openpi/picf/README_PI05_PARITY_AUDIT.md`
+- `src/openpi/picf/README_FROZEN_PERCEPTION_AUGMENTATION.md`
 - `PICF_FORMAL_CONTRACT.md`
 - `docs/CALVIN_VALIDATION_README.md`
 - `src/openpi/picf/README.md` as entry pointer
@@ -127,13 +156,18 @@ If you are opening the repo cold, use this order:
    Repo-level entry point.
 3. [`README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md)
    Current live architecture record and implementation audit.
-4. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
+4. [`README_FROZEN_PERCEPTION_AUGMENTATION.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_FROZEN_PERCEPTION_AUGMENTATION.md)
+   Read this before using frozen V-JEPA/Sonata/AnyTouch profiles or enabling
+   train-time augmentation in full PICF.
+5. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
    Concise executable contract for the current code.
-5. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+6. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
    Runtime / training / rollout workflow.
    For the current canonical full PICF long-run launch, jump directly to
    [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch).
-   For the current validated cloud rollout/video test recipe, jump directly to
+   For the current validated cloud rollout/video test recipes, including
+   full PICF `step=7500` serving/evaluation, single-rollout GPU usage, and
+   `/tmp` to `/mnt` artifact mirroring, jump directly to
    [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation).
    For the current 2x40GB ablated training definition and the explicit
    `2500 current optimizer steps ~= 5000 historical no-Sonata PI0.5 steps`
@@ -211,6 +245,9 @@ When verifying the local v2.2 codebase, use this navigation split:
     [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
   - current cloud 20-sequence CALVIN video evaluation:
     [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
+    This section records that one CALVIN rollout uses one policy-server GPU plus
+    one EGL/evaluator GPU; it does not automatically consume all GPUs the way
+    FSDP training does.
 - historical pre-v2.2 reference only:
   - [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
 - temporary deep audits for this local rollout:
@@ -1785,6 +1822,47 @@ It also does **not** rely on:
 - CPU offload
 - watchdog restart logic
 
+### 8.6.1Z Current 6x40GB Full-PICF Extension
+
+The same full-PICF contract can be launched on a 6x40GB A100 node by changing
+only the distributed launch width:
+
+- `--nproc_per_node=6`
+- `CUDA_VISIBLE_DEVICES=0,1,2,3,4,5`
+
+The current 6-GPU long-run profile keeps the same v2.2 semantics:
+
+- `picf_mode=enabled`
+- `training_strategy=fsdp_full_shard`
+- `optimizer_sharding=none`
+- `accum_steps=1`
+- `unroll_steps=2`
+- `action_horizon=16`
+- `num_train_steps=30000`
+- `save_interval=2500`
+- `log_interval=100`
+- `window_activation_checkpointing=False`
+- all foundation backbones trainable
+- action normalization uses CALVIN `norm_stats.json`
+- prompt-state normalization inherits the same CALVIN `norm_stats.json`
+
+Important comparison note:
+
+- the 4x40GB profile has `effective_global_batch=4`
+- the 6x40GB extension has `effective_global_batch=6`
+- this is intentional when all 6 GPUs are used with `accum_steps=1`
+- loss curves from 4-GPU and 6-GPU runs should therefore be compared as
+  same-objective but different-global-batch runs, not as bitwise-identical
+  optimizer trajectories
+
+The 6-GPU extension does not change:
+
+- PI0.5 flow-matching action objective
+- PICF observe/finalize dataflow
+- physical posterior / innovation boundary
+- task-readout / conditioned-control contract
+- checkpoint cadence
+
 ### 8.6.1A Current 2x40GB PI0.5-Only Ablation Profile
 
 The current operator-validated PI0.5-only ablation launch profile is:
@@ -2127,6 +2205,39 @@ The current early-observability verification template is the same command with:
 
 - `--log-interval 10`
 - optionally `--no-progress`
+
+Cloud detach rule:
+
+- long runs on rented cloud machines should be launched in a detached session,
+  not as a plain SSH-attached foreground/background command
+- this is an operational rule only; it does not change the training graph,
+  losses, optimizer, checkpoint cadence, or model math
+- the observed failure mode from a plain SSH-attached `torchrun` launch is
+  `torch.distributed.elastic.multiprocessing.api.SignalException: ... signal: 1`,
+  i.e. an external SIGHUP delivered to the elastic launcher after the shell or
+  SSH session exits
+- the maintained clean launch pattern is to write the exact `torchrun` command
+  into a script and start it with `setsid + nohup + stdin redirected from
+  /dev/null`
+
+Example detached launch skeleton:
+
+```bash
+RUN=/mnt/checkpoints/picf_core/debug/run_<exp_name>.sh
+LOG=/mnt/checkpoints/picf_core/debug/<exp_name>.log
+
+chmod +x "$RUN"
+nohup setsid "$RUN" </dev/null > "$LOG" 2>&1 &
+```
+
+After reconnecting, verify the launcher has no controlling TTY:
+
+```bash
+ps -o pid,ppid,sid,tty,etime,stat,cmd -C torchrun
+```
+
+The expected healthy state is `PPID=1` or otherwise independent from the
+interactive SSH shell, and `TTY=?`.
 
 ### 8.6.6 Operationally Important Knobs
 
