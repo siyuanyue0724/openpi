@@ -49,6 +49,7 @@ class PicfTokenFieldState:
     tactile_contact_score_ema: torch.Tensor | None = None
     fusion_attention_mean: torch.Tensor | None = None
     projective_geometry: PicfProjectiveGeometryState | None = None
+    point_pool_ids: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -75,6 +76,7 @@ class PicfObservationAnchorState:
     routing_mass_tactile: torch.Tensor | None = None
     routing_support_tactile: torch.Tensor | None = None
     routing_gate_tactile: torch.Tensor | None = None
+    role_ids: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -104,6 +106,7 @@ class PicfTaskReadoutState:
     visual_private_attention: torch.Tensor | None = None
     tactile_private_attention: torch.Tensor | None = None
     point_private_attention: torch.Tensor | None = None
+    local_role_ids: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -133,6 +136,7 @@ class PicfPosteriorAnchorState:
     evidence_tokens: torch.Tensor
     tokens: torch.Tensor
     global_post: torch.Tensor
+    role_ids: torch.Tensor | None = None
 
 
 @dataclasses.dataclass

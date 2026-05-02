@@ -179,6 +179,7 @@ def _make_core(tmp_path: Path, **overrides) -> tuple[PicfFullCore, CalvinSequent
         predictive_semantic_dropout_prob=0.0,
         attention_heads=4,
         query_rounds=2,
+        visual_real_grid=4,
     )
     config_kwargs.update(overrides)
     config = PicfCoreConfig(**config_kwargs)
@@ -278,6 +279,77 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     assert output.state.predictive.predictive_query_state.shape == (core.config.semantic_dim,)
     assert output.state.predictive.global_pred.shape == (core.config.hidden_dim,)
     assert output.state.token_field.fusion_attention_mean is not None
+
+
+def test_effector_and_scene_anchor_roles_use_separate_point_pools(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        persistent_anchors=6,
+        observation_anchors=8,
+        effector_persistent_anchors=2,
+        effector_observation_anchors=2,
+        task_local_queries=6,
+        task_effector_queries=2,
+        global_scene_point_cap=16,
+    )
+    frame = next(iter(replay))
+    frame.G_t = core.local_frame.make_transform(frame.robot_obs)
+    tcp = np.asarray(frame.G_t[:3, 3], dtype=np.float32)
+    local_offsets = np.asarray(
+        [
+            [0.00, 0.00, 0.00],
+            [0.02, 0.00, 0.00],
+            [0.00, 0.02, 0.00],
+            [0.00, 0.00, 0.02],
+        ],
+        dtype=np.float32,
+    )
+    global_offsets = np.asarray(
+        [
+            [0.35, 0.00, 0.00],
+            [0.00, 0.35, 0.00],
+            [0.00, 0.00, 0.35],
+            [0.35, 0.35, 0.00],
+            [0.20, -0.25, 0.10],
+            [-0.25, 0.20, 0.15],
+        ],
+        dtype=np.float32,
+    )
+    xyz = np.concatenate([tcp[None, :] + local_offsets, tcp[None, :] + global_offsets], axis=0)
+    frame.point_set = PicfPointCloudFrame(
+        grid_coord=np.arange(xyz.shape[0] * 3, dtype=np.int32).reshape(xyz.shape[0], 3),
+        xyz_world=xyz,
+        rgb=np.linspace(0.0, 1.0, num=xyz.shape[0] * 3, dtype=np.float32).reshape(xyz.shape[0], 3),
+        normal_world=np.tile(np.asarray([[0.0, 0.0, 1.0]], dtype=np.float32), (xyz.shape[0], 1)),
+        valid_point_mask=np.ones((xyz.shape[0],), dtype=bool),
+        frame_valid=True,
+    )
+    output = core.step(
+        frame,
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+    point_pool_ids = output.state.token_field.point_pool_ids
+    assert point_pool_ids is not None
+    assert int((point_pool_ids == 0).sum().item()) == local_offsets.shape[0]
+    assert int((point_pool_ids == 1).sum().item()) == xyz.shape[0]
+
+    obs = output.state.observation_anchors
+    assert obs.role_ids is not None
+    torch.testing.assert_close(obs.role_ids[:2], torch.zeros((2,), dtype=torch.long))
+    torch.testing.assert_close(obs.role_ids[2:], torch.ones((6,), dtype=torch.long))
+    assert bool(torch.all(obs.seed_indices[:2] < local_offsets.shape[0]).item())
+    assert bool(torch.all(obs.seed_indices[2:] >= local_offsets.shape[0]).item())
+
+    posterior_roles = output.state.posterior.role_ids
+    assert posterior_roles is not None
+    torch.testing.assert_close(posterior_roles[:2], torch.zeros((2,), dtype=torch.long))
+    torch.testing.assert_close(posterior_roles[2:], torch.ones((4,), dtype=torch.long))
+
+    task_roles = output.state.task_readout.local_role_ids
+    assert task_roles is not None
+    torch.testing.assert_close(task_roles[:2], torch.zeros((2,), dtype=torch.long))
+    torch.testing.assert_close(task_roles[2:], torch.ones((4,), dtype=torch.long))
 
 
 def test_refresh_predictive_state_for_action_rebuilds_cache_from_supplied_action(tmp_path: Path) -> None:

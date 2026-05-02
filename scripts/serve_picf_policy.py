@@ -4,6 +4,7 @@ import argparse
 import ast
 import json
 import logging
+import os
 import socket
 from pathlib import Path
 import sys
@@ -129,6 +130,291 @@ def _visual_override_if_needed(
     return _trainer._rgb_visual_override(observation.rgb_static, grid=trainer.visual_grid)
 
 
+def _tensor_to_list(value: torch.Tensor | None, *, max_rows: int | None = None) -> Any:
+    if value is None:
+        return None
+    tensor = value.detach().to(device="cpu", dtype=torch.float32)
+    if max_rows is not None and tensor.ndim > 0:
+        tensor = tensor[: int(max_rows)]
+    array = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0).numpy()
+    return array.tolist()
+
+
+def _tensor_to_int_list(value: torch.Tensor | None, *, max_rows: int | None = None) -> Any:
+    if value is None:
+        return None
+    tensor = value.detach().to(device="cpu", dtype=torch.long)
+    if max_rows is not None and tensor.ndim > 0:
+        tensor = tensor[: int(max_rows)]
+    return tensor.numpy().tolist()
+
+
+def _visual_real_grid_payload(value: torch.Tensor | None) -> Any:
+    if value is None:
+        return None
+    tensor = value.detach().to(device="cpu", dtype=torch.float32).flatten()
+    if tensor.numel() == 0 or tensor.numel() % 3 != 0:
+        return None
+    grid = int(round((int(tensor.numel()) // 3) ** 0.5))
+    if 3 * grid * grid != int(tensor.numel()):
+        return None
+    array = torch.nan_to_num(tensor, nan=0.0, posinf=0.0, neginf=0.0)
+    array = array.reshape(3, grid, grid).permute(1, 2, 0).numpy()
+    return array.tolist()
+
+
+def _prediction_debug_payload(output: Any | None) -> dict[str, Any] | None:
+    if output is None or getattr(output, "state", None) is None:
+        return None
+    predictive = getattr(output.state, "predictive", None)
+    if predictive is None:
+        return None
+    physical_cache = getattr(predictive, "physical_prediction_cache", None)
+    conditioned_cache = getattr(predictive, "prediction_cache", None)
+    physical_visual = _visual_real_grid_payload(getattr(physical_cache, "visual_real", None))
+    conditioned_visual = _visual_real_grid_payload(getattr(conditioned_cache, "visual_real", None))
+    if physical_visual is None and conditioned_visual is None:
+        return None
+    return {
+        "visual_real_grid": len(physical_visual or conditioned_visual or []),
+        "physical_visual_real": physical_visual,
+        "conditioned_visual_real": conditioned_visual,
+        "physical_availability": _tensor_to_list(getattr(physical_cache, "availability", None)),
+        "conditioned_availability": _tensor_to_list(getattr(conditioned_cache, "availability", None)),
+    }
+
+
+def _weighted_point_pixels(point_weights: torch.Tensor, point_pixels: torch.Tensor) -> torch.Tensor:
+    if point_weights.numel() == 0 or point_pixels.numel() == 0:
+        return torch.zeros((int(point_weights.shape[0]), 2), device=point_weights.device, dtype=point_weights.dtype)
+    weights = torch.clamp(point_weights, min=0.0)
+    denom = torch.clamp(weights.sum(dim=-1, keepdim=True), min=1e-6)
+    return (weights @ point_pixels.to(device=weights.device, dtype=weights.dtype)) / denom
+
+
+def _attention_summary(
+    weights: torch.Tensor | None,
+    *,
+    topk: int = 5,
+    max_queries: int = 8,
+    points: torch.Tensor | None = None,
+    pixels: torch.Tensor | None = None,
+) -> dict[str, Any] | None:
+    if weights is None:
+        return None
+    value = torch.nan_to_num(weights.detach().to(device="cpu", dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+    if value.ndim == 3 and value.shape[0] == 1:
+        value = value[0]
+    if value.ndim != 2:
+        return {"shape": list(value.shape)}
+    query_count = min(int(value.shape[0]), int(max_queries))
+    key_count = int(value.shape[1])
+    if query_count <= 0 or key_count <= 0:
+        return {"shape": [int(value.shape[0]), key_count], "entropy": [], "topk": []}
+    clipped = torch.clamp(value[:query_count], min=0.0)
+    denom = torch.clamp(clipped.sum(dim=-1, keepdim=True), min=1e-9)
+    probs = clipped / denom
+    entropy = -(probs * torch.log(torch.clamp(probs, min=1e-9))).sum(dim=-1)
+    if key_count > 1:
+        entropy = entropy / float(np.log(key_count))
+    k = min(int(topk), key_count)
+    top_values, top_indices = torch.topk(probs, k=k, dim=-1)
+
+    point_cpu = None if points is None else points.detach().to(device="cpu", dtype=torch.float32)
+    pixel_cpu = None if pixels is None else pixels.detach().to(device="cpu", dtype=torch.float32)
+    top_payload: list[list[dict[str, Any]]] = []
+    for query_idx in range(query_count):
+        row: list[dict[str, Any]] = []
+        for rank in range(k):
+            index = int(top_indices[query_idx, rank].item())
+            item: dict[str, Any] = {
+                "index": index,
+                "weight": float(top_values[query_idx, rank].item()),
+            }
+            if point_cpu is not None and 0 <= index < int(point_cpu.shape[0]):
+                item["xyz"] = point_cpu[index].tolist()
+            if pixel_cpu is not None and 0 <= index < int(pixel_cpu.shape[0]):
+                item["pixel"] = pixel_cpu[index].tolist()
+            row.append(item)
+        top_payload.append(row)
+    return {
+        "shape": [int(value.shape[0]), key_count],
+        "entropy": entropy.tolist(),
+        "topk": top_payload,
+    }
+
+
+def _slot_diversity(points: torch.Tensor | None, pixels: torch.Tensor | None) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for name, value in (("xyz", points), ("pixel", pixels)):
+        if value is None:
+            continue
+        tensor = value.detach().to(device="cpu", dtype=torch.float32)
+        if tensor.ndim != 2 or tensor.shape[0] < 2:
+            payload[name] = {"count": int(tensor.shape[0]) if tensor.ndim > 0 else 0}
+            continue
+        distances = torch.pdist(tensor)
+        payload[name] = {
+            "count": int(tensor.shape[0]),
+            "mean_pairwise_distance": float(distances.mean().item()) if distances.numel() > 0 else 0.0,
+            "min_pairwise_distance": float(distances.min().item()) if distances.numel() > 0 else 0.0,
+            "max_pairwise_distance": float(distances.max().item()) if distances.numel() > 0 else 0.0,
+        }
+    return payload
+
+
+def _near_proprio_point_mass(
+    *,
+    point_weights: torch.Tensor | None,
+    point_positions: torch.Tensor | None,
+    proprio: np.ndarray,
+    radius_m: float,
+) -> Any:
+    if point_weights is None or point_positions is None:
+        return None
+    if point_weights.numel() == 0 or point_positions.numel() == 0 or proprio.shape[0] < 3:
+        return None
+    weights = torch.clamp(point_weights.detach().to(device="cpu", dtype=torch.float32), min=0.0)
+    positions = point_positions.detach().to(device="cpu", dtype=torch.float32)
+    count = min(int(weights.shape[-1]), int(positions.shape[0]))
+    if count <= 0:
+        return None
+    weights = weights[..., :count]
+    positions = positions[:count]
+    denom = torch.clamp(weights.sum(dim=-1, keepdim=True), min=1e-9)
+    weights = weights / denom
+    tcp = torch.as_tensor(np.asarray(proprio[:3], dtype=np.float32), dtype=torch.float32)
+    mask = torch.linalg.norm(positions - tcp[None, :], dim=-1) <= float(radius_m)
+    return (weights * mask.to(dtype=weights.dtype)[None, :]).sum(dim=-1).tolist()
+
+
+def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> dict[str, Any] | None:
+    if output is None or getattr(output, "state", None) is None:
+        return None
+    state = output.state
+    token_field = getattr(state, "token_field", None)
+    geom = None if token_field is None else getattr(token_field, "projective_geometry", None)
+    if geom is None or getattr(geom, "point_proj_grid_index", None) is None:
+        return None
+    rgb = np.asarray(observation.rgb_static)
+    image_h = int(rgb.shape[0]) if rgb.ndim >= 2 else 0
+    image_w = int(rgb.shape[1]) if rgb.ndim >= 2 else 0
+    visual_grid = geom.visual_grid_index.detach()
+    point_grid = geom.point_proj_grid_index.detach()
+    grid_w = int(torch.max(visual_grid[:, 0]).item()) + 1 if visual_grid.numel() > 0 else 1
+    grid_h = int(torch.max(visual_grid[:, 1]).item()) + 1 if visual_grid.numel() > 0 else 1
+    scale_x = float(max(image_w - 1, 0)) / float(max(grid_w - 1, 1))
+    scale_y = float(max(image_h - 1, 0)) / float(max(grid_h - 1, 1))
+    visual_pixels = (
+        torch.stack([visual_grid[:, 0] * scale_x, visual_grid[:, 1] * scale_y], dim=-1)
+        if visual_grid.numel() > 0
+        else torch.zeros((0, 2), device=point_grid.device, dtype=point_grid.dtype)
+    )
+    if point_grid.numel() == 0:
+        point_pixels = torch.zeros((0, 2), device=point_grid.device, dtype=point_grid.dtype)
+    else:
+        point_pixels = torch.stack([point_grid[:, 0] * scale_x, point_grid[:, 1] * scale_y], dim=-1)
+
+    observation_anchors = getattr(state, "observation_anchors", None)
+    posterior = getattr(state, "posterior", None)
+    task_readout = getattr(state, "task_readout", None)
+    obs_pixel = (
+        _weighted_point_pixels(observation_anchors.point_weights, point_pixels)
+        if observation_anchors is not None and getattr(observation_anchors, "point_weights", None) is not None
+        else None
+    )
+    posterior_pixel = None
+    if posterior is not None and obs_pixel is not None and getattr(posterior, "binding", None) is not None:
+        binding = torch.clamp(posterior.binding[..., : obs_pixel.shape[0]], min=0.0)
+        denom = torch.clamp(binding.sum(dim=-1, keepdim=True), min=1e-6)
+        posterior_pixel = (binding @ obs_pixel.to(device=binding.device, dtype=binding.dtype)) / denom
+    task_pixel = (
+        _weighted_point_pixels(task_readout.point_weights, point_pixels)
+        if task_readout is not None and getattr(task_readout, "point_weights", None) is not None
+        else None
+    )
+    proprio_np = np.asarray(
+        observation.proprio if observation.proprio is not None else observation.robot_obs,
+        dtype=np.float32,
+    )
+    task_attention = None
+    if task_readout is not None:
+        task_attention = {
+            "note": (
+                "task.pixel is a point-public-attention centroid. It is not the same as semantic or "
+                "visual attention; inspect these summaries before interpreting gripper-centric overlays."
+            ),
+            "local_role_ids": _tensor_to_int_list(getattr(task_readout, "local_role_ids", None), max_rows=64),
+            "semantic": _attention_summary(getattr(task_readout, "semantic_attention", None), topk=8, max_queries=16),
+            "public": _attention_summary(getattr(task_readout, "public_attention", None), topk=8, max_queries=16),
+            "visual_public": _attention_summary(
+                getattr(task_readout, "visual_public_attention", None),
+                topk=8,
+                max_queries=16,
+                pixels=visual_pixels,
+            ),
+            "point_public": _attention_summary(
+                getattr(task_readout, "point_public_attention", None),
+                topk=8,
+                max_queries=16,
+                points=getattr(token_field, "point_positions", None),
+                pixels=point_pixels,
+            ),
+            "tactile_public": _attention_summary(getattr(task_readout, "tactile_public_attention", None), topk=8, max_queries=16),
+            "visual_private": _attention_summary(getattr(task_readout, "visual_private_attention", None), topk=8, max_queries=16),
+            "point_private": _attention_summary(getattr(task_readout, "point_private_attention", None), topk=8, max_queries=16),
+            "tactile_private": _attention_summary(getattr(task_readout, "tactile_private_attention", None), topk=8, max_queries=16),
+            "slot_diversity": _slot_diversity(getattr(task_readout, "x", None), task_pixel),
+            "near_proprio_point_mass_10cm": _near_proprio_point_mass(
+                point_weights=getattr(task_readout, "point_weights", None),
+                point_positions=getattr(token_field, "point_positions", None),
+                proprio=proprio_np,
+                radius_m=0.10,
+            ),
+            "near_proprio_point_mass_20cm": _near_proprio_point_mass(
+                point_weights=getattr(task_readout, "point_weights", None),
+                point_positions=getattr(token_field, "point_positions", None),
+                proprio=proprio_np,
+                radius_m=0.20,
+            ),
+        }
+    return {
+        "image_hw": [image_h, image_w],
+        "segment_id": int(observation.segment_id),
+        "step_id": int(observation.step_id),
+        "observation": {
+            "xyz": _tensor_to_list(getattr(observation_anchors, "x", None)),
+            "pixel": _tensor_to_list(obs_pixel),
+            "role_ids": _tensor_to_int_list(getattr(observation_anchors, "role_ids", None), max_rows=128),
+            "support_point": _tensor_to_list(getattr(observation_anchors, "routing_support_point", None)),
+            "support_visual": _tensor_to_list(getattr(observation_anchors, "routing_support_visual", None)),
+            "gate_point": _tensor_to_list(getattr(observation_anchors, "routing_gate_point", None)),
+            "gate_visual": _tensor_to_list(getattr(observation_anchors, "routing_gate_visual", None)),
+        },
+        "posterior": {
+            "xyz": _tensor_to_list(getattr(posterior, "x", None)),
+            "pixel": _tensor_to_list(posterior_pixel),
+            "role_ids": _tensor_to_int_list(getattr(posterior, "role_ids", None), max_rows=128),
+            "alpha": _tensor_to_list(getattr(posterior, "alpha", None)),
+            "support_mass": _tensor_to_list(getattr(posterior, "support_mass", None)),
+            "contact_prob": _tensor_to_list(getattr(posterior, "contact_prob", None)),
+        },
+        "task": {
+            "xyz": _tensor_to_list(getattr(task_readout, "x", None)),
+            "pixel": _tensor_to_list(task_pixel),
+            "local_role_ids": _tensor_to_int_list(getattr(task_readout, "local_role_ids", None), max_rows=64),
+            "attention": task_attention,
+        },
+        "point_cloud": {
+            "xyz": _tensor_to_list(getattr(token_field, "point_positions", None), max_rows=1024),
+            "pool_ids": _tensor_to_int_list(getattr(token_field, "point_pool_ids", None), max_rows=1024),
+            "projected_pixel": _tensor_to_list(point_pixels, max_rows=1024),
+            "visibility": _tensor_to_list(getattr(geom, "point_visibility", None), max_rows=1024),
+            "visual_projected_pixel": _tensor_to_list(visual_pixels, max_rows=1024),
+        },
+    }
+
+
 class _PicfCheckpointPolicy(_base_policy.BasePolicy):
     def __init__(
         self,
@@ -138,6 +424,8 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         checkpoint_step: int,
         action_normalizer: PicfActionNormalizer | None,
         frame_dt_s: float = 1.0 / 30.0,
+        export_anchor_debug: bool = False,
+        export_prediction_debug: bool = False,
     ) -> None:
         self._trainer = trainer.eval()
         self._core = trainer.core
@@ -152,6 +440,8 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
             ),
         )
         self._action_normalizer = action_normalizer
+        self._export_anchor_debug = bool(export_anchor_debug)
+        self._export_prediction_debug = bool(export_prediction_debug)
         self._frame_dt_s = float(frame_dt_s)
         self._segment_id = 0
         self._step_id = 0
@@ -212,10 +502,19 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         if self._action_normalizer is not None:
             action = self._action_normalizer.unnormalize_np(action)
         self._step_id += 1
-        return {
+        response = {
             "actions": action[None, :],
             "debug": act_result.debug,
         }
+        if self._export_anchor_debug:
+            anchor_debug = _anchor_debug_payload(output, observation)
+            if anchor_debug is not None:
+                response["anchor_debug"] = anchor_debug
+        if self._export_prediction_debug:
+            prediction_debug = _prediction_debug_payload(output)
+            if prediction_debug is not None:
+                response["prediction_debug"] = prediction_debug
+        return response
 
 
 def _build_policy(
@@ -223,6 +522,8 @@ def _build_policy(
     checkpoint_path: Path,
     device: torch.device,
     picf_mode_override: str | None = None,
+    export_anchor_debug: bool = False,
+    export_prediction_debug: bool = False,
 ) -> _PicfCheckpointPolicy:
     output_dir, checkpoint_dir = _resolve_checkpoint_dir(checkpoint_path)
     args = _load_runtime_args(checkpoint_dir)
@@ -267,6 +568,8 @@ def _build_policy(
         checkpoint_dir=checkpoint_dir,
         checkpoint_step=checkpoint_step,
         action_normalizer=action_normalizer,
+        export_anchor_debug=export_anchor_debug,
+        export_prediction_debug=export_prediction_debug,
     )
 
 
@@ -286,6 +589,18 @@ def main() -> None:
             "recurrent/control/future branches."
         ),
     )
+    parser.add_argument(
+        "--export-anchor-debug",
+        action="store_true",
+        default=os.environ.get("OPENPI_PICF_EXPORT_ANCHORS", "0").lower() in {"1", "true", "yes", "on"},
+        help="Return compact PICF anchor projection and point-cloud debug payloads with each websocket action.",
+    )
+    parser.add_argument(
+        "--export-prediction-debug",
+        action="store_true",
+        default=os.environ.get("OPENPI_PICF_EXPORT_PREDICTIONS", "0").lower() in {"1", "true", "yes", "on"},
+        help="Return compact 4x4 visual-real predictive-cache payloads with each websocket action.",
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -296,6 +611,8 @@ def main() -> None:
         checkpoint_path=Path(args.checkpoint),
         device=device,
         picf_mode_override=args.picf_mode,
+        export_anchor_debug=bool(args.export_anchor_debug),
+        export_prediction_debug=bool(args.export_prediction_debug),
     )
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)

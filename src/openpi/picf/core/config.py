@@ -8,8 +8,10 @@ import math
 class PicfCoreConfig:
     device: str | None = None
     dtype: str = "float32"
-    persistent_anchors: int = 16
-    observation_anchors: int = 24
+    persistent_anchors: int = 8
+    observation_anchors: int = 16
+    effector_persistent_anchors: int = 2
+    effector_observation_anchors: int = 2
     hidden_dim: int = 512
     posterior_hidden_dim: int = 512
     latent_dim: int = 112
@@ -26,6 +28,7 @@ class PicfCoreConfig:
     control_query_tokens: int = 1
     predictive_query_tokens: int = 1
     task_local_queries: int = 8
+    task_effector_queries: int = 2
     task_global_queries: int = 1
     task_instruction_queries: int = 2
     # Reserved compatibility field for an unimplemented iterative task-readout variant.
@@ -42,6 +45,7 @@ class PicfCoreConfig:
     attention_heads: int = 8
     query_rounds: int = 2
     crop_radius_m: float = 0.10
+    global_scene_point_cap: int = 1024
     point_focus_sigma_m: float = 0.03
     workspace_radius_m: float = 0.5
     epsilon_s: float = 1e-6
@@ -61,7 +65,7 @@ class PicfCoreConfig:
     sync_tolerance_s: float = 0.02
     visual_stale_s: float = 0.15
     tactile_stale_s: float = 0.05
-    visual_real_grid: int = 4
+    visual_real_grid: int = 64
     visual_latent_tokens: int = 8
     tactile_real_grid: int = 4
     tactile_latent_tokens: int = 4

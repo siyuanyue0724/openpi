@@ -41,6 +41,9 @@ current recurrent burn-in speed-path audit
   full PICF `step=7500` run and the maintained PI0.5-only ablation run, are
   recorded in
   [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation).
+  Anchor / task-readout attention diagnostics and visual predictive-cache
+  comparison output are recorded in
+  [`Section 6.1.3`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#613-anchor-task-readout-and-predictive-cache-diagnostics).
 
 ## 0. Current Audit Snapshot
 
@@ -94,6 +97,20 @@ Latest 2x40GB frozen-perception burn-in smoke evidence:
   - about `0.055-0.061 steps/sec`
   - about `16.4-18.3 s/step`
 
+Current selected 2x40GB long-run bring-up evidence:
+
+- run name:
+  `picf_v22_frozen2x40_photometric_burnin4_unroll1_30000_ckpt5000_20260430_r1`
+- command shape:
+  `--unroll-steps 1 --burnin-steps 4 --burnin-mode state_only`
+- result:
+  - reached early ordinary training steps
+  - launch log printed `effective_window_steps=5`
+  - launch log printed frozen Sonata / V-JEPA / AnyTouch and trainable
+    PaliGemma
+- observed early speed:
+  - roughly `11.7-14.3 s/step`
+
 Performance note:
 
 - the current main open issue is still throughput, not mathematical contract
@@ -135,15 +152,18 @@ Current training profiles:
 | --- | --- | --- | --- |
 | 6x40GB full PICF | Full cotrain when enough GPUs are available | `picf_mode=enabled`, `nproc_per_node=6`, `accum_steps=1`, `unroll_steps=2`, `action_horizon=16`, `save_interval=2500` | Same v2.2 objective, larger global batch than 4x40GB |
 | 4x40GB full PICF | Standard all-backbone full-train reference | `picf_mode=enabled`, `fsdp_full_shard`, all foundation backbones trainable, `save_interval=2500` | Valid full-train profile, memory tight |
-| 2x40GB frozen-perception PICF | Cost-controlled full PICF without full perception cotrain | `perception_finetune_mode=frozen`, `unroll_steps=3`, `action_horizon=16`, `semantic_max_length=200`, conservative photometric augmentation, `save_interval=5000` | Maintained 2x40GB long-run profile |
-| 2x40GB frozen-perception fast PICF | Throughput-first full-PICF probe | `perception_finetune_mode=frozen`, `unroll_steps=1`, `semantic_gradient_checkpointing=False`, `action_horizon=16`, `semantic_max_length=200` | Reached about `8.8-9.3 s/step`; not equivalent to `unroll_steps=3` recurrent full-BPTT |
-| 2x40GB state-only burn-in | Faster long-context recurrent-state probe | `unroll_steps=1`, `burnin_steps=8`, `burnin_mode=state_only` | Smoke-tested through step10/final checkpoint; needs CALVIN quality comparison before becoming default |
+| 2x40GB frozen-perception PICF | Cost-controlled full PICF without full perception cotrain | `perception_finetune_mode=frozen`, `unroll_steps=3`, `action_horizon=16`, `semantic_max_length=256` primary / `200` fallback, conservative photometric augmentation, `persistent_anchors=8`, `observation_anchors=16`, `visual_real_grid=64`, `save_interval=5000` | Full-BPTT quality reference; slower, about `24-27 s/step` in early 2x40GB probes before the 8/16 anchor + 64x64 visual-real update |
+| 2x40GB frozen-perception fast PICF | Throughput-first full-PICF probe | `perception_finetune_mode=frozen`, `unroll_steps=1`, `semantic_gradient_checkpointing=False`, `action_horizon=16`, `semantic_max_length=256` primary / `200` fallback, `persistent_anchors=8`, `observation_anchors=16`, `visual_real_grid=64` | Reached about `8.8-9.3 s/step` before the 64x64 visual-real update; weakest recurrent credit-assignment profile |
+| 2x40GB selected state-only burn-in | Current sub-15s 30000-step full-PICF run | `unroll_steps=1`, `burnin_steps=4`, `burnin_mode=state_only`, `semantic_gradient_checkpointing=False`, `persistent_anchors=8`, `observation_anchors=16`, `visual_real_grid=64`, `save_interval=5000` | Four no-grad recurrent updates plus one trainable suffix transition; preserves PICF architecture while reducing runtime |
 | PI0.5-only ablation | Test the PI0.5 action path without PICF branches | `picf_mode=ablated`, `extra_prefix_tokens=None`, PICF core frozen | Maintained ablation profile, not full PICF |
 
 Default recommendation:
 
-- use full-BPTT `unroll_steps=3` for the current 2x40GB frozen-perception long
-  run when quality is the priority
+- use full-BPTT `unroll_steps=3` when the priority is strongest recurrent
+  credit assignment and runtime is acceptable
+- use `unroll_steps=1`, `burnin_steps=4`, `burnin_mode=state_only` for the
+  current sub-15s 2x40GB long run; this is the selected speed/quality
+  compromise under the current rental budget
 - use the fast `unroll_steps=1` profile only when the immediate target is
   `~10 s/step` throughput; it keeps the PICF architecture enabled but does not
   train multi-step recurrent BPTT like `unroll_steps=3`
@@ -153,8 +173,9 @@ Default recommendation:
   context but does not backpropagate credit through the burn-in transitions
 - do not disable FSDP on the 2x40GB trainable-PaliGemma profile; direct DDP was
   tested and OOMed in the PaliGemma/Gemma forward MLP
-- keep `semantic_max_length=200` for CALVIN parity-style runs unless a separate
-  prompt-length experiment is intended
+- use `semantic_max_length=256` first on frozen-perception 2x40GB runs; use
+  `200` only as a memory fallback or when intentionally matching a PI0.5
+  prompt-length parity run
 - keep `action_horizon=16` for CALVIN PI0.5/PICF action training unless a
   separate horizon sweep is intended
 ## 1. Document Map
@@ -1018,8 +1039,14 @@ the refactor, are:
 
 `PicfCoreConfig`
 
-- `persistent_anchors = 16`
-- `observation_anchors = 24`
+- `persistent_anchors = 8`
+- `observation_anchors = 16`
+- `effector_persistent_anchors = 2`
+- `effector_observation_anchors = 2`
+- `global_scene_point_cap = 1024`
+- `visual_real_grid = 64`
+- `task_local_queries = 8`
+- `task_effector_queries = 2`
 - `hidden_dim = 512`
 - `posterior_hidden_dim = 512`
 - `latent_dim = 112`
@@ -1028,6 +1055,30 @@ the refactor, are:
 - `semantic_dim = 2048`
 - `semantic_cross_dim = 2048`
 - `future_hidden_dim = 512`
+
+Anchor-role default:
+
+- of the `8` recurrent posterior slots, the first `2` remain effector/contact
+  slots and the remaining `6` are scene/object slots
+- of the `16` observation anchors, the first `2` are sampled from the local
+  effector/contact point pool and the remaining `14` are sampled from the global
+  scene point pool
+- no hard background slot is reserved in the live default. Background is handled
+  through scene/object slots plus task global/instruction tokens. A dedicated
+  background role should only be added after a measured diagnostic shows stable
+  non-object background evidence that should be recurrently maintained; adding
+  it blindly would reduce object capacity from the default `6` scene slots.
+
+Visual-real target:
+
+- `visual_real_grid = 64` means the future RGB supervision target is a
+  `64x64` downsample of the current/future static RGB frame
+- this replaces the historical `4x4` diagnostic target, which was useful for
+  cache plumbing but too coarse to inspect meaningful image prediction
+- direct `256x256` linear prediction is intentionally not the 2x40GB default:
+  it would make `visual_real_dim = 196608` and create a large output/error-head
+  parameter and activation footprint. Use a decoder-style visual head before
+  promoting `256x256` to a standard profile.
 - `attention_heads = 8`
 - `tactile_group_proposals = 2`
 - `visual_reread_topk = 32`
@@ -1211,6 +1262,84 @@ where:
 `task readout` reads this corrected public memory and then rereads private
 dense memory. It does not regress to raw pre-fusion
 `point_tokens/tactile_tokens_active/context_tokens` as its only public memory.
+
+### 6.1A Point-Pool Role Split For Effector vs Object Anchors
+
+The original anchor design reserves a small number of slots for the
+end-effector/contact region and leaves the rest to global scene/object evidence.
+The maintained implementation now makes that contract explicit instead of
+letting all anchors compete inside the same 10 cm gripper crop.
+
+Current point-token construction:
+
+```text
+local_effector_context
+  = points inside crop_radius_m around TCP/tactile focus centers
+
+global_scene_context
+  = farthest-point sample over the full current point cloud
+    capped by global_scene_point_cap
+
+point_context
+  = [local_effector_context, global_scene_context]
+
+point_pool_ids
+  = 0 for local_effector_context
+  = 1 for global_scene_context
+```
+
+Important detail:
+
+- `global_scene_context` is sampled from the whole frame, not from
+  `not local_effector_context`
+- this is intentional because, once the gripper reaches the target object, the
+  target can be inside the 10 cm crop and still must remain visible to object
+  anchors through its global-scene copy
+- local physical/contact targets continue to use the local crop; adding the
+  global point pool does not change the gripper-local occupancy target
+
+Current role allocation:
+
+```text
+observation anchors:
+  first effector_observation_anchors slots -> role 0 effector/contact
+  remaining observation anchors            -> role 1 scene/object
+
+posterior anchors:
+  first effector_persistent_anchors slots -> role 0 effector/contact
+  remaining persistent anchors            -> role 1 scene/object
+
+task-local queries:
+  first task_effector_queries slots -> role 0 effector/contact
+  remaining local task slots        -> role 1 scene/object
+```
+
+Role-aware read masks:
+
+- effector-role observation/task slots read local point-pool tokens
+- scene/object-role observation/task slots read global point-pool tokens when
+  global tokens are present
+- scene/object-role task slots do not read tactile proposals directly
+- global and instruction task slots remain unrestricted control/context slots
+- visual public memory remains available to both role families
+
+Role-aware posterior binding:
+
+- effector posterior anchors bind only effector observation anchors
+- scene/object posterior anchors bind only scene/object observation anchors
+- this prevents recurrent object state from being overwritten by gripper-local
+  observations just because the gripper crop is dense
+
+This role split is still language-free in the physical core. Semantic tokens do
+not enter observation-anchor construction or posterior binding; semantic enters
+only later through task readout and conditioned control.
+
+CLI knobs:
+
+- `--effector-persistent-anchors`
+- `--effector-observation-anchors`
+- `--task-effector-queries`
+- `--global-scene-point-cap`
 
 ### 6.2 Contract Rewrite Must Be Explicit
 
@@ -1487,13 +1616,22 @@ compat migration notes:
 
 ### 8.3 `src/openpi/picf/core/pipeline.py`
 
-Do not structurally change:
+Do not structurally weaken:
 
 - `_build_token_field`
 - `_build_observation_anchors`
 - `_posterior_update`
 - `_current_targets`
 - `_innovation`
+
+Allowed structural fixes in these helpers must preserve the formal boundary:
+
+- semantic still does not enter observation anchors, posterior update, or
+  innovation
+- physical/contact targets still use the effector-local point crop where that is
+  the supervised target
+- task/object selection may add explicit point-pool roles so the integration
+  layer no longer forces every anchor candidate to come from the gripper crop
 
 Current helper: `_build_public_read_memory(...)`
 
@@ -1562,6 +1700,131 @@ Implementation hard requirement:
   not inherit the current dormant `cross_gate=0` startup behavior unchanged
 - either add a nonzero `gate_init` path, or use a dedicated ungated semantic
   conditioner for this block
+
+Current implementation status:
+
+- `task_query_conditioner` uses `gate_init=1.0`
+- semantic query conditioning is therefore active from initialization rather
+  than waiting for a dormant gate to open
+- private visual / point / tactile reread blocks are still lazy gated readers;
+  this is intentional, but early or partial checkpoints can under-use dense
+  private reread until those gates learn to open
+
+### 8.3.1 Task-Readout Anchor Diagnostics And Interpretation
+
+The CALVIN anchor overlay uses three visual layers and role colors:
+
+- observation anchors: circles
+  - orange = effector/contact observation slots
+  - yellow = scene/object observation slots
+- posterior anchors: red circles
+  - purple = effector/contact posterior slots
+  - red = scene/object posterior slots
+- task-readout local slots: crosses
+  - magenta = effector/contact task slots
+  - cyan = scene/object task slots
+
+The cyan/object crosses require careful interpretation.
+
+Current code path:
+
+```text
+task_readout.point_weights
+  = normalized point_public_attention[:task_local_queries]
+
+task_readout.x
+  = task_readout.point_weights @ token_field.point_positions
+
+task.pixel
+  = task_readout.point_weights @ projected_point_pixels
+```
+
+Therefore:
+
+- `task.pixel` is a **point-public-attention centroid**
+- it is not the same tensor as semantic attention
+- it is not the same tensor as visual public attention
+- it is not the same tensor as private V-JEPA / visual reread attention
+
+Important risk:
+
+- object-role task pixels clustering on the gripper does **not** by itself prove that
+  PaliGemma language understanding failed
+- it proves only that the current point-space projection of the local task
+  readout is gripper-proximal
+- this can happen when point tokens around the gripper dominate the point-public
+  geometric projection even if semantic or visual attention still moves toward
+  the task object
+
+The maintained debug server now exports extra JSON diagnostics under:
+
+```text
+anchor_debug.task.attention
+```
+
+Fields:
+
+- `anchor_debug.observation.role_ids`: observation-anchor roles
+- `anchor_debug.posterior.role_ids`: posterior-anchor roles
+- `anchor_debug.task.local_role_ids`: task-local roles
+- `anchor_debug.point_cloud.pool_ids`: point-token pool ids, where `0` means
+  effector-local and `1` means global-scene
+- `semantic`: entropy and top-k semantic token indices for task queries
+- `public`: entropy and top-k over the combined `[fused_tokens, visual_tokens]`
+  public memory
+- `visual_public`: top visual grid cells and projected pixels
+- `point_public`: top point tokens, xyz, and projected pixels
+- `tactile_public`: tactile-public attention summary
+- `visual_private`, `point_private`, `tactile_private`: private reread
+  attention summaries; candidate identities are local candidate slots because
+  the current `PicfTaskReadoutState` does not store gather indices
+- `slot_diversity`: pairwise diversity for task xyz and projected task pixels
+- `near_proprio_point_mass_10cm` / `near_proprio_point_mass_20cm`: heuristic
+  mass near the first three `proprio` coordinates; this should be read as an
+  end-effector-proximity diagnostic, not as a formal object-label metric
+
+Decision rules:
+
+- if `semantic` and `visual_public` attention change with prompt while cyan
+  pixels remain on the gripper, the likely issue is point-projection or
+  effector/object disentanglement, not a language-input failure
+- if object-role slots have `role_ids=1` but their top `point_public` entries
+  mostly have `point_cloud.pool_ids=0`, the role mask has regressed
+- if object-role slots have `role_ids=1` and top points have `pool_ids=1` but
+  still project to the gripper, the global scene pool itself is gripper-heavy
+  and point-cloud sampling/camera projection should be inspected
+- if `semantic`, `visual_public`, and `point_public` are all nearly
+  prompt-invariant across different instructions, the semantic conditioning
+  path or prompt-state path is suspect
+- if `slot_diversity` is very low and all local slots share the same top-k point
+  tokens, the task slots are collapsing
+- if near-proprio mass is high for most local slots, inspect whether the model
+  is using the gripper as a useful manipulation reference or incorrectly
+  replacing object slots with effector slots
+
+Current audit files for the 2026-05-03 follow-through:
+
+- `/tmp/picf_v22_anchor_role_dataflow_20260503.md`
+- `/tmp/picf_v22_anchor_role_theory_20260503.md`
+- `/tmp/picf_v22_anchor_role_final_report_20260503.md`
+
+Local verification from that pass:
+
+- `python -m py_compile src/openpi/picf/core/contracts.py src/openpi/picf/core/config.py src/openpi/picf/core/pipeline.py src/openpi/picf/frame_context.py scripts/picf_core_train.py scripts/serve_picf_policy.py scripts/calvin/evaluate_picf_policy.py`
+- AST/static checks for the new point-pool fields, role masks, debug helpers,
+  CLI flags, and README navigation
+- README grep checks for the role/pool diagnostic contract and navigation
+
+Known local limitation:
+
+- the local Python environment currently fails on `import torch` before repo
+  code runs because `torch.autograd.profiler_legacy` is missing; runtime tensor
+  tests for this diagnostic path should be run on the cloud image where torch is
+  healthy
+
+Do not change the training architecture based only on cyan overlay videos.
+First compare the JSON attention summaries across prompts such as
+`open drawer`, `move slider`, and `push block`.
 
 Current helper: `_build_conditioned_control_state(...)`
 
@@ -1959,7 +2222,7 @@ architecture, PI0.5 action path, recurrent carry, task readout, conditioned
 control, and future supervision all stay enabled, while the heavy perception
 encoders are treated as fixed feature extractors.
 
-Current cloud-tested operator profile:
+Full-BPTT reference operator profile:
 
 - `world_size=2`
 - `training_strategy=fsdp_full_shard`
@@ -1967,11 +2230,15 @@ Current cloud-tested operator profile:
 - `picf_mode=enabled`
 - `accum_steps=1`
 - `unroll_steps=3`
+- `burnin_steps=0`
 - `action_horizon=16`
 - `num_train_steps=30000`
 - `save_interval=5000`
 - `log_interval=100`
-- `semantic_max_length=200`
+- `semantic_max_length=256` primary (`200` only as memory/parity fallback)
+- `visual_real_grid=64`
+- `persistent_anchors=8`
+- `observation_anchors=16`
 - `perception_finetune_mode=frozen`
 - `point_backbone=sonata`
 - `visual_mode=encoder`
@@ -2009,10 +2276,10 @@ Current 2x40GB evidence:
 
 - an initial `unroll_steps=2` smoke run on two A100 40GB GPUs reached
   `step >= 10`
-- `unroll_steps=3` was then smoke-tested and promoted to the maintained
-  2x40GB long-run setting
-- the maintained `unroll_steps=3` run reached `step >= 10` and continued as a
-  `30000`-step run with `save_interval=5000`
+- `unroll_steps=3` was smoke-tested and remains the slower full-BPTT quality
+  reference
+- the selected 2x40GB long run now uses `burnin_steps=4`,
+  `burnin_mode=state_only`, and `unroll_steps=1` with `save_interval=5000`
 - `unroll_steps=8` was tested and failed with CUDA OOM during `step=1`
   backward
 - `unroll_steps=4` was tested and failed with CUDA OOM during `step=2`
@@ -2026,6 +2293,44 @@ Current 2x40GB evidence:
 - if future sample variability causes OOM, fall back to `unroll_steps=2`
 - do not increase `accum_steps` or `action_horizon` on 2x40GB without a fresh
   smoke test
+
+Current selected sub-15s long-run profile:
+
+- `world_size=2`
+- `training_strategy=fsdp_full_shard`
+- `optimizer_sharding=none`
+- `picf_mode=enabled`
+- `accum_steps=1`
+- `unroll_steps=1`
+- `burnin_steps=4`
+- `burnin_mode=state_only`
+- `effective_window_steps=5`
+- `action_horizon=16`
+- `num_train_steps=30000`
+- `save_interval=5000`
+- `log_interval=100`
+- `semantic_max_length=256` primary (`200` only as memory/parity fallback)
+- `visual_real_grid=64`
+- `persistent_anchors=8`
+- `observation_anchors=16`
+- `perception_finetune_mode=frozen`
+- `picf_augmentation_mode=photometric`
+- `picf_photometric_strength=conservative`
+- `semantic_gradient_checkpointing=False`
+- `visual_activation_checkpointing=True`
+- `window_activation_checkpointing=False`
+
+This selected profile is the current runtime compromise for the 2x40GB node:
+
+- it gives the trainable suffix transition four previous recurrent physical
+  state updates
+- it keeps PaliGemma/PI0.5 and all PICF adapters/control/future heads trainable
+- it freezes only Sonata, V-JEPA, and AnyTouch
+- it is not full-BPTT through five transitions
+- observed bring-up speed was roughly `11.7-14.3 s/step`, depending on early
+  step and logging conditions
+- use CALVIN evaluation to compare quality against the slower full-BPTT
+  `unroll_steps=3` reference
 
 Experimental burn-in / suffix-gradient mode:
 
@@ -2083,8 +2388,11 @@ Current status on 2x40GB:
   diagnostics and duplicate post-clip FSDP gradient scanning; final diagnostics
   are now interval-only, and logging reuses the already computed pre/post clip
   norm instead of launching a second FSDP grad scan
-- therefore the maintained 2x40GB long-run profile remains full-BPTT
-  `unroll_steps=3` until `state_only` has a CALVIN quality comparison
+- the selected current 2x40GB long-run uses `burnin_steps=4` because it is the
+  only tested profile in this family that keeps full PICF enabled while staying
+  near the sub-15s target
+- full-BPTT `unroll_steps=3` remains the stronger recurrent-credit reference
+  when time budget allows
 - before using `state_only` for a real run, compare `burnin_steps=4/8/12`
   against full-BPTT
   `unroll_steps=3` for both speed and CALVIN quality

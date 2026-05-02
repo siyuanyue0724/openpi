@@ -52,6 +52,7 @@ def _base_args() -> argparse.Namespace:
         crop_radius_m=0.10,
         point_focus_sigma_m=0.03,
         visual_grid=8,
+        visual_real_grid=64,
         visual_num_frames=64,
         visual_img_size=384,
         visual_patch_size=16,
@@ -66,8 +67,10 @@ def _base_args() -> argparse.Namespace:
         semantic_dim=2048,
         semantic_cross_dim=2048,
         future_hidden_dim=512,
-        persistent_anchors=16,
-        observation_anchors=24,
+        persistent_anchors=8,
+        observation_anchors=16,
+        effector_persistent_anchors=2,
+        effector_observation_anchors=2,
         fusion_layers=4,
         posterior_layers=2,
         predictive_layers=2,
@@ -75,6 +78,7 @@ def _base_args() -> argparse.Namespace:
         control_query_tokens=1,
         predictive_query_tokens=1,
         task_local_queries=8,
+        task_effector_queries=2,
         task_global_queries=1,
         task_instruction_queries=2,
         task_self_layers=1,
@@ -88,6 +92,7 @@ def _base_args() -> argparse.Namespace:
         task_visual_reread_topk=32,
         task_tactile_reread_groups=2,
         task_point_reread_topk=32,
+        global_scene_point_cap=1024,
         require_pi0_action_generator=True,
         attention_heads=8,
         future_vote_heads=4,
@@ -197,6 +202,16 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     args = _base_args()
     _MODULE._normalize_train_args(args)
     assert args.warmup_steps == 600
+
+
+def test_normalize_train_args_caps_visual_real_diagnostic_upscale_for_64_grid() -> None:
+    args = _base_args()
+    args.visual_real_grid = 64
+    args.diagnostic_visual_upscale = 64
+    _MODULE._normalize_train_args(args)
+
+    assert args.visual_real_grid == 64
+    assert args.diagnostic_visual_upscale == 4
 
 
 def test_normalize_train_args_tracks_burnin_effective_window_length() -> None:

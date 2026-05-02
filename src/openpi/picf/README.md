@@ -6,7 +6,8 @@ Current PICF documents:
 
 1. [`README_v2.2.md`](./README_v2.2.md)
    The current local v2.2 architecture record and implementation audit for the
-   live codebase.
+   live codebase, including the explicit effector/object anchor role split and
+   global scene point-pool contract.
 2. [`README_PI05_PARITY_AUDIT.md`](./README_PI05_PARITY_AUDIT.md)
    Code-level comparison of reference PI0.5 / PI0.5+Sonata dataflow against
    current PICF enabled and PI0.5-only ablated modes.
@@ -27,6 +28,10 @@ Current PICF documents:
    Use
    [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
    for the current cloud-tested CALVIN video evaluation recipe.
+   Use
+   [`Section 6.1.3`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#613-anchor-task-readout-and-predictive-cache-diagnostics)
+   for anchor overlays, task-readout attention JSONL, and compact predictive
+   cache diagnostics.
 
 Use `README_v2.2.md` for the current live system,
 `README_PI05_PARITY_AUDIT.md` for PI0.5/PICF dataflow comparisons,
@@ -50,3 +55,7 @@ Fast operator path:
 4. Use
    [`CALVIN_VALIDATION_README.md Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
    for cloud CALVIN video evaluation and `/mnt` artifact handling.
+5. Use
+   [`CALVIN_VALIDATION_README.md Section 6.1.3`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#613-anchor-task-readout-and-predictive-cache-diagnostics)
+   when evaluating whether cyan task overlays indicate real slot collapse,
+   point-projection bias, or semantic/visual attention failure.

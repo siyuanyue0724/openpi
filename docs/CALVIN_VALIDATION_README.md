@@ -20,7 +20,8 @@ Direct execution entry points in this document:
 - current 2x40GB frozen-perception full PICF and state-only burn-in speed path:
   [`Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile)
 - current cloud-tested 20-sequence CALVIN video evaluation, including the
-  full PICF `step=7500` recipe and the maintained PI0.5-only ablation recipe:
+  full PICF rollout recipe, anchor/task-readout diagnostics, compact
+  predictive-cache comparisons, and the maintained PI0.5-only ablation recipe:
   [`Section 6.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#61-current-cloud-calvin-video-evaluation)
 
 Important status note:
@@ -396,14 +397,28 @@ training math, keep the same command and temporarily add:
 - freeze Sonata, V-JEPA, and AnyTouch through
   `--perception-finetune-mode frozen`
 - keep PaliGemma / PI0.5 action generation trainable
-- use `--semantic-max-length 200` to match the PI0.5 prompt-length contract
+- use `--semantic-max-length 256` first on this frozen-perception PICF profile;
+  use `200` only as a memory fallback or for a strict PI0.5 prompt-length
+  parity probe
+- use `--persistent-anchors 8 --observation-anchors 16`; this keeps two
+  effector/contact recurrent slots and six scene/object recurrent slots
+- use `--visual-real-grid 64`; the historical `4x4` visual-real cache is now a
+  diagnostic-only compatibility setting
+- when `--visual-real-grid 64` is used, the trainer auto-converts the historical
+  `--diagnostic-visual-upscale 64` default to `4`, keeping diagnostic videos
+  near `256x256` instead of writing `4096x4096` frames
+- do not reserve a hard background slot by default. Background evidence should
+  flow through scene/object anchors plus task global/instruction tokens until a
+  measured diagnostic justifies a dedicated background role.
 - use only conservative photometric augmentation:
   `--picf-augmentation-mode photometric --picf-photometric-strength conservative`
 - do not use RGB crop / rotation on full PICF unless point/depth/tactile
   geometry is transformed coherently as well
-- keep `--accum-steps 1`, `--unroll-steps 3`, and `--action-horizon 16` on
-  2x40GB; `unroll_steps=3` is the maximum setting validated on the current
-  frozen-perception profile
+- keep `--accum-steps 1` and `--action-horizon 16` on 2x40GB
+- `unroll_steps=3` is the maximum full-BPTT setting validated on the current
+  frozen-perception profile, but it is slow
+- the current selected sub-15s long-run uses
+  `--unroll-steps 1 --burnin-steps 4 --burnin-mode state_only`
 - `unroll_steps=8` was tested and failed with CUDA OOM during `step=1`
   backward
 - `unroll_steps=4` was tested and failed with CUDA OOM during `step=2`
@@ -413,7 +428,7 @@ training math, keep the same command and temporarily add:
   `unroll_steps=2`
 - the maintained checkpoint cadence for this profile is `--save-interval 5000`
 
-Current 2x40GB frozen-perception long-run template:
+Current selected 2x40GB frozen-perception long-run template:
 
 ```bash
 cd /root/openpi_posterior_vla_clean
@@ -429,7 +444,7 @@ export OPENPI_DISABLE_TORCH_COMPILE=1
   --calvin-root /mnt/calvin_data/task_ABC_D \
   --backend dir \
   --checkpoint-base-dir /mnt/checkpoints/picf_core \
-  --exp-name picf_v22_frozen2x40_photometric_30000_YYYYMMDD_rN \
+  --exp-name picf_v22_frozen2x40_vreal64_p8o16_sem256_burnin4_unroll1_30000_YYYYMMDD_rN \
   --overwrite \
   --device cuda \
   --picf-mode enabled \
@@ -448,9 +463,15 @@ export OPENPI_DISABLE_TORCH_COMPILE=1
   --training-strategy fsdp_full_shard \
   --optimizer-sharding none \
   --accum-steps 1 \
-  --unroll-steps 3 \
+  --unroll-steps 1 \
+  --burnin-steps 4 \
+  --burnin-mode state_only \
   --action-horizon 16 \
-  --semantic-max-length 200 \
+  --semantic-max-length 256 \
+  --persistent-anchors 8 \
+  --observation-anchors 16 \
+  --visual-real-grid 64 \
+  --diagnostic-visual-upscale 4 \
   --picf-augmentation-mode photometric \
   --picf-photometric-strength conservative \
   --num-train-steps 30000 \
@@ -459,7 +480,6 @@ export OPENPI_DISABLE_TORCH_COMPILE=1
   --grad-clip-mode percentile \
   --grad-clip-percentile 75 \
   --grad-clip-window 100 \
-  --semantic-gradient-checkpointing \
   --visual-activation-checkpointing \
   --no-wandb
 ```
@@ -467,7 +487,7 @@ export OPENPI_DISABLE_TORCH_COMPILE=1
 Live monitoring for the current 2026-04-30 run:
 
 ```bash
-tail -f /mnt/checkpoints/picf_core/debug/picf_v22_frozen2x40_photometric_unroll3_30000_20260430_r1.log
+tail -f /mnt/checkpoints/picf_core/debug/picf_v22_frozen2x40_photometric_burnin4_unroll1_30000_ckpt5000_20260430_r1.log
 ```
 
 ```bash
@@ -477,12 +497,15 @@ watch -n 2 "nvidia-smi --query-gpu=index,memory.used,utilization.gpu --format=cs
 Observed bring-up evidence:
 
 - an `unroll_steps=2` smoke run reached `step >= 10`
-- an `unroll_steps=3` smoke run reached early steps and became the maintained
-  long-run setting
-- the `unroll_steps=3` long-run reached `step >= 10`
+- an `unroll_steps=3` smoke run reached early steps and remains the full-BPTT
+  quality reference
+- the selected `unroll_steps=1`, `burnin_steps=4`, `state_only` long-run
+  reached early steps and is the current sub-15s runtime compromise
 - `unroll_steps=8` failed with CUDA OOM during `step=1` backward
 - `unroll_steps=4` failed with CUDA OOM during `step=2` backward
 - early `unroll_steps=3` speed was approximately `24-27 s/step`
+- early `burnin_steps=4`, `unroll_steps=1`, `state_only` speed was roughly
+  `11.7-14.3 s/step`
 - sampled inter-step memory can look lower, but probe peaks reached the 40GB
   limit; treat this as a tight configuration
 
@@ -508,9 +531,9 @@ Experimental burn-in speed probe:
   not retained by `make_recurrent_carry(...)`
 - `loss_total` and all logged loss averages are computed over the trainable
   suffix only, not over the burn-in transitions
-- this is intended for speed/memory exploration on 2x40GB nodes; it preserves
-  the v2.2 state/action architecture but is not equivalent to full-BPTT
-  `unroll_steps=9`
+- this is intended for speed/memory exploration and selected sub-15s long runs
+  on 2x40GB nodes; it preserves the v2.2 state/action architecture but is not
+  equivalent to full-BPTT over `burnin_steps + unroll_steps`
 - current 2026-04-30 cloud evidence: the fixed smoke
   `picf_v22_stateonly_burnin8_fixed_smoke_20260430_r3` ran with
   `burnin_steps=8`, `burnin_mode=state_only`, `unroll_steps=1`, reached
@@ -522,8 +545,9 @@ Experimental burn-in speed probe:
   to main-rank-only final visual diagnostics and duplicate post-clip FSDP grad
   scanning. Final visual diagnostics are now interval-only, and logging reuses
   the existing clip result instead of launching a second grad scan
-- `state_only` is therefore a valid experimental speed path, but it is still not
-  the maintained long-run default until it has a CALVIN quality comparison
+- `state_only` is therefore valid for the selected sub-15s long run, but
+  full-BPTT `unroll_steps=3` remains the quality reference until CALVIN
+  evaluation proves the burn-in profile is equivalent or better
 - do not use `--burnin-steps` with `--picf-mode ablated`; the trainer rejects it
   because the ablated PI0.5 path has no PICF recurrent carry
 - recommended sweep order:
@@ -783,6 +807,14 @@ export OPENPI_DISABLE_TORCH_COMPILE=1
   --picf-mode enabled
 ```
 
+To export anchor/task-readout diagnostics and compact predictive-cache
+comparisons, add:
+
+```bash
+  --export-anchor-debug \
+  --export-prediction-debug
+```
+
 Useful checks:
 
 ```bash
@@ -851,7 +883,97 @@ earlier direct `/mnt` write created a tiny placeholder such as a `44B` `.mp4`,
 ignore-existing copy modes will preserve the broken file forever instead of
 replacing it with the valid `/tmp` output.
 
-#### 6.1.3 Legacy Maintained Ablation Example
+#### 6.1.3 Anchor, Task-Readout, And Predictive-Cache Diagnostics
+
+The maintained PICF debug path can save three artifact families:
+
+- rollout videos under `videos/`
+- anchor/task-readout overlays and JSONL under `anchor_debug/`
+- compact predictive-cache comparison videos and JSONL under
+  `prediction_debug/`
+
+Server flags:
+
+```bash
+/root/openpi/.venv/bin/python scripts/serve_picf_policy.py \
+  --checkpoint /mnt/checkpoints/picf_core/picf_core/picf_v22_full_picf_a6_30000_ckpt2500_print100_p192_20260424_r2/10000 \
+  --device cuda:0 \
+  --port 8000 \
+  --picf-mode enabled \
+  --export-anchor-debug \
+  --export-prediction-debug
+```
+
+Evaluator flags:
+
+```bash
+base=/mnt/checkpoints/picf_core/eval/full_picf_a6_step10000_eval20_video_anchor_pred_YYYYMMDD_rN
+mkdir -p "$base/videos" "$base/logs" "$base/eval_logs" "$base/anchor_debug" "$base/prediction_debug"
+
+python /root/openpi_posterior_vla_clean/scripts/calvin/evaluate_picf_policy.py \
+  --dataset_path /mnt/calvin_data/task_ABC_D \
+  --eval_log_dir "$base/eval_logs" \
+  --num_sequences 20 \
+  --save_video \
+  --video_dir "$base/videos" \
+  --save_anchor_debug \
+  --anchor_debug_dir "$base/anchor_debug" \
+  --save_prediction_debug \
+  --prediction_debug_dir "$base/prediction_debug" \
+  > "$base/logs/eval.log" 2>&1
+```
+
+Monitor commands:
+
+```bash
+tail -f "$base/logs/eval.log"
+```
+
+```bash
+watch -n 10 "find \"$base\" -maxdepth 2 -type f -printf '%s %p\n' | sort -nr | head -40"
+```
+
+Interpretation rules:
+
+- `anchor_overlay_epXXXX.mp4` draws observation anchors, posterior anchors, and
+  task local slots
+- observation anchors are role-colored: orange for effector/contact slots and
+  yellow for scene/object slots
+- posterior anchors are role-colored: purple for effector/contact slots and red
+  for scene/object slots
+- task local slots are role-colored: magenta for effector/contact slots and cyan
+  for scene/object slots
+- a cyan object slot on the gripper is not by itself proof that language failed
+- inspect `anchor_debug/anchor_debug.jsonl`, especially
+  `anchor_debug.observation.role_ids`, `anchor_debug.posterior.role_ids`,
+  `anchor_debug.task.local_role_ids`,
+  `anchor_debug.point_cloud.pool_ids`,
+  `anchor_debug.task.attention.semantic`,
+  `anchor_debug.task.attention.visual_public`,
+  `anchor_debug.task.attention.point_public`,
+  `anchor_debug.task.attention.slot_diversity`, and
+  `near_proprio_point_mass_10cm/20cm`
+- if semantic and visual attention move with the prompt while point-projected
+  cyan object pixels remain near the gripper, inspect whether the object slots'
+  top point-public entries come from `pool_ids=1`; if they do, the issue is
+  global point sampling/projection, not semantic input
+- if semantic, visual, and point attention are all prompt-invariant, then the
+  semantic/prompt path is suspect
+- `prediction_compare_epXXXX.mp4` is not a generated full-resolution future
+  image; it compares the current `visual_real` predictive-cache grid against
+  the next real frame downsampled to the same grid. Current v2.2 default is
+  `64x64`; the historical `4x4` target is diagnostic-only compatibility.
+
+Artifact sanity checks:
+
+```bash
+find "$base/videos" "$base/anchor_debug" "$base/prediction_debug" -type f -name '*.mp4' -printf '%s %p\n' | sort -nr | head
+```
+
+Valid mp4 files should be non-trivial. Tiny `44B` files are placeholders from a
+writer that did not finalize and should not be treated as successful videos.
+
+#### 6.1.4 Legacy Maintained Ablation Example
 
 The current validated cloud-side evaluation recipe for the PI0.5-only ablation
 path is preserved below.
@@ -912,7 +1034,7 @@ Important current cloud notes:
   artifact persistence will still fail; check `df -h /mnt` before assuming the
   evaluator path is wrong
 
-#### 6.1.4 Serve The Ablated Checkpoint
+#### 6.1.5 Serve The Ablated Checkpoint
 
 ```bash
 cd /root/openpi_posterior_vla_clean
@@ -939,7 +1061,7 @@ ss -ltnp | grep :8000
 ps -ef | grep -E 'serve_picf_policy.py' | grep -v grep
 ```
 
-#### 6.1.5 Run The Ablated 20-Sequence Evaluator With Video
+#### 6.1.6 Run The Ablated 20-Sequence Evaluator With Video
 
 ```bash
 cd /root/openpi_posterior_vla_clean
@@ -968,7 +1090,7 @@ Notes:
   runtime because that path is known-good for `cv2.VideoWriter` on the current
   cloud image
 
-#### 6.1.6 Monitor Progress And Final Success Rate
+#### 6.1.7 Monitor Progress And Final Success Rate
 
 While the evaluator is running:
 
@@ -999,7 +1121,7 @@ Validated example final summary for checkpoint `2500` in ablated mode:
 
 That run completed all `20/20` sequences and produced `20` rollout videos.
 
-#### 6.1.7 Copy Videos And Logs Back Into `/mnt`
+#### 6.1.8 Copy Videos And Logs Back Into `/mnt`
 
 After the evaluator finishes successfully:
 

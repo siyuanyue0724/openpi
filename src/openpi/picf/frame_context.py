@@ -20,6 +20,9 @@ class PointFrameContext:
     local_mask: np.ndarray
     world_to_local: np.ndarray
     G_t: np.ndarray
+    # 0 = effector/contact-local point, 1 = global scene/object point.
+    # Older callers may leave this unset; core code treats unset as all-local.
+    pool_ids: np.ndarray | None = None
 
 
 def build_point_frame_context(
@@ -46,4 +49,5 @@ def build_point_frame_context(
         local_mask=keep,
         world_to_local=world_to_local,
         G_t=np.asarray(observation.G_t, dtype=np.float32),
+        pool_ids=np.zeros((int(keep.sum()),), dtype=np.int64),
     )

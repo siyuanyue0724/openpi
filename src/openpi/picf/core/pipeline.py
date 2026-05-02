@@ -310,6 +310,23 @@ def _fps_indices(points: torch.Tensor, count: int) -> torch.Tensor:
     return torch.as_tensor(chosen, device=points.device, dtype=torch.long)
 
 
+def _numpy_fps_indices(points: np.ndarray, count: int) -> np.ndarray:
+    if points.shape[0] == 0 or count <= 0:
+        return np.zeros((0,), dtype=np.int64)
+    if points.shape[0] <= count:
+        return np.arange(points.shape[0], dtype=np.int64)
+    centroid = points.mean(axis=0, dtype=np.float32)
+    dists = np.linalg.norm(points - centroid[None, :], axis=1)
+    first = int(np.argmax(dists))
+    chosen = [first]
+    min_dist = np.linalg.norm(points - points[first : first + 1], axis=1)
+    while len(chosen) < count:
+        next_idx = int(np.argmax(min_dist))
+        chosen.append(next_idx)
+        min_dist = np.minimum(min_dist, np.linalg.norm(points - points[next_idx : next_idx + 1], axis=1))
+    return np.asarray(chosen, dtype=np.int64)
+
+
 def _build_identity_frame_context(
     observation: PicfObservation,
     *,
@@ -329,6 +346,7 @@ def _build_identity_frame_context(
         local_mask=keep,
         world_to_local=np.eye(4, dtype=np.float32),
         G_t=np.asarray(observation.G_t, dtype=np.float32),
+        pool_ids=np.zeros((int(keep.sum()),), dtype=np.int64),
     )
 
 
@@ -1000,6 +1018,77 @@ class PicfFullCore(nn.Module):
         focus_centers_world = _focus_centers_world_from_observation(observation)
         return _build_identity_frame_context(observation, crop_radius_m=self.config.crop_radius_m, focus_centers_world=focus_centers_world)
 
+    def _point_context_with_global_scene(self, observation: PicfObservation, local_context: PointFrameContext) -> PointFrameContext:
+        """Return a unified point context with local effector points followed by global scene points.
+
+        The physical/contact path still has explicit local points. Scene/object
+        anchors and task slots need a separate global_scene_context candidate
+        pool so their geometry is not forced to collapse into the gripper crop.
+        """
+        assert observation.point_set is not None
+        cap = int(self.config.global_scene_point_cap)
+        if cap <= 0:
+            return local_context
+        xyz_world = np.asarray(observation.point_set.xyz_world, dtype=np.float32)
+        if xyz_world.shape[0] == 0:
+            return local_context
+        local_mask = np.asarray(local_context.local_mask, dtype=bool).reshape(-1)
+        if local_mask.shape[0] != xyz_world.shape[0]:
+            local_mask = np.zeros((xyz_world.shape[0],), dtype=bool)
+        # The scene/object pool is sampled from the whole frame, not from the
+        # complement of the effector crop. When the gripper is already near the
+        # task object, excluding the local crop would incorrectly hide that
+        # object from object-role anchors.
+        selected_rel = _numpy_fps_indices(xyz_world, min(cap, int(xyz_world.shape[0])))
+        scene_indices = selected_rel
+        grid = np.concatenate(
+            [
+                np.asarray(local_context.grid_coord, dtype=np.int32),
+                np.asarray(observation.point_set.grid_coord[scene_indices], dtype=np.int32),
+            ],
+            axis=0,
+        )
+        points = np.concatenate(
+            [
+                np.asarray(local_context.points_local, dtype=np.float32),
+                np.asarray(observation.point_set.xyz_world[scene_indices], dtype=np.float32),
+            ],
+            axis=0,
+        )
+        normals = np.concatenate(
+            [
+                np.asarray(local_context.normals_local, dtype=np.float32),
+                np.asarray(observation.point_set.normal_world[scene_indices], dtype=np.float32),
+            ],
+            axis=0,
+        )
+        colors = np.concatenate(
+            [
+                np.asarray(local_context.colors, dtype=np.float32),
+                np.asarray(observation.point_set.rgb[scene_indices], dtype=np.float32),
+            ],
+            axis=0,
+        )
+        selected_mask = local_mask.copy()
+        selected_mask[scene_indices] = True
+        pool_ids = np.concatenate(
+            [
+                np.zeros((int(local_context.points_local.shape[0]),), dtype=np.int64),
+                np.ones((int(scene_indices.shape[0]),), dtype=np.int64),
+            ],
+            axis=0,
+        )
+        return PointFrameContext(
+            grid_coord=grid,
+            points_local=points,
+            normals_local=normals,
+            colors=colors,
+            local_mask=selected_mask,
+            world_to_local=local_context.world_to_local,
+            G_t=local_context.G_t,
+            pool_ids=pool_ids,
+        )
+
     def _extract_point_features(self, frame_context: PointFrameContext, override: torch.Tensor | np.ndarray | None) -> torch.Tensor:
         if override is not None:
             feature = _to_tensor(override, device=self.device, dtype=self.dtype)
@@ -1164,6 +1253,61 @@ class PicfFullCore(nn.Module):
     ) -> torch.Tensor:
         return self._semantic_memory(semantic.prefix_tokens, dropout_prob=dropout_prob)
 
+    def _point_pool_ids(self, token_field: PicfTokenFieldState) -> torch.Tensor:
+        point_count = int(token_field.point_tokens.shape[0])
+        ids = token_field.point_pool_ids
+        if ids is None or ids.numel() != point_count:
+            return torch.zeros((point_count,), device=self.device, dtype=torch.long)
+        return ids.to(device=self.device, dtype=torch.long)
+
+    def _effector_observation_count(self) -> int:
+        return min(max(int(self.config.effector_observation_anchors), 0), int(self.config.observation_anchors))
+
+    def _effector_persistent_count(self) -> int:
+        return min(max(int(self.config.effector_persistent_anchors), 0), int(self.config.persistent_anchors))
+
+    def _task_effector_count(self) -> int:
+        return min(max(int(self.config.task_effector_queries), 0), int(self.config.task_local_queries))
+
+    def _fused_read_role_bias(self, query_role_ids: torch.Tensor, token_field: PicfTokenFieldState) -> torch.Tensor | None:
+        fused_count = int(token_field.fused_tokens.shape[0])
+        if fused_count == 0 or query_role_ids.numel() == 0:
+            return None
+        point_count = int(token_field.point_tokens.shape[0])
+        tactile_count = 0 if token_field.tactile_tokens_active is None else int(token_field.tactile_tokens_active.shape[0])
+        point_pool_ids = self._point_pool_ids(token_field)
+        has_global = bool(point_count > 0 and torch.any(point_pool_ids == 1).item())
+        bias = torch.zeros((int(query_role_ids.numel()), fused_count), device=self.device, dtype=self.dtype)
+        blocked = torch.zeros_like(bias, dtype=torch.bool)
+        if point_count > 0:
+            local_point = point_pool_ids == 0
+            global_point = point_pool_ids == 1
+            for row, role in enumerate(query_role_ids.tolist()):
+                if int(role) == 0:
+                    blocked[row, :point_count] = ~local_point
+                elif int(role) == 1 and has_global:
+                    blocked[row, :point_count] = ~global_point
+        if tactile_count > 0:
+            tactile_start = point_count
+            tactile_end = tactile_start + tactile_count
+            for row, role in enumerate(query_role_ids.tolist()):
+                if int(role) == 1:
+                    blocked[row, tactile_start:tactile_end] = True
+        if bool(blocked.any().item()):
+            bias = bias.masked_fill(blocked, -1.0e4)
+        return bias
+
+    def _task_public_role_bias(self, query_role_ids: torch.Tensor, token_field: PicfTokenFieldState) -> torch.Tensor | None:
+        fused_bias = self._fused_read_role_bias(query_role_ids, token_field)
+        if fused_bias is None:
+            if token_field.visual_tokens.shape[0] == 0:
+                return None
+            return torch.zeros((int(query_role_ids.numel()), int(token_field.visual_tokens.shape[0])), device=self.device, dtype=self.dtype)
+        if token_field.visual_tokens.shape[0] == 0:
+            return fused_bias
+        visual_bias = torch.zeros((fused_bias.shape[0], int(token_field.visual_tokens.shape[0])), device=self.device, dtype=self.dtype)
+        return torch.cat([fused_bias, visual_bias], dim=1)
+
     def _build_public_read_memory(self, token_field: PicfTokenFieldState) -> torch.Tensor:
         pieces = []
         if token_field.fused_tokens.shape[0] > 0:
@@ -1202,7 +1346,26 @@ class PicfFullCore(nn.Module):
         tactile_count = 0 if token_field.tactile_tokens_active is None else token_field.tactile_tokens_active.shape[0]
         tactile_public_attention = torch.zeros((queries.shape[1], tactile_count), device=self.device, dtype=self.dtype)
         if public_read_memory.shape[0] > 0:
-            queries, public_attention = self.task_public_reader(queries, public_read_memory[None, :])
+            local_count = int(self.config.task_local_queries)
+            effector_count = self._task_effector_count()
+            query_role_ids = torch.cat(
+                [
+                    torch.zeros((effector_count,), device=self.device, dtype=torch.long),
+                    torch.ones((max(local_count - effector_count, 0),), device=self.device, dtype=torch.long),
+                    torch.full(
+                        (int(self.config.task_global_queries) + int(self.config.task_instruction_queries),),
+                        2,
+                        device=self.device,
+                        dtype=torch.long,
+                    ),
+                ],
+                dim=0,
+            )
+            queries, public_attention = self.task_public_reader(
+                queries,
+                public_read_memory[None, :],
+                attn_bias=self._task_public_role_bias(query_role_ids, token_field),
+            )
             fused_count = token_field.fused_tokens.shape[0]
             visual_count = token_field.visual_tokens.shape[0]
             fused_attention = public_attention[:, :fused_count]
@@ -1258,6 +1421,14 @@ class PicfFullCore(nn.Module):
         local_tokens = task_tokens[:local_count]
         global_tokens = task_tokens[local_count : local_count + global_count]
         instruction_tokens = task_tokens[local_count + global_count : local_count + global_count + instruction_count]
+        task_effector_count = self._task_effector_count()
+        local_role_ids = torch.cat(
+            [
+                torch.zeros((task_effector_count,), device=self.device, dtype=torch.long),
+                torch.ones((max(local_count - task_effector_count, 0),), device=self.device, dtype=torch.long),
+            ],
+            dim=0,
+        )
 
         if token_field.point_tokens.shape[0] > 0 and local_count > 0:
             point_weights = point_public_attention[:local_count]
@@ -1296,6 +1467,7 @@ class PicfFullCore(nn.Module):
             visual_private_attention=visual_private_attention,
             tactile_private_attention=tactile_private_attention,
             point_private_attention=point_private_attention,
+            local_role_ids=local_role_ids,
         )
 
     def _build_conditioned_control_state(
@@ -1767,6 +1939,7 @@ class PicfFullCore(nn.Module):
         hidden_dim = self.config.hidden_dim
         point_tokens = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
         point_positions = torch.zeros((0, 3), device=self.device, dtype=self.dtype)
+        point_pool_ids = torch.zeros((0,), device=self.device, dtype=torch.long)
         point_align_embeddings = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
         visual_align_embeddings = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
         tactile_align_embeddings = torch.zeros((0, hidden_dim), device=self.device, dtype=self.dtype)
@@ -1793,6 +1966,15 @@ class PicfFullCore(nn.Module):
         )
         if frame_context is not None:
             point_positions = _to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype)
+            if frame_context.pool_ids is None:
+                point_pool_ids = torch.zeros((int(point_positions.shape[0]),), device=self.device, dtype=torch.long)
+            else:
+                point_pool_ids = torch.as_tensor(frame_context.pool_ids, device=self.device, dtype=torch.long)
+                if point_pool_ids.numel() != point_positions.shape[0]:
+                    raise RuntimeError(
+                        "PICF point-pool contract violated: "
+                        f"pool_ids={int(point_pool_ids.numel())} point_positions={int(point_positions.shape[0])}"
+                    )
             proj_features = self._point_projection_features(
                 projective_geometry,
                 source_hw=(int(observation.rgb_static.shape[0]), int(observation.rgb_static.shape[1])),
@@ -2015,6 +2197,7 @@ class PicfFullCore(nn.Module):
             tactile_contact_score_ema=tactile_contact_score_ema,
             fusion_attention_mean=fusion_attention_mean,
             projective_geometry=projective_geometry,
+            point_pool_ids=point_pool_ids,
         )
         dense_memory = _StepDenseMemory(
             point_payload=point_payload,
@@ -2039,27 +2222,61 @@ class PicfFullCore(nn.Module):
         point_count = token_field.point_tokens.shape[0]
         visual_count = dense_memory.visual_payload.shape[0]
         tactile_count = token_field.tactile_tokens.shape[0]
+        effector_count = self._effector_observation_count()
+        role_ids = torch.cat(
+            [
+                torch.zeros((effector_count,), device=self.device, dtype=torch.long),
+                torch.ones((max(n_obs - effector_count, 0),), device=self.device, dtype=torch.long),
+            ],
+            dim=0,
+        )
         seed_indices = torch.full((n_obs,), -1, device=self.device, dtype=torch.long)
         queries = torch.zeros((1, n_obs, hidden_dim), device=self.device, dtype=self.dtype)
         if point_count > 0:
-            chosen = _fps_indices(token_field.point_positions, min(n_obs, point_count))
-            if chosen.numel() > 0:
-                min_idx = int(chosen.min().item())
-                max_idx = int(chosen.max().item())
-                if min_idx < 0 or max_idx >= point_count:
-                    raise RuntimeError(
-                        "PICF observation-anchor seed index out of bounds: "
-                        f"valid=[0,{point_count - 1}] got min={min_idx} max={max_idx}"
-                    )
-            seed_indices[: chosen.shape[0]] = chosen
-            queries[0, : chosen.shape[0]] = token_field.point_tokens[chosen]
+            pool_ids = self._point_pool_ids(token_field)
+            seed_parts: list[tuple[slice, torch.Tensor]] = []
+            local_indices = torch.nonzero(pool_ids == 0, as_tuple=False).squeeze(-1)
+            global_indices = torch.nonzero(pool_ids == 1, as_tuple=False).squeeze(-1)
+            if effector_count > 0:
+                if local_indices.numel() > 0:
+                    chosen_local = local_indices[
+                        _fps_indices(token_field.point_positions[local_indices], min(effector_count, int(local_indices.numel())))
+                    ]
+                else:
+                    chosen_local = _fps_indices(token_field.point_positions, min(effector_count, point_count))
+                seed_parts.append((slice(0, effector_count), chosen_local))
+            scene_count = max(n_obs - effector_count, 0)
+            if scene_count > 0:
+                if global_indices.numel() > 0:
+                    chosen_scene = global_indices[
+                        _fps_indices(token_field.point_positions[global_indices], min(scene_count, int(global_indices.numel())))
+                    ]
+                else:
+                    chosen_scene = _fps_indices(token_field.point_positions, min(scene_count, point_count))
+                seed_parts.append((slice(effector_count, n_obs), chosen_scene))
+            for target_slice, chosen in seed_parts:
+                if chosen.numel() > 0:
+                    min_idx = int(chosen.min().item())
+                    max_idx = int(chosen.max().item())
+                    if min_idx < 0 or max_idx >= point_count:
+                        raise RuntimeError(
+                            "PICF observation-anchor seed index out of bounds: "
+                            f"valid=[0,{point_count - 1}] got min={min_idx} max={max_idx}"
+                        )
+                start = int(target_slice.start or 0)
+                stop = int(target_slice.stop or n_obs)
+                take = min(int(chosen.shape[0]), max(stop - start, 0))
+                if take > 0:
+                    seed_indices[start : start + take] = chosen[:take]
+                    queries[0, start : start + take] = token_field.point_tokens[chosen[:take]]
         attn_public = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
         attn_visual = torch.zeros((n_obs, visual_count), device=self.device, dtype=self.dtype)
+        public_role_bias = self._fused_read_role_bias(role_ids, token_field)
         for _ in range(max(self.config.query_rounds, 1)):
             if visual_count > 0:
                 queries, visual_weights = self.visual_native_reread(queries, dense_memory.visual_payload[None, :])
                 attn_visual = visual_weights[0]
-            queries, attn_public = self.obs_reader(queries, token_field.fused_tokens[None, :])
+            queries, attn_public = self.obs_reader(queries, token_field.fused_tokens[None, :], attn_bias=public_role_bias)
         obs_tokens = self.obs_self(queries)[0]
         routing_mass_point = attn_public[:, :point_count]
         routing_mass_visual = attn_visual
@@ -2119,6 +2336,7 @@ class PicfFullCore(nn.Module):
             routing_mass_tactile=routing_mass_tactile,
             routing_support_tactile=routing_support_tactile,
             routing_gate_tactile=routing_gate_tactile,
+            role_ids=role_ids,
         )
 
     def _initial_persistent(self) -> tuple[torch.Tensor, ...]:
@@ -2198,6 +2416,28 @@ class PicfFullCore(nn.Module):
         S_diag = torch.diagonal(S_prior, dim1=-2, dim2=-1)
         maha = torch.sum((delta**2) / torch.clamp(S_diag[:, None, :] + (self.config.bind_sigma_m**2), min=self.config.epsilon_s), dim=-1)
         return (self.config.lambda_bind_hidden * hidden_score) - (self.config.lambda_bind_geom * maha)
+
+    def _posterior_binding_role_bias(self, obs: PicfObservationAnchorState) -> torch.Tensor | None:
+        if obs.role_ids is None or obs.role_ids.numel() == 0:
+            return None
+        obs_roles = obs.role_ids.to(device=self.device, dtype=torch.long)
+        posterior_roles = self._posterior_role_ids()
+        k = int(posterior_roles.numel())
+        incompatible = posterior_roles[:, None] != obs_roles[None, :]
+        if not bool(incompatible.any().item()):
+            return None
+        return torch.zeros((k, int(obs_roles.numel())), device=self.device, dtype=self.dtype).masked_fill(incompatible, -1.0e4)
+
+    def _posterior_role_ids(self) -> torch.Tensor:
+        k = int(self.config.persistent_anchors)
+        effector_count = self._effector_persistent_count()
+        return torch.cat(
+            [
+                torch.zeros((effector_count,), device=self.device, dtype=torch.long),
+                torch.ones((max(k - effector_count, 0),), device=self.device, dtype=torch.long),
+            ],
+            dim=0,
+        )
 
     def _gather_topk_native_candidates(
         self,
@@ -2303,6 +2543,9 @@ class PicfFullCore(nn.Module):
             )
         h_prior, c_prior, mu_prior, var_prior, x_prior, S_prior, a_prior, alpha_prior = self._current_prior(previous, observation)
         bind_logits = self._binding_logits(h_prior, x_prior, S_prior, obs_anchors)
+        role_bias = self._posterior_binding_role_bias(obs_anchors)
+        if role_bias is not None:
+            bind_logits = bind_logits + role_bias
         binding_raw = self._sinkhorn_dustbin(bind_logits)
         support_raw = binding_raw[:-1]
         dustbin_raw = binding_raw[-1]
@@ -2497,6 +2740,7 @@ class PicfFullCore(nn.Module):
             evidence_tokens=evidence_tokens,
             tokens=tokens,
             global_post=global_post,
+            role_ids=self._posterior_role_ids(),
         )
 
     @staticmethod
@@ -2763,17 +3007,22 @@ class PicfFullCore(nn.Module):
         meta = self._build_runtime_meta(observation, previous.runtime_meta if previous is not None else None)
         if previous is None and not meta.point_contract_ok:
             raise RuntimeError("PICF core requires a valid xyzrgb point cloud on the first control step.")
-        frame_context = self._point_subset(observation) if meta.point_contract_ok else None
-        if previous is None and frame_context is not None and frame_context.points_local.shape[0] == 0:
+        local_frame_context = self._point_subset(observation) if meta.point_contract_ok else None
+        if previous is None and local_frame_context is not None and local_frame_context.points_local.shape[0] == 0:
             raise RuntimeError("PICF core requires non-empty local xyzrgb support on the first control step.")
-        point_features = self._extract_point_features(frame_context, point_features_override) if frame_context is not None else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
+        point_context = (
+            self._point_context_with_global_scene(observation, local_frame_context)
+            if local_frame_context is not None and point_features_override is None
+            else local_frame_context
+        )
+        point_features = self._extract_point_features(point_context, point_features_override) if point_context is not None else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
         visual_map = self._visual_map(observation, visual_map_override, meta)
         tactile_bundle = self._tactile_features(observation, meta)
         semantic = self._semantic_context(observation, previous, semantic_override)
-        token_field, dense_memory = self._build_token_field(observation, frame_context, point_features, visual_map, tactile_bundle, meta, previous)
+        token_field, dense_memory = self._build_token_field(observation, point_context, point_features, visual_map, tactile_bundle, meta, previous)
         observation_anchors = self._build_observation_anchors(token_field, dense_memory)
         posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory)
-        current_targets, availability = self._current_targets(observation, frame_context, visual_map, dense_memory)
+        current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
         innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
         proprio = _to_tensor(
             np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
@@ -2855,19 +3104,24 @@ class PicfFullCore(nn.Module):
         meta = self._build_runtime_meta(observation, previous.runtime_meta if previous is not None else None)
         if previous is None and not meta.point_contract_ok:
             raise RuntimeError("PICF core requires a valid xyzrgb point cloud on the first control step.")
-        frame_context = self._point_subset(observation) if meta.point_contract_ok else None
-        if previous is None and frame_context is not None and frame_context.points_local.shape[0] == 0:
+        local_frame_context = self._point_subset(observation) if meta.point_contract_ok else None
+        if previous is None and local_frame_context is not None and local_frame_context.points_local.shape[0] == 0:
             raise RuntimeError("PICF core requires non-empty local xyzrgb support on the first control step.")
+        point_context = (
+            self._point_context_with_global_scene(observation, local_frame_context)
+            if local_frame_context is not None and point_features_override is None
+            else local_frame_context
+        )
         point_features = (
-            self._extract_point_features(frame_context, point_features_override)
-            if frame_context is not None
+            self._extract_point_features(point_context, point_features_override)
+            if point_context is not None
             else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
         )
         visual_map = self._visual_map(observation, visual_map_override, meta)
         tactile_bundle = self._tactile_features(observation, meta)
         token_field, dense_memory = self._build_token_field(
             observation,
-            frame_context,
+            point_context,
             point_features,
             visual_map,
             tactile_bundle,

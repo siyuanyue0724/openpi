@@ -899,6 +899,20 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
     args.picf_mode = str(getattr(args, "picf_mode", "enabled")).lower().replace("-", "_")
     args.burnin_mode = str(getattr(args, "burnin_mode", "full")).lower().replace("-", "_")
     args.burnin_steps = int(getattr(args, "burnin_steps", 0) or 0)
+    args.effector_persistent_anchors = int(
+        getattr(args, "effector_persistent_anchors", _SPEC_DEFAULTS.effector_persistent_anchors)
+    )
+    args.effector_observation_anchors = int(
+        getattr(args, "effector_observation_anchors", _SPEC_DEFAULTS.effector_observation_anchors)
+    )
+    args.task_effector_queries = int(getattr(args, "task_effector_queries", _SPEC_DEFAULTS.task_effector_queries))
+    args.global_scene_point_cap = int(getattr(args, "global_scene_point_cap", _SPEC_DEFAULTS.global_scene_point_cap))
+    args.visual_real_grid = int(getattr(args, "visual_real_grid", _SPEC_DEFAULTS.visual_real_grid))
+    if int(getattr(args, "diagnostic_visual_upscale", 64)) == 64 and int(args.visual_real_grid) >= 32:
+        # The historical 4x4 visual-real target used 64x upscaling to make
+        # 256x256 diagnostic videos.  The live 64x64 target should keep the
+        # same approximate display size instead of writing 4096x4096 frames.
+        args.diagnostic_visual_upscale = max(1, 256 // int(args.visual_real_grid))
     args.effective_unroll_steps = int(getattr(args, "unroll_steps", 1)) + int(args.burnin_steps)
     perception_finetune_mode = str(getattr(args, "perception_finetune_mode", "auto")).lower().replace("-", "_")
     if perception_finetune_mode not in {"auto", "full", "frozen"}:
@@ -1139,6 +1153,7 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "stride",
         "max_points",
         "visual_grid",
+        "visual_real_grid",
         "visual_num_frames",
         "visual_img_size",
         "visual_patch_size",
@@ -1156,6 +1171,9 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "future_hidden_dim",
         "persistent_anchors",
         "observation_anchors",
+        "effector_persistent_anchors",
+        "effector_observation_anchors",
+        "global_scene_point_cap",
         "fusion_layers",
         "posterior_layers",
         "predictive_layers",
@@ -1163,6 +1181,7 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "control_query_tokens",
         "predictive_query_tokens",
         "task_local_queries",
+        "task_effector_queries",
         "task_global_queries",
         "task_instruction_queries",
         "task_self_layers",
@@ -1268,6 +1287,15 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(f"action_output_clip must be > 0 when provided, got {args.action_output_clip}.")
     if float(args.crop_radius_m) <= 0.0:
         raise ValueError(f"crop_radius_m must be > 0, got {args.crop_radius_m}.")
+    for name in ("effector_persistent_anchors", "effector_observation_anchors", "task_effector_queries", "global_scene_point_cap"):
+        if int(getattr(args, name)) < 0:
+            raise ValueError(f"{name} must be >= 0, got {getattr(args, name)}.")
+    if int(args.effector_persistent_anchors) > int(args.persistent_anchors):
+        raise ValueError("effector_persistent_anchors must be <= persistent_anchors.")
+    if int(args.effector_observation_anchors) > int(args.observation_anchors):
+        raise ValueError("effector_observation_anchors must be <= observation_anchors.")
+    if int(args.task_effector_queries) > int(args.task_local_queries):
+        raise ValueError("task_effector_queries must be <= task_local_queries.")
     if float(args.point_focus_sigma_m) <= 0.0:
         raise ValueError(f"point_focus_sigma_m must be > 0, got {args.point_focus_sigma_m}.")
     if int(args.diagnostic_interval) < 0:
@@ -3854,6 +3882,8 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         future_hidden_dim=args.future_hidden_dim,
         persistent_anchors=args.persistent_anchors,
         observation_anchors=args.observation_anchors,
+        effector_persistent_anchors=int(_arg_or_default("effector_persistent_anchors", _SPEC_DEFAULTS.effector_persistent_anchors)),
+        effector_observation_anchors=int(_arg_or_default("effector_observation_anchors", _SPEC_DEFAULTS.effector_observation_anchors)),
         fusion_layers=args.fusion_layers,
         posterior_layers=args.posterior_layers,
         predictive_layers=args.predictive_layers,
@@ -3861,6 +3891,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         control_query_tokens=args.control_query_tokens,
         predictive_query_tokens=args.predictive_query_tokens,
         task_local_queries=args.task_local_queries,
+        task_effector_queries=int(_arg_or_default("task_effector_queries", _SPEC_DEFAULTS.task_effector_queries)),
         task_global_queries=args.task_global_queries,
         task_instruction_queries=args.task_instruction_queries,
         task_self_layers=args.task_self_layers,
@@ -3874,6 +3905,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         attention_heads=args.attention_heads,
         future_vote_heads=args.future_vote_heads,
         crop_radius_m=float(_arg_or_default("crop_radius_m", _SPEC_DEFAULTS.crop_radius_m)),
+        global_scene_point_cap=int(_arg_or_default("global_scene_point_cap", _SPEC_DEFAULTS.global_scene_point_cap)),
         point_focus_sigma_m=float(_arg_or_default("point_focus_sigma_m", _SPEC_DEFAULTS.point_focus_sigma_m)),
         tactile_contact_tau_on=float(_arg_or_default("tactile_contact_tau_on", _SPEC_DEFAULTS.tactile_contact_tau_on)),
         tactile_contact_tau_off=float(_arg_or_default("tactile_contact_tau_off", _SPEC_DEFAULTS.tactile_contact_tau_off)),
@@ -3889,6 +3921,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default("task_tactile_reread_groups", _SPEC_DEFAULTS.task_tactile_reread_groups)
         ),
         task_point_reread_topk=int(_arg_or_default("task_point_reread_topk", _SPEC_DEFAULTS.task_point_reread_topk)),
+        visual_real_grid=int(_arg_or_default("visual_real_grid", _SPEC_DEFAULTS.visual_real_grid)),
         action_output_clip=getattr(args, "action_output_clip", None),
         tokenwise_ff_chunk_size=int(_arg_or_default("tokenwise_ff_chunk_size", _SPEC_DEFAULTS.tokenwise_ff_chunk_size)),
         require_pi0_action_generator=bool(_arg_or_default("require_pi0_action_generator", _SPEC_DEFAULTS.require_pi0_action_generator)),
@@ -4596,7 +4629,7 @@ def train(args: argparse.Namespace) -> None:
                 True,
             )
             logging.info(
-                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s task_local_queries=%s task_global_queries=%s task_instruction_queries=%s task_self_layers=%s conditioned_control_queries=%s pi_prefix_queries=%s conditioned_future_queries=%s task_visual_reread_topk=%s task_tactile_reread_groups=%s task_point_reread_topk=%s require_pi0_action_generator=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
+                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s effector_persistent_anchors=%s effector_observation_anchors=%s global_scene_point_cap=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s task_local_queries=%s task_effector_queries=%s task_global_queries=%s task_instruction_queries=%s task_self_layers=%s conditioned_control_queries=%s pi_prefix_queries=%s conditioned_future_queries=%s task_visual_reread_topk=%s task_tactile_reread_groups=%s task_point_reread_topk=%s visual_real_grid=%s visual_real_dim=%s require_pi0_action_generator=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
                 args.hidden_dim,
                 args.posterior_hidden_dim,
                 args.latent_dim,
@@ -4607,6 +4640,9 @@ def train(args: argparse.Namespace) -> None:
                 args.future_hidden_dim,
                 args.persistent_anchors,
                 args.observation_anchors,
+                args.effector_persistent_anchors,
+                args.effector_observation_anchors,
+                args.global_scene_point_cap,
                 args.fusion_layers,
                 args.posterior_layers,
                 args.predictive_layers,
@@ -4614,6 +4650,7 @@ def train(args: argparse.Namespace) -> None:
                 args.control_query_tokens,
                 args.predictive_query_tokens,
                 args.task_local_queries,
+                args.task_effector_queries,
                 args.task_global_queries,
                 args.task_instruction_queries,
                 args.task_self_layers,
@@ -4623,6 +4660,8 @@ def train(args: argparse.Namespace) -> None:
                 args.task_visual_reread_topk,
                 args.task_tactile_reread_groups,
                 args.task_point_reread_topk,
+                args.visual_real_grid,
+                3 * int(args.visual_real_grid) * int(args.visual_real_grid),
                 bool(args.require_pi0_action_generator),
                 args.predictive_semantic_reads,
                 args.control_semantic_reads,
@@ -4632,7 +4671,7 @@ def train(args: argparse.Namespace) -> None:
                 args.future_vote_heads,
             )
             logging.info(
-                "v2.2 semantic/control contract: the full PaliGemma token sequence remains width=%s and stays native in PI0.5 semantic/action generation; core control/future no longer take raw semantic-prefix tokens directly, task readout builds semantic-conditioned current-step context from public_read_memory=[fused_tokens, visual_tokens] plus private dense rereads, and conditioned control/future consume that context together with up-projected physical posterior/global_post/innovation/proprio/physical_pred tokens; semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not restore direct raw-semantic injection into the core trunks.",
+                "v2.2 semantic/control contract: the full PaliGemma token sequence remains width=%s and stays native in PI0.5 semantic/action generation; core control/future no longer take raw semantic-prefix tokens directly, task readout builds semantic-conditioned current-step context from public_read_memory=[fused_tokens, visual_tokens] plus private dense rereads; point tokens are split into local effector and global scene pools for role-aware observation/task slots; conditioned control/future consume task context together with up-projected physical posterior/global_post/innovation/proprio/physical_pred tokens; semantic_cross_dim/predictive_semantic_reads/control_semantic_reads remain compatibility fields that do not restore direct raw-semantic injection into the core trunks.",
                 args.semantic_dim,
             )
             logging.info(
@@ -5223,6 +5262,16 @@ def main() -> None:
     parser.add_argument("--progress", dest="progress", action="store_true")
     parser.add_argument("--no-progress", dest="progress", action="store_false")
     parser.add_argument("--visual-grid", type=int, default=8)
+    parser.add_argument(
+        "--visual-real-grid",
+        type=int,
+        default=_SPEC_DEFAULTS.visual_real_grid,
+        help=(
+            "Side length of the RGB future target used by loss_visual_real. "
+            "The v2.2 default is 64, replacing the historical 4x4 diagnostic target. "
+            "Use 4 only for lightweight unit tests or compatibility probes."
+        ),
+    )
     parser.add_argument("--use-foundation-backbones", action="store_true")
     parser.add_argument(
         "--perception-finetune-mode",
@@ -5326,6 +5375,8 @@ def main() -> None:
     parser.add_argument("--future-hidden-dim", type=int, default=_SPEC_DEFAULTS.future_hidden_dim)
     parser.add_argument("--persistent-anchors", type=int, default=_SPEC_DEFAULTS.persistent_anchors)
     parser.add_argument("--observation-anchors", type=int, default=_SPEC_DEFAULTS.observation_anchors)
+    parser.add_argument("--effector-persistent-anchors", type=int, default=_SPEC_DEFAULTS.effector_persistent_anchors)
+    parser.add_argument("--effector-observation-anchors", type=int, default=_SPEC_DEFAULTS.effector_observation_anchors)
     parser.add_argument("--fusion-layers", type=int, default=_SPEC_DEFAULTS.fusion_layers)
     parser.add_argument("--posterior-layers", type=int, default=_SPEC_DEFAULTS.posterior_layers)
     parser.add_argument("--predictive-layers", type=int, default=_SPEC_DEFAULTS.predictive_layers)
@@ -5333,6 +5384,7 @@ def main() -> None:
     parser.add_argument("--control-query-tokens", type=int, default=_SPEC_DEFAULTS.control_query_tokens)
     parser.add_argument("--predictive-query-tokens", type=int, default=_SPEC_DEFAULTS.predictive_query_tokens)
     parser.add_argument("--task-local-queries", type=int, default=_SPEC_DEFAULTS.task_local_queries)
+    parser.add_argument("--task-effector-queries", type=int, default=_SPEC_DEFAULTS.task_effector_queries)
     parser.add_argument("--task-global-queries", type=int, default=_SPEC_DEFAULTS.task_global_queries)
     parser.add_argument("--task-instruction-queries", type=int, default=_SPEC_DEFAULTS.task_instruction_queries)
     parser.add_argument("--task-self-layers", type=int, default=_SPEC_DEFAULTS.task_self_layers)
@@ -5343,6 +5395,7 @@ def main() -> None:
     parser.add_argument("--control-semantic-reads", type=int, default=_SPEC_DEFAULTS.control_semantic_reads)
     parser.add_argument("--predictive-semantic-dropout-prob", type=float, default=_SPEC_DEFAULTS.predictive_semantic_dropout_prob)
     parser.add_argument("--semantic-prefix-dropout-prob", type=float, default=_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
+    parser.add_argument("--global-scene-point-cap", type=int, default=_SPEC_DEFAULTS.global_scene_point_cap)
     parser.add_argument("--task-visual-reread-topk", type=int, default=_SPEC_DEFAULTS.task_visual_reread_topk)
     parser.add_argument("--task-tactile-reread-groups", type=int, default=_SPEC_DEFAULTS.task_tactile_reread_groups)
     parser.add_argument("--task-point-reread-topk", type=int, default=_SPEC_DEFAULTS.task_point_reread_topk)

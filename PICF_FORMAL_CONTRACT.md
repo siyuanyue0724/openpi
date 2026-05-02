@@ -47,6 +47,9 @@ At control step `t`:
   - `S_t`
 - current token field:
   - `F_t`
+- point-pool roles:
+  - local effector/contact point pool `P_t^{eff}`
+  - global scene/object point pool `P_t^{scene}`
 - current-step private dense memory:
   - `M_t^{priv}`
 - physical observation anchors:
@@ -200,6 +203,11 @@ Current semantic tokens must not affect:
 - observation-anchor selection
 - observation-anchor token values
 - observation-anchor geometry summaries
+
+Observation-anchor selection may use language-free point-pool roles. The
+maintained role split reserves a small effector/contact subset and assigns the
+remaining observation anchors to the global scene/object point pool. This does
+not relax the semantic isolation rule.
 
 ### F2. Semantic must not affect physical posterior update
 

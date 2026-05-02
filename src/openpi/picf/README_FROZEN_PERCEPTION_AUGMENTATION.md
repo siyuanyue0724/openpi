@@ -50,7 +50,7 @@ The profile must not silently change:
 
 ## 2. Recommended 2x40GB Profile
 
-Default 2x40GB recommendation:
+Full-BPTT 2x40GB reference recommendation:
 
 ```text
 picf_mode=enabled
@@ -60,16 +60,50 @@ world_size=2
 accum_steps=1
 unroll_steps=3
 action_horizon=16
-semantic_max_length=200
+semantic_max_length=256 primary / 200 memory fallback
 semantic_trainable=True
 perception_finetune_mode=frozen
 visual_feature_mode=hierarchical
+visual_real_grid=64
+persistent_anchors=8
+observation_anchors=16
 point_backbone_trainable=False
 tactile_trainable=False
 picf_augmentation_mode=photometric
 picf_photometric_strength=conservative
 save_interval=5000
 ```
+
+Current selected sub-15s 2x40GB long-run:
+
+```text
+picf_mode=enabled
+training_strategy=fsdp_full_shard
+optimizer_sharding=none
+world_size=2
+accum_steps=1
+unroll_steps=1
+burnin_steps=4
+burnin_mode=state_only
+effective_window_steps=5
+action_horizon=16
+semantic_max_length=256 primary / 200 memory fallback
+semantic_trainable=True
+semantic_gradient_checkpointing=False
+perception_finetune_mode=frozen
+visual_feature_mode=hierarchical
+visual_real_grid=64
+persistent_anchors=8
+observation_anchors=16
+picf_augmentation_mode=photometric
+picf_photometric_strength=conservative
+save_interval=5000
+```
+
+This selected profile keeps the full PICF suffix path and PI0.5 action path
+trainable, but uses four no-grad recurrent state updates before one trainable
+suffix transition. It is the current runtime compromise for the sub-15s target.
+It is not equivalent to full-BPTT `unroll_steps=5`.
 
 Fast 2x40GB speed profile:
 
@@ -82,7 +116,7 @@ accum_steps=1
 unroll_steps=1
 burnin_steps=0
 action_horizon=16
-semantic_max_length=200
+semantic_max_length=256 primary / 200 memory fallback
 semantic_trainable=True
 semantic_gradient_checkpointing=False
 perception_finetune_mode=frozen
@@ -93,9 +127,9 @@ save_interval=5000
 ```
 
 This speed profile is exact for its stated objective, but it is not equivalent
-to the maintained `unroll_steps=3` full-BPTT recurrent objective. Use it when
+to the `unroll_steps=3` full-BPTT recurrent reference. Use it when
 throughput is the priority and evaluate CALVIN quality separately before
-promoting it over the default.
+promoting it beyond a speed probe.
 
 Trainable modules:
 
@@ -131,9 +165,28 @@ Rationale:
 - The fastest capacity-preserving 2x40GB probe kept FSDP, used
   `unroll_steps=1`, and disabled semantic gradient checkpointing. It reached
   about `0.107-0.114 steps/sec` after step 1, roughly `8.8-9.3 s/step`.
+- The selected `burnin_steps=4`, `burnin_mode=state_only`, `unroll_steps=1`
+  run reached early steps at roughly `11.7-14.3 s/step`, while exposing the
+  trainable suffix to four previous recurrent state updates.
 - Conservative photometric augmentation is geometry-preserving. It changes RGB
   intensities without moving pixels, point coordinates, camera geometry, robot
   state, or action labels.
+- `visual_real_grid=64` is the maintained future-RGB supervision target for
+  this profile. The historical `4x4` target is now treated as a diagnostic-only
+  compatibility setting. Direct `256x256` linear prediction is not used on
+  2x40GB because it creates a large output/error-head footprint without a
+  decoder-style visual head.
+- `diagnostic_visual_upscale` should be `4` with `visual_real_grid=64`; the
+  trainer automatically converts the old `64` default to `4` to keep diagnostic
+  videos near `256x256`.
+- `persistent_anchors=8` and `observation_anchors=16` are the current slot
+  budget for frozen-perception bring-up: two effector/contact recurrent slots,
+  six scene/object recurrent slots, two effector observation anchors, and
+  fourteen global scene observation anchors.
+- A hard background slot is intentionally not reserved by default. Background
+  evidence is represented through scene/object anchors plus task global and
+  instruction tokens; reserving a background slot without explicit supervision
+  would reduce object capacity.
 
 ## 3. Current Code Support
 
@@ -155,9 +208,9 @@ Operational notes:
   [`docs/CALVIN_VALIDATION_README.md Section 5.1A`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51a-current-2x40gb-frozen-perception-full-picf-profile)
 - named shell wrappers are optional convenience only; the CLI contract itself is
   the maintained interface
-- `state_only` burn-in is implemented as an experimental speed path, but the
-  maintained long-run profile remains full-BPTT `unroll_steps=3` until burn-in
-  has a separate CALVIN quality comparison
+- `state_only` burn-in is implemented and selected for the current sub-15s
+  2x40GB long run with `burnin_steps=4`; full-BPTT `unroll_steps=3` remains the
+  quality reference when runtime is acceptable
 - the `unroll_steps=1` fast profile is a throughput profile, not a hidden
   replacement for recurrent full-BPTT training
 
@@ -168,7 +221,10 @@ point=sonata(trainable=False)
 visual=encoder(finetune_mode=frozen trainable=False)
 tactile=encoder(trainable=False)
 semantic=paligemma(trainable=True)
-semantic_max_length=200
+semantic_max_length=256 primary / 200 memory fallback
+visual_real_grid=64
+persistent_anchors=8
+observation_anchors=16
 picf_augmentation_mode=photometric
 picf_photometric_strength=conservative
 ```
@@ -343,7 +399,7 @@ Current implementation status:
 Implemented and validated:
 
 - CLI support for `perception_finetune_mode=frozen`
-- CLI support for `semantic_max_length=200`
+- CLI support for `semantic_max_length=256` with `200` as a memory/parity fallback
 - CLI support for `picf_augmentation_mode=off|photometric|multimodal_geometry`
 - fail-fast behavior for reserved `multimodal_geometry`
 - tests proving that `off` preserves the existing path
@@ -382,11 +438,13 @@ Required tests before enabling any non-off augmentation in long runs:
 
 ## 9. Operational Recommendation
 
-For the maintained 2x40GB full-PICF experiment, use:
+For the current selected 2x40GB full-PICF experiment, use:
 
 ```text
-frozen perception + conservative photometric augmentation + semantic_max_length=200
-unroll_steps=3 + action_horizon=16 + save_interval=5000
+frozen perception + conservative photometric augmentation + semantic_max_length=256
+unroll_steps=1 + burnin_steps=4 + burnin_mode=state_only
+action_horizon=16 + save_interval=5000
+visual_real_grid=64 + persistent_anchors=8 + observation_anchors=16
 ```
 
 The canonical command is maintained in
@@ -413,9 +471,15 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   --training-strategy fsdp_full_shard \
   --optimizer-sharding none \
   --accum-steps 1 \
-  --unroll-steps 3 \
+  --unroll-steps 1 \
+  --burnin-steps 4 \
+  --burnin-mode state_only \
   --action-horizon 16 \
-  --semantic-max-length 200 \
+  --semantic-max-length 256 \
+  --persistent-anchors 8 \
+  --observation-anchors 16 \
+  --visual-real-grid 64 \
+  --diagnostic-visual-upscale 4 \
   --visual-feature-mode hierarchical \
   --picf-augmentation-mode photometric \
   --picf-photometric-strength conservative \
@@ -425,7 +489,6 @@ export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
   --grad-clip-mode percentile \
   --grad-clip-percentile 75 \
   --grad-clip-window 100 \
-  --semantic-gradient-checkpointing \
   --visual-activation-checkpointing
 ```
 
@@ -438,6 +501,8 @@ log_interval=1
 ```
 
 Only after memory, speed, and loss are stable should `photometric` augmentation
-be compared against `off` as a controlled quality experiment. Do not replace the
-full-BPTT `unroll_steps=3` default with `state_only` burn-in without a separate
-CALVIN quality comparison.
+be compared against `off` as a controlled quality experiment. Full-BPTT
+`unroll_steps=3` remains the quality reference when runtime is acceptable, but
+the selected 2x40GB runtime profile is the `burnin_steps=4` state-only burn-in
+compromise because it preserves full PICF on the trainable suffix while staying
+near the sub-15s target.
