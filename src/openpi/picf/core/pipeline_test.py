@@ -246,6 +246,133 @@ def _semantic_features(value: float, *, num_tokens: int = 3, width: int = 32) ->
     return PaliGemmaSemanticFeatures(tokens=tokens, summary=summary)
 
 
+def _semantic_features_with_spatial(value: float, *, width: int = 32) -> PaliGemmaSemanticFeatures:
+    tokens = torch.full((3, width), value, dtype=torch.float32)
+    summary = torch.full((1, width), value, dtype=torch.float32)
+    image_tokens = torch.arange(4 * width, dtype=torch.float32).reshape(4, width) / 100.0
+    text_tokens = torch.full((2, width), value + 0.5, dtype=torch.float32)
+    return PaliGemmaSemanticFeatures(
+        tokens=tokens,
+        summary=summary,
+        image_tokens=image_tokens,
+        text_tokens=text_tokens,
+        image_token_ranges=((0, 4),),
+        image_grid_shapes=((2, 2),),
+        image_view_names=("static",),
+    )
+
+
+def test_vl_point_prior_uses_column_normalized_projective_mass() -> None:
+    compatibility = torch.tensor(
+        [
+            [1.0, 0.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    heatmap = torch.tensor([0.5, 0.5], dtype=torch.float32)
+
+    prior, valid, visible_mass = pipeline_module._point_prior_from_heatmap(
+        compatibility,
+        heatmap,
+        point_projectable_mask=torch.ones((3,), dtype=torch.bool),
+        min_visible_mass=1e-4,
+        eps=1e-6,
+    )
+
+    assert bool(valid.item())
+    torch.testing.assert_close(visible_mass, torch.tensor(1.0))
+    torch.testing.assert_close(prior, torch.tensor([0.25, 0.25, 0.5]), atol=1e-6, rtol=1e-6)
+
+
+def test_vl_point_prior_invalid_projection_is_zero_not_top_left_fallback() -> None:
+    compatibility = torch.zeros((3, 2), dtype=torch.float32)
+    heatmap = torch.tensor([1.0, 0.0], dtype=torch.float32)
+
+    prior, valid, visible_mass = pipeline_module._point_prior_from_heatmap(
+        compatibility,
+        heatmap,
+        point_projectable_mask=torch.ones((3,), dtype=torch.bool),
+        min_visible_mass=1e-4,
+        eps=1e-6,
+    )
+
+    assert not bool(valid.item())
+    torch.testing.assert_close(visible_mass, torch.tensor(0.0))
+    torch.testing.assert_close(prior, torch.zeros((3,)))
+
+
+def test_vl_heatmap_resize_preserves_probability_mass() -> None:
+    heatmap = torch.tensor([1.0, 0.0, 0.0, 0.0], dtype=torch.float32)
+
+    resized = pipeline_module._resize_flat_heatmap(
+        heatmap,
+        src_hw=(2, 2),
+        dst_hw=(4, 4),
+        eps=1e-6,
+    )
+
+    assert resized.shape == (16,)
+    assert bool(torch.all(resized >= 0.0).item())
+    torch.testing.assert_close(resized.sum(), torch.tensor(1.0), atol=1e-6, rtol=1e-6)
+
+
+def test_vl_point_prior_projectable_mask_excludes_local_frame_rows() -> None:
+    compatibility = torch.tensor(
+        [
+            [1.0, 1.0],
+            [1.0, 0.0],
+            [0.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    heatmap = torch.tensor([0.5, 0.5], dtype=torch.float32)
+    # Row 0 represents a local-frame point. The VL 2D-to-3D lift must not assign
+    # heatmap mass to it unless the code has explicitly converted it to world
+    # coordinates.
+    projectable = torch.tensor([False, True, True], dtype=torch.bool)
+
+    prior, valid, visible_mass = pipeline_module._point_prior_from_heatmap(
+        compatibility,
+        heatmap,
+        point_projectable_mask=projectable,
+        min_visible_mass=1e-4,
+        eps=1e-6,
+    )
+
+    assert bool(valid.item())
+    torch.testing.assert_close(visible_mass, torch.tensor(1.0))
+    torch.testing.assert_close(prior, torch.tensor([0.0, 0.5, 0.5]), atol=1e-6, rtol=1e-6)
+
+
+def test_weighted_anchor_modes_preserve_separated_high_weight_modes() -> None:
+    positions = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [0.01, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+        ],
+        dtype=torch.float32,
+    )
+    weights = torch.tensor([0.9, 0.8, 0.7], dtype=torch.float32)
+
+    modes = pipeline_module._weighted_anchor_modes(positions, weights, count=2, radius_m=0.1)
+
+    assert modes.tolist() == [0, 2]
+
+
+def test_vl_grounding_disabled_does_not_instantiate_router_modules(tmp_path: Path) -> None:
+    core, _replay = _make_core(tmp_path)
+
+    assert core.config.vl_anchor_router_enabled is False
+    assert core.vl_heatmap_head is None
+    assert core.vl_anchor_token_proj is None
+    assert core.vl_task_point_gate_logit is None
+    assert core.vl_obs_anchor_gate_logit is None
+    assert core.vl_posterior_bind_gate_logit is None
+
+
 def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
@@ -279,6 +406,32 @@ def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp
     assert output.state.predictive.predictive_query_state.shape == (core.config.semantic_dim,)
     assert output.state.predictive.global_pred.shape == (core.config.hidden_dim,)
     assert output.state.token_field.fusion_attention_mean is not None
+    assert output.state.vl_grounding is None
+
+
+def test_vl_grounding_enabled_builds_state_without_changing_default_anchor_contract(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        vl_anchor_router_enabled=True,
+        vl_anchor_modes=3,
+    )
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+
+    vl = output.state.vl_grounding
+    assert vl is not None
+    assert vl.task_heatmap.shape == (output.state.token_field.visual_tokens.shape[0],)
+    assert vl.task_point_prior.shape == (output.state.token_field.point_tokens.shape[0],)
+    assert vl.anchor_point_priors.shape[1] == output.state.token_field.point_tokens.shape[0]
+    assert output.state.observation_anchors.tokens.shape == (core.config.observation_anchors, core.config.hidden_dim)
+    assert output.state.task_readout.point_weights.shape[0] == core.config.task_local_queries
+    assert "vl_grounding_valid" in output.debug
+    assert "vl_grounding_confidence" in output.debug
+    assert "vl_grounding_anchor_count" in output.debug
 
 
 def test_effector_and_scene_anchor_roles_use_separate_point_pools(tmp_path: Path) -> None:
@@ -336,20 +489,20 @@ def test_effector_and_scene_anchor_roles_use_separate_point_pools(tmp_path: Path
 
     obs = output.state.observation_anchors
     assert obs.role_ids is not None
-    torch.testing.assert_close(obs.role_ids[:2], torch.zeros((2,), dtype=torch.long))
-    torch.testing.assert_close(obs.role_ids[2:], torch.ones((6,), dtype=torch.long))
+    torch.testing.assert_close(obs.role_ids[:2], torch.zeros((2,), dtype=torch.long, device=obs.role_ids.device))
+    torch.testing.assert_close(obs.role_ids[2:], torch.ones((6,), dtype=torch.long, device=obs.role_ids.device))
     assert bool(torch.all(obs.seed_indices[:2] < local_offsets.shape[0]).item())
     assert bool(torch.all(obs.seed_indices[2:] >= local_offsets.shape[0]).item())
 
     posterior_roles = output.state.posterior.role_ids
     assert posterior_roles is not None
-    torch.testing.assert_close(posterior_roles[:2], torch.zeros((2,), dtype=torch.long))
-    torch.testing.assert_close(posterior_roles[2:], torch.ones((4,), dtype=torch.long))
+    torch.testing.assert_close(posterior_roles[:2], torch.zeros((2,), dtype=torch.long, device=posterior_roles.device))
+    torch.testing.assert_close(posterior_roles[2:], torch.ones((4,), dtype=torch.long, device=posterior_roles.device))
 
     task_roles = output.state.task_readout.local_role_ids
     assert task_roles is not None
-    torch.testing.assert_close(task_roles[:2], torch.zeros((2,), dtype=torch.long))
-    torch.testing.assert_close(task_roles[2:], torch.ones((4,), dtype=torch.long))
+    torch.testing.assert_close(task_roles[:2], torch.zeros((2,), dtype=torch.long, device=task_roles.device))
+    torch.testing.assert_close(task_roles[2:], torch.ones((4,), dtype=torch.long, device=task_roles.device))
 
 
 def test_refresh_predictive_state_for_action_rebuilds_cache_from_supplied_action(tmp_path: Path) -> None:

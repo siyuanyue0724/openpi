@@ -42,6 +42,25 @@ class PaliGemmaSemanticFeatures:
     prefix_embeddings: torch.Tensor | None = None
     prefix_pad_masks: torch.Tensor | None = None
     prefix_att_masks: torch.Tensor | None = None
+    image_tokens: torch.Tensor | None = None
+    text_tokens: torch.Tensor | None = None
+    image_token_ranges: tuple[tuple[int, int], ...] = ()
+    image_grid_shapes: tuple[tuple[int, int], ...] = ()
+    image_view_names: tuple[str, ...] = ()
+    image_view_transforms: tuple["PaliGemmaViewTransform", ...] = ()
+
+
+@dataclasses.dataclass(frozen=True)
+class PaliGemmaViewTransform:
+    original_hw: tuple[int, int]
+    target_hw: tuple[int, int]
+    resized_hw: tuple[int, int]
+    pad_top: int
+    pad_bottom: int
+    pad_left: int
+    pad_right: int
+    scale_y: float
+    scale_x: float
 
 
 def _masked_position_ids(pad_mask: torch.Tensor) -> torch.Tensor:
@@ -408,11 +427,40 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
             for parameter in self.model.parameters():
                 parameter.requires_grad_(False)
 
-    def _views(self, observation: PicfObservation) -> list[np.ndarray]:
-        views = [np.asarray(observation.rgb_static)]
+    def _named_views(self, observation: PicfObservation) -> list[tuple[str, np.ndarray]]:
+        views = [("static", np.asarray(observation.rgb_static))]
         if self.config.include_gripper_image and observation.rgb_gripper is not None:
-            views.append(np.asarray(observation.rgb_gripper))
+            views.append(("gripper", np.asarray(observation.rgb_gripper)))
         return views
+
+    def _views(self, observation: PicfObservation) -> list[np.ndarray]:
+        return [image for _, image in self._named_views(observation)]
+
+    def _view_transform(self, image: np.ndarray, *, target_h: int = 224, target_w: int = 224) -> PaliGemmaViewTransform:
+        arr = np.asarray(image)
+        if arr.ndim != 3:
+            raise ValueError(f"Expected HWC image for view transform, got shape={tuple(arr.shape)}")
+        cur_h, cur_w = int(arr.shape[0]), int(arr.shape[1])
+        if cur_h <= 0 or cur_w <= 0:
+            raise ValueError(f"Expected positive image size, got original_hw={(cur_h, cur_w)}")
+        ratio = max(cur_w / float(target_w), cur_h / float(target_h))
+        resized_h = int(cur_h / ratio)
+        resized_w = int(cur_w / ratio)
+        pad_top, rem_h = divmod(target_h - resized_h, 2)
+        pad_bottom = pad_top + rem_h
+        pad_left, rem_w = divmod(target_w - resized_w, 2)
+        pad_right = pad_left + rem_w
+        return PaliGemmaViewTransform(
+            original_hw=(cur_h, cur_w),
+            target_hw=(target_h, target_w),
+            resized_hw=(resized_h, resized_w),
+            pad_top=int(pad_top),
+            pad_bottom=int(pad_bottom),
+            pad_left=int(pad_left),
+            pad_right=int(pad_right),
+            scale_y=float(resized_h / max(cur_h, 1)),
+            scale_x=float(resized_w / max(cur_w, 1)),
+        )
 
     def _prepare_inputs(self, *, prompt: str, image: np.ndarray) -> dict[str, torch.Tensor]:
         processed = self.processor(
@@ -726,11 +774,40 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
     def _model_runtime_dtype(self) -> torch.dtype:
         return module_parameter_dtype(self.paligemma_with_expert.paligemma.language_model.layers[0].self_attn.q_proj)
 
-    def _views(self, observation: PicfObservation) -> list[np.ndarray]:
-        views = [np.asarray(observation.rgb_static)]
+    def _named_views(self, observation: PicfObservation) -> list[tuple[str, np.ndarray]]:
+        views = [("static", np.asarray(observation.rgb_static))]
         if self.config.include_gripper_image and observation.rgb_gripper is not None:
-            views.append(np.asarray(observation.rgb_gripper))
+            views.append(("gripper", np.asarray(observation.rgb_gripper)))
         return views
+
+    def _views(self, observation: PicfObservation) -> list[np.ndarray]:
+        return [image for _, image in self._named_views(observation)]
+
+    def _view_transform(self, image: np.ndarray, *, target_h: int = 224, target_w: int = 224) -> PaliGemmaViewTransform:
+        arr = np.asarray(image)
+        if arr.ndim != 3:
+            raise ValueError(f"Expected HWC image for view transform, got shape={tuple(arr.shape)}")
+        cur_h, cur_w = int(arr.shape[0]), int(arr.shape[1])
+        if cur_h <= 0 or cur_w <= 0:
+            raise ValueError(f"Expected positive image size, got original_hw={(cur_h, cur_w)}")
+        ratio = max(cur_w / float(target_w), cur_h / float(target_h))
+        resized_h = int(cur_h / ratio)
+        resized_w = int(cur_w / ratio)
+        pad_top, rem_h = divmod(target_h - resized_h, 2)
+        pad_bottom = pad_top + rem_h
+        pad_left, rem_w = divmod(target_w - resized_w, 2)
+        pad_right = pad_left + rem_w
+        return PaliGemmaViewTransform(
+            original_hw=(cur_h, cur_w),
+            target_hw=(target_h, target_w),
+            resized_hw=(resized_h, resized_w),
+            pad_top=int(pad_top),
+            pad_bottom=int(pad_bottom),
+            pad_left=int(pad_left),
+            pad_right=int(pad_right),
+            scale_y=float(resized_h / max(cur_h, 1)),
+            scale_x=float(resized_w / max(cur_w, 1)),
+        )
 
     def _prepare_image(self, image: np.ndarray) -> torch.Tensor:
         arr = np.asarray(image)
@@ -820,13 +897,30 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
     def _embed_prefix(
         self,
         observation: PicfObservation,
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, int, torch.Tensor]:
+    ) -> tuple[
+        torch.Tensor,
+        torch.Tensor,
+        torch.Tensor,
+        int,
+        torch.Tensor,
+        tuple[tuple[int, int], ...],
+        tuple[tuple[int, int], ...],
+        tuple[str, ...],
+        tuple[PaliGemmaViewTransform, ...],
+    ]:
         lang_tokens, lang_masks = self._prepare_prompt(observation.prompt, observation)
         embs: list[torch.Tensor] = []
         pad_masks: list[torch.Tensor] = []
         att_masks: list[int] = []
         image_token_count = 0
-        for image in self._views(observation):
+        image_token_ranges: list[tuple[int, int]] = []
+        image_grid_shapes: list[tuple[int, int]] = []
+        image_view_names: list[str] = []
+        image_view_transforms: list[PaliGemmaViewTransform] = []
+        cursor = 0
+        for view_name, image in self._named_views(observation):
+            image_view_names.append(view_name)
+            image_view_transforms.append(self._view_transform(image))
             image_tensor = self._prepare_image(image)
 
             def _image_embed(x: torch.Tensor) -> torch.Tensor:
@@ -834,7 +928,18 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
 
             img_emb = self._apply_checkpoint(_image_embed, image_tensor)
             batch_size, num_img_tokens = img_emb.shape[:2]
-            image_token_count += int(num_img_tokens)
+            num_img_tokens = int(num_img_tokens)
+            start, end = cursor, cursor + num_img_tokens
+            image_token_ranges.append((start, end))
+            grid_side = int(round(math.sqrt(num_img_tokens)))
+            if grid_side * grid_side != num_img_tokens:
+                raise RuntimeError(
+                    "PaliGemma spatial token contract requires a square image-token grid. "
+                    f"view={view_name!r} num_img_tokens={num_img_tokens}"
+                )
+            image_grid_shapes.append((grid_side, grid_side))
+            cursor = end
+            image_token_count += num_img_tokens
             embs.append(img_emb)
             pad_masks.append(torch.ones((batch_size, num_img_tokens), device=self.device, dtype=torch.bool))
             att_masks += [0] * num_img_tokens
@@ -860,7 +965,17 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         model_dtype = self._model_runtime_dtype()
         if model_dtype in (torch.float16, torch.bfloat16):
             prefix_embs = prefix_embs.to(dtype=model_dtype)
-        return prefix_embs, prefix_pad_masks, prefix_att_masks, image_token_count, lang_masks
+        return (
+            prefix_embs,
+            prefix_pad_masks,
+            prefix_att_masks,
+            image_token_count,
+            lang_masks,
+            tuple(image_token_ranges),
+            tuple(image_grid_shapes),
+            tuple(image_view_names),
+            tuple(image_view_transforms),
+        )
 
     def _prepare_attention_masks_4d(self, att_2d_masks: torch.Tensor) -> torch.Tensor:
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
@@ -870,7 +985,17 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         use_grad = bool(self.trainable and self.training)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
-            prefix_embs, prefix_pad_masks, prefix_att_masks, image_token_count, lang_masks = self._embed_prefix(observation)
+            (
+                prefix_embs,
+                prefix_pad_masks,
+                prefix_att_masks,
+                image_token_count,
+                lang_masks,
+                image_token_ranges,
+                image_grid_shapes,
+                image_view_names,
+                image_view_transforms,
+            ) = self._embed_prefix(observation)
             att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
             position_ids = _masked_position_ids(prefix_pad_masks)
             attn_mask_4d = self._prepare_attention_masks_4d(att_2d_masks).to(dtype=prefix_embs.dtype)
@@ -892,6 +1017,11 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             prefix_output = self._apply_checkpoint(_forward_prefix, prefix_embs, attn_mask_4d, position_ids)
             image_hidden = prefix_output[:, :image_token_count, :] if image_token_count > 0 else None
             text_hidden = prefix_output[:, image_token_count:, :]
+            image_tokens = None if image_hidden is None else image_hidden[0]
+            text_tokens = text_hidden[0]
+            if not use_grad:
+                image_tokens = None if image_tokens is None else image_tokens.detach().clone()
+                text_tokens = text_tokens.detach().clone()
             return PaliGemmaSemanticFeatures(
                 tokens=_take_valid_prefix_tokens(prefix_output[0], prefix_pad_masks[0]),
                 summary=_summary_from_outputs(
@@ -902,6 +1032,12 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 prefix_embeddings=prefix_embs[0],
                 prefix_pad_masks=prefix_pad_masks[0],
                 prefix_att_masks=prefix_att_masks[0],
+                image_tokens=image_tokens,
+                text_tokens=text_tokens,
+                image_token_ranges=image_token_ranges,
+                image_grid_shapes=image_grid_shapes,
+                image_view_names=image_view_names,
+                image_view_transforms=image_view_transforms,
             )
 
     def supports_pi0_action_generation(self) -> bool:

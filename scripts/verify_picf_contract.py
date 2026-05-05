@@ -585,7 +585,9 @@ def verify_static_contract() -> list[CheckResult]:
                 in source
                 and "all_tokens = torch.cat([point_tokens, tactile_tokens_active, context_tokens], dim=0)" in source
                 and "queries, visual_weights = self.visual_native_reread(queries, dense_memory.visual_payload[None, :])" in source
-                and "queries, attn_public = self.obs_reader(queries, token_field.fused_tokens[None, :])" in source
+                and "queries, attn_public = self.obs_reader(" in source
+                and "token_field.fused_tokens[None, :]" in source
+                and "attn_bias=public_role_bias" in source
             ),
             detail=(
                 "Live PICF observation competition is now visual-native-first: native V-JEPA payload is re-read "

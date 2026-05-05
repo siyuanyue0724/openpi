@@ -26,6 +26,28 @@ class PicfProjectiveGeometryState:
 
 
 @dataclasses.dataclass
+class PicfVLGroundingState:
+    task_heatmap_logits: torch.Tensor
+    effector_heatmap_logits: torch.Tensor
+    interaction_heatmap_logits: torch.Tensor
+    task_heatmap: torch.Tensor
+    effector_heatmap: torch.Tensor
+    interaction_heatmap: torch.Tensor
+    task_point_prior: torch.Tensor
+    effector_point_prior: torch.Tensor
+    interaction_point_prior: torch.Tensor
+    anchor_point_priors: torch.Tensor
+    anchor_x: torch.Tensor
+    anchor_S: torch.Tensor
+    anchor_tokens: torch.Tensor
+    anchor_roles: torch.Tensor
+    anchor_scores: torch.Tensor
+    visual_pixel_centers: torch.Tensor | None
+    valid: torch.Tensor
+    confidence: torch.Tensor
+
+
+@dataclasses.dataclass
 class PicfTokenFieldState:
     point_tokens: torch.Tensor
     visual_tokens: torch.Tensor
@@ -183,6 +205,7 @@ class PicfCoreState:
     predictive: PicfPredictiveState
     control: PicfControlState
     last_prompt: str | None = None
+    vl_grounding: PicfVLGroundingState | None = None
 
 
 @dataclasses.dataclass

@@ -184,12 +184,113 @@ def _prediction_debug_payload(output: Any | None) -> dict[str, Any] | None:
     }
 
 
-def _weighted_point_pixels(point_weights: torch.Tensor, point_pixels: torch.Tensor) -> torch.Tensor:
+def _weighted_pixels_and_mass(
+    point_weights: torch.Tensor,
+    point_pixels: torch.Tensor,
+    point_visibility: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     if point_weights.numel() == 0 or point_pixels.numel() == 0:
-        return torch.zeros((int(point_weights.shape[0]), 2), device=point_weights.device, dtype=point_weights.dtype)
+        rows = int(point_weights.shape[0]) if point_weights.ndim > 0 else 0
+        return (
+            torch.zeros((rows, 2), device=point_weights.device, dtype=point_weights.dtype),
+            torch.zeros((rows,), device=point_weights.device, dtype=point_weights.dtype),
+        )
+    count = min(int(point_weights.shape[-1]), int(point_pixels.shape[0]))
+    if count <= 0:
+        rows = int(point_weights.shape[0]) if point_weights.ndim > 0 else 0
+        return (
+            torch.zeros((rows, 2), device=point_weights.device, dtype=point_weights.dtype),
+            torch.zeros((rows,), device=point_weights.device, dtype=point_weights.dtype),
+        )
     weights = torch.clamp(point_weights, min=0.0)
+    weights = weights[..., :count]
+    pixels = point_pixels[:count].to(device=weights.device, dtype=weights.dtype)
+    if point_visibility is not None and point_visibility.numel() > 0:
+        visibility = torch.clamp(point_visibility[:count].to(device=weights.device, dtype=weights.dtype), min=0.0, max=1.0)
+        weights = weights * visibility[None, :]
     denom = torch.clamp(weights.sum(dim=-1, keepdim=True), min=1e-6)
-    return (weights @ point_pixels.to(device=weights.device, dtype=weights.dtype)) / denom
+    return (weights @ pixels) / denom, weights.sum(dim=-1)
+
+
+def _weighted_point_pixels(
+    point_weights: torch.Tensor,
+    point_pixels: torch.Tensor,
+    point_visibility: torch.Tensor | None = None,
+) -> torch.Tensor:
+    centers, _ = _weighted_pixels_and_mass(point_weights, point_pixels, point_visibility)
+    return centers
+
+
+def _tensor_rows_to_list(value: torch.Tensor | None, valid: torch.Tensor | None = None, *, max_rows: int | None = None) -> Any:
+    if value is None:
+        return None
+    tensor = value.detach().to(device="cpu", dtype=torch.float32)
+    if tensor.ndim == 0:
+        return float(tensor.item())
+    if max_rows is not None and tensor.ndim > 0:
+        tensor = tensor[: int(max_rows)]
+    if valid is None:
+        return tensor.numpy().tolist()
+    valid_cpu = valid.detach().to(device="cpu", dtype=torch.bool)
+    if max_rows is not None and valid_cpu.ndim > 0:
+        valid_cpu = valid_cpu[: int(max_rows)]
+    rows = tensor.numpy().tolist()
+    flags = valid_cpu.numpy().tolist()
+    if not isinstance(rows, list) or not isinstance(flags, list):
+        return rows
+    return [row if idx < len(flags) and bool(flags[idx]) else None for idx, row in enumerate(rows)]
+
+
+def _pixel_ellipse_payload(
+    point_weights: torch.Tensor | None,
+    point_pixels: torch.Tensor,
+    point_visibility: torch.Tensor | None,
+    *,
+    max_queries: int = 16,
+) -> list[dict[str, Any]]:
+    if point_weights is None or point_weights.numel() == 0 or point_pixels.numel() == 0:
+        return []
+    weights = torch.clamp(point_weights.detach().to(dtype=torch.float32), min=0.0)
+    pixels = point_pixels.detach().to(device=weights.device, dtype=torch.float32)
+    count = min(int(weights.shape[-1]), int(pixels.shape[0]))
+    if count <= 0:
+        return []
+    weights = weights[: int(max_queries), :count]
+    pixels = pixels[:count]
+    if point_visibility is not None and point_visibility.numel() > 0:
+        visibility = torch.clamp(point_visibility.detach().to(device=weights.device, dtype=torch.float32)[:count], min=0.0, max=1.0)
+        weights = weights * visibility[None, :]
+    payload: list[dict[str, Any]] = []
+    for row in range(int(weights.shape[0])):
+        row_weights = weights[row]
+        mass = torch.sum(row_weights)
+        if not torch.isfinite(mass) or float(mass.item()) <= 1e-6:
+            payload.append({"valid": False, "visible_mass": float(max(float(mass.item()) if torch.isfinite(mass) else 0.0, 0.0))})
+            continue
+        probs = row_weights / mass
+        center = probs @ pixels
+        diff = pixels - center[None, :]
+        cov = (diff.T * probs[None, :]) @ diff
+        cov = 0.5 * (cov + cov.T)
+        eigvals, eigvecs = torch.linalg.eigh(cov)
+        eigvals = torch.clamp(eigvals, min=0.0)
+        order = torch.argsort(eigvals, descending=True)
+        eigvals = eigvals[order]
+        eigvecs = eigvecs[:, order]
+        angle = torch.atan2(eigvecs[1, 0], eigvecs[0, 0]) * (180.0 / float(np.pi))
+        effective_points = 1.0 / torch.clamp(torch.sum(probs**2), min=1e-9)
+        payload.append(
+            {
+                "valid": True,
+                "center": center.detach().cpu().tolist(),
+                "covariance": cov.detach().cpu().tolist(),
+                "axis_lengths_2sigma": (2.0 * torch.sqrt(eigvals)).detach().cpu().tolist(),
+                "angle_degrees": float(angle.item()),
+                "visible_mass": float(mass.item()),
+                "effective_points": float(effective_points.item()),
+            }
+        )
+    return payload
 
 
 def _attention_summary(
@@ -199,6 +300,8 @@ def _attention_summary(
     max_queries: int = 8,
     points: torch.Tensor | None = None,
     pixels: torch.Tensor | None = None,
+    visibility: torch.Tensor | None = None,
+    pool_ids: torch.Tensor | None = None,
 ) -> dict[str, Any] | None:
     if weights is None:
         return None
@@ -222,6 +325,8 @@ def _attention_summary(
 
     point_cpu = None if points is None else points.detach().to(device="cpu", dtype=torch.float32)
     pixel_cpu = None if pixels is None else pixels.detach().to(device="cpu", dtype=torch.float32)
+    visibility_cpu = None if visibility is None else visibility.detach().to(device="cpu", dtype=torch.float32)
+    pool_cpu = None if pool_ids is None else pool_ids.detach().to(device="cpu", dtype=torch.long)
     top_payload: list[list[dict[str, Any]]] = []
     for query_idx in range(query_count):
         row: list[dict[str, Any]] = []
@@ -235,6 +340,10 @@ def _attention_summary(
                 item["xyz"] = point_cpu[index].tolist()
             if pixel_cpu is not None and 0 <= index < int(pixel_cpu.shape[0]):
                 item["pixel"] = pixel_cpu[index].tolist()
+            if visibility_cpu is not None and 0 <= index < int(visibility_cpu.shape[0]):
+                item["visibility"] = float(visibility_cpu[index].item())
+            if pool_cpu is not None and 0 <= index < int(pool_cpu.shape[0]):
+                item["pool_id"] = int(pool_cpu[index].item())
             row.append(item)
         top_payload.append(row)
     return {
@@ -301,6 +410,8 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
     image_w = int(rgb.shape[1]) if rgb.ndim >= 2 else 0
     visual_grid = geom.visual_grid_index.detach()
     point_grid = geom.point_proj_grid_index.detach()
+    point_visibility = getattr(geom, "point_visibility", None)
+    point_visibility_t = None if point_visibility is None else point_visibility.detach()
     grid_w = int(torch.max(visual_grid[:, 0]).item()) + 1 if visual_grid.numel() > 0 else 1
     grid_h = int(torch.max(visual_grid[:, 1]).item()) + 1 if visual_grid.numel() > 0 else 1
     scale_x = float(max(image_w - 1, 0)) / float(max(grid_w - 1, 1))
@@ -314,25 +425,46 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
         point_pixels = torch.zeros((0, 2), device=point_grid.device, dtype=point_grid.dtype)
     else:
         point_pixels = torch.stack([point_grid[:, 0] * scale_x, point_grid[:, 1] * scale_y], dim=-1)
+    visible_count = int(torch.count_nonzero(point_visibility_t > 0.5).item()) if point_visibility_t is not None and point_visibility_t.numel() > 0 else 0
+    projection_available = bool(point_pixels.numel() > 0 and visible_count > 0)
 
     observation_anchors = getattr(state, "observation_anchors", None)
     posterior = getattr(state, "posterior", None)
     task_readout = getattr(state, "task_readout", None)
+    obs_pixel_raw = None
+    obs_pixel = None
+    obs_pixel_mass = None
     obs_pixel = (
-        _weighted_point_pixels(observation_anchors.point_weights, point_pixels)
+        _weighted_point_pixels(observation_anchors.point_weights, point_pixels, point_visibility_t)
         if observation_anchors is not None and getattr(observation_anchors, "point_weights", None) is not None
         else None
     )
+    if observation_anchors is not None and getattr(observation_anchors, "point_weights", None) is not None:
+        obs_pixel_raw = _weighted_point_pixels(observation_anchors.point_weights, point_pixels)
+        obs_pixel, obs_pixel_mass = _weighted_pixels_and_mass(observation_anchors.point_weights, point_pixels, point_visibility_t)
     posterior_pixel = None
+    posterior_pixel_raw = None
+    posterior_pixel_valid = None
     if posterior is not None and obs_pixel is not None and getattr(posterior, "binding", None) is not None:
         binding = torch.clamp(posterior.binding[..., : obs_pixel.shape[0]], min=0.0)
         denom = torch.clamp(binding.sum(dim=-1, keepdim=True), min=1e-6)
         posterior_pixel = (binding @ obs_pixel.to(device=binding.device, dtype=binding.dtype)) / denom
+        if obs_pixel_raw is not None:
+            posterior_pixel_raw = (binding @ obs_pixel_raw.to(device=binding.device, dtype=binding.dtype)) / denom
+        if obs_pixel_mass is not None:
+            posterior_mass = binding @ obs_pixel_mass.to(device=binding.device, dtype=binding.dtype)[:, None]
+            posterior_pixel_valid = posterior_mass.squeeze(-1) > 1e-6
+    task_pixel_raw = None
+    task_pixel_mass = None
     task_pixel = (
-        _weighted_point_pixels(task_readout.point_weights, point_pixels)
+        _weighted_point_pixels(task_readout.point_weights, point_pixels, point_visibility_t)
         if task_readout is not None and getattr(task_readout, "point_weights", None) is not None
         else None
     )
+    if task_readout is not None and getattr(task_readout, "point_weights", None) is not None:
+        task_pixel_raw = _weighted_point_pixels(task_readout.point_weights, point_pixels)
+        task_pixel, task_pixel_mass = _weighted_pixels_and_mass(task_readout.point_weights, point_pixels, point_visibility_t)
+    task_pixel_valid = None if task_pixel_mass is None else task_pixel_mass > 1e-6
     proprio_np = np.asarray(
         observation.proprio if observation.proprio is not None else observation.robot_obs,
         dtype=np.float32,
@@ -359,12 +491,21 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
                 max_queries=16,
                 points=getattr(token_field, "point_positions", None),
                 pixels=point_pixels,
+                visibility=point_visibility_t,
+                pool_ids=getattr(token_field, "point_pool_ids", None),
             ),
             "tactile_public": _attention_summary(getattr(task_readout, "tactile_public_attention", None), topk=8, max_queries=16),
             "visual_private": _attention_summary(getattr(task_readout, "visual_private_attention", None), topk=8, max_queries=16),
             "point_private": _attention_summary(getattr(task_readout, "point_private_attention", None), topk=8, max_queries=16),
             "tactile_private": _attention_summary(getattr(task_readout, "tactile_private_attention", None), topk=8, max_queries=16),
             "slot_diversity": _slot_diversity(getattr(task_readout, "x", None), task_pixel),
+            "point_pixel_ellipse": _pixel_ellipse_payload(
+                getattr(task_readout, "point_weights", None),
+                point_pixels,
+                point_visibility_t,
+                max_queries=16,
+            ),
+            "visible_point_mass": _tensor_to_list(task_pixel_mass),
             "near_proprio_point_mass_10cm": _near_proprio_point_mass(
                 point_weights=getattr(task_readout, "point_weights", None),
                 point_positions=getattr(token_field, "point_positions", None),
@@ -382,9 +523,21 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
         "image_hw": [image_h, image_w],
         "segment_id": int(observation.segment_id),
         "step_id": int(observation.step_id),
+        "projection": {
+            "available": bool(projection_available),
+            "point_count": int(point_pixels.shape[0]) if point_pixels.ndim > 0 else 0,
+            "visible_point_count": int(visible_count),
+            "visual_grid_hw": [int(grid_h), int(grid_w)],
+            "note": (
+                "task.pixel uses visible point projection. If available=false, image-space overlays are intentionally "
+                "invalid instead of falling back to the misleading upper-left zero projection."
+            ),
+        },
         "observation": {
             "xyz": _tensor_to_list(getattr(observation_anchors, "x", None)),
-            "pixel": _tensor_to_list(obs_pixel),
+            "pixel": _tensor_rows_to_list(obs_pixel, None if obs_pixel_mass is None else obs_pixel_mass > 1e-6),
+            "pixel_raw_unmasked": _tensor_to_list(obs_pixel_raw),
+            "visible_point_mass": _tensor_to_list(obs_pixel_mass),
             "role_ids": _tensor_to_int_list(getattr(observation_anchors, "role_ids", None), max_rows=128),
             "support_point": _tensor_to_list(getattr(observation_anchors, "routing_support_point", None)),
             "support_visual": _tensor_to_list(getattr(observation_anchors, "routing_support_visual", None)),
@@ -393,7 +546,8 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
         },
         "posterior": {
             "xyz": _tensor_to_list(getattr(posterior, "x", None)),
-            "pixel": _tensor_to_list(posterior_pixel),
+            "pixel": _tensor_rows_to_list(posterior_pixel, posterior_pixel_valid),
+            "pixel_raw_unmasked": _tensor_to_list(posterior_pixel_raw),
             "role_ids": _tensor_to_int_list(getattr(posterior, "role_ids", None), max_rows=128),
             "alpha": _tensor_to_list(getattr(posterior, "alpha", None)),
             "support_mass": _tensor_to_list(getattr(posterior, "support_mass", None)),
@@ -401,7 +555,9 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
         },
         "task": {
             "xyz": _tensor_to_list(getattr(task_readout, "x", None)),
-            "pixel": _tensor_to_list(task_pixel),
+            "pixel": _tensor_rows_to_list(task_pixel, task_pixel_valid),
+            "pixel_raw_unmasked": _tensor_to_list(task_pixel_raw),
+            "visible_point_mass": _tensor_to_list(task_pixel_mass),
             "local_role_ids": _tensor_to_int_list(getattr(task_readout, "local_role_ids", None), max_rows=64),
             "attention": task_attention,
         },

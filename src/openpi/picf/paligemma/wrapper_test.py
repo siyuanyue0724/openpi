@@ -365,6 +365,23 @@ def test_prepare_image_accepts_resize_with_pad_batch1_squeeze(monkeypatch: pytes
     assert tuple(out.shape) == (1, 3, 224, 224)
 
 
+def test_paligemma_view_transform_records_resize_with_pad_metadata() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    image = np.zeros((100, 200, 3), dtype=np.uint8)
+
+    transform = _Pi0PaliGemmaSemanticEncoder._view_transform(encoder, image, target_h=224, target_w=224)
+
+    assert transform.original_hw == (100, 200)
+    assert transform.target_hw == (224, 224)
+    assert transform.resized_hw == (112, 224)
+    assert transform.pad_top == 56
+    assert transform.pad_bottom == 56
+    assert transform.pad_left == 0
+    assert transform.pad_right == 0
+    assert transform.scale_y == pytest.approx(1.12)
+    assert transform.scale_x == pytest.approx(1.12)
+
+
 def test_state_for_prompt_uses_state_normalizer_when_configured() -> None:
     encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
     encoder.model_action_dim = 4

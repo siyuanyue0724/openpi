@@ -34,6 +34,7 @@ from openpi.picf.core.contracts import PicfRecurrentPredictiveState
 from openpi.picf.core.contracts import PicfRecurrentTokenFieldState
 from openpi.picf.core.contracts import PicfTaskReadoutState
 from openpi.picf.core.contracts import PicfTokenFieldState
+from openpi.picf.core.contracts import PicfVLGroundingState
 from openpi.picf.core.tactile_contact import contact_prob_with_hysteresis
 from openpi.picf.core.tactile_contact import summarize_contact_context
 from openpi.picf.frame_context import PointFrameContext
@@ -308,6 +309,106 @@ def _fps_indices(points: torch.Tensor, count: int) -> torch.Tensor:
         chosen.append(next_idx)
         min_dist = torch.minimum(min_dist, torch.linalg.norm(points - points[next_idx : next_idx + 1], dim=-1))
     return torch.as_tensor(chosen, device=points.device, dtype=torch.long)
+
+
+def _weighted_anchor_modes(
+    positions: torch.Tensor,
+    weights: torch.Tensor,
+    *,
+    count: int,
+    radius_m: float,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    if positions.shape[0] == 0 or weights.numel() == 0 or count <= 0:
+        return torch.zeros((0,), device=positions.device, dtype=torch.long)
+    if weights.shape[0] != positions.shape[0]:
+        raise RuntimeError(
+            "VL weighted-anchor mode contract violated: "
+            f"positions={tuple(positions.shape)} weights={tuple(weights.shape)}"
+        )
+    work = torch.clamp(weights.to(device=positions.device, dtype=positions.dtype), min=0.0).clone()
+    chosen: list[int] = []
+    radius = max(float(radius_m), eps)
+    for _ in range(int(count)):
+        max_value = torch.max(work) if work.numel() > 0 else work.new_tensor(0.0)
+        if float(max_value.item()) <= eps:
+            break
+        idx = int(torch.argmax(work).item())
+        chosen.append(idx)
+        dist2 = torch.sum((positions - positions[idx][None, :]) ** 2, dim=-1)
+        suppress = torch.exp(-dist2 / (2.0 * radius * radius))
+        work = work * torch.clamp(1.0 - suppress, min=0.0, max=1.0)
+    if not chosen:
+        return torch.zeros((0,), device=positions.device, dtype=torch.long)
+    return torch.as_tensor(chosen, device=positions.device, dtype=torch.long)
+
+
+def _resize_flat_heatmap(
+    heatmap: torch.Tensor,
+    *,
+    src_hw: tuple[int, int],
+    dst_hw: tuple[int, int],
+    eps: float,
+) -> torch.Tensor:
+    heat = heatmap.reshape(1, 1, int(src_hw[0]), int(src_hw[1])).to(dtype=torch.float32)
+    if tuple(src_hw) != tuple(dst_hw):
+        heat = fn.interpolate(heat, size=(int(dst_hw[0]), int(dst_hw[1])), mode="bilinear", align_corners=False)
+    flat = torch.clamp(heat.reshape(-1).to(device=heatmap.device, dtype=heatmap.dtype), min=0.0)
+    return flat / torch.clamp(flat.sum(), min=eps)
+
+
+def _resize_flat_grid_values(
+    values: torch.Tensor,
+    *,
+    src_hw: tuple[int, int],
+    dst_hw: tuple[int, int],
+) -> torch.Tensor:
+    grid = values.reshape(1, 1, int(src_hw[0]), int(src_hw[1])).to(dtype=torch.float32)
+    if tuple(src_hw) != tuple(dst_hw):
+        grid = fn.interpolate(grid, size=(int(dst_hw[0]), int(dst_hw[1])), mode="bilinear", align_corners=False)
+    return grid.reshape(-1).to(device=values.device, dtype=values.dtype)
+
+
+def _point_prior_from_heatmap(
+    projective_compatibility: torch.Tensor,
+    heatmap: torch.Tensor,
+    *,
+    point_projectable_mask: torch.Tensor | None,
+    min_visible_mass: float,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if projective_compatibility.ndim != 2:
+        raise RuntimeError(f"Expected projective compatibility [P,V], got {tuple(projective_compatibility.shape)}")
+    point_count, visual_count = projective_compatibility.shape
+    if heatmap.shape != (visual_count,):
+        raise RuntimeError(
+            "VL heatmap/projective contract violated: "
+            f"heatmap={tuple(heatmap.shape)} projective={tuple(projective_compatibility.shape)}"
+        )
+    if point_count == 0 or visual_count == 0:
+        prior = projective_compatibility.new_zeros((point_count,))
+        return prior, torch.tensor(False, device=projective_compatibility.device), projective_compatibility.new_zeros(())
+    compat = torch.clamp(torch.nan_to_num(projective_compatibility, nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+    if point_projectable_mask is not None:
+        if point_projectable_mask.shape != (point_count,):
+            raise RuntimeError(
+                "VL point-projectable mask contract violated: "
+                f"mask={tuple(point_projectable_mask.shape)} point_count={point_count}"
+            )
+        compat = compat * point_projectable_mask.to(device=compat.device, dtype=compat.dtype)[:, None]
+    heat = torch.clamp(heatmap.to(device=compat.device, dtype=compat.dtype), min=0.0)
+    heat = heat / torch.clamp(heat.sum(), min=eps)
+    column_mass = compat.sum(dim=0)
+    visible_cols = column_mass > eps
+    visible_mass = torch.sum(heat * visible_cols.to(dtype=heat.dtype))
+    valid = visible_mass > float(min_visible_mass)
+    if not bool(valid.item()):
+        return compat.new_zeros((point_count,)), valid, visible_mass
+    compat_col = compat / torch.clamp(column_mass[None, :], min=eps)
+    prior = compat_col @ heat
+    prior = torch.clamp(prior, min=0.0)
+    prior = prior / torch.clamp(prior.sum(), min=eps)
+    return prior, valid, visible_mass
 
 
 def _numpy_fps_indices(points: np.ndarray, count: int) -> np.ndarray:
@@ -703,6 +804,12 @@ class _SemanticContext:
     tokens: torch.Tensor
     prefix_tokens: torch.Tensor
     available: bool
+    summary: torch.Tensor | None = None
+    image_tokens: torch.Tensor | None = None
+    text_tokens: torch.Tensor | None = None
+    image_token_ranges: tuple[tuple[int, int], ...] = ()
+    image_grid_shapes: tuple[tuple[int, int], ...] = ()
+    image_view_names: tuple[str, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -725,6 +832,7 @@ class _ObservedStepState:
     innovation_token: torch.Tensor
     innovation_norm: torch.Tensor
     semantic: _SemanticContext
+    vl_grounding: PicfVLGroundingState | None
     proprio_token: torch.Tensor
     task_readout: PicfTaskReadoutState
     conditioned_control: PicfConditionedControlState
@@ -837,6 +945,19 @@ class PicfFullCore(nn.Module):
         self.residual_h_head = ResidualMLP(self.config.posterior_hidden_dim, hidden_dim)
         self.residual_c_head = ResidualMLP(self.config.posterior_hidden_dim, hidden_dim)
 
+        self.posterior_slot_hidden = nn.Parameter(
+            torch.empty((self.config.persistent_anchors, self.config.posterior_hidden_dim), device=self.device, dtype=self.dtype)
+        )
+        self.posterior_slot_token = nn.Parameter(
+            torch.empty((self.config.persistent_anchors, hidden_dim), device=self.device, dtype=self.dtype)
+        )
+        posterior_slot_std = float(self.config.posterior_slot_identity_std)
+        if posterior_slot_std > 0.0:
+            nn.init.normal_(self.posterior_slot_hidden, mean=0.0, std=posterior_slot_std)
+            nn.init.normal_(self.posterior_slot_token, mean=0.0, std=posterior_slot_std)
+        else:
+            nn.init.zeros_(self.posterior_slot_hidden)
+            nn.init.zeros_(self.posterior_slot_token)
         self.anchor_seed_proj = nn.LazyLinear(hidden_dim)
         self.anchor_reader = CrossAttentionRead(
             hidden_dim,
@@ -861,9 +982,41 @@ class PicfFullCore(nn.Module):
         self.semantic_prefix_proj = nn.Identity()
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
-        self.task_query_tokens = nn.Parameter(torch.zeros((self.config.task_local_queries, hidden_dim)))
-        self.task_global_query_tokens = nn.Parameter(torch.zeros((self.config.task_global_queries, hidden_dim)))
-        self.task_instruction_query_tokens = nn.Parameter(torch.zeros((self.config.task_instruction_queries, hidden_dim)))
+        if bool(self.config.vl_anchor_router_enabled):
+            self.vl_heatmap_head = nn.Sequential(
+                nn.LazyLinear(int(self.config.vl_heatmap_hidden_dim)),
+                nn.GELU(),
+                nn.LayerNorm(int(self.config.vl_heatmap_hidden_dim)),
+                nn.Linear(int(self.config.vl_heatmap_hidden_dim), 3),
+            )
+            self.vl_anchor_token_proj = nn.LazyLinear(hidden_dim)
+            self.vl_task_point_gate_logit = nn.Parameter(
+                torch.tensor(float(self.config.vl_task_point_gate_init), device=self.device, dtype=self.dtype)
+            )
+            self.vl_obs_anchor_gate_logit = nn.Parameter(
+                torch.tensor(float(self.config.vl_obs_anchor_gate_init), device=self.device, dtype=self.dtype)
+            )
+            self.vl_posterior_bind_gate_logit = nn.Parameter(
+                torch.tensor(float(self.config.vl_posterior_bind_gate_init), device=self.device, dtype=self.dtype)
+            )
+        else:
+            self.vl_heatmap_head = None
+            self.vl_anchor_token_proj = None
+            self.vl_task_point_gate_logit = None
+            self.vl_obs_anchor_gate_logit = None
+            self.vl_posterior_bind_gate_logit = None
+        self.task_query_tokens = nn.Parameter(torch.empty((self.config.task_local_queries, hidden_dim)))
+        self.task_global_query_tokens = nn.Parameter(torch.empty((self.config.task_global_queries, hidden_dim)))
+        self.task_instruction_query_tokens = nn.Parameter(torch.empty((self.config.task_instruction_queries, hidden_dim)))
+        task_slot_std = float(self.config.task_slot_identity_std)
+        if task_slot_std > 0.0:
+            nn.init.normal_(self.task_query_tokens, mean=0.0, std=task_slot_std)
+            nn.init.normal_(self.task_global_query_tokens, mean=0.0, std=task_slot_std)
+            nn.init.normal_(self.task_instruction_query_tokens, mean=0.0, std=task_slot_std)
+        else:
+            nn.init.zeros_(self.task_query_tokens)
+            nn.init.zeros_(self.task_global_query_tokens)
+            nn.init.zeros_(self.task_instruction_query_tokens)
         self.task_query_conditioner = GatedCrossAttentionRead(
             hidden_dim,
             semantic_trunk_dim,
@@ -1147,6 +1300,7 @@ class PicfFullCore(nn.Module):
         self,
         *,
         tokens_raw: torch.Tensor,
+        features: PaliGemmaSemanticFeatures | None = None,
     ) -> _SemanticContext:
         if tokens_raw.ndim == 1:
             tokens_raw = tokens_raw[None, :]
@@ -1166,7 +1320,35 @@ class PicfFullCore(nn.Module):
             if semantic_tokens.shape[0] > 0
             else torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype)
         )
-        return _SemanticContext(tokens=semantic_tokens, prefix_tokens=semantic_prefix_tokens, available=True)
+        summary = None
+        image_tokens = None
+        text_tokens = None
+        image_token_ranges: tuple[tuple[int, int], ...] = ()
+        image_grid_shapes: tuple[tuple[int, int], ...] = ()
+        image_view_names: tuple[str, ...] = ()
+        if features is not None:
+            if features.summary is not None:
+                summary = _to_tensor(features.summary, device=self.device, dtype=self.dtype)
+                if summary.ndim > 1:
+                    summary = summary.reshape(-1, summary.shape[-1]).mean(dim=0)
+            if features.image_tokens is not None:
+                image_tokens = _to_tensor(features.image_tokens, device=self.device, dtype=self.dtype)
+            if features.text_tokens is not None:
+                text_tokens = _to_tensor(features.text_tokens, device=self.device, dtype=self.dtype)
+            image_token_ranges = tuple(features.image_token_ranges)
+            image_grid_shapes = tuple(features.image_grid_shapes)
+            image_view_names = tuple(features.image_view_names)
+        return _SemanticContext(
+            tokens=semantic_tokens,
+            prefix_tokens=semantic_prefix_tokens,
+            available=True,
+            summary=summary,
+            image_tokens=image_tokens,
+            text_tokens=text_tokens,
+            image_token_ranges=image_token_ranges,
+            image_grid_shapes=image_grid_shapes,
+            image_view_names=image_view_names,
+        )
 
     def _semantic_context(
         self,
@@ -1179,7 +1361,7 @@ class PicfFullCore(nn.Module):
         if semantic_override is None:
             return self._zero_semantic_context()
         if isinstance(semantic_override, PaliGemmaSemanticFeatures):
-            return self._project_semantic_context(tokens_raw=semantic_override.tokens)
+            return self._project_semantic_context(tokens_raw=semantic_override.tokens, features=semantic_override)
         if isinstance(semantic_override, torch.Tensor | np.ndarray):
             raw = _to_tensor(semantic_override, device=self.device, dtype=self.dtype)
             raw = raw if raw.ndim == 2 else raw[None, :]
@@ -1197,6 +1379,188 @@ class PicfFullCore(nn.Module):
                 "PICF semantic override contract now requires token-level semantic inputs. "
                 "Pass PaliGemmaSemanticFeatures instead of summary-only outputs."
             )
+
+    def _build_vl_grounding(
+        self,
+        *,
+        semantic: _SemanticContext,
+        token_field: PicfTokenFieldState,
+    ) -> PicfVLGroundingState | None:
+        if not bool(self.config.vl_anchor_router_enabled):
+            return None
+        if self.vl_heatmap_head is None or self.vl_anchor_token_proj is None:
+            return None
+        geometry = token_field.projective_geometry
+        if (
+            geometry is None
+            or semantic.image_tokens is None
+            or semantic.image_tokens.numel() == 0
+            or not semantic.image_token_ranges
+            or not semantic.image_grid_shapes
+            or geometry.projective_compatibility.numel() == 0
+            or token_field.point_positions.shape[0] == 0
+        ):
+            return None
+
+        view_names = tuple(semantic.image_view_names)
+        view_index = 0
+        requested_view = str(self.config.vl_grounding_view)
+        if view_names and requested_view in view_names:
+            view_index = view_names.index(requested_view)
+        start, end = semantic.image_token_ranges[view_index]
+        src_hw = semantic.image_grid_shapes[view_index]
+        img_tokens = semantic.image_tokens[start:end]
+        if img_tokens.shape[0] != int(src_hw[0] * src_hw[1]):
+            raise RuntimeError(
+                "VL grounding image-token/grid contract violated: "
+                f"tokens={tuple(img_tokens.shape)} src_hw={src_hw}"
+            )
+        if semantic.text_tokens is not None and semantic.text_tokens.numel() > 0:
+            text_summary = semantic.text_tokens.reshape(-1, semantic.text_tokens.shape[-1]).mean(dim=0)
+        elif semantic.summary is not None:
+            text_summary = semantic.summary.reshape(-1)
+        elif semantic.tokens.numel() > 0:
+            text_summary = semantic.tokens.mean(dim=0)
+        else:
+            return None
+
+        visual_grid = geometry.visual_grid_index
+        if visual_grid.numel() == 0:
+            return None
+        dst_w = int(torch.max(visual_grid[:, 0]).item()) + 1
+        dst_h = int(torch.max(visual_grid[:, 1]).item()) + 1
+        dst_hw = (dst_h, dst_w)
+
+        text = text_summary.to(device=img_tokens.device, dtype=img_tokens.dtype)
+        head_input = torch.cat([img_tokens, text[None, :].expand(img_tokens.shape[0], -1)], dim=-1)
+        logits = self.vl_heatmap_head(head_input)
+        temperature = max(float(self.config.vl_heatmap_temperature), 1e-6)
+        task_logits_pg = logits[:, 0]
+        eff_logits_pg = logits[:, 1]
+        int_logits_pg = logits[:, 2]
+        task_heat_pg = torch.softmax((task_logits_pg / temperature).float(), dim=0).to(dtype=self.dtype)
+        eff_heat_pg = torch.softmax((eff_logits_pg / temperature).float(), dim=0).to(dtype=self.dtype)
+        int_heat_pg = torch.softmax((int_logits_pg / temperature).float(), dim=0).to(dtype=self.dtype)
+        task_heat = _resize_flat_heatmap(task_heat_pg, src_hw=src_hw, dst_hw=dst_hw, eps=self.config.epsilon_a)
+        eff_heat = _resize_flat_heatmap(eff_heat_pg, src_hw=src_hw, dst_hw=dst_hw, eps=self.config.epsilon_a)
+        int_heat = _resize_flat_heatmap(int_heat_pg, src_hw=src_hw, dst_hw=dst_hw, eps=self.config.epsilon_a)
+
+        projectable_mask = None
+        if token_field.point_pool_ids is not None and token_field.point_pool_ids.numel() == token_field.point_positions.shape[0]:
+            projectable_mask = token_field.point_pool_ids.to(device=self.device) == 1
+        task_prior, task_valid, task_mass = _point_prior_from_heatmap(
+            geometry.projective_compatibility,
+            task_heat,
+            point_projectable_mask=projectable_mask,
+            min_visible_mass=float(self.config.vl_min_visible_mass),
+            eps=self.config.epsilon_a,
+        )
+        eff_prior, eff_valid, eff_mass = _point_prior_from_heatmap(
+            geometry.projective_compatibility,
+            eff_heat,
+            point_projectable_mask=projectable_mask,
+            min_visible_mass=float(self.config.vl_min_visible_mass),
+            eps=self.config.epsilon_a,
+        )
+        int_prior, int_valid, int_mass = _point_prior_from_heatmap(
+            geometry.projective_compatibility,
+            int_heat,
+            point_projectable_mask=projectable_mask,
+            min_visible_mass=float(self.config.vl_min_visible_mass),
+            eps=self.config.epsilon_a,
+        )
+        valid = task_valid | eff_valid | int_valid
+        if not bool(valid.item()):
+            point_count = int(token_field.point_positions.shape[0])
+            hidden = int(self.config.hidden_dim)
+            empty_cov = torch.zeros((0, 3, 3), device=self.device, dtype=self.dtype)
+            return PicfVLGroundingState(
+                task_heatmap_logits=_resize_flat_grid_values(task_logits_pg.detach().to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
+                effector_heatmap_logits=_resize_flat_grid_values(eff_logits_pg.detach().to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
+                interaction_heatmap_logits=_resize_flat_grid_values(int_logits_pg.detach().to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
+                task_heatmap=task_heat,
+                effector_heatmap=eff_heat,
+                interaction_heatmap=int_heat,
+                task_point_prior=torch.zeros((point_count,), device=self.device, dtype=self.dtype),
+                effector_point_prior=torch.zeros((point_count,), device=self.device, dtype=self.dtype),
+                interaction_point_prior=torch.zeros((point_count,), device=self.device, dtype=self.dtype),
+                anchor_point_priors=torch.zeros((0, point_count), device=self.device, dtype=self.dtype),
+                anchor_x=torch.zeros((0, 3), device=self.device, dtype=self.dtype),
+                anchor_S=empty_cov,
+                anchor_tokens=torch.zeros((0, hidden), device=self.device, dtype=self.dtype),
+                anchor_roles=torch.zeros((0,), device=self.device, dtype=torch.long),
+                anchor_scores=torch.zeros((0,), device=self.device, dtype=self.dtype),
+                visual_pixel_centers=geometry.visual_pixel_centers,
+                valid=valid,
+                confidence=torch.stack([task_mass, eff_mass, int_mass]).max(),
+            )
+
+        anchor_priors: list[torch.Tensor] = []
+        anchor_roles: list[int] = []
+        per_role_budget = max(int(self.config.vl_anchor_modes), 0)
+        eff_budget = min(1, per_role_budget)
+        remaining = max(per_role_budget - eff_budget, 0)
+        task_budget = remaining // 2
+        int_budget = remaining - task_budget
+        role_specs = (
+            (0, eff_prior, eff_budget),
+            (1, task_prior, task_budget),
+            (2, int_prior, int_budget),
+        )
+        for role, prior, count in role_specs:
+            modes = _weighted_anchor_modes(
+                token_field.point_positions,
+                prior,
+                count=count,
+                radius_m=float(self.config.vl_anchor_nms_radius_m),
+                eps=self.config.epsilon_a,
+            )
+            for idx in modes.tolist():
+                center = token_field.point_positions[int(idx)]
+                dist2 = torch.sum((token_field.point_positions - center[None, :]) ** 2, dim=-1)
+                sigma = max(float(self.config.vl_anchor_local_sigma_m), self.config.epsilon_a)
+                local = torch.exp(-dist2 / (2.0 * sigma * sigma)) * torch.clamp(prior, min=0.0)
+                local = local / torch.clamp(local.sum(), min=self.config.epsilon_a)
+                anchor_priors.append(local)
+                anchor_roles.append(int(role))
+        if anchor_priors:
+            anchor_point_priors = torch.stack(anchor_priors, dim=0)
+            anchor_x = anchor_point_priors @ token_field.point_positions
+            anchor_S = _weighted_cov(token_field.point_positions, anchor_point_priors, anchor_x, self.config)
+            anchor_tokens_raw = anchor_point_priors @ token_field.point_tokens
+            anchor_tokens = self.vl_anchor_token_proj(anchor_tokens_raw)
+            anchor_scores = torch.max(anchor_point_priors, dim=-1).values
+            anchor_roles_t = torch.as_tensor(anchor_roles, device=self.device, dtype=torch.long)
+        else:
+            point_count = int(token_field.point_positions.shape[0])
+            hidden = int(self.config.hidden_dim)
+            anchor_point_priors = torch.zeros((0, point_count), device=self.device, dtype=self.dtype)
+            anchor_x = torch.zeros((0, 3), device=self.device, dtype=self.dtype)
+            anchor_S = torch.zeros((0, 3, 3), device=self.device, dtype=self.dtype)
+            anchor_tokens = torch.zeros((0, hidden), device=self.device, dtype=self.dtype)
+            anchor_scores = torch.zeros((0,), device=self.device, dtype=self.dtype)
+            anchor_roles_t = torch.zeros((0,), device=self.device, dtype=torch.long)
+
+        return PicfVLGroundingState(
+            task_heatmap_logits=_resize_flat_grid_values(task_logits_pg.to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
+            effector_heatmap_logits=_resize_flat_grid_values(eff_logits_pg.to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
+            interaction_heatmap_logits=_resize_flat_grid_values(int_logits_pg.to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
+            task_heatmap=task_heat,
+            effector_heatmap=eff_heat,
+            interaction_heatmap=int_heat,
+            task_point_prior=task_prior,
+            effector_point_prior=eff_prior,
+            interaction_point_prior=int_prior,
+            anchor_point_priors=anchor_point_priors,
+            anchor_x=anchor_x,
+            anchor_S=anchor_S,
+            anchor_tokens=anchor_tokens,
+            anchor_roles=anchor_roles_t,
+            anchor_scores=anchor_scores,
+            visual_pixel_centers=geometry.visual_pixel_centers,
+            valid=valid,
+            confidence=torch.stack([task_mass, eff_mass, int_mass]).max(),
+        )
 
     def _previous_action(self, previous: PicfPreviousState | None) -> torch.Tensor:
         if previous is None:
@@ -2343,13 +2707,45 @@ class PicfFullCore(nn.Module):
         k = self.config.persistent_anchors
         mu = torch.zeros((k, self.config.latent_dim), device=self.device, dtype=self.dtype)
         var = torch.full((k, self.config.latent_dim), self.config.sigma_reset**2, device=self.device, dtype=self.dtype)
-        h = torch.zeros((k, self.config.posterior_hidden_dim), device=self.device, dtype=self.dtype)
+        h = self.posterior_slot_hidden.to(device=self.device, dtype=self.dtype)
         c = torch.zeros((k, self.config.posterior_hidden_dim), device=self.device, dtype=self.dtype)
         a = _to_tensor(self.config.a_min_m, device=self.device, dtype=self.dtype)[None, :].expand(k, -1).clone()
         S = _diag_embed(torch.clamp((a / 2.0) ** 2, min=self.config.epsilon_s))
         x = torch.zeros((k, 3), device=self.device, dtype=self.dtype)
         alpha = torch.full((k,), self.config.alpha_init, device=self.device, dtype=self.dtype)
         return h, c, mu, var, x, S, a, alpha
+
+    def _bootstrap_prior_geometry_from_observation(
+        self,
+        x_prior: torch.Tensor,
+        S_prior: torch.Tensor,
+        a_prior: torch.Tensor,
+        obs: PicfObservationAnchorState,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        if not bool(self.config.posterior_bootstrap_from_observation):
+            return x_prior, S_prior, a_prior
+        if obs.x.shape[0] == 0 or obs.role_ids is None or obs.role_ids.numel() != obs.x.shape[0]:
+            return x_prior, S_prior, a_prior
+        posterior_roles = self._posterior_role_ids().to(device=self.device, dtype=torch.long)
+        obs_roles = obs.role_ids.to(device=self.device, dtype=torch.long)
+        x = x_prior.clone()
+        S = S_prior.clone()
+        a = a_prior.clone()
+        for role_value in torch.unique(posterior_roles).tolist():
+            slot_indices = torch.nonzero(posterior_roles == int(role_value), as_tuple=False).squeeze(-1)
+            obs_indices = torch.nonzero(obs_roles == int(role_value), as_tuple=False).squeeze(-1)
+            if slot_indices.numel() == 0 or obs_indices.numel() == 0:
+                continue
+            take = min(int(slot_indices.numel()), int(obs_indices.numel()))
+            if int(obs_indices.numel()) > take:
+                selected = obs_indices[_fps_indices(obs.x[obs_indices], take)]
+            else:
+                selected = obs_indices[:take]
+            slots = slot_indices[:take]
+            x[slots] = obs.x[selected]
+            S[slots] = obs.S[selected]
+            a[slots] = obs.a[selected]
+        return x, S, a
 
     def _current_prior(self, previous: PicfPreviousState | None, observation: PicfObservation) -> tuple[torch.Tensor, ...]:
         if previous is None:
@@ -2542,6 +2938,8 @@ class PicfFullCore(nn.Module):
                 tactile_group_tokens=(),
             )
         h_prior, c_prior, mu_prior, var_prior, x_prior, S_prior, a_prior, alpha_prior = self._current_prior(previous, observation)
+        if previous is None:
+            x_prior, S_prior, a_prior = self._bootstrap_prior_geometry_from_observation(x_prior, S_prior, a_prior, obs_anchors)
         bind_logits = self._binding_logits(h_prior, x_prior, S_prior, obs_anchors)
         role_bias = self._posterior_binding_role_bias(obs_anchors)
         if role_bias is not None:
@@ -2603,7 +3001,8 @@ class PicfFullCore(nn.Module):
             ],
             dim=-1,
         )
-        query = self.anchor_seed_proj(anchor_seed)[None, :]
+        slot_token = self.posterior_slot_token.to(device=self.device, dtype=self.dtype)
+        query = (self.anchor_seed_proj(anchor_seed) + slot_token)[None, :]
         bias = None
         if obs_anchors.tokens.shape[0] > 0:
             bias = self.config.lambda_bind_prior * torch.log(torch.clamp(binding[:-1], min=self.config.epsilon_a))
@@ -2721,7 +3120,7 @@ class PicfFullCore(nn.Module):
             ],
             dim=-1,
         )
-        tokens = self.posterior_token_proj(token_in)
+        tokens = self.posterior_token_proj(token_in) + slot_token
         tokens = self.posterior_self(tokens[None, :])[0]
         global_post = self.posterior_pool(tokens[None, :])[0]
         return PicfPosteriorAnchorState(
@@ -3020,6 +3419,7 @@ class PicfFullCore(nn.Module):
         tactile_bundle = self._tactile_features(observation, meta)
         semantic = self._semantic_context(observation, previous, semantic_override)
         token_field, dense_memory = self._build_token_field(observation, point_context, point_features, visual_map, tactile_bundle, meta, previous)
+        vl_grounding = self._build_vl_grounding(semantic=semantic, token_field=token_field)
         observation_anchors = self._build_observation_anchors(token_field, dense_memory)
         posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory)
         current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
@@ -3045,6 +3445,7 @@ class PicfFullCore(nn.Module):
             innovation_token=innovation_token,
             innovation_norm=innovation_norm,
             semantic=semantic,
+            vl_grounding=vl_grounding,
             proprio_token=proprio_token,
             task_readout=task_readout,
             conditioned_control=conditioned_control,
@@ -3236,6 +3637,7 @@ class PicfFullCore(nn.Module):
             predictive=predictive,
             control=observed.control,
             last_prompt=observed.last_prompt,
+            vl_grounding=observed.vl_grounding,
         )
         debug = {
             "num_point_tokens": float(observed.token_field.point_tokens.shape[0]),
@@ -3265,6 +3667,10 @@ class PicfFullCore(nn.Module):
             debug["mean_point_visibility"] = float(geom.point_visibility.mean().item()) if geom.point_visibility.numel() > 0 else 0.0
             debug["projective_candidate_edges"] = float(num_edges)
             debug["projective_candidate_density"] = float(density)
+        if observed.vl_grounding is not None:
+            debug["vl_grounding_valid"] = 1.0 if bool(observed.vl_grounding.valid.item()) else 0.0
+            debug["vl_grounding_confidence"] = float(observed.vl_grounding.confidence.item())
+            debug["vl_grounding_anchor_count"] = float(observed.vl_grounding.anchor_point_priors.shape[0])
         return PicfCoreOutput(state=state, debug=debug)
 
     def refresh_predictive_state_for_action(
@@ -3290,6 +3696,7 @@ class PicfFullCore(nn.Module):
             innovation_token=state.predictive.innovation_token,
             innovation_norm=state.predictive.innovation_norm,
             semantic=self._project_semantic_context(tokens_raw=state.predictive.semantic_tokens),
+            vl_grounding=state.vl_grounding,
             proprio_token=self.proprio_proj(
                 _to_tensor(
                     np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
