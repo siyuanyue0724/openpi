@@ -1072,12 +1072,12 @@ the refactor, are:
 
 - `persistent_anchors = 8`
 - `observation_anchors = 16`
-- `effector_persistent_anchors = 2`
-- `effector_observation_anchors = 2`
+- `effector_persistent_anchors = 1`
+- `effector_observation_anchors = 1`
 - `global_scene_point_cap = 1024`
 - `visual_real_grid = 64`
 - `task_local_queries = 8`
-- `task_effector_queries = 2`
+- `task_effector_queries = 1`
 - `hidden_dim = 512`
 - `posterior_hidden_dim = 512`
 - `latent_dim = 112`
@@ -1089,16 +1089,16 @@ the refactor, are:
 
 Anchor-role default:
 
-- of the `8` recurrent posterior slots, the first `2` remain effector/contact
-  slots and the remaining `6` are scene/object slots
-- of the `16` observation anchors, the first `2` are sampled from the local
-  effector/contact point pool and the remaining `14` are sampled from the global
+- of the `8` recurrent posterior slots, the first `1` remains effector/contact
+  and the remaining `7` are scene/object slots
+- of the `16` observation anchors, the first `1` is sampled from the local
+  effector/contact point pool and the remaining `15` are sampled from the global
   scene point pool
 - no hard background slot is reserved in the live default. Background is handled
   through scene/object slots plus task global/instruction tokens. A dedicated
   background role should only be added after a measured diagnostic shows stable
   non-object background evidence that should be recurrently maintained; adding
-  it blindly would reduce object capacity from the default `6` scene slots.
+  it blindly would reduce object capacity from the default `7` scene slots.
 
 Visual-real target:
 
@@ -2245,15 +2245,21 @@ The 6-GPU extension does not change:
 - task-readout / conditioned-control contract
 - checkpoint cadence
 
-### 8.6.1F Current 2x40GB Frozen-Perception Full-PICF Profile
+### 8.6.1F Historical 2x40GB Frozen-Perception Full-BPTT Reference
 
-The current 2x40GB A100 profile is a **full PICF** profile with frozen
-perception backbones. It is intended for cost-controlled runs where the PICF
+This subsection records the earlier full-BPTT 2x40GB A100 frozen-perception
+reference. It is **not** the current VL-router long-run launch profile. The
+current live long-run contract is documented in
+[`README_VL_GUIDED_ANCHOR_ROUTER.md` Section 6.1](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_VL_GUIDED_ANCHOR_ROUTER.md)
+and uses `training_strategy=ddp`, `unroll_steps=2`, `burnin_steps=0`,
+`tactile_mode=stub`, frozen PaliGemma, and one effector slot by default.
+
+The historical reference was intended for cost-controlled runs where the PICF
 architecture, PI0.5 action path, recurrent carry, task readout, conditioned
 control, and future supervision all stay enabled, while the heavy perception
 encoders are treated as fixed feature extractors.
 
-Full-BPTT reference operator profile:
+Historical full-BPTT reference operator profile:
 
 - `world_size=2`
 - `training_strategy=fsdp_full_shard`
@@ -2286,7 +2292,9 @@ Trainability contract:
 - Sonata point backbone is frozen.
 - V-JEPA visual backbone is frozen.
 - AnyTouch tactile backbone is frozen.
-- PaliGemma / PI0.5 semantic-action stack remains trainable.
+- PaliGemma / PI0.5 semantic-action stack remains trainable in this historical
+  reference only. The current VL-router long-run leaves PaliGemma frozen and
+  trains the PICF/action-side adapters and heads around frozen semantic tokens.
 - PICF task-readout, conditioned-control, posterior/predictive/future heads,
   and auxiliary losses remain active.
 

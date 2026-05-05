@@ -870,6 +870,12 @@ unroll_steps: 2
 burnin_steps: 0
 picf_mode: enabled
 perception_finetune_mode: frozen
+visual_feature_mode: hierarchical
+tactile_mode: stub
+semantic_trainable: false
+effector_persistent_anchors: 1
+effector_observation_anchors: 1
+task_effector_queries: 1
 VL router: enabled, gated, no default heatmap/keypose/diversity loss
 scene_anchor_border_patches: 1.0
 ```
@@ -912,7 +918,7 @@ nohup /root/openpi/.venv/bin/torchrun --standalone --nproc_per_node=2 \
   --visual-mode encoder \
   --visual-model-name vjepa2_1_vit_base_384 \
   --visual-checkpoint-path /root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt \
-  --visual-feature-mode final \
+  --visual-feature-mode hierarchical \
   --visual-real-grid 64 \
   --point-backbone sonata \
   --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
@@ -922,7 +928,7 @@ nohup /root/openpi/.venv/bin/torchrun --standalone --nproc_per_node=2 \
   --semantic-checkpoint-config-path /root/openpi/checkpoints/foundation/pi05_base_pytorch/config.json \
   --semantic-max-length 256 \
   --semantic-gradient-checkpointing \
-  --tactile-mode handcrafted \
+  --tactile-mode stub \
   --persistent-anchors 8 \
   --observation-anchors 16 \
   --effector-persistent-anchors 1 \
