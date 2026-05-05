@@ -1562,6 +1562,92 @@ class PicfFullCore(nn.Module):
             confidence=torch.stack([task_mass, eff_mass, int_mass]).max(),
         )
 
+    def _vl_gate(self, logit: nn.Parameter | None, grounding: PicfVLGroundingState | None) -> torch.Tensor:
+        if (
+            logit is None
+            or grounding is None
+            or not bool(self.config.vl_anchor_router_enabled)
+            or not bool(grounding.valid.item())
+        ):
+            return torch.zeros((), device=self.device, dtype=self.dtype)
+        return torch.sigmoid(logit.to(device=self.device, dtype=self.dtype))
+
+    def _vl_centered_log_prior_bias(self, priors: torch.Tensor) -> torch.Tensor:
+        if priors.numel() == 0:
+            return priors
+        prior = torch.clamp(priors.to(device=self.device, dtype=self.dtype), min=0.0)
+        prior = prior / torch.clamp(prior.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+        log_prior = torch.log(torch.clamp(prior, min=self.config.epsilon_a))
+        centered = log_prior - log_prior.mean(dim=-1, keepdim=True)
+        clip = max(float(self.config.vl_prior_bias_clip), 0.0)
+        if clip > 0.0:
+            centered = torch.clamp(centered, min=-clip, max=clip)
+        return centered
+
+    def _vl_slot_point_priors(
+        self,
+        grounding: PicfVLGroundingState | None,
+        slot_role_ids: torch.Tensor,
+        *,
+        point_count: int,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        slot_count = int(slot_role_ids.numel())
+        priors = torch.zeros((slot_count, int(point_count)), device=self.device, dtype=self.dtype)
+        valid_rows = torch.zeros((slot_count,), device=self.device, dtype=torch.bool)
+        if (
+            grounding is None
+            or not bool(grounding.valid.item())
+            or point_count <= 0
+            or slot_count == 0
+        ):
+            return priors, valid_rows
+
+        anchor_priors = grounding.anchor_point_priors.to(device=self.device, dtype=self.dtype)
+        anchor_roles = grounding.anchor_roles.to(device=self.device, dtype=torch.long)
+
+        def _fallback_for_role(role: int) -> torch.Tensor:
+            if role == 0:
+                return grounding.effector_point_prior.to(device=self.device, dtype=self.dtype)
+            if role == 1:
+                scene = grounding.task_point_prior.to(device=self.device, dtype=self.dtype)
+                scene = scene + grounding.interaction_point_prior.to(device=self.device, dtype=self.dtype)
+                return scene
+            scene = grounding.task_point_prior.to(device=self.device, dtype=self.dtype)
+            scene = scene + grounding.interaction_point_prior.to(device=self.device, dtype=self.dtype)
+            return scene
+
+        for role in torch.unique(slot_role_ids.to(device=self.device, dtype=torch.long)).tolist():
+            role_int = int(role)
+            slot_indices = torch.nonzero(slot_role_ids.to(device=self.device, dtype=torch.long) == role_int, as_tuple=False).squeeze(-1)
+            if slot_indices.numel() == 0:
+                continue
+            if anchor_priors.numel() > 0 and anchor_roles.numel() == anchor_priors.shape[0]:
+                if role_int == 0:
+                    role_mask = anchor_roles == 0
+                elif role_int == 1:
+                    role_mask = (anchor_roles == 1) | (anchor_roles == 2)
+                else:
+                    role_mask = (anchor_roles == 1) | (anchor_roles == 2)
+                candidates = anchor_priors[role_mask]
+            else:
+                candidates = torch.zeros((0, point_count), device=self.device, dtype=self.dtype)
+            fallback = _fallback_for_role(role_int)
+            fallback = torch.clamp(fallback, min=0.0)
+            fallback = fallback / torch.clamp(fallback.sum(), min=self.config.epsilon_a)
+            for local_index, slot_index in enumerate(slot_indices.tolist()):
+                if candidates.shape[0] > 0:
+                    prior = candidates[int(local_index) % int(candidates.shape[0])]
+                else:
+                    prior = fallback
+                prior = torch.clamp(prior[:point_count], min=0.0)
+                if prior.numel() < point_count:
+                    prior = fn.pad(prior, (0, point_count - prior.numel()))
+                mass = prior.sum()
+                if bool((mass > self.config.epsilon_a).item()):
+                    priors[int(slot_index)] = prior / torch.clamp(mass, min=self.config.epsilon_a)
+                    valid_rows[int(slot_index)] = True
+        return priors, valid_rows
+
     def _previous_action(self, previous: PicfPreviousState | None) -> torch.Tensor:
         if previous is None:
             return torch.zeros((7,), device=self.device, dtype=self.dtype)
@@ -1688,6 +1774,7 @@ class PicfFullCore(nn.Module):
         dense_memory: _StepDenseMemory,
         semantic: _SemanticContext,
         proprio_token: torch.Tensor,
+        vl_grounding: PicfVLGroundingState | None = None,
     ) -> PicfTaskReadoutState:
         del proprio_token
         query_tokens = torch.cat(
@@ -1795,9 +1882,22 @@ class PicfFullCore(nn.Module):
         )
 
         if token_field.point_tokens.shape[0] > 0 and local_count > 0:
-            point_weights = point_public_attention[:local_count]
-            denom = torch.clamp(point_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
-            point_weights = point_weights / denom
+            direct_weights = point_public_attention[:local_count]
+            denom = torch.clamp(direct_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+            direct_weights = direct_weights / denom
+            vl_weights, vl_valid = self._vl_slot_point_priors(
+                vl_grounding,
+                local_role_ids,
+                point_count=int(token_field.point_tokens.shape[0]),
+            )
+            gate = self._vl_gate(self.vl_task_point_gate_logit, vl_grounding)
+            if bool(vl_valid.any().item()) and bool((gate > 0.0).item()):
+                vl_mix = torch.where(vl_valid[:, None], vl_weights, direct_weights)
+                point_weights = ((1.0 - gate) * direct_weights) + (gate * vl_mix)
+                point_weights = torch.clamp(point_weights, min=0.0)
+                point_weights = point_weights / torch.clamp(point_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+            else:
+                point_weights = direct_weights
             x = point_weights @ token_field.point_positions
             S = _weighted_cov(token_field.point_positions, point_weights, x, self.config)
             a = _extent_from_cov(S, self.config)
@@ -2574,6 +2674,7 @@ class PicfFullCore(nn.Module):
         self,
         token_field: PicfTokenFieldState,
         dense_memory: _StepDenseMemory | None = None,
+        vl_grounding: PicfVLGroundingState | None = None,
     ) -> PicfObservationAnchorState:
         if dense_memory is None:
             dense_memory = _StepDenseMemory(
@@ -2596,6 +2697,11 @@ class PicfFullCore(nn.Module):
         )
         seed_indices = torch.full((n_obs,), -1, device=self.device, dtype=torch.long)
         queries = torch.zeros((1, n_obs, hidden_dim), device=self.device, dtype=self.dtype)
+        vl_slot_priors, vl_slot_valid = self._vl_slot_point_priors(
+            vl_grounding,
+            role_ids,
+            point_count=point_count,
+        )
         if point_count > 0:
             pool_ids = self._point_pool_ids(token_field)
             seed_parts: list[tuple[slice, torch.Tensor]] = []
@@ -2633,9 +2739,28 @@ class PicfFullCore(nn.Module):
                 if take > 0:
                     seed_indices[start : start + take] = chosen[:take]
                     queries[0, start : start + take] = token_field.point_tokens[chosen[:take]]
+            obs_vl_gate = self._vl_gate(self.vl_obs_anchor_gate_logit, vl_grounding)
+            if bool(vl_slot_valid.any().item()) and bool((obs_vl_gate > 0.0).item()):
+                vl_seed_indices = torch.argmax(vl_slot_priors, dim=-1)
+                for row in torch.nonzero(vl_slot_valid, as_tuple=False).squeeze(-1).tolist():
+                    idx = int(vl_seed_indices[int(row)].item())
+                    if 0 <= idx < point_count:
+                        seed_indices[int(row)] = idx
+                        queries[0, int(row)] = ((1.0 - obs_vl_gate) * queries[0, int(row)]) + (
+                            obs_vl_gate * token_field.point_tokens[idx]
+                        )
         attn_public = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
         attn_visual = torch.zeros((n_obs, visual_count), device=self.device, dtype=self.dtype)
         public_role_bias = self._fused_read_role_bias(role_ids, token_field)
+        if point_count > 0 and token_field.fused_tokens.shape[0] > 0 and bool(vl_slot_valid.any().item()):
+            gate = self._vl_gate(self.vl_obs_anchor_gate_logit, vl_grounding)
+            if bool((gate > 0.0).item()):
+                if public_role_bias is None:
+                    public_role_bias = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
+                vl_bias = torch.zeros_like(public_role_bias)
+                vl_bias[:, :point_count] = self._vl_centered_log_prior_bias(vl_slot_priors)
+                vl_bias = torch.where(vl_slot_valid[:, None], vl_bias, torch.zeros_like(vl_bias))
+                public_role_bias = public_role_bias + (gate * vl_bias)
         for _ in range(max(self.config.query_rounds, 1)):
             if visual_count > 0:
                 queries, visual_weights = self.visual_native_reread(queries, dense_memory.visual_payload[None, :])
@@ -2824,6 +2949,33 @@ class PicfFullCore(nn.Module):
             return None
         return torch.zeros((k, int(obs_roles.numel())), device=self.device, dtype=self.dtype).masked_fill(incompatible, -1.0e4)
 
+    def _posterior_vl_binding_bias(
+        self,
+        obs: PicfObservationAnchorState,
+        vl_grounding: PicfVLGroundingState | None,
+    ) -> torch.Tensor | None:
+        if (
+            vl_grounding is None
+            or not bool(vl_grounding.valid.item())
+            or obs.point_weights.numel() == 0
+            or obs.tokens.shape[0] == 0
+        ):
+            return None
+        posterior_roles = self._posterior_role_ids().to(device=self.device, dtype=torch.long)
+        point_count = int(obs.point_weights.shape[1])
+        slot_priors, slot_valid = self._vl_slot_point_priors(
+            vl_grounding,
+            posterior_roles,
+            point_count=point_count,
+        )
+        if not bool(slot_valid.any().item()):
+            return None
+        obs_weights = torch.clamp(obs.point_weights.to(device=self.device, dtype=self.dtype), min=0.0)
+        obs_weights = obs_weights / torch.clamp(obs_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+        overlap = slot_priors @ obs_weights.T
+        overlap = torch.where(slot_valid[:, None], overlap, torch.zeros_like(overlap))
+        return self._vl_centered_log_prior_bias(overlap)
+
     def _posterior_role_ids(self) -> torch.Tensor:
         k = int(self.config.persistent_anchors)
         effector_count = self._effector_persistent_count()
@@ -2930,6 +3082,7 @@ class PicfFullCore(nn.Module):
         observation: PicfObservation,
         obs_anchors: PicfObservationAnchorState,
         dense_memory: _StepDenseMemory | None = None,
+        vl_grounding: PicfVLGroundingState | None = None,
     ) -> PicfPosteriorAnchorState:
         if dense_memory is None:
             dense_memory = _StepDenseMemory(
@@ -2944,6 +3097,9 @@ class PicfFullCore(nn.Module):
         role_bias = self._posterior_binding_role_bias(obs_anchors)
         if role_bias is not None:
             bind_logits = bind_logits + role_bias
+        vl_bias = self._posterior_vl_binding_bias(obs_anchors, vl_grounding)
+        if vl_bias is not None:
+            bind_logits = bind_logits + (self._vl_gate(self.vl_posterior_bind_gate_logit, vl_grounding) * vl_bias)
         binding_raw = self._sinkhorn_dustbin(bind_logits)
         support_raw = binding_raw[:-1]
         dustbin_raw = binding_raw[-1]
@@ -3420,8 +3576,8 @@ class PicfFullCore(nn.Module):
         semantic = self._semantic_context(observation, previous, semantic_override)
         token_field, dense_memory = self._build_token_field(observation, point_context, point_features, visual_map, tactile_bundle, meta, previous)
         vl_grounding = self._build_vl_grounding(semantic=semantic, token_field=token_field)
-        observation_anchors = self._build_observation_anchors(token_field, dense_memory)
-        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory)
+        observation_anchors = self._build_observation_anchors(token_field, dense_memory, vl_grounding=vl_grounding)
+        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory, vl_grounding=vl_grounding)
         current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
         innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
         proprio = _to_tensor(
@@ -3430,7 +3586,7 @@ class PicfFullCore(nn.Module):
             dtype=self.dtype,
         )
         proprio_token = self.proprio_proj(proprio[None, :])[0]
-        task_readout = self._build_task_readout(token_field, dense_memory, semantic, proprio_token)
+        task_readout = self._build_task_readout(token_field, dense_memory, semantic, proprio_token, vl_grounding=vl_grounding)
         conditioned_control = self._build_conditioned_control_state(posterior, innovation_token, proprio_token, task_readout)
         hold_reason = self._hold_reason(meta, posterior, innovation_token)
         return _ObservedStepState(

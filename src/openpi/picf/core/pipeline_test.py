@@ -13,6 +13,7 @@ from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
+from openpi.picf.core.contracts import PicfVLGroundingState
 from openpi.picf.core import pipeline as pipeline_module
 from openpi.picf.core.pipeline import PicfFullCore
 from openpi.picf.core.pipeline import _variance_from_logvar
@@ -373,6 +374,44 @@ def test_vl_grounding_disabled_does_not_instantiate_router_modules(tmp_path: Pat
     assert core.vl_posterior_bind_gate_logit is None
 
 
+def _manual_vl_grounding(point_count: int) -> PicfVLGroundingState:
+    heat = torch.full((point_count,), 1.0 / max(point_count, 1), dtype=torch.float32)
+    anchor_priors = torch.eye(point_count, dtype=torch.float32)[:3]
+    return PicfVLGroundingState(
+        task_heatmap_logits=heat,
+        effector_heatmap_logits=heat,
+        interaction_heatmap_logits=heat,
+        task_heatmap=heat,
+        effector_heatmap=heat,
+        interaction_heatmap=heat,
+        task_point_prior=torch.tensor([0.0, 1.0, 0.0], dtype=torch.float32)[:point_count],
+        effector_point_prior=torch.tensor([1.0, 0.0, 0.0], dtype=torch.float32)[:point_count],
+        interaction_point_prior=torch.tensor([0.0, 0.0, 1.0], dtype=torch.float32)[:point_count],
+        anchor_point_priors=anchor_priors[:, :point_count],
+        anchor_x=torch.zeros((anchor_priors.shape[0], 3), dtype=torch.float32),
+        anchor_S=torch.eye(3, dtype=torch.float32)[None, :, :].expand(anchor_priors.shape[0], -1, -1).clone(),
+        anchor_tokens=torch.zeros((anchor_priors.shape[0], 64), dtype=torch.float32),
+        anchor_roles=torch.tensor([0, 1, 2], dtype=torch.long)[: anchor_priors.shape[0]],
+        anchor_scores=torch.ones((anchor_priors.shape[0],), dtype=torch.float32),
+        visual_pixel_centers=None,
+        valid=torch.tensor(True),
+        confidence=torch.tensor(1.0),
+    )
+
+
+def test_vl_slot_point_priors_are_role_aware(tmp_path: Path) -> None:
+    core, _replay = _make_core(tmp_path, vl_anchor_router_enabled=True)
+    grounding = _manual_vl_grounding(point_count=3)
+    slot_roles = torch.tensor([0, 1, 1], dtype=torch.long)
+
+    priors, valid = core._vl_slot_point_priors(grounding, slot_roles, point_count=3)
+
+    assert valid.tolist() == [True, True, True]
+    torch.testing.assert_close(priors[0], torch.tensor([1.0, 0.0, 0.0], device=priors.device))
+    torch.testing.assert_close(priors[1], torch.tensor([0.0, 1.0, 0.0], device=priors.device))
+    torch.testing.assert_close(priors[2], torch.tensor([0.0, 0.0, 1.0], device=priors.device))
+
+
 def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
@@ -414,6 +453,9 @@ def test_vl_grounding_enabled_builds_state_without_changing_default_anchor_contr
         tmp_path,
         vl_anchor_router_enabled=True,
         vl_anchor_modes=3,
+        vl_obs_anchor_gate_init=20.0,
+        vl_task_point_gate_init=20.0,
+        vl_posterior_bind_gate_init=20.0,
     )
     frame = next(iter(replay))
     output = core.step(
@@ -432,6 +474,13 @@ def test_vl_grounding_enabled_builds_state_without_changing_default_anchor_contr
     assert "vl_grounding_valid" in output.debug
     assert "vl_grounding_confidence" in output.debug
     assert "vl_grounding_anchor_count" in output.debug
+    if bool(vl.valid.item()) and output.state.task_readout.point_weights.shape[1] > 0:
+        expected = torch.ones(
+            (output.state.task_readout.point_weights.shape[0],),
+            device=output.state.task_readout.point_weights.device,
+            dtype=output.state.task_readout.point_weights.dtype,
+        )
+        torch.testing.assert_close(output.state.task_readout.point_weights.sum(dim=-1), expected, atol=1e-5, rtol=1e-5)
 
 
 def test_effector_and_scene_anchor_roles_use_separate_point_pools(tmp_path: Path) -> None:

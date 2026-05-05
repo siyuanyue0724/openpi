@@ -1,12 +1,14 @@
 # VL-Guided Anchor Router for PICF
 
 Date: 2026-05-05
-Status: staged implementation record. The current local code only implements
-the default-off safety skeleton: PaliGemma spatial-token metadata, resize-with-
-pad view metadata, `PicfVLGroundingState`, no-op router config, column-
-normalized heatmap-to-point prior helpers, and a disabled `_build_vl_grounding`
-path. It does **not** yet feed VL priors into observation anchors, task readout,
-posterior binding, training losses, serving debug, or CALVIN evaluation.
+Status: staged implementation record. The current local code implements the
+default-off safety substrate plus gated live consumption in the core:
+PaliGemma spatial-token metadata, resize-with-pad view metadata,
+`PicfVLGroundingState`, router config, column-normalized heatmap-to-point prior
+helpers, `_build_vl_grounding(...)`, role-aware observation-anchor seeding and
+attention bias, task-readout point-prior fusion, and posterior-binding soft
+overlap bias. The router remains disabled by default and does not alter the
+current canonical training profile unless `vl_anchor_router_enabled=True`.
 
 This document records the planned PICF-compatible grounding upgrade:
 
@@ -46,12 +48,15 @@ Implemented in the current local branch:
   top-left fallback.
 - `_build_vl_grounding(...)` can build heatmaps/point priors/anchor proposals
   only when `vl_anchor_router_enabled=True`.
+- `_build_observation_anchors(...)` consumes valid VL priors as soft role-aware
+  query seeds and point-attention log-prior bias when the router is enabled.
+- `_build_task_readout(...)` fuses direct task point attention with role-aware
+  VL point priors through a learnable gate when the router is enabled.
+- `_posterior_update(...)` consumes VL/observation point-overlap as a soft
+  binding-logit bias when the router is enabled.
 
 Not implemented yet:
 
-- VL prior injection into `_build_observation_anchors(...)`
-- VL prior fusion inside `_build_task_readout(...)`
-- posterior semantic binding bias
 - VL heatmap/keypose/diversity losses
 - serving/CALVIN heatmap and point-prior debug export
 - any default behavior change in the active training profile
@@ -94,10 +99,14 @@ M6/M7 routing stage is enabled:
    weighted NMS preserves separated high-confidence modes instead of collapsing
    every proposed anchor to one point.
 
-7. Enabled skeleton state:
+7. Enabled gated-consumer state:
    when vl_anchor_router_enabled=True, the core can build typed heatmap, point
-   prior, and proposal tensors and expose debug keys without altering the
-   default observation-anchor or task-readout contracts.
+   prior, and proposal tensors, consume them through observation/task/posterior
+   soft gates, keep output tensor contracts stable, and expose debug keys.
+
+8. No hard posterior overwrite:
+   VL grounding may add binding-logit bias, but it must not directly write
+   posterior `x/S/a/h/c/mu/Sigma`.
 ```
 
 ### 0.2 Current Verification Commands
@@ -1399,16 +1408,15 @@ Recommended order:
 M0. Documentation and tests only.
 M1. Expose PaliGemma image/text tokens and view ranges.
 M2. Add PicfVLGroundingState and no-op router config.
-M3. Add heatmap head and _build_vl_grounding while keeping all consumers
-    disconnected from live observation/task/posterior paths.
-M4. Add diagnostic export for heatmaps, point priors, top-k, ellipses.
-M5. Add heatmap supervision losses with zero default weights.
-M6. Enable task-readout gated point fusion.
-M7. Enable observation-anchor seeded proposals and gated point bias.
-M8. Only after stable diagnostics, add optional posterior semantic binding bias.
+M3. Add heatmap head and _build_vl_grounding.
+M4. Enable task-readout gated point fusion.
+M5. Enable observation-anchor soft seeded proposals and gated point bias.
+M6. Enable posterior-binding soft overlap bias.
+M7. Add diagnostic export for heatmaps, point priors, top-k, ellipses.
+M8. Add heatmap supervision losses with zero default weights.
 ```
 
-Do not implement M6/M7 before M1-M5 can prove that:
+Do not enable router training by default before M1-M6 can prove that:
 
 ```text
 heatmap shape is correct
@@ -1431,11 +1439,12 @@ test_vl_heatmap_resize_preserves_probability_mass
 test_vl_point_prior_uses_column_normalized_projective_mass
 test_vl_point_prior_projectable_mask_excludes_local_frame_rows
 test_vl_point_prior_invalid_projection_is_zero_not_top_left_fallback
+test_vl_slot_point_priors_are_role_aware
 test_weighted_anchor_modes_preserve_separated_high_weight_modes
 test_vl_grounding_enabled_builds_state_without_changing_default_anchor_contract
 ```
 
-Required before enabling M6/M7 routing:
+Required before enabling default-on routing:
 
 ```text
 test_paligemma_features_return_image_token_ranges
@@ -1443,7 +1452,7 @@ test_vl_router_disabled_exact_equivalence
 test_vl_zero_gate_exact_equivalence
 test_vl_observation_anchor_role_budget_preserved
 test_vl_task_point_weights_normalized
-test_vl_posterior_no_hard_write_when_stage2_disabled
+test_vl_posterior_binding_bias_is_soft_and_shape_safe
 ```
 
 ### 19.2 Synthetic Geometry Tests

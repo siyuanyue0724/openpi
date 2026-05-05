@@ -28,9 +28,11 @@ current recurrent burn-in speed-path audit
   `auto/off`.
 - [`src/openpi/picf/README_VL_GUIDED_ANCHOR_ROUTER.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_VL_GUIDED_ANCHOR_ROUTER.md)
   Staged plan and implementation record for a PaliGemma-guided 2D-to-3D anchor
-  prior router. The current code only contains the default-off safety skeleton
-  and typed carriers; it does not yet feed VL priors into observation anchors,
-  task readout, posterior binding, losses, serving debug, or CALVIN evaluation.
+  prior router. The current code keeps the router disabled by default, but when
+  explicitly enabled it builds VL grounding state and consumes it through
+  role-aware observation-anchor soft seeds/biases, task-readout gated point
+  prior fusion, and posterior-binding soft overlap bias. Heatmap supervision
+  losses and CALVIN heatmap export are still not default-live.
   Use its Current Mathematical Guardrails and Verification Commands sections
   before enabling any router stage beyond the default-off substrate.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
