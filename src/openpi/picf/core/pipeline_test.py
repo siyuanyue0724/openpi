@@ -454,6 +454,23 @@ def test_scene_point_candidate_mask_rejects_projective_border_points(tmp_path: P
     mask = core._scene_point_candidate_mask(token_field)
 
     torch.testing.assert_close(mask.cpu(), torch.tensor([False, True, True]))
+    strict_mask = core._scene_point_candidate_mask(token_field, fallback_to_global=False)
+    torch.testing.assert_close(strict_mask.cpu(), torch.tensor([False, True, True]))
+
+    border_only_geom = dataclasses.replace(
+        geom,
+        point_proj_grid_index=torch.tensor([[0.0, 0.0], [0.0, 3.0], [3.0, 0.0]], dtype=torch.float32),
+    )
+    border_only_field = dataclasses.replace(token_field, projective_geometry=border_only_geom)
+
+    # Coverage seeding may fall back to all global scene points, but VL 2D-to-3D
+    # lift must stay invalid/no-op if every scene point is a projected border
+    # artifact.
+    fallback_mask = core._scene_point_candidate_mask(border_only_field)
+    strict_border_mask = core._scene_point_candidate_mask(border_only_field, fallback_to_global=False)
+
+    torch.testing.assert_close(fallback_mask.cpu(), torch.tensor([True, True, True]))
+    torch.testing.assert_close(strict_border_mask.cpu(), torch.tensor([False, False, False]))
 
 
 def test_weighted_anchor_modes_preserve_separated_high_weight_modes() -> None:
@@ -519,6 +536,79 @@ def test_vl_slot_point_priors_are_role_aware(tmp_path: Path) -> None:
     torch.testing.assert_close(priors[0], torch.tensor([1.0, 0.0, 0.0], device=priors.device))
     torch.testing.assert_close(priors[1], torch.tensor([0.0, 1.0, 0.0], device=priors.device))
     torch.testing.assert_close(priors[2], torch.tensor([0.0, 0.0, 1.0], device=priors.device))
+
+
+def test_vl_observation_seed_does_not_override_effector_role_slots(tmp_path: Path) -> None:
+    core, _replay = _make_core(
+        tmp_path,
+        vl_anchor_router_enabled=True,
+        vl_obs_anchor_gate_init=20.0,
+        observation_anchors=4,
+        effector_observation_anchors=2,
+    )
+    hidden = core.config.hidden_dim
+    device = core.device
+    point_tokens = torch.arange(4 * hidden, device=device, dtype=torch.float32).reshape(4, hidden)
+    zeros_h = torch.zeros((0, hidden), device=device, dtype=torch.float32)
+    token_field = pipeline_module.PicfTokenFieldState(
+        point_tokens=point_tokens,
+        visual_tokens=zeros_h,
+        tactile_tokens=zeros_h,
+        context_tokens=zeros_h,
+        fused_tokens=point_tokens.clone(),
+        point_positions=torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [0.1, 0.0, 0.0],
+                [1.0, 0.0, 0.0],
+                [1.1, 0.0, 0.0],
+            ],
+            device=device,
+            dtype=torch.float32,
+        ),
+        modality_ids=torch.zeros((4,), device=device, dtype=torch.long),
+        point_align_embeddings=torch.zeros((4, hidden), device=device, dtype=torch.float32),
+        visual_align_embeddings=zeros_h,
+        tactile_align_embeddings=zeros_h,
+        tactile_positions_world=torch.zeros((0, 3), device=device, dtype=torch.float32),
+        tactile_contact_gate=torch.zeros((0,), device=device, dtype=torch.float32),
+        point_pool_ids=torch.tensor([0, 0, 1, 1], device=device, dtype=torch.long),
+    )
+    grounding = PicfVLGroundingState(
+        task_heatmap_logits=torch.full((4,), 0.25, device=device, dtype=torch.float32),
+        effector_heatmap_logits=torch.full((4,), 0.25, device=device, dtype=torch.float32),
+        interaction_heatmap_logits=torch.full((4,), 0.25, device=device, dtype=torch.float32),
+        task_heatmap=torch.full((4,), 0.25, device=device, dtype=torch.float32),
+        effector_heatmap=torch.full((4,), 0.25, device=device, dtype=torch.float32),
+        interaction_heatmap=torch.full((4,), 0.25, device=device, dtype=torch.float32),
+        task_point_prior=torch.tensor([0.0, 0.0, 1.0, 0.0], device=device, dtype=torch.float32),
+        effector_point_prior=torch.tensor([0.0, 0.0, 0.0, 1.0], device=device, dtype=torch.float32),
+        interaction_point_prior=torch.tensor([0.0, 0.0, 0.0, 1.0], device=device, dtype=torch.float32),
+        anchor_point_priors=torch.tensor(
+            [
+                [0.0, 0.0, 0.0, 1.0],
+                [0.0, 0.0, 1.0, 0.0],
+                [0.0, 0.0, 0.0, 1.0],
+            ],
+            device=device,
+            dtype=torch.float32,
+        ),
+        anchor_x=torch.zeros((3, 3), device=device, dtype=torch.float32),
+        anchor_S=torch.eye(3, device=device, dtype=torch.float32)[None, :, :].expand(3, -1, -1).clone(),
+        anchor_tokens=torch.zeros((3, hidden), device=device, dtype=torch.float32),
+        anchor_roles=torch.tensor([0, 1, 2], device=device, dtype=torch.long),
+        anchor_scores=torch.ones((3,), device=device, dtype=torch.float32),
+        visual_pixel_centers=None,
+        valid=torch.tensor(True, device=device),
+        confidence=torch.tensor(1.0, device=device),
+    )
+
+    obs = core._build_observation_anchors(token_field, vl_grounding=grounding)
+
+    assert obs.role_ids is not None
+    torch.testing.assert_close(obs.role_ids, torch.tensor([0, 0, 1, 1], dtype=torch.long, device=obs.role_ids.device))
+    assert bool(torch.all(obs.seed_indices[:2] < 2).item())
+    assert bool(torch.all(obs.seed_indices[2:] >= 2).item())
 
 
 def test_full_core_emits_unified_field_observation_posterior_and_predictions(tmp_path: Path) -> None:

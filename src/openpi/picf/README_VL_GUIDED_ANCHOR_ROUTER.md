@@ -1,7 +1,7 @@
 # VL-Guided Anchor Router for PICF
 
 Date: 2026-05-05
-Status: staged implementation record. The current local code implements the
+Status: live implementation and long-run safety record. The current local code implements the
 default-off safety substrate plus gated live consumption in the core:
 PaliGemma spatial-token metadata, resize-with-pad view metadata,
 transform-aware PaliGemma-grid-to-PICF-grid mapping, `PicfVLGroundingState`,
@@ -75,6 +75,13 @@ Implemented in the current local branch:
   mask. Scene/object slots prefer global rows that are visible, depth-valid,
   and not clipped by the visual-grid border; if too few such rows exist, the
   code falls back to remaining global rows only to keep tensor contracts filled.
+- VL task/interaction lift uses the strict scene candidate mask with **no**
+  global fallback. If every scene row is an invalid border/depth/visibility
+  candidate, the VL point prior is invalid and no-op. The global fallback is
+  reserved only for observation-anchor coverage seeding.
+- role-0 observation anchors keep the local/proprio/tactile seed contract.
+  Static-camera VL priors are not allowed to replace role-0 seeds and are not
+  added as point-attention log-prior bias for role-0 rows.
 - serving anchor diagnostics now export `point_cloud.xyz_world`,
   `point_cloud.projectable_mask`, and `vl_grounding.*` heatmap / anchor-prior
   summaries so a top-left/top-border overlay can be traced back to heatmap,
@@ -143,7 +150,9 @@ _fused_read_role_bias
   role 1 falls back to global rows only when no candidate rows exist
 
 _build_vl_grounding
-  task/interaction heatmaps lift only through scene/object candidate rows
+  task/interaction heatmaps lift only through strict scene/object candidate rows
+  with no global fallback; invalid all-border/all-invisible rows produce an
+  explicit zero/invalid prior
   anchor moments use point_positions_world
 
 _build_task_readout / _build_observation_anchors
@@ -177,6 +186,37 @@ The current compatibility target remains:
 vl_anchor_router_enabled=False
 -> current PICF behavior is unchanged
 ```
+
+### 0.1B Long-Run Safety Closeout: Strict Lift, Local Effector Anchors
+
+The long-run launch contract is stricter than the early diagnostic branch:
+
+```text
+VL lift path:
+  _build_vl_grounding(...)
+  -> _scene_point_candidate_mask(..., fallback_to_global=False)
+  -> _point_prior_from_heatmap(...)
+
+Coverage seed path:
+  _build_observation_anchors(...)
+  -> _scene_point_candidate_mask(..., fallback_to_global=True)
+  -> fill scene/object slots so tensor contracts remain valid
+
+Effector observation path:
+  role 0 slots use local effector/contact point rows
+  role 0 slots do not receive static-camera VL seed overrides
+  role 0 slots do not receive static-camera VL point-prior attention bias
+
+Scene/object observation path:
+  role 1 slots may receive valid task/interaction VL seeds and log-prior bias
+  role 1 slots fall back to global FPS only for coverage, not for claiming a
+  valid VL prior
+```
+
+This distinction matters because a diagnostic heatmap can be weak early in
+training. A fallback scene seed is acceptable for coverage. A fallback VL prior
+is not acceptable because it would pretend that a clipped border point is a
+valid language-conditioned anchor.
 
 ### 0.1 Current Mathematical Guardrails
 
@@ -218,6 +258,14 @@ the router is made default-on or trained with nonzero VL losses:
 8. No hard posterior overwrite:
    VL grounding may add binding-logit bias, but it must not directly write
    posterior `x/S/a/h/c/mu/Sigma`.
+
+9. Strict scene lift:
+   task/interaction VL priors use no global fallback after border, visibility,
+   and depth filtering. If no row survives, the prior is invalid/no-op.
+
+10. Local effector observation anchors:
+   role-0 observation anchors are not seeded or point-biased by static-camera
+   VL global priors. They stay local/proprio/tactile by construction.
 ```
 
 ### 0.2 Current Verification Commands
@@ -236,8 +284,10 @@ uv run python -m py_compile \
   src/openpi/picf/core/contracts.py \
   src/openpi/picf/core/pipeline.py
 
+uv run pytest -q src/openpi/picf/core/pipeline_test.py -k 'vl_point_prior_projectable or scene_point_candidate_mask or vl_slot_point_priors or vl_observation_seed or vl_grounding_enabled or effector_and_scene_anchor_roles'
 uv run pytest -q src/openpi/picf/core/pipeline_test.py -k 'vl_'
 uv run pytest -q src/openpi/picf/core/pipeline_test.py -k 'semantic_context_carries or scene_point_candidate or effector_and_scene_anchor_roles'
+uv run pytest -q scripts/picf_core_train_test.py -k 'vl_anchor_router or scene_anchor_border or save_interval or checkpoint'
 uv run pytest -q scripts/picf_core_train_test.py -k 'vl_anchor_router or conditioned_control'
 uv run pytest -q src/openpi/picf/paligemma/wrapper_test.py
 uv run pytest -q src/openpi/picf/core/pipeline_test.py
@@ -251,6 +301,12 @@ The `-k 'vl_'` test slice is the strict mathematical smoke for the staged
 router substrate. The full pipeline, wrapper, training, trainer, and verifier
 commands ensure that the default-off substrate does not break the existing
 PICF v2.2 runtime contract.
+
+The first targeted command is the minimum pre-launch gate for long runs. It
+checks the exact failure cases that produced earlier anchor collapse:
+projectable-mask exclusion of local rows, strict-vs-coverage scene masks,
+role-aware slot priors, no static-VL override of role-0 observation seeds,
+enabled router tensor contracts, and effector/scene point-pool separation.
 
 ## 1. Motivation
 
@@ -799,6 +855,107 @@ picf_mode=ablated forces:
 
 This is intentional. The router needs PaliGemma image tokens and PICF anchor
 state; it is not meaningful in PI0.5-only ablation mode.
+
+### 6.1 Current Long-Run Launch Contract
+
+The current VL-router long-run is a diagnostic-safe full PICF run, not a claim
+that the untrained heatmap head is already a final MAPG result. Use this profile
+when the goal is to collect stable long-run checkpoints and CALVIN diagnostics
+without reintroducing top-border/static-VL effector contamination:
+
+```text
+steps: 30000
+checkpoint cadence: every 5000 optimizer steps
+unroll_steps: 2
+burnin_steps: 0
+picf_mode: enabled
+perception_finetune_mode: frozen
+VL router: enabled, gated, no default heatmap/keypose/diversity loss
+scene_anchor_border_patches: 1.0
+```
+
+Operational requirements before launch:
+
+```text
+1. repository branch is Posterior_VLA and clean except intentional runtime logs
+2. local tests in Section 0.2 pass
+3. cloud clone is reset to origin/Posterior_VLA
+4. no old torchrun, serving, or CALVIN evaluator process is occupying GPUs or
+   ports 8000/8001
+5. output run name includes vlrouter/strict/unroll2/30000/ckpt5000/date/retry
+```
+
+Template:
+
+```bash
+cd /root/openpi_vlrouter_longrun
+export PYTHONPATH=/root/openpi_vlrouter_longrun/src:/root/openpi_vlrouter_longrun/packages/openpi-client/src
+export WANDB_MODE=disabled
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+
+RUN=picf_v22_vlrouter_strict2x40_unroll2_30000_ckpt5000_YYYYMMDD_rN
+LOG=/mnt/checkpoints/picf_core/debug/${RUN}.outer.log
+mkdir -p /mnt/checkpoints/picf_core/debug
+
+nohup /root/openpi/.venv/bin/torchrun --standalone --nproc_per_node=2 \
+  scripts/picf_core_train.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --checkpoint-base-dir /mnt/checkpoints/picf_core \
+  --exp-name "$RUN" \
+  --num-train-steps 30000 \
+  --save-interval 5000 \
+  --unroll-steps 2 \
+  --burnin-steps 0 \
+  --picf-mode enabled \
+  --training-strategy ddp \
+  --perception-finetune-mode frozen \
+  --visual-mode encoder \
+  --visual-model-name vjepa2_1_vit_base_384 \
+  --visual-checkpoint-path /root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt \
+  --visual-feature-mode final \
+  --visual-real-grid 64 \
+  --point-backbone sonata \
+  --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
+  --semantic-mode paligemma \
+  --semantic-source pi0_pytorch \
+  --semantic-checkpoint-path /root/openpi/checkpoints/foundation/pi05_base_pytorch \
+  --semantic-checkpoint-config-path /root/openpi/checkpoints/foundation/pi05_base_pytorch/config.json \
+  --semantic-max-length 256 \
+  --semantic-gradient-checkpointing \
+  --tactile-mode handcrafted \
+  --persistent-anchors 8 \
+  --observation-anchors 16 \
+  --effector-persistent-anchors 1 \
+  --effector-observation-anchors 1 \
+  --task-local-queries 8 \
+  --task-effector-queries 1 \
+  --vl-anchor-router-enabled \
+  --vl-anchor-modes 6 \
+  --scene-anchor-border-patches 1.0 \
+  --vl-obs-anchor-gate-init -4.0 \
+  --vl-task-point-gate-init -4.0 \
+  --vl-posterior-bind-gate-init -6.0 \
+  > "$LOG" 2>&1 &
+echo $! > /mnt/checkpoints/picf_core/debug/${RUN}.pid
+```
+
+Tail:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/debug/${RUN}.outer.log
+tail -f /mnt/checkpoints/picf_core/picf_core/${RUN}/metrics.jsonl
+```
+
+Expected save paths:
+
+```text
+/mnt/checkpoints/picf_core/picf_core/${RUN}/5000
+/mnt/checkpoints/picf_core/picf_core/${RUN}/10000
+/mnt/checkpoints/picf_core/picf_core/${RUN}/15000
+/mnt/checkpoints/picf_core/picf_core/${RUN}/20000
+/mnt/checkpoints/picf_core/picf_core/${RUN}/25000
+/mnt/checkpoints/picf_core/picf_core/${RUN}/30000
+```
 
 ## 7. Pseudocode: Wrapper Changes
 

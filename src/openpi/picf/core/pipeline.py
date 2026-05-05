@@ -1579,9 +1579,7 @@ class PicfFullCore(nn.Module):
         projectable_mask = None
         if token_field.point_pool_ids is not None and token_field.point_pool_ids.numel() == token_field.point_positions.shape[0]:
             projectable_mask = token_field.point_pool_ids.to(device=self.device) == 1
-        scene_projectable_mask = self._scene_point_candidate_mask(token_field)
-        if not bool(scene_projectable_mask.any().item()):
-            scene_projectable_mask = projectable_mask
+        scene_projectable_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=False)
         task_prior, task_valid, task_mass = _point_prior_from_heatmap(
             geometry.projective_compatibility,
             task_heat,
@@ -1882,7 +1880,12 @@ class PicfFullCore(nn.Module):
             return world.to(device=self.device, dtype=self.dtype)
         return token_field.point_positions.to(device=self.device, dtype=self.dtype)
 
-    def _scene_point_candidate_mask(self, token_field: PicfTokenFieldState) -> torch.Tensor:
+    def _scene_point_candidate_mask(
+        self,
+        token_field: PicfTokenFieldState,
+        *,
+        fallback_to_global: bool = True,
+    ) -> torch.Tensor:
         point_count = int(token_field.point_tokens.shape[0])
         if point_count == 0:
             return torch.zeros((0,), device=self.device, dtype=torch.bool)
@@ -1910,7 +1913,9 @@ class PicfFullCore(nn.Module):
                         & (grid[:, 1] <= (max_y - border))
                     )
                     mask = mask & interior
-        return mask if bool(mask.any().item()) else global_mask
+        if bool(mask.any().item()):
+            return mask
+        return global_mask if bool(fallback_to_global) else mask
 
     def _effector_observation_count(self) -> int:
         return min(max(int(self.config.effector_observation_anchors), 0), int(self.config.observation_anchors))
@@ -2875,7 +2880,7 @@ class PicfFullCore(nn.Module):
             point_positions_world=point_positions_world,
             point_projectable_mask=None,
         )
-        token_field.point_projectable_mask = self._scene_point_candidate_mask(token_field)
+        token_field.point_projectable_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=False)
         dense_memory = _StepDenseMemory(
             point_payload=point_payload,
             visual_payload=visual_payload,
@@ -2919,7 +2924,7 @@ class PicfFullCore(nn.Module):
             pool_ids = self._point_pool_ids(token_field)
             seed_parts: list[tuple[slice, torch.Tensor]] = []
             local_indices = torch.nonzero(pool_ids == 0, as_tuple=False).squeeze(-1)
-            scene_mask = self._scene_point_candidate_mask(token_field)
+            scene_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=True)
             global_indices = torch.nonzero(scene_mask, as_tuple=False).squeeze(-1)
             all_global_indices = torch.nonzero(pool_ids == 1, as_tuple=False).squeeze(-1)
             if global_indices.numel() > 0 and global_indices.numel() < max(n_obs - effector_count, 0):
@@ -2961,11 +2966,12 @@ class PicfFullCore(nn.Module):
                     seed_indices[start : start + take] = chosen[:take]
                     queries[0, start : start + take] = token_field.point_tokens[chosen[:take]]
             obs_vl_gate = self._vl_gate(self.vl_obs_anchor_gate_logit, vl_grounding)
-            if bool(vl_slot_valid.any().item()) and bool((obs_vl_gate > 0.0).item()):
+            scene_vl_slot_valid = vl_slot_valid & (role_ids != 0)
+            if bool(scene_vl_slot_valid.any().item()) and bool((obs_vl_gate > 0.0).item()):
                 vl_seed_indices = torch.argmax(vl_slot_priors, dim=-1)
                 vl_seed_tokens = torch.zeros_like(queries)
                 vl_seed_mask = torch.zeros((1, n_obs, 1), device=self.device, dtype=torch.bool)
-                for row in torch.nonzero(vl_slot_valid, as_tuple=False).squeeze(-1).tolist():
+                for row in torch.nonzero(scene_vl_slot_valid, as_tuple=False).squeeze(-1).tolist():
                     idx = int(vl_seed_indices[int(row)].item())
                     if 0 <= idx < point_count:
                         seed_indices[int(row)] = idx
@@ -2980,14 +2986,15 @@ class PicfFullCore(nn.Module):
         attn_public = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
         attn_visual = torch.zeros((n_obs, visual_count), device=self.device, dtype=self.dtype)
         public_role_bias = self._fused_read_role_bias(role_ids, token_field)
-        if point_count > 0 and token_field.fused_tokens.shape[0] > 0 and bool(vl_slot_valid.any().item()):
+        scene_vl_slot_valid = vl_slot_valid & (role_ids != 0)
+        if point_count > 0 and token_field.fused_tokens.shape[0] > 0 and bool(scene_vl_slot_valid.any().item()):
             gate = self._vl_gate(self.vl_obs_anchor_gate_logit, vl_grounding)
             if bool((gate > 0.0).item()):
                 if public_role_bias is None:
                     public_role_bias = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
                 vl_bias = torch.zeros_like(public_role_bias)
                 vl_bias[:, :point_count] = self._vl_centered_log_prior_bias(vl_slot_priors)
-                vl_bias = torch.where(vl_slot_valid[:, None], vl_bias, torch.zeros_like(vl_bias))
+                vl_bias = torch.where(scene_vl_slot_valid[:, None], vl_bias, torch.zeros_like(vl_bias))
                 public_role_bias = public_role_bias + (gate * vl_bias)
         for _ in range(max(self.config.query_rounds, 1)):
             if visual_count > 0:

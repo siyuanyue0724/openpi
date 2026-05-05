@@ -42,6 +42,12 @@ current recurrent burn-in speed-path audit
   exposes this through `--vl-anchor-router-enabled` plus the `--vl-*` gate,
   radius, temperature, visible-mass, and bias-clip controls; ablated PI0.5 mode
   forces the router off.
+  The current long-run-safe contract is recorded there: VL task/interaction
+  lift uses a strict scene candidate mask with no global fallback, fallback
+  global rows are coverage-only, and role-0 observation anchors keep their
+  local/proprio/tactile seed path without static-camera VL seed or point-bias.
+  Its Section 6.1 records the maintained `30000` step / `5000` checkpoint /
+  `unroll_steps=2` VL-router launch template.
   Use its Current Mathematical Guardrails and Verification Commands sections
   before enabling any router stage beyond the default-off substrate.
 - [`src/openpi/picf/README_MAPG_PICF.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_MAPG_PICF.md)
