@@ -10,8 +10,8 @@ class PicfCoreConfig:
     dtype: str = "float32"
     persistent_anchors: int = 8
     observation_anchors: int = 16
-    effector_persistent_anchors: int = 2
-    effector_observation_anchors: int = 2
+    effector_persistent_anchors: int = 1
+    effector_observation_anchors: int = 1
     posterior_slot_identity_std: float = 0.0
     task_slot_identity_std: float = 0.0
     posterior_bootstrap_from_observation: bool = False
@@ -31,7 +31,7 @@ class PicfCoreConfig:
     control_query_tokens: int = 1
     predictive_query_tokens: int = 1
     task_local_queries: int = 8
-    task_effector_queries: int = 2
+    task_effector_queries: int = 1
     task_global_queries: int = 1
     task_instruction_queries: int = 2
     # Reserved compatibility field for an unimplemented iterative task-readout variant.
