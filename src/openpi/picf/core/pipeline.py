@@ -1088,13 +1088,13 @@ class PicfFullCore(nn.Module):
             )
             self.vl_anchor_token_proj = nn.LazyLinear(hidden_dim)
             self.vl_task_point_gate_logit = nn.Parameter(
-                torch.tensor(float(self.config.vl_task_point_gate_init), device=self.device, dtype=self.dtype)
+                torch.tensor([float(self.config.vl_task_point_gate_init)], device=self.device, dtype=self.dtype)
             )
             self.vl_obs_anchor_gate_logit = nn.Parameter(
-                torch.tensor(float(self.config.vl_obs_anchor_gate_init), device=self.device, dtype=self.dtype)
+                torch.tensor([float(self.config.vl_obs_anchor_gate_init)], device=self.device, dtype=self.dtype)
             )
             self.vl_posterior_bind_gate_logit = nn.Parameter(
-                torch.tensor(float(self.config.vl_posterior_bind_gate_init), device=self.device, dtype=self.dtype)
+                torch.tensor([float(self.config.vl_posterior_bind_gate_init)], device=self.device, dtype=self.dtype)
             )
         else:
             self.vl_heatmap_head = None

@@ -706,7 +706,15 @@ def test_vl_grounding_enabled_backward_does_not_mutate_query_views(tmp_path: Pat
     loss.backward()
 
     assert core.vl_obs_anchor_gate_logit is not None
+    assert core.vl_obs_anchor_gate_logit.ndim == 1
+    assert core.vl_obs_anchor_gate_logit.numel() == 1
     assert core.vl_obs_anchor_gate_logit.grad is not None
+    assert core.vl_task_point_gate_logit is not None
+    assert core.vl_task_point_gate_logit.ndim == 1
+    assert core.vl_task_point_gate_logit.numel() == 1
+    assert core.vl_posterior_bind_gate_logit is not None
+    assert core.vl_posterior_bind_gate_logit.ndim == 1
+    assert core.vl_posterior_bind_gate_logit.numel() == 1
 
 
 def test_effector_and_scene_anchor_roles_use_separate_point_pools(tmp_path: Path) -> None:
