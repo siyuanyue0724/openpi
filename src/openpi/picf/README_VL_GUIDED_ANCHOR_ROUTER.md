@@ -856,12 +856,18 @@ picf_mode=ablated forces:
 This is intentional. The router needs PaliGemma image tokens and PICF anchor
 state; it is not meaningful in PI0.5-only ablation mode.
 
-### 6.1 Current Long-Run Launch Contract
+### 6.1 Current Intended Long-Run Launch Contract
 
-The current VL-router long-run is a diagnostic-safe full PICF run, not a claim
-that the untrained heatmap head is already a final MAPG result. Use this profile
-when the goal is to collect stable long-run checkpoints and CALVIN diagnostics
-without reintroducing top-border/static-VL effector contamination:
+The current intended VL-router long-run is a full PICF run with frozen
+perception feature extractors and a trainable PI0.5/PaliGemma semantic-action
+stack. This is the profile to use for real long-run checkpoints and CALVIN
+diagnostics after the strict scene-candidate and local-effector fixes.
+
+`tactile_mode=stub` means the trainer installs a null tactile encoder. No
+AnyTouch checkpoint is loaded, no real tactile feature tokens are produced, and
+tactile losses are expected to remain zero. That mode is acceptable only for
+diagnostics or datasets without tactile observations. It is **not** the formal
+PICF v2.2 VL-router long-run profile.
 
 ```text
 steps: 30000
@@ -870,15 +876,39 @@ unroll_steps: 2
 burnin_steps: 0
 picf_mode: enabled
 perception_finetune_mode: frozen
+training_strategy: fsdp_full_shard
+optimizer_sharding: none
 visual_feature_mode: hierarchical
-tactile_mode: stub
-semantic_trainable: false
+tactile_mode: encoder
+tactile_trainable: false
+visual_trainable: false
+point_backbone_trainable: false
+semantic_trainable: true
 effector_persistent_anchors: 1
 effector_observation_anchors: 1
 task_effector_queries: 1
 VL router: enabled, gated, no default heatmap/keypose/diversity loss
 scene_anchor_border_patches: 1.0
 ```
+
+Trainability boundary:
+
+```text
+Frozen feature extractors:
+  Sonata point backbone
+  V-JEPA visual backbone
+  AnyTouch tactile backbone
+
+Trainable modules:
+  PaliGemma / PI0.5 semantic-action stack
+  PI0.5 action head / flow-matching path
+  PICF posterior, task-readout, conditioned-control, predictive/future heads
+  VL-router heatmap/proposal heads and gates
+```
+
+This boundary preserves the multimodal PICF architecture while avoiding
+full-perception fine-tuning on a 2x40GB node. `--semantic-trainable` is required
+explicitly; `--perception-finetune-mode frozen` does not set it.
 
 Operational requirements before launch:
 
@@ -888,7 +918,10 @@ Operational requirements before launch:
 3. cloud clone is reset to origin/Posterior_VLA
 4. no old torchrun, serving, or CALVIN evaluator process is occupying GPUs or
    ports 8000/8001
-5. output run name includes vlrouter/strict/unroll2/30000/ckpt5000/date/retry
+5. tactile checkpoint, backgrounds, fingertip calibration, and contact stats
+   exist on the target machine
+6. output run name includes vlrouter/semtrain/tactenc/strict/unroll2/30000/
+   ckpt5000/date/retry
 ```
 
 Template:
@@ -899,7 +932,7 @@ export PYTHONPATH=/root/openpi_vlrouter_longrun/src:/root/openpi_vlrouter_longru
 export WANDB_MODE=disabled
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
 
-RUN=picf_v22_vlrouter_strict2x40_unroll2_30000_ckpt5000_YYYYMMDD_rN
+RUN=picf_v22_vlrouter_semtrain_tactenc_strict2x40_unroll2_30000_ckpt5000_YYYYMMDD_rN
 LOG=/mnt/checkpoints/picf_core/debug/${RUN}.outer.log
 mkdir -p /mnt/checkpoints/picf_core/debug
 
@@ -913,7 +946,8 @@ nohup /root/openpi/.venv/bin/torchrun --standalone --nproc_per_node=2 \
   --unroll-steps 2 \
   --burnin-steps 0 \
   --picf-mode enabled \
-  --training-strategy ddp \
+  --training-strategy fsdp_full_shard \
+  --optimizer-sharding none \
   --perception-finetune-mode frozen \
   --visual-mode encoder \
   --visual-model-name vjepa2_1_vit_base_384 \
@@ -927,8 +961,16 @@ nohup /root/openpi/.venv/bin/torchrun --standalone --nproc_per_node=2 \
   --semantic-checkpoint-path /root/openpi/checkpoints/foundation/pi05_base_pytorch \
   --semantic-checkpoint-config-path /root/openpi/checkpoints/foundation/pi05_base_pytorch/config.json \
   --semantic-max-length 256 \
+  --semantic-trainable \
   --semantic-gradient-checkpointing \
-  --tactile-mode stub \
+  --semantic-tokenwise-chunk-size 64 \
+  --semantic-projection-chunk-size 128 \
+  --semantic-mlp-chunk-size 64 \
+  --tactile-mode encoder \
+  --tactile-checkpoint-path /root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth \
+  --tactile-backgrounds-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_backgrounds.npz \
+  --tactile-calibration-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_fingertip_calibration.json \
+  --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
   --persistent-anchors 8 \
   --observation-anchors 16 \
   --effector-persistent-anchors 1 \
@@ -941,9 +983,33 @@ nohup /root/openpi/.venv/bin/torchrun --standalone --nproc_per_node=2 \
   --vl-obs-anchor-gate-init -4.0 \
   --vl-task-point-gate-init -4.0 \
   --vl-posterior-bind-gate-init -6.0 \
+  --no-wandb \
   > "$LOG" 2>&1 &
 echo $! > /mnt/checkpoints/picf_core/debug/${RUN}.pid
 ```
+
+The startup log must report the following contract before the run is accepted:
+
+```text
+Training config:
+  training_strategy=fsdp_full_shard
+  unroll_steps=2
+  burnin_steps=0
+  num_steps=30000
+  save_interval=5000
+
+Backbone contract:
+  point=sonata(trainable=False ...)
+  visual=encoder(finetune_mode=frozen trainable=False)
+  tactile=encoder(trainable=False)
+  semantic=paligemma(trainable=True)
+
+Frozen-perception/augmentation contract:
+  perception_finetune_mode=frozen
+```
+
+If the log says `tactile=stub` or `semantic=paligemma(trainable=False)`, stop
+the run. It is not the intended profile.
 
 Tail:
 

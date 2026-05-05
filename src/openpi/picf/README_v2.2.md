@@ -2251,8 +2251,10 @@ This subsection records the earlier full-BPTT 2x40GB A100 frozen-perception
 reference. It is **not** the current VL-router long-run launch profile. The
 current live long-run contract is documented in
 [`README_VL_GUIDED_ANCHOR_ROUTER.md` Section 6.1](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_VL_GUIDED_ANCHOR_ROUTER.md)
-and uses `training_strategy=ddp`, `unroll_steps=2`, `burnin_steps=0`,
-`tactile_mode=stub`, frozen PaliGemma, and one effector slot by default.
+and uses `training_strategy=fsdp_full_shard`, `unroll_steps=2`,
+`burnin_steps=0`, `tactile_mode=encoder`, frozen Sonata/V-JEPA/AnyTouch
+feature extractors, trainable PaliGemma/PI0.5 semantic-action modules, and one
+effector slot by default.
 
 The historical reference was intended for cost-controlled runs where the PICF
 architecture, PI0.5 action path, recurrent carry, task readout, conditioned
