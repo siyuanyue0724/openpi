@@ -1188,6 +1188,7 @@ def test_materialize_model_parameters_initializes_task_tactile_reread() -> None:
             self.config = types.SimpleNamespace(
                 hidden_dim=8,
                 tactile_group_proposals=2,
+                tactile_latent_tokens=3,
                 task_local_queries=8,
                 task_global_queries=1,
                 task_instruction_queries=2,
@@ -1199,6 +1200,7 @@ def test_materialize_model_parameters_initializes_task_tactile_reread() -> None:
             self.point_error_encoder = torch.nn.Linear(4, 4)
             self.innovation_proj = torch.nn.Linear(4, 4)
             self.tactile_route_reread = LazyCrossAttentionRead(self.config.hidden_dim, inner_dim=self.config.hidden_dim)
+            self.tactile_native_reread = LazyCrossAttentionRead(self.config.hidden_dim, inner_dim=self.config.hidden_dim)
             self.task_tactile_reread = LazyCrossAttentionRead(self.config.hidden_dim, inner_dim=self.config.hidden_dim)
             self.tactile_encoder = types.SimpleNamespace(
                 model=types.SimpleNamespace(
@@ -1223,10 +1225,16 @@ def test_materialize_model_parameters_initializes_task_tactile_reread() -> None:
 
     trainer = _FakeTrainer()
 
+    assert isinstance(trainer.core.tactile_native_reread.key_proj.weight, torch.nn.parameter.UninitializedParameter)
     assert isinstance(trainer.core.task_tactile_reread.key_proj.weight, torch.nn.parameter.UninitializedParameter)
 
     _MODULE._materialize_model_parameters(trainer, source=_FakeSource(), rank=0)
 
+    assert not isinstance(
+        trainer.core.tactile_native_reread.key_proj.weight,
+        torch.nn.parameter.UninitializedParameter,
+    )
+    assert tuple(trainer.core.tactile_native_reread.key_proj.weight.shape) == (8, 768)
     assert not isinstance(
         trainer.core.task_tactile_reread.key_proj.weight,
         torch.nn.parameter.UninitializedParameter,

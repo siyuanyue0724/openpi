@@ -4244,6 +4244,20 @@ def _materialize_model_parameters(
                 dtype=core.dtype,
             )
             _ = core.tactile_route_reread(dummy_queries, dummy_keys)
+        if picf_enabled and isinstance(core.tactile_native_reread.key_proj.weight, UninitializedParameter):
+            tactile_dense_dim = _infer_tactile_dense_dim(core)
+            tactile_query_count = max(int(getattr(core.config, "tactile_latent_tokens", 1)), 1)
+            dummy_queries = torch.zeros(
+                (1, tactile_query_count, core.config.hidden_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            dummy_keys = torch.zeros(
+                (1, 1, tactile_dense_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = core.tactile_native_reread(dummy_queries, dummy_keys)
         if picf_enabled and isinstance(core.task_tactile_reread.key_proj.weight, UninitializedParameter):
             tactile_dense_dim = _infer_tactile_dense_dim(core)
             task_query_count = max(
