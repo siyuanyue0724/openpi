@@ -2742,13 +2742,20 @@ class PicfFullCore(nn.Module):
             obs_vl_gate = self._vl_gate(self.vl_obs_anchor_gate_logit, vl_grounding)
             if bool(vl_slot_valid.any().item()) and bool((obs_vl_gate > 0.0).item()):
                 vl_seed_indices = torch.argmax(vl_slot_priors, dim=-1)
+                vl_seed_tokens = torch.zeros_like(queries)
+                vl_seed_mask = torch.zeros((1, n_obs, 1), device=self.device, dtype=torch.bool)
                 for row in torch.nonzero(vl_slot_valid, as_tuple=False).squeeze(-1).tolist():
                     idx = int(vl_seed_indices[int(row)].item())
                     if 0 <= idx < point_count:
                         seed_indices[int(row)] = idx
-                        queries[0, int(row)] = ((1.0 - obs_vl_gate) * queries[0, int(row)]) + (
-                            obs_vl_gate * token_field.point_tokens[idx]
-                        )
+                        vl_seed_tokens[0, int(row)] = token_field.point_tokens[idx]
+                        vl_seed_mask[0, int(row), 0] = True
+                if bool(vl_seed_mask.any().item()):
+                    queries = torch.where(
+                        vl_seed_mask,
+                        ((1.0 - obs_vl_gate) * queries) + (obs_vl_gate * vl_seed_tokens),
+                        queries,
+                    )
         attn_public = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
         attn_visual = torch.zeros((n_obs, visual_count), device=self.device, dtype=self.dtype)
         public_role_bias = self._fused_read_role_bias(role_ids, token_field)

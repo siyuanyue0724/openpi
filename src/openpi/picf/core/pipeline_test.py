@@ -483,6 +483,33 @@ def test_vl_grounding_enabled_builds_state_without_changing_default_anchor_contr
         torch.testing.assert_close(output.state.task_readout.point_weights.sum(dim=-1), expected, atol=1e-5, rtol=1e-5)
 
 
+def test_vl_grounding_enabled_backward_does_not_mutate_query_views(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        vl_anchor_router_enabled=True,
+        vl_anchor_modes=3,
+        vl_obs_anchor_gate_init=20.0,
+        vl_task_point_gate_init=20.0,
+        vl_posterior_bind_gate_init=20.0,
+    )
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+
+    loss = (
+        output.state.observation_anchors.tokens.square().mean()
+        + output.state.task_readout.conditioned_queries.square().mean()
+        + output.state.posterior.tokens.square().mean()
+    )
+    loss.backward()
+
+    assert core.vl_obs_anchor_gate_logit is not None
+    assert core.vl_obs_anchor_gate_logit.grad is not None
+
+
 def test_effector_and_scene_anchor_roles_use_separate_point_pools(tmp_path: Path) -> None:
     core, replay = _make_core(
         tmp_path,
