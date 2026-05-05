@@ -72,6 +72,8 @@ class PicfTokenFieldState:
     fusion_attention_mean: torch.Tensor | None = None
     projective_geometry: PicfProjectiveGeometryState | None = None
     point_pool_ids: torch.Tensor | None = None
+    point_positions_world: torch.Tensor | None = None
+    point_projectable_mask: torch.Tensor | None = None
 
 
 @dataclasses.dataclass

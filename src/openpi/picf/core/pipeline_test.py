@@ -22,6 +22,7 @@ from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.visual_expert import _project_world_points
 from openpi.picf.posterior.visual_expert import _scale_to_grid
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticFeatures
+from openpi.picf.paligemma.wrapper import PaliGemmaViewTransform
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
 from openpi.picf.test_utils import build_mini_calvin_dataset
 from openpi.picf.vjepa.config import VjepaVisualConfig
@@ -319,6 +320,69 @@ def test_vl_heatmap_resize_preserves_probability_mass() -> None:
     torch.testing.assert_close(resized.sum(), torch.tensor(1.0), atol=1e-6, rtol=1e-6)
 
 
+def test_vl_heatmap_mapping_uses_resize_with_pad_transform() -> None:
+    transform = PaliGemmaViewTransform(
+        original_hw=(100, 200),
+        target_hw=(224, 224),
+        resized_hw=(112, 224),
+        pad_top=56,
+        pad_bottom=56,
+        pad_left=0,
+        pad_right=0,
+        scale_y=112.0 / 100.0,
+        scale_x=224.0 / 200.0,
+    )
+    heatmap = torch.arange(1, 17, dtype=torch.float32)
+
+    naive = pipeline_module._resize_flat_heatmap(
+        heatmap,
+        src_hw=(4, 4),
+        dst_hw=(4, 4),
+        eps=1e-6,
+    )
+    mapped = pipeline_module._map_pg_heatmap_to_visual_grid(
+        heatmap,
+        src_hw=(4, 4),
+        dst_hw=(4, 4),
+        view_transform=transform,
+        eps=1e-6,
+    )
+
+    assert mapped.shape == (16,)
+    assert bool(torch.all(mapped >= 0.0).item())
+    torch.testing.assert_close(mapped.sum(), torch.tensor(1.0), atol=1e-6, rtol=1e-6)
+    assert not torch.allclose(mapped, naive)
+
+
+def test_semantic_context_carries_paligemma_view_transforms(tmp_path: Path) -> None:
+    core, _replay = _make_core(tmp_path)
+    transform = PaliGemmaViewTransform(
+        original_hw=(100, 200),
+        target_hw=(224, 224),
+        resized_hw=(112, 224),
+        pad_top=56,
+        pad_bottom=56,
+        pad_left=0,
+        pad_right=0,
+        scale_y=112.0 / 100.0,
+        scale_x=224.0 / 200.0,
+    )
+    features = PaliGemmaSemanticFeatures(
+        tokens=torch.ones((2, core.config.semantic_dim), dtype=torch.float32),
+        summary=torch.ones((1, core.config.semantic_dim), dtype=torch.float32),
+        image_tokens=torch.ones((4, core.config.semantic_dim), dtype=torch.float32),
+        text_tokens=torch.ones((2, core.config.semantic_dim), dtype=torch.float32),
+        image_token_ranges=((0, 4),),
+        image_grid_shapes=((2, 2),),
+        image_view_names=("static",),
+        image_view_transforms=(transform,),
+    )
+
+    context = core._project_semantic_context(tokens_raw=features.tokens, features=features)
+
+    assert context.image_view_transforms == (transform,)
+
+
 def test_vl_point_prior_projectable_mask_excludes_local_frame_rows() -> None:
     compatibility = torch.tensor(
         [
@@ -345,6 +409,51 @@ def test_vl_point_prior_projectable_mask_excludes_local_frame_rows() -> None:
     assert bool(valid.item())
     torch.testing.assert_close(visible_mass, torch.tensor(1.0))
     torch.testing.assert_close(prior, torch.tensor([0.0, 0.5, 0.5]), atol=1e-6, rtol=1e-6)
+
+
+def test_scene_point_candidate_mask_rejects_projective_border_points(tmp_path: Path) -> None:
+    core, _replay = _make_core(tmp_path, scene_anchor_border_patches=1.0)
+    visual_grid = torch.tensor(
+        [[x, y] for y in range(4) for x in range(4)],
+        dtype=torch.float32,
+    )
+    geom = pipeline_module.PicfProjectiveGeometryState(
+        point_proj_grid_norm=torch.zeros((3, 2)),
+        point_proj_grid_index=torch.tensor([[0.0, 0.0], [1.0, 1.0], [2.0, 2.0]], dtype=torch.float32),
+        point_visibility=torch.ones((3,)),
+        point_depth=torch.ones((3,)),
+        point_depth_sample=torch.ones((3,)),
+        point_depth_valid=torch.ones((3,), dtype=torch.bool),
+        visual_grid_norm=torch.zeros((16, 2)),
+        visual_grid_index=visual_grid,
+        visual_pixel_centers=torch.zeros((16, 2)),
+        visual_ray_world=torch.zeros((16, 3)),
+        camera_origin_world=torch.zeros((3,)),
+        projective_compatibility=torch.ones((3, 16)),
+        projective_candidate_mask=torch.ones((3, 16), dtype=torch.bool),
+        projective_attention_bias=torch.zeros((3, 16)),
+    )
+    zeros_h = torch.zeros((0, core.config.hidden_dim), dtype=torch.float32)
+    token_field = pipeline_module.PicfTokenFieldState(
+        point_tokens=torch.zeros((3, core.config.hidden_dim), dtype=torch.float32),
+        visual_tokens=zeros_h,
+        tactile_tokens=zeros_h,
+        context_tokens=zeros_h,
+        fused_tokens=torch.zeros((3, core.config.hidden_dim), dtype=torch.float32),
+        point_positions=torch.zeros((3, 3), dtype=torch.float32),
+        modality_ids=torch.zeros((3,), dtype=torch.long),
+        point_align_embeddings=torch.zeros((3, core.config.hidden_dim), dtype=torch.float32),
+        visual_align_embeddings=zeros_h,
+        tactile_align_embeddings=zeros_h,
+        tactile_positions_world=torch.zeros((0, 3), dtype=torch.float32),
+        tactile_contact_gate=torch.zeros((0,), dtype=torch.float32),
+        projective_geometry=geom,
+        point_pool_ids=torch.ones((3,), dtype=torch.long),
+    )
+
+    mask = core._scene_point_candidate_mask(token_field)
+
+    torch.testing.assert_close(mask.cpu(), torch.tensor([False, True, True]))
 
 
 def test_weighted_anchor_modes_preserve_separated_high_weight_modes() -> None:
@@ -562,6 +671,12 @@ def test_effector_and_scene_anchor_roles_use_separate_point_pools(tmp_path: Path
     assert point_pool_ids is not None
     assert int((point_pool_ids == 0).sum().item()) == local_offsets.shape[0]
     assert int((point_pool_ids == 1).sum().item()) == xyz.shape[0]
+    assert output.state.token_field.point_positions_world is not None
+    np.testing.assert_allclose(
+        output.state.token_field.point_positions_world.detach().cpu().numpy()[: local_offsets.shape[0]],
+        xyz[: local_offsets.shape[0]],
+        atol=1e-6,
+    )
 
     obs = output.state.observation_anchors
     assert obs.role_ids is not None

@@ -4,11 +4,18 @@ Date: 2026-05-05
 Status: staged implementation record. The current local code implements the
 default-off safety substrate plus gated live consumption in the core:
 PaliGemma spatial-token metadata, resize-with-pad view metadata,
-`PicfVLGroundingState`, router config, column-normalized heatmap-to-point prior
-helpers, `_build_vl_grounding(...)`, role-aware observation-anchor seeding and
-attention bias, task-readout point-prior fusion, and posterior-binding soft
-overlap bias. The router remains disabled by default and does not alter the
-current canonical training profile unless `vl_anchor_router_enabled=True`.
+transform-aware PaliGemma-grid-to-PICF-grid mapping, `PicfVLGroundingState`,
+router config, column-normalized heatmap-to-point prior helpers,
+`_build_vl_grounding(...)`, role-aware observation-anchor seeding and attention
+bias, task-readout point-prior fusion, and posterior-binding soft overlap bias.
+The router remains disabled by default and does not alter the current canonical
+training profile unless `vl_anchor_router_enabled=True`.
+
+Latest local fix audit:
+
+```text
+/tmp/picf_vl_router_anchor_collapse_fix_audit_20260505.md
+```
 
 This document records the planned PICF-compatible grounding upgrade:
 
@@ -40,6 +47,9 @@ Implemented in the current local branch:
   metadata.
 - `PaliGemmaViewTransform` records the `resize_with_pad` geometry needed to map
   PaliGemma heatmaps back to original image coordinates.
+- `_map_pg_heatmap_to_visual_grid(...)` and `_map_pg_grid_values_to_visual_grid(...)`
+  consume `PaliGemmaViewTransform`; non-square images and padded regions are
+  mapped through original-camera pixel centers rather than a naive grid resize.
 - `PicfVLGroundingState` exists as a typed carrier.
 - `PicfCoreConfig` and `scripts/picf_core_train.py` expose default-off VL
   router knobs. The standard trainer can enable the router without ad-hoc code
@@ -56,12 +66,110 @@ Implemented in the current local branch:
   VL point priors through a learnable gate when the router is enabled.
 - `_posterior_update(...)` consumes VL/observation point-overlap as a soft
   binding-logit bias when the router is enabled.
+- point geometry now keeps a row-aligned world-frame coordinate stream:
+  `PointFrameContext.points_world` -> `PicfTokenFieldState.point_positions_world`.
+  Camera projection, tactile alignment, VL point-prior moments, observation
+  anchor geometry, and task-readout `x/S/a` use this world-frame stream instead
+  of projecting local-frame rows as if they were world coordinates.
+- scene/object candidate routing now uses a role-aware projective candidate
+  mask. Scene/object slots prefer global rows that are visible, depth-valid,
+  and not clipped by the visual-grid border; if too few such rows exist, the
+  code falls back to remaining global rows only to keep tensor contracts filled.
+- serving anchor diagnostics now export `point_cloud.xyz_world`,
+  `point_cloud.projectable_mask`, and `vl_grounding.*` heatmap / anchor-prior
+  summaries so a top-left/top-border overlay can be traced back to heatmap,
+  projection, point prior, or task attention.
 
 Not implemented yet:
 
 - VL heatmap/keypose/diversity losses
-- serving/CALVIN heatmap and point-prior debug export
 - any default behavior change in the active training profile
+
+### 0.1A Diagnostic Fix: Top-Border Scene Anchor Collapse
+
+The first `vl_anchor_router_enabled=True` CALVIN diagnostic run at step 500
+showed a real failure mode:
+
+```text
+effector role-0 anchors:
+  mostly near the gripper, as expected
+
+scene/object role-1 anchors:
+  concentrated on y ~= 0 top-border projected points
+  top point rows were global-scene pool rows with near-floor/boundary geometry
+```
+
+This was not a drawing issue. The JSONL showed that task and observation
+point weights were actually selecting global rows whose projected pixels were
+on the top image border. The root cause was a combination of three issues:
+
+```text
+1. global_scene_context was sampled by FPS from the whole point cloud.
+   Large planes and camera-boundary rows could become object-role candidates.
+
+2. PointFrameContext.points_local was overloaded.
+   The unified context concatenated local effector-frame rows and world-frame
+   global scene rows into one tensor, while projective geometry assumed all
+   rows were world coordinates.
+
+3. The live router has no nonzero heatmap/keypose/diversity loss yet.
+   At step 500, the PaliGemma heatmap head is still weakly constrained, so
+   scene/object slots must be protected by geometric validity masks rather than
+   assuming the router has learned object grounding.
+```
+
+The fix is upstream and geometric, not cosmetic:
+
+```text
+PointFrameContext
+  points_local        : model-frame feature coordinates
+  points_world        : row-aligned world coordinates for projection/alignment
+
+PicfTokenFieldState
+  point_positions       : existing model-frame point coordinates
+  point_positions_world : row-aligned world coordinates
+  point_projectable_mask: scene/object projective candidate rows
+
+_build_projective_geometry
+  consumes point_positions_world
+
+_scene_point_candidate_mask
+  keeps global-scene rows that are visible, depth-valid, and not visual-grid
+  border-clipped
+
+_fused_read_role_bias
+  role 0 can read local effector/contact rows
+  role 1 can read scene/object candidate rows
+  role 1 falls back to global rows only when no candidate rows exist
+
+_build_vl_grounding
+  task/interaction heatmaps lift only through scene/object candidate rows
+  anchor moments use point_positions_world
+
+_build_task_readout / _build_observation_anchors
+  task and observation geometry moments use point_positions_world
+```
+
+This means future diagnostics should distinguish:
+
+```text
+point_cloud.xyz:
+  model-frame coordinates used by existing point token features
+
+point_cloud.xyz_world:
+  world coordinates used by camera projection, tactile alignment, and
+  anchor/task geometry
+
+point_cloud.projectable_mask:
+  rows allowed as scene/object candidates for current point-centric router
+
+vl_grounding.task_heatmap / effector_heatmap / interaction_heatmap:
+  PaliGemma heatmap distributions after transform-aware mapping to the PICF
+  visual grid
+
+vl_grounding.anchor_point_prior:
+  actual point priors consumed by observation/task/posterior gates
+```
 
 The current compatibility target remains:
 
@@ -82,8 +190,9 @@ the router is made default-on or trained with nonzero VL losses:
    -> no VL heatmap head, no VL anchor projection module, no VL gate parameters
    -> no PicfVLGroundingState is attached to the live core state
 
-2. Probability-preserving heatmap resize:
-   flat heatmaps remain non-negative and sum to one after grid resize.
+2. Transform-aware heatmap mapping:
+   flat heatmaps remain non-negative and sum to one after
+   resize-with-pad-aware mapping from PaliGemma grid to PICF visual grid.
 
 3. Column-normalized 2D-to-3D lift:
    each visual cell distributes its heatmap mass across compatible points.
@@ -128,6 +237,7 @@ uv run python -m py_compile \
   src/openpi/picf/core/pipeline.py
 
 uv run pytest -q src/openpi/picf/core/pipeline_test.py -k 'vl_'
+uv run pytest -q src/openpi/picf/core/pipeline_test.py -k 'semantic_context_carries or scene_point_candidate or effector_and_scene_anchor_roles'
 uv run pytest -q scripts/picf_core_train_test.py -k 'vl_anchor_router or conditioned_control'
 uv run pytest -q src/openpi/picf/paligemma/wrapper_test.py
 uv run pytest -q src/openpi/picf/core/pipeline_test.py
@@ -487,13 +597,14 @@ I9. Diagnostics must expose raw distributions, not hide failures by thresholding
 I10. CALVIN/PI0.5 action flow remains the final action loss path.
 ```
 
-Additional blocking constraints before enabling M6/M7:
+Additional constraints enforced by the current staged implementation:
 
 ```text
 B1. PaliGemma heatmaps are in resize-with-pad coordinates.
-    They need `PaliGemmaViewTransform` inversion or a direct C_pg
-    point-to-PaliGemma-grid compatibility matrix. Plain interpolation from
-    PaliGemma grid to PICF grid is not sufficient when padding exists.
+    Current code carries `PaliGemmaViewTransform` through `_SemanticContext` and
+    samples the PaliGemma grid at the padded-image coordinates corresponding to
+    PICF's original-camera pixel centers. Plain interpolation is only a legacy
+    fallback for old semantic features that lack transform metadata.
 
 B2. VL 2D-to-3D lift only applies to world-projectable point rows.
     Current PICF point rows can include local effector-frame rows and global
@@ -529,7 +640,7 @@ Then:
 
 ### 5.1 PaliGemmaSemanticFeatures Extension
 
-Planned extension:
+Current extension:
 
 ```python
 @dataclasses.dataclass(frozen=True)
@@ -545,6 +656,7 @@ class PaliGemmaSemanticFeatures:
     image_token_ranges: tuple[tuple[int, int], ...] = ()
     image_grid_shapes: tuple[tuple[int, int], ...] = ()
     image_view_names: tuple[str, ...] = ()
+    image_view_transforms: tuple[PaliGemmaViewTransform, ...] = ()
 ```
 
 Shape contract:
@@ -555,6 +667,7 @@ text_tokens: [T_text, D_pg]
 image_token_ranges[i] = [start_i, end_i) into image_tokens
 image_grid_shapes[i] = (H_pg_i, W_pg_i)
 image_view_names[i] = "static" or "gripper"
+image_view_transforms[i] = resize-with-pad geometry for that view
 ```
 
 Implementation detail:
@@ -567,7 +680,7 @@ trainable heatmap heads. This avoids inference-tensor autograd metadata issues.
 
 ### 5.2 Semantic Context Extension
 
-Planned `_SemanticContext`:
+Current `_SemanticContext`:
 
 ```python
 @dataclasses.dataclass(frozen=True)
@@ -581,6 +694,7 @@ class _SemanticContext:
     image_token_ranges: tuple[tuple[int, int], ...] = ()
     image_grid_shapes: tuple[tuple[int, int], ...] = ()
     image_view_names: tuple[str, ...] = ()
+    image_view_transforms: tuple[Any, ...] = ()
 ```
 
 Legacy callers that pass raw semantic tensors still produce the old token-only
@@ -618,8 +732,9 @@ class PicfVLGroundingState:
 ```
 
 `Vv` is the PICF visual grid token count, not necessarily PaliGemma's raw image
-token count. If PaliGemma and PICF visual grids differ, heatmaps are resized
-before projection.
+token count. If PaliGemma and PICF visual grids differ, heatmaps are mapped
+through `PaliGemmaViewTransform` before projection. Naive interpolation is only
+a compatibility fallback for legacy features without view-transform metadata.
 
 ## 6. Config Surface
 
@@ -802,19 +917,44 @@ for PICF.
 
 ## 9. Pseudocode: 2D Heatmap To 3D Point Prior
 
-### 9.1 Resize Heatmap To PICF Visual Grid
+### 9.1 Map PaliGemma Heatmap To PICF Visual Grid
 
 PaliGemma image grid and PICF visual grid may differ.
 
 ```python
-def _resize_flat_heatmap(heat: Tensor, src_hw: tuple[int,int], dst_hw: tuple[int,int]) -> Tensor:
-    x = heat.reshape(1, 1, src_hw[0], src_hw[1])
-    x = F.interpolate(x, size=dst_hw, mode="bilinear", align_corners=False)
-    x = x.reshape(-1).clamp_min(0.0)
-    return x / x.sum().clamp_min(eps)
+def _map_pg_heatmap_to_visual_grid(
+    heat: Tensor,
+    src_hw: tuple[int, int],
+    dst_hw: tuple[int, int],
+    view_transform: PaliGemmaViewTransform | None,
+) -> Tensor:
+    if view_transform is None:
+        # Legacy compatibility only. New PaliGemma features should always carry
+        # view_transform.
+        return _resize_flat_heatmap(heat, src_hw, dst_hw)
+
+    # PICF visual pixels are in the original camera image.
+    original_uv = picf_visual_grid_centers(view_transform.original_hw, dst_hw)
+
+    # Map original camera pixel centers into the padded 224x224 PaliGemma image.
+    padded_uv = resize_with_pad_forward(
+        original_uv,
+        scale_x=view_transform.scale_x,
+        scale_y=view_transform.scale_y,
+        pad_left=view_transform.pad_left,
+        pad_top=view_transform.pad_top,
+    )
+
+    # Sample the PaliGemma token grid at those padded-image coordinates.
+    sampled = grid_sample_pg_tokens(heat.reshape(src_hw), padded_uv, view_transform.target_hw)
+    sampled = sampled.reshape(-1).clamp_min(0.0)
+    return sampled / sampled.sum().clamp_min(eps)
 ```
 
 The destination grid must match `token_field.projective_geometry.visual_grid_index`.
+This mapping is intentionally not a naive `F.interpolate` when transform
+metadata exists. It prevents padded top/bottom/left/right regions from becoming
+fake task anchors.
 
 ### 9.2 Build Heatmaps
 
@@ -1470,12 +1610,16 @@ Current implemented tests:
 test_paligemma_view_transform_records_resize_with_pad_metadata
 test_vl_grounding_disabled_does_not_instantiate_router_modules
 test_vl_heatmap_resize_preserves_probability_mass
+test_vl_heatmap_mapping_uses_resize_with_pad_transform
+test_semantic_context_carries_paligemma_view_transforms
 test_vl_point_prior_uses_column_normalized_projective_mass
 test_vl_point_prior_projectable_mask_excludes_local_frame_rows
 test_vl_point_prior_invalid_projection_is_zero_not_top_left_fallback
+test_scene_point_candidate_mask_rejects_projective_border_points
 test_vl_slot_point_priors_are_role_aware
 test_weighted_anchor_modes_preserve_separated_high_weight_modes
 test_vl_grounding_enabled_builds_state_without_changing_default_anchor_contract
+test_effector_and_scene_anchor_roles_use_separate_point_pools
 ```
 
 Required before enabling default-on routing:

@@ -23,6 +23,11 @@ class PointFrameContext:
     # 0 = effector/contact-local point, 1 = global scene/object point.
     # Older callers may leave this unset; core code treats unset as all-local.
     pool_ids: np.ndarray | None = None
+    # World-frame positions corresponding row-by-row to points_local.  The
+    # model may use local-frame positions for effector-relative features, but
+    # camera projection, tactile alignment, and cross-modal anchor priors must
+    # never project local-frame rows as if they were world-frame coordinates.
+    points_world: np.ndarray | None = None
 
 
 def build_point_frame_context(
@@ -50,4 +55,5 @@ def build_point_frame_context(
         world_to_local=world_to_local,
         G_t=np.asarray(observation.G_t, dtype=np.float32),
         pool_ids=np.zeros((int(keep.sum()),), dtype=np.int64),
+        points_world=np.asarray(observation.point_set.xyz_world[keep], dtype=np.float32),
     )

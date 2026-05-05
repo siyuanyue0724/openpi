@@ -431,6 +431,10 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
     observation_anchors = getattr(state, "observation_anchors", None)
     posterior = getattr(state, "posterior", None)
     task_readout = getattr(state, "task_readout", None)
+    vl_grounding = getattr(state, "vl_grounding", None)
+    point_positions_world = getattr(token_field, "point_positions_world", None)
+    if point_positions_world is None:
+        point_positions_world = getattr(token_field, "point_positions", None)
     obs_pixel_raw = None
     obs_pixel = None
     obs_pixel_mass = None
@@ -489,7 +493,7 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
                 getattr(task_readout, "point_public_attention", None),
                 topk=8,
                 max_queries=16,
-                points=getattr(token_field, "point_positions", None),
+                points=point_positions_world,
                 pixels=point_pixels,
                 visibility=point_visibility_t,
                 pool_ids=getattr(token_field, "point_pool_ids", None),
@@ -508,17 +512,26 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
             "visible_point_mass": _tensor_to_list(task_pixel_mass),
             "near_proprio_point_mass_10cm": _near_proprio_point_mass(
                 point_weights=getattr(task_readout, "point_weights", None),
-                point_positions=getattr(token_field, "point_positions", None),
+                point_positions=point_positions_world,
                 proprio=proprio_np,
                 radius_m=0.10,
             ),
             "near_proprio_point_mass_20cm": _near_proprio_point_mass(
                 point_weights=getattr(task_readout, "point_weights", None),
-                point_positions=getattr(token_field, "point_positions", None),
+                point_positions=point_positions_world,
                 proprio=proprio_np,
                 radius_m=0.20,
             ),
         }
+
+    def _vl_heatmap_row(name: str) -> torch.Tensor | None:
+        if vl_grounding is None:
+            return None
+        value = getattr(vl_grounding, name, None)
+        if value is None:
+            return None
+        return value[None, :]
+
     return {
         "image_hw": [image_h, image_w],
         "segment_id": int(observation.segment_id),
@@ -561,9 +574,46 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
             "local_role_ids": _tensor_to_int_list(getattr(task_readout, "local_role_ids", None), max_rows=64),
             "attention": task_attention,
         },
+        "vl_grounding": {
+            "valid": bool(getattr(vl_grounding, "valid", torch.tensor(False)).detach().to(device="cpu").item())
+            if vl_grounding is not None
+            else False,
+            "confidence": _tensor_to_list(getattr(vl_grounding, "confidence", None)),
+            "anchor_roles": _tensor_to_int_list(getattr(vl_grounding, "anchor_roles", None), max_rows=64),
+            "anchor_scores": _tensor_to_list(getattr(vl_grounding, "anchor_scores", None), max_rows=64),
+            "task_heatmap": _attention_summary(
+                _vl_heatmap_row("task_heatmap"),
+                topk=12,
+                max_queries=1,
+                pixels=visual_pixels,
+            ),
+            "effector_heatmap": _attention_summary(
+                _vl_heatmap_row("effector_heatmap"),
+                topk=12,
+                max_queries=1,
+                pixels=visual_pixels,
+            ),
+            "interaction_heatmap": _attention_summary(
+                _vl_heatmap_row("interaction_heatmap"),
+                topk=12,
+                max_queries=1,
+                pixels=visual_pixels,
+            ),
+            "anchor_point_prior": _attention_summary(
+                getattr(vl_grounding, "anchor_point_priors", None),
+                topk=8,
+                max_queries=16,
+                points=point_positions_world,
+                pixels=point_pixels,
+                visibility=point_visibility_t,
+                pool_ids=getattr(token_field, "point_pool_ids", None),
+            ),
+        },
         "point_cloud": {
             "xyz": _tensor_to_list(getattr(token_field, "point_positions", None), max_rows=1024),
+            "xyz_world": _tensor_to_list(point_positions_world, max_rows=1024),
             "pool_ids": _tensor_to_int_list(getattr(token_field, "point_pool_ids", None), max_rows=1024),
+            "projectable_mask": _tensor_to_int_list(getattr(token_field, "point_projectable_mask", None), max_rows=1024),
             "projected_pixel": _tensor_to_list(point_pixels, max_rows=1024),
             "visibility": _tensor_to_list(getattr(geom, "point_visibility", None), max_rows=1024),
             "visual_projected_pixel": _tensor_to_list(visual_pixels, max_rows=1024),

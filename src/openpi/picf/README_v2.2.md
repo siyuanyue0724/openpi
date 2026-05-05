@@ -32,12 +32,25 @@ current recurrent burn-in speed-path audit
   explicitly enabled it builds VL grounding state and consumes it through
   role-aware observation-anchor soft seeds/biases, task-readout gated point
   prior fusion, and posterior-binding soft overlap bias. Heatmap supervision
-  losses and CALVIN heatmap export are still not default-live. The live trainer
+  losses are still not default-live. The live implementation now records the
+  top-border scene-anchor diagnostic fix: world-frame point coordinates are
+  split from model-frame point coordinates, scene/object slots use a
+  projective candidate mask, PaliGemma heatmaps are mapped through
+  `PaliGemmaViewTransform` instead of naive resize when transform metadata is
+  available, and CALVIN debug export includes VL heatmap and point-prior
+  summaries. The live trainer
   exposes this through `--vl-anchor-router-enabled` plus the `--vl-*` gate,
   radius, temperature, visible-mass, and bias-clip controls; ablated PI0.5 mode
   forces the router off.
   Use its Current Mathematical Guardrails and Verification Commands sections
   before enabling any router stage beyond the default-off substrate.
+- [`src/openpi/picf/README_MAPG_PICF.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_MAPG_PICF.md)
+  Architecture and implementation contract for the proposed MAPG-PICF upgrade:
+  modality-optional anchor prior graph routing over PaliGemma, V-JEPA, Sonata,
+  AnyTouch, and posterior supports. This is the next graph-level design layer
+  above the current point-centric VL-guided router, and records the required
+  mathematical invariants, state objects, dataflow, losses, tests, and rollout
+  milestones before any MAPG-enabled long run should be claimed.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)

@@ -14,11 +14,18 @@ Current PICF documents:
 3. [`README_FROZEN_PERCEPTION_AUGMENTATION.md`](./README_FROZEN_PERCEPTION_AUGMENTATION.md)
    Design record for the 2x40GB frozen-perception profile and geometry-safe
    augmentation policy.
-4. [`README_v2.1.md`](./README_v2.1.md)
+4. [`README_VL_GUIDED_ANCHOR_ROUTER.md`](./README_VL_GUIDED_ANCHOR_ROUTER.md)
+   Current staged implementation record for the default-off point-centric
+   PaliGemma-guided 2D-to-3D anchor prior router.
+5. [`README_MAPG_PICF.md`](./README_MAPG_PICF.md)
+   Architecture and implementation contract for MAPG-PICF, the proposed
+   modality-optional anchor prior graph over PaliGemma, V-JEPA, Sonata,
+   AnyTouch, and posterior supports.
+6. [`README_v2.1.md`](./README_v2.1.md)
    Historical v2.1 deployment record retained for reference.
-5. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
+7. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
    The executable live-code contract enforced by regression tests.
-6. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+8. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
    The runtime, training, rollout, and validation workflow.
    Use [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
    for the current canonical full PICF long-run training command, and
@@ -36,7 +43,9 @@ Current PICF documents:
 Use `README_v2.2.md` for the current live system,
 `README_PI05_PARITY_AUDIT.md` for PI0.5/PICF dataflow comparisons,
 `README_FROZEN_PERCEPTION_AUGMENTATION.md` for frozen-perception and
-augmentation design,
+augmentation design, `README_VL_GUIDED_ANCHOR_ROUTER.md` for the current
+point-centric VL router substrate, `README_MAPG_PICF.md` for the proposed
+modality-optional graph-level anchor design,
 `PICF_FORMAL_CONTRACT.md` for the concise executable contract, and
 `README_v2.1.md` only as the archived pre-v2.2 deployment record.
 
@@ -59,3 +68,7 @@ Fast operator path:
    [`CALVIN_VALIDATION_README.md Section 6.1.3`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#613-anchor-task-readout-and-predictive-cache-diagnostics)
    when evaluating whether cyan task overlays indicate real slot collapse,
    point-projection bias, or semantic/visual attention failure.
+6. Use
+   [`README_MAPG_PICF.md`](./README_MAPG_PICF.md)
+   before designing any graph-level anchor upgrade that should remain robust to
+   missing pointcloud, weak tactile evidence, or RGB-only datasets.

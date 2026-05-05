@@ -39,6 +39,7 @@ from openpi.picf.core.tactile_contact import contact_prob_with_hysteresis
 from openpi.picf.core.tactile_contact import summarize_contact_context
 from openpi.picf.frame_context import PointFrameContext
 from openpi.picf.fsdp_utils import call_module_forward_or_method
+from openpi.picf.geometry import transform_points
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.posterior.visual_expert import load_camera_model
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticFeatures
@@ -357,6 +358,89 @@ def _resize_flat_heatmap(
     return flat / torch.clamp(flat.sum(), min=eps)
 
 
+def _map_pg_grid_values_to_visual_grid(
+    values: torch.Tensor,
+    *,
+    src_hw: tuple[int, int],
+    dst_hw: tuple[int, int],
+    view_transform: Any | None,
+) -> torch.Tensor:
+    """Map PaliGemma padded-image grid values back onto the PICF visual grid.
+
+    PaliGemma receives images through resize-with-pad. A naive interpolation from
+    the PaliGemma token grid to the V-JEPA/PICF grid treats padded pixels as real
+    image content and can shift grounding toward borders. This helper samples the
+    PaliGemma grid at the padded-image coordinates corresponding to each original
+    camera pixel center used by PICF.
+    """
+
+    if view_transform is None:
+        return _resize_flat_grid_values(values, src_hw=src_hw, dst_hw=dst_hw)
+    src_h, src_w = int(src_hw[0]), int(src_hw[1])
+    dst_h, dst_w = int(dst_hw[0]), int(dst_hw[1])
+    if src_h <= 0 or src_w <= 0 or dst_h <= 0 or dst_w <= 0:
+        return torch.zeros((max(dst_h * dst_w, 0),), device=values.device, dtype=values.dtype)
+
+    try:
+        original_h, original_w = tuple(int(v) for v in view_transform.original_hw)
+        target_h, target_w = tuple(int(v) for v in view_transform.target_hw)
+        pad_top = float(view_transform.pad_top)
+        pad_left = float(view_transform.pad_left)
+        scale_y = float(view_transform.scale_y)
+        scale_x = float(view_transform.scale_x)
+    except Exception:
+        return _resize_flat_grid_values(values, src_hw=src_hw, dst_hw=dst_hw)
+    if original_h <= 0 or original_w <= 0 or target_h <= 0 or target_w <= 0 or scale_y <= 0.0 or scale_x <= 0.0:
+        return _resize_flat_grid_values(values, src_hw=src_hw, dst_hw=dst_hw)
+
+    ys_idx, xs_idx = torch.meshgrid(
+        torch.arange(dst_h, device=values.device, dtype=torch.float32),
+        torch.arange(dst_w, device=values.device, dtype=torch.float32),
+        indexing="ij",
+    )
+    x_orig = xs_idx * (float(original_w - 1) / max(dst_w - 1, 1))
+    y_orig = ys_idx * (float(original_h - 1) / max(dst_h - 1, 1))
+
+    # Match torch.interpolate(..., align_corners=False) pixel-center geometry.
+    x_padded = (x_orig + 0.5) * scale_x - 0.5 + pad_left
+    y_padded = (y_orig + 0.5) * scale_y - 0.5 + pad_top
+    x_cell = (x_padded + 0.5) * (float(src_w) / float(target_w)) - 0.5
+    y_cell = (y_padded + 0.5) * (float(src_h) / float(target_h)) - 0.5
+    grid_x = ((x_cell + 0.5) * 2.0 / float(src_w)) - 1.0
+    grid_y = ((y_cell + 0.5) * 2.0 / float(src_h)) - 1.0
+    sample_grid = torch.stack([grid_x, grid_y], dim=-1)[None, :]
+
+    grid_values = values.reshape(1, 1, src_h, src_w).to(device=values.device, dtype=torch.float32)
+    sampled = fn.grid_sample(
+        grid_values,
+        sample_grid.to(device=values.device, dtype=torch.float32),
+        mode="bilinear",
+        padding_mode="zeros",
+        align_corners=False,
+    )
+    return sampled.reshape(-1).to(device=values.device, dtype=values.dtype)
+
+
+def _map_pg_heatmap_to_visual_grid(
+    heatmap: torch.Tensor,
+    *,
+    src_hw: tuple[int, int],
+    dst_hw: tuple[int, int],
+    view_transform: Any | None,
+    eps: float,
+) -> torch.Tensor:
+    if view_transform is None:
+        return _resize_flat_heatmap(heatmap, src_hw=src_hw, dst_hw=dst_hw, eps=eps)
+    flat = _map_pg_grid_values_to_visual_grid(
+        heatmap,
+        src_hw=src_hw,
+        dst_hw=dst_hw,
+        view_transform=view_transform,
+    )
+    flat = torch.clamp(flat, min=0.0)
+    return flat / torch.clamp(flat.sum(), min=eps)
+
+
 def _resize_flat_grid_values(
     values: torch.Tensor,
     *,
@@ -411,6 +495,17 @@ def _point_prior_from_heatmap(
     return prior, valid, visible_mass
 
 
+def _frame_context_points_world(frame_context: PointFrameContext) -> np.ndarray:
+    """Return row-aligned world-frame point positions for camera/tactile geometry."""
+    points_local = np.asarray(frame_context.points_local, dtype=np.float32)
+    points_world = getattr(frame_context, "points_world", None)
+    if points_world is not None:
+        points_world_arr = np.asarray(points_world, dtype=np.float32)
+        if points_world_arr.shape == points_local.shape:
+            return points_world_arr
+    return transform_points(points_local, np.asarray(frame_context.G_t, dtype=np.float32))
+
+
 def _numpy_fps_indices(points: np.ndarray, count: int) -> np.ndarray:
     if points.shape[0] == 0 or count <= 0:
         return np.zeros((0,), dtype=np.int64)
@@ -448,6 +543,7 @@ def _build_identity_frame_context(
         world_to_local=np.eye(4, dtype=np.float32),
         G_t=np.asarray(observation.G_t, dtype=np.float32),
         pool_ids=np.zeros((int(keep.sum()),), dtype=np.int64),
+        points_world=np.asarray(xyz_world[keep], dtype=np.float32),
     )
 
 
@@ -810,6 +906,7 @@ class _SemanticContext:
     image_token_ranges: tuple[tuple[int, int], ...] = ()
     image_grid_shapes: tuple[tuple[int, int], ...] = ()
     image_view_names: tuple[str, ...] = ()
+    image_view_transforms: tuple[Any, ...] = ()
 
 
 @dataclasses.dataclass(frozen=True)
@@ -1208,6 +1305,13 @@ class PicfFullCore(nn.Module):
             ],
             axis=0,
         )
+        points_world = np.concatenate(
+            [
+                _frame_context_points_world(local_context),
+                np.asarray(observation.point_set.xyz_world[scene_indices], dtype=np.float32),
+            ],
+            axis=0,
+        )
         normals = np.concatenate(
             [
                 np.asarray(local_context.normals_local, dtype=np.float32),
@@ -1240,6 +1344,7 @@ class PicfFullCore(nn.Module):
             world_to_local=local_context.world_to_local,
             G_t=local_context.G_t,
             pool_ids=pool_ids,
+            points_world=points_world,
         )
 
     def _extract_point_features(self, frame_context: PointFrameContext, override: torch.Tensor | np.ndarray | None) -> torch.Tensor:
@@ -1326,6 +1431,7 @@ class PicfFullCore(nn.Module):
         image_token_ranges: tuple[tuple[int, int], ...] = ()
         image_grid_shapes: tuple[tuple[int, int], ...] = ()
         image_view_names: tuple[str, ...] = ()
+        image_view_transforms: tuple[Any, ...] = ()
         if features is not None:
             if features.summary is not None:
                 summary = _to_tensor(features.summary, device=self.device, dtype=self.dtype)
@@ -1338,6 +1444,7 @@ class PicfFullCore(nn.Module):
             image_token_ranges = tuple(features.image_token_ranges)
             image_grid_shapes = tuple(features.image_grid_shapes)
             image_view_names = tuple(features.image_view_names)
+            image_view_transforms = tuple(features.image_view_transforms)
         return _SemanticContext(
             tokens=semantic_tokens,
             prefix_tokens=semantic_prefix_tokens,
@@ -1348,6 +1455,7 @@ class PicfFullCore(nn.Module):
             image_token_ranges=image_token_ranges,
             image_grid_shapes=image_grid_shapes,
             image_view_names=image_view_names,
+            image_view_transforms=image_view_transforms,
         )
 
     def _semantic_context(
@@ -1409,6 +1517,11 @@ class PicfFullCore(nn.Module):
             view_index = view_names.index(requested_view)
         start, end = semantic.image_token_ranges[view_index]
         src_hw = semantic.image_grid_shapes[view_index]
+        view_transform = (
+            semantic.image_view_transforms[view_index]
+            if view_index < len(semantic.image_view_transforms)
+            else None
+        )
         img_tokens = semantic.image_tokens[start:end]
         if img_tokens.shape[0] != int(src_hw[0] * src_hw[1]):
             raise RuntimeError(
@@ -1441,17 +1554,38 @@ class PicfFullCore(nn.Module):
         task_heat_pg = torch.softmax((task_logits_pg / temperature).float(), dim=0).to(dtype=self.dtype)
         eff_heat_pg = torch.softmax((eff_logits_pg / temperature).float(), dim=0).to(dtype=self.dtype)
         int_heat_pg = torch.softmax((int_logits_pg / temperature).float(), dim=0).to(dtype=self.dtype)
-        task_heat = _resize_flat_heatmap(task_heat_pg, src_hw=src_hw, dst_hw=dst_hw, eps=self.config.epsilon_a)
-        eff_heat = _resize_flat_heatmap(eff_heat_pg, src_hw=src_hw, dst_hw=dst_hw, eps=self.config.epsilon_a)
-        int_heat = _resize_flat_heatmap(int_heat_pg, src_hw=src_hw, dst_hw=dst_hw, eps=self.config.epsilon_a)
+        task_heat = _map_pg_heatmap_to_visual_grid(
+            task_heat_pg,
+            src_hw=src_hw,
+            dst_hw=dst_hw,
+            view_transform=view_transform,
+            eps=self.config.epsilon_a,
+        )
+        eff_heat = _map_pg_heatmap_to_visual_grid(
+            eff_heat_pg,
+            src_hw=src_hw,
+            dst_hw=dst_hw,
+            view_transform=view_transform,
+            eps=self.config.epsilon_a,
+        )
+        int_heat = _map_pg_heatmap_to_visual_grid(
+            int_heat_pg,
+            src_hw=src_hw,
+            dst_hw=dst_hw,
+            view_transform=view_transform,
+            eps=self.config.epsilon_a,
+        )
 
         projectable_mask = None
         if token_field.point_pool_ids is not None and token_field.point_pool_ids.numel() == token_field.point_positions.shape[0]:
             projectable_mask = token_field.point_pool_ids.to(device=self.device) == 1
+        scene_projectable_mask = self._scene_point_candidate_mask(token_field)
+        if not bool(scene_projectable_mask.any().item()):
+            scene_projectable_mask = projectable_mask
         task_prior, task_valid, task_mass = _point_prior_from_heatmap(
             geometry.projective_compatibility,
             task_heat,
-            point_projectable_mask=projectable_mask,
+            point_projectable_mask=scene_projectable_mask,
             min_visible_mass=float(self.config.vl_min_visible_mass),
             eps=self.config.epsilon_a,
         )
@@ -1465,7 +1599,7 @@ class PicfFullCore(nn.Module):
         int_prior, int_valid, int_mass = _point_prior_from_heatmap(
             geometry.projective_compatibility,
             int_heat,
-            point_projectable_mask=projectable_mask,
+            point_projectable_mask=scene_projectable_mask,
             min_visible_mass=float(self.config.vl_min_visible_mass),
             eps=self.config.epsilon_a,
         )
@@ -1475,9 +1609,24 @@ class PicfFullCore(nn.Module):
             hidden = int(self.config.hidden_dim)
             empty_cov = torch.zeros((0, 3, 3), device=self.device, dtype=self.dtype)
             return PicfVLGroundingState(
-                task_heatmap_logits=_resize_flat_grid_values(task_logits_pg.detach().to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
-                effector_heatmap_logits=_resize_flat_grid_values(eff_logits_pg.detach().to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
-                interaction_heatmap_logits=_resize_flat_grid_values(int_logits_pg.detach().to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
+                task_heatmap_logits=_map_pg_grid_values_to_visual_grid(
+                    task_logits_pg.detach().to(dtype=self.dtype),
+                    src_hw=src_hw,
+                    dst_hw=dst_hw,
+                    view_transform=view_transform,
+                ),
+                effector_heatmap_logits=_map_pg_grid_values_to_visual_grid(
+                    eff_logits_pg.detach().to(dtype=self.dtype),
+                    src_hw=src_hw,
+                    dst_hw=dst_hw,
+                    view_transform=view_transform,
+                ),
+                interaction_heatmap_logits=_map_pg_grid_values_to_visual_grid(
+                    int_logits_pg.detach().to(dtype=self.dtype),
+                    src_hw=src_hw,
+                    dst_hw=dst_hw,
+                    view_transform=view_transform,
+                ),
                 task_heatmap=task_heat,
                 effector_heatmap=eff_heat,
                 interaction_heatmap=int_heat,
@@ -1507,17 +1656,18 @@ class PicfFullCore(nn.Module):
             (1, task_prior, task_budget),
             (2, int_prior, int_budget),
         )
+        point_positions_world = self._world_point_positions(token_field)
         for role, prior, count in role_specs:
             modes = _weighted_anchor_modes(
-                token_field.point_positions,
+                point_positions_world,
                 prior,
                 count=count,
                 radius_m=float(self.config.vl_anchor_nms_radius_m),
                 eps=self.config.epsilon_a,
             )
             for idx in modes.tolist():
-                center = token_field.point_positions[int(idx)]
-                dist2 = torch.sum((token_field.point_positions - center[None, :]) ** 2, dim=-1)
+                center = point_positions_world[int(idx)]
+                dist2 = torch.sum((point_positions_world - center[None, :]) ** 2, dim=-1)
                 sigma = max(float(self.config.vl_anchor_local_sigma_m), self.config.epsilon_a)
                 local = torch.exp(-dist2 / (2.0 * sigma * sigma)) * torch.clamp(prior, min=0.0)
                 local = local / torch.clamp(local.sum(), min=self.config.epsilon_a)
@@ -1525,8 +1675,8 @@ class PicfFullCore(nn.Module):
                 anchor_roles.append(int(role))
         if anchor_priors:
             anchor_point_priors = torch.stack(anchor_priors, dim=0)
-            anchor_x = anchor_point_priors @ token_field.point_positions
-            anchor_S = _weighted_cov(token_field.point_positions, anchor_point_priors, anchor_x, self.config)
+            anchor_x = anchor_point_priors @ point_positions_world
+            anchor_S = _weighted_cov(point_positions_world, anchor_point_priors, anchor_x, self.config)
             anchor_tokens_raw = anchor_point_priors @ token_field.point_tokens
             anchor_tokens = self.vl_anchor_token_proj(anchor_tokens_raw)
             anchor_scores = torch.max(anchor_point_priors, dim=-1).values
@@ -1542,9 +1692,24 @@ class PicfFullCore(nn.Module):
             anchor_roles_t = torch.zeros((0,), device=self.device, dtype=torch.long)
 
         return PicfVLGroundingState(
-            task_heatmap_logits=_resize_flat_grid_values(task_logits_pg.to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
-            effector_heatmap_logits=_resize_flat_grid_values(eff_logits_pg.to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
-            interaction_heatmap_logits=_resize_flat_grid_values(int_logits_pg.to(dtype=self.dtype), src_hw=src_hw, dst_hw=dst_hw),
+            task_heatmap_logits=_map_pg_grid_values_to_visual_grid(
+                task_logits_pg.to(dtype=self.dtype),
+                src_hw=src_hw,
+                dst_hw=dst_hw,
+                view_transform=view_transform,
+            ),
+            effector_heatmap_logits=_map_pg_grid_values_to_visual_grid(
+                eff_logits_pg.to(dtype=self.dtype),
+                src_hw=src_hw,
+                dst_hw=dst_hw,
+                view_transform=view_transform,
+            ),
+            interaction_heatmap_logits=_map_pg_grid_values_to_visual_grid(
+                int_logits_pg.to(dtype=self.dtype),
+                src_hw=src_hw,
+                dst_hw=dst_hw,
+                view_transform=view_transform,
+            ),
             task_heatmap=task_heat,
             effector_heatmap=eff_heat,
             interaction_heatmap=int_heat,
@@ -1710,6 +1875,43 @@ class PicfFullCore(nn.Module):
             return torch.zeros((point_count,), device=self.device, dtype=torch.long)
         return ids.to(device=self.device, dtype=torch.long)
 
+    def _world_point_positions(self, token_field: PicfTokenFieldState) -> torch.Tensor:
+        point_count = int(token_field.point_tokens.shape[0])
+        world = token_field.point_positions_world
+        if world is not None and world.shape == (point_count, 3):
+            return world.to(device=self.device, dtype=self.dtype)
+        return token_field.point_positions.to(device=self.device, dtype=self.dtype)
+
+    def _scene_point_candidate_mask(self, token_field: PicfTokenFieldState) -> torch.Tensor:
+        point_count = int(token_field.point_tokens.shape[0])
+        if point_count == 0:
+            return torch.zeros((0,), device=self.device, dtype=torch.bool)
+        pool_ids = self._point_pool_ids(token_field)
+        global_mask = pool_ids == 1
+        if not bool(global_mask.any().item()):
+            return global_mask
+        mask = global_mask.clone()
+        geometry = token_field.projective_geometry
+        if geometry is not None and geometry.point_visibility.shape == (point_count,):
+            mask = mask & (geometry.point_visibility.to(device=self.device, dtype=self.dtype) > 0.0)
+            if geometry.point_depth_valid.shape == (point_count,):
+                mask = mask & geometry.point_depth_valid.to(device=self.device, dtype=torch.bool)
+            if geometry.point_proj_grid_index.shape == (point_count, 2) and geometry.visual_grid_index.numel() > 0:
+                grid = geometry.point_proj_grid_index.to(device=self.device, dtype=self.dtype)
+                visual_grid = geometry.visual_grid_index.to(device=self.device, dtype=self.dtype)
+                max_x = torch.max(visual_grid[:, 0])
+                max_y = torch.max(visual_grid[:, 1])
+                border = max(float(self.config.scene_anchor_border_patches), 0.0)
+                if border > 0.0:
+                    interior = (
+                        (grid[:, 0] >= border)
+                        & (grid[:, 0] <= (max_x - border))
+                        & (grid[:, 1] >= border)
+                        & (grid[:, 1] <= (max_y - border))
+                    )
+                    mask = mask & interior
+        return mask if bool(mask.any().item()) else global_mask
+
     def _effector_observation_count(self) -> int:
         return min(max(int(self.config.effector_observation_anchors), 0), int(self.config.observation_anchors))
 
@@ -1731,7 +1933,9 @@ class PicfFullCore(nn.Module):
         blocked = torch.zeros_like(bias, dtype=torch.bool)
         if point_count > 0:
             local_point = point_pool_ids == 0
-            global_point = point_pool_ids == 1
+            global_point = self._scene_point_candidate_mask(token_field)
+            if not bool(global_point.any().item()):
+                global_point = point_pool_ids == 1
             for row, role in enumerate(query_role_ids.tolist()):
                 if int(role) == 0:
                     blocked[row, :point_count] = ~local_point
@@ -1882,6 +2086,7 @@ class PicfFullCore(nn.Module):
         )
 
         if token_field.point_tokens.shape[0] > 0 and local_count > 0:
+            geometry_positions = self._world_point_positions(token_field)
             direct_weights = point_public_attention[:local_count]
             denom = torch.clamp(direct_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
             direct_weights = direct_weights / denom
@@ -1898,8 +2103,8 @@ class PicfFullCore(nn.Module):
                 point_weights = point_weights / torch.clamp(point_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
             else:
                 point_weights = direct_weights
-            x = point_weights @ token_field.point_positions
-            S = _weighted_cov(token_field.point_positions, point_weights, x, self.config)
+            x = point_weights @ geometry_positions
+            S = _weighted_cov(geometry_positions, point_weights, x, self.config)
             a = _extent_from_cov(S, self.config)
             local_tokens = local_tokens + self.task_geom_proj(_geometry_pe(x, a, S, self.config))
         else:
@@ -2423,9 +2628,14 @@ class PicfFullCore(nn.Module):
         visual_hw: tuple[int, int] | None = None
         if visual_map is not None and visual_map.numel() > 0:
             visual_hw = (int(visual_map.shape[0]), int(visual_map.shape[1]))
+        point_positions_world = (
+            _to_tensor(_frame_context_points_world(frame_context), device=self.device, dtype=self.dtype)
+            if frame_context is not None
+            else point_positions
+        )
         projective_geometry = self._build_projective_geometry(
             observation=observation,
-            point_positions=_to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype) if frame_context is not None else point_positions,
+            point_positions=point_positions_world,
             visual_hw=visual_hw,
         )
         if frame_context is not None:
@@ -2662,7 +2872,10 @@ class PicfFullCore(nn.Module):
             fusion_attention_mean=fusion_attention_mean,
             projective_geometry=projective_geometry,
             point_pool_ids=point_pool_ids,
+            point_positions_world=point_positions_world,
+            point_projectable_mask=None,
         )
+        token_field.point_projectable_mask = self._scene_point_candidate_mask(token_field)
         dense_memory = _StepDenseMemory(
             point_payload=point_payload,
             visual_payload=visual_payload,
@@ -2706,7 +2919,15 @@ class PicfFullCore(nn.Module):
             pool_ids = self._point_pool_ids(token_field)
             seed_parts: list[tuple[slice, torch.Tensor]] = []
             local_indices = torch.nonzero(pool_ids == 0, as_tuple=False).squeeze(-1)
-            global_indices = torch.nonzero(pool_ids == 1, as_tuple=False).squeeze(-1)
+            scene_mask = self._scene_point_candidate_mask(token_field)
+            global_indices = torch.nonzero(scene_mask, as_tuple=False).squeeze(-1)
+            all_global_indices = torch.nonzero(pool_ids == 1, as_tuple=False).squeeze(-1)
+            if global_indices.numel() > 0 and global_indices.numel() < max(n_obs - effector_count, 0):
+                extra_global = all_global_indices[~torch.isin(all_global_indices, global_indices)]
+                if extra_global.numel() > 0:
+                    global_indices = torch.cat([global_indices, extra_global], dim=0)
+            if global_indices.numel() == 0:
+                global_indices = all_global_indices
             if effector_count > 0:
                 if local_indices.numel() > 0:
                     chosen_local = local_indices[
@@ -2806,10 +3027,11 @@ class PicfFullCore(nn.Module):
             else torch.zeros((0,), device=self.device, dtype=self.dtype)
         )
         if point_count > 0:
+            geometry_positions = self._world_point_positions(token_field)
             denom = torch.clamp(routing_mass_point.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
             point_weights = routing_mass_point / denom
-            x = point_weights @ token_field.point_positions
-            S = _weighted_cov(token_field.point_positions, point_weights, x, self.config)
+            x = point_weights @ geometry_positions
+            S = _weighted_cov(geometry_positions, point_weights, x, self.config)
             a = _extent_from_cov(S, self.config)
         else:
             point_weights = torch.zeros((n_obs, 0), device=self.device, dtype=self.dtype)
@@ -3386,7 +3608,7 @@ class PicfFullCore(nn.Module):
                 targets["tactile_real"] = torch.cat([tactile_latent, tactile_base, aux_full], dim=0)
                 availability[2] = 1.0
         if frame_context is not None and frame_context.points_local.shape[0] > 0:
-            points = _to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype)
+            points = _to_tensor(_frame_context_points_world(frame_context), device=self.device, dtype=self.dtype)
             point_latent = self._point_latent_target(dense_memory)
             center = _to_tensor(observation.G_t[:3, 3], device=self.device, dtype=self.dtype)
             rel = torch.clamp((points - center[None, :]) / max(self.config.crop_radius_m, 1e-6), min=-0.999, max=0.999)
@@ -3448,9 +3670,10 @@ class PicfFullCore(nn.Module):
             else torch.zeros((0, 0), device=self.device, dtype=self.dtype)
         )
         if frame_context is not None:
+            point_positions_world = _to_tensor(_frame_context_points_world(frame_context), device=self.device, dtype=self.dtype)
             projective_geometry = self._build_projective_geometry(
                 observation=observation,
-                point_positions=_to_tensor(frame_context.points_local, device=self.device, dtype=self.dtype),
+                point_positions=point_positions_world,
                 visual_hw=None if visual_map is None or visual_map.numel() == 0 else (int(visual_map.shape[0]), int(visual_map.shape[1])),
             )
             proj_features = self._point_projection_features(

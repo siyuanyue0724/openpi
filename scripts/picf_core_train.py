@@ -911,6 +911,9 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
     )
     args.task_effector_queries = int(getattr(args, "task_effector_queries", _SPEC_DEFAULTS.task_effector_queries))
     args.global_scene_point_cap = int(getattr(args, "global_scene_point_cap", _SPEC_DEFAULTS.global_scene_point_cap))
+    args.scene_anchor_border_patches = float(
+        getattr(args, "scene_anchor_border_patches", _SPEC_DEFAULTS.scene_anchor_border_patches)
+    )
     args.visual_real_grid = int(getattr(args, "visual_real_grid", _SPEC_DEFAULTS.visual_real_grid))
     if int(getattr(args, "diagnostic_visual_upscale", 64)) == 64 and int(args.visual_real_grid) >= 32:
         # The historical 4x4 visual-real target used 64x upscaling to make
@@ -1318,6 +1321,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(f"action_output_clip must be > 0 when provided, got {args.action_output_clip}.")
     if float(args.crop_radius_m) <= 0.0:
         raise ValueError(f"crop_radius_m must be > 0, got {args.crop_radius_m}.")
+    if float(args.scene_anchor_border_patches) < 0.0:
+        raise ValueError(f"scene_anchor_border_patches must be >= 0, got {args.scene_anchor_border_patches}.")
     for name in ("effector_persistent_anchors", "effector_observation_anchors", "task_effector_queries", "global_scene_point_cap"):
         if int(getattr(args, name)) < 0:
             raise ValueError(f"{name} must be >= 0, got {getattr(args, name)}.")
@@ -3947,6 +3952,9 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         future_vote_heads=args.future_vote_heads,
         crop_radius_m=float(_arg_or_default("crop_radius_m", _SPEC_DEFAULTS.crop_radius_m)),
         global_scene_point_cap=int(_arg_or_default("global_scene_point_cap", _SPEC_DEFAULTS.global_scene_point_cap)),
+        scene_anchor_border_patches=float(
+            _arg_or_default("scene_anchor_border_patches", _SPEC_DEFAULTS.scene_anchor_border_patches)
+        ),
         point_focus_sigma_m=float(_arg_or_default("point_focus_sigma_m", _SPEC_DEFAULTS.point_focus_sigma_m)),
         tactile_contact_tau_on=float(_arg_or_default("tactile_contact_tau_on", _SPEC_DEFAULTS.tactile_contact_tau_on)),
         tactile_contact_tau_off=float(_arg_or_default("tactile_contact_tau_off", _SPEC_DEFAULTS.tactile_contact_tau_off)),
@@ -5488,6 +5496,7 @@ def main() -> None:
     parser.add_argument("--predictive-semantic-dropout-prob", type=float, default=_SPEC_DEFAULTS.predictive_semantic_dropout_prob)
     parser.add_argument("--semantic-prefix-dropout-prob", type=float, default=_SPEC_DEFAULTS.semantic_prefix_dropout_prob)
     parser.add_argument("--global-scene-point-cap", type=int, default=_SPEC_DEFAULTS.global_scene_point_cap)
+    parser.add_argument("--scene-anchor-border-patches", type=float, default=_SPEC_DEFAULTS.scene_anchor_border_patches)
     parser.add_argument("--task-visual-reread-topk", type=int, default=_SPEC_DEFAULTS.task_visual_reread_topk)
     parser.add_argument("--task-tactile-reread-groups", type=int, default=_SPEC_DEFAULTS.task_tactile_reread_groups)
     parser.add_argument("--task-point-reread-topk", type=int, default=_SPEC_DEFAULTS.task_point_reread_topk)

@@ -476,7 +476,9 @@ def _point_tactile_alignment(
     token_field = state.token_field
     point_embed = token_field.point_align_embeddings
     tactile_embed = token_field.tactile_align_embeddings
-    point_positions = token_field.point_positions
+    point_positions = token_field.point_positions_world
+    if point_positions is None or point_positions.shape != token_field.point_positions.shape:
+        point_positions = token_field.point_positions
     tactile_positions = token_field.tactile_positions_world
     tactile_prob = token_field.tactile_contact_prob
     tactile_gate = token_field.tactile_contact_gate

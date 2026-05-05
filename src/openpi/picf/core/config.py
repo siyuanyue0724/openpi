@@ -49,6 +49,7 @@ class PicfCoreConfig:
     query_rounds: int = 2
     crop_radius_m: float = 0.10
     global_scene_point_cap: int = 1024
+    scene_anchor_border_patches: float = 1.0
     point_focus_sigma_m: float = 0.03
     workspace_radius_m: float = 0.5
     epsilon_s: float = 1e-6
