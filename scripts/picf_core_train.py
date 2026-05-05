@@ -972,6 +972,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.tactile_trainable = False
         args.use_tactile = False
         args.use_scene_obs = False
+        args.vl_anchor_router_enabled = False
         args.require_pi0_action_generator = True
     if getattr(args, "grad_clip_percentile", None) is None:
         args.grad_clip_percentile = 75.0
@@ -1005,6 +1006,28 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.task_tactile_reread_groups = int(_SPEC_DEFAULTS.task_tactile_reread_groups)
     if getattr(args, "task_point_reread_topk", None) is None:
         args.task_point_reread_topk = int(_SPEC_DEFAULTS.task_point_reread_topk)
+    if getattr(args, "vl_anchor_router_enabled", None) is None:
+        args.vl_anchor_router_enabled = bool(_SPEC_DEFAULTS.vl_anchor_router_enabled)
+    if getattr(args, "vl_grounding_view", None) is None:
+        args.vl_grounding_view = str(_SPEC_DEFAULTS.vl_grounding_view)
+    if getattr(args, "vl_anchor_modes", None) is None:
+        args.vl_anchor_modes = int(_SPEC_DEFAULTS.vl_anchor_modes)
+    if getattr(args, "vl_anchor_nms_radius_m", None) is None:
+        args.vl_anchor_nms_radius_m = float(_SPEC_DEFAULTS.vl_anchor_nms_radius_m)
+    if getattr(args, "vl_anchor_local_sigma_m", None) is None:
+        args.vl_anchor_local_sigma_m = float(_SPEC_DEFAULTS.vl_anchor_local_sigma_m)
+    if getattr(args, "vl_min_visible_mass", None) is None:
+        args.vl_min_visible_mass = float(_SPEC_DEFAULTS.vl_min_visible_mass)
+    if getattr(args, "vl_heatmap_temperature", None) is None:
+        args.vl_heatmap_temperature = float(_SPEC_DEFAULTS.vl_heatmap_temperature)
+    if getattr(args, "vl_obs_anchor_gate_init", None) is None:
+        args.vl_obs_anchor_gate_init = float(_SPEC_DEFAULTS.vl_obs_anchor_gate_init)
+    if getattr(args, "vl_task_point_gate_init", None) is None:
+        args.vl_task_point_gate_init = float(_SPEC_DEFAULTS.vl_task_point_gate_init)
+    if getattr(args, "vl_posterior_bind_gate_init", None) is None:
+        args.vl_posterior_bind_gate_init = float(_SPEC_DEFAULTS.vl_posterior_bind_gate_init)
+    if getattr(args, "vl_prior_bias_clip", None) is None:
+        args.vl_prior_bias_clip = float(_SPEC_DEFAULTS.vl_prior_bias_clip)
     if getattr(args, "require_pi0_action_generator", None) is None:
         args.require_pi0_action_generator = bool(_SPEC_DEFAULTS.require_pi0_action_generator)
     if getattr(args, "semantic_prefix_dropout_prob", None) is None:
@@ -1221,6 +1244,10 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         )
     if int(args.burnin_steps) > 0 and not _picf_mode_enabled(args):
         raise ValueError("burnin_steps > 0 requires picf_mode=enabled; ablated PI0.5 has no PICF carry to burn in.")
+    if bool(getattr(args, "vl_anchor_router_enabled", False)) and not _picf_mode_enabled(args):
+        raise ValueError("vl_anchor_router_enabled requires picf_mode=enabled.")
+    if bool(getattr(args, "vl_anchor_router_enabled", False)) and str(getattr(args, "semantic_mode", "zero")) != "paligemma":
+        raise ValueError("vl_anchor_router_enabled requires semantic_mode=paligemma so PaliGemma image tokens exist.")
     if int(args.warmup_steps) < 0:
         raise ValueError(f"warmup_steps must be >= 0, got {args.warmup_steps}.")
     if float(args.lr) <= 0.0:
@@ -1294,6 +1321,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
     for name in ("effector_persistent_anchors", "effector_observation_anchors", "task_effector_queries", "global_scene_point_cap"):
         if int(getattr(args, name)) < 0:
             raise ValueError(f"{name} must be >= 0, got {getattr(args, name)}.")
+    if int(getattr(args, "vl_anchor_modes", 0)) < 0:
+        raise ValueError(f"vl_anchor_modes must be >= 0, got {getattr(args, 'vl_anchor_modes')}.")
     if int(args.effector_persistent_anchors) > int(args.persistent_anchors):
         raise ValueError("effector_persistent_anchors must be <= persistent_anchors.")
     if int(args.effector_observation_anchors) > int(args.observation_anchors):
@@ -1308,6 +1337,14 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         value = float(getattr(args, name))
         if value <= 0.0:
             raise ValueError(f"{name} must be > 0, got {value}.")
+    for name in ("vl_anchor_nms_radius_m", "vl_anchor_local_sigma_m", "vl_heatmap_temperature"):
+        value = float(getattr(args, name))
+        if value <= 0.0:
+            raise ValueError(f"{name} must be > 0, got {value}.")
+    for name in ("vl_min_visible_mass", "vl_prior_bias_clip"):
+        value = float(getattr(args, name))
+        if value < 0.0:
+            raise ValueError(f"{name} must be >= 0, got {value}.")
     for name in (
         "lambda_action_pos",
         "lambda_action_rot",
@@ -3925,6 +3962,29 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default("task_tactile_reread_groups", _SPEC_DEFAULTS.task_tactile_reread_groups)
         ),
         task_point_reread_topk=int(_arg_or_default("task_point_reread_topk", _SPEC_DEFAULTS.task_point_reread_topk)),
+        vl_anchor_router_enabled=bool(_arg_or_default("vl_anchor_router_enabled", _SPEC_DEFAULTS.vl_anchor_router_enabled)),
+        vl_grounding_view=str(_arg_or_default("vl_grounding_view", _SPEC_DEFAULTS.vl_grounding_view)),
+        vl_anchor_modes=int(_arg_or_default("vl_anchor_modes", _SPEC_DEFAULTS.vl_anchor_modes)),
+        vl_anchor_nms_radius_m=float(
+            _arg_or_default("vl_anchor_nms_radius_m", _SPEC_DEFAULTS.vl_anchor_nms_radius_m)
+        ),
+        vl_anchor_local_sigma_m=float(
+            _arg_or_default("vl_anchor_local_sigma_m", _SPEC_DEFAULTS.vl_anchor_local_sigma_m)
+        ),
+        vl_min_visible_mass=float(_arg_or_default("vl_min_visible_mass", _SPEC_DEFAULTS.vl_min_visible_mass)),
+        vl_heatmap_temperature=float(
+            _arg_or_default("vl_heatmap_temperature", _SPEC_DEFAULTS.vl_heatmap_temperature)
+        ),
+        vl_obs_anchor_gate_init=float(
+            _arg_or_default("vl_obs_anchor_gate_init", _SPEC_DEFAULTS.vl_obs_anchor_gate_init)
+        ),
+        vl_task_point_gate_init=float(
+            _arg_or_default("vl_task_point_gate_init", _SPEC_DEFAULTS.vl_task_point_gate_init)
+        ),
+        vl_posterior_bind_gate_init=float(
+            _arg_or_default("vl_posterior_bind_gate_init", _SPEC_DEFAULTS.vl_posterior_bind_gate_init)
+        ),
+        vl_prior_bias_clip=float(_arg_or_default("vl_prior_bias_clip", _SPEC_DEFAULTS.vl_prior_bias_clip)),
         visual_real_grid=int(_arg_or_default("visual_real_grid", _SPEC_DEFAULTS.visual_real_grid)),
         action_output_clip=getattr(args, "action_output_clip", None),
         tokenwise_ff_chunk_size=int(_arg_or_default("tokenwise_ff_chunk_size", _SPEC_DEFAULTS.tokenwise_ff_chunk_size)),
@@ -4686,6 +4746,20 @@ def train(args: argparse.Namespace) -> None:
                 int(getattr(args, "semantic_mlp_chunk_size", 0)),
             )
             logging.info(
+                "VL-guided anchor router contract: enabled=%s view=%s anchor_modes=%s nms_radius_m=%s local_sigma_m=%s min_visible_mass=%s heatmap_temperature=%s obs_gate_init=%s task_gate_init=%s posterior_bind_gate_init=%s prior_bias_clip=%s",
+                bool(getattr(args, "vl_anchor_router_enabled", False)),
+                getattr(args, "vl_grounding_view", _SPEC_DEFAULTS.vl_grounding_view),
+                int(getattr(args, "vl_anchor_modes", _SPEC_DEFAULTS.vl_anchor_modes)),
+                float(getattr(args, "vl_anchor_nms_radius_m", _SPEC_DEFAULTS.vl_anchor_nms_radius_m)),
+                float(getattr(args, "vl_anchor_local_sigma_m", _SPEC_DEFAULTS.vl_anchor_local_sigma_m)),
+                float(getattr(args, "vl_min_visible_mass", _SPEC_DEFAULTS.vl_min_visible_mass)),
+                float(getattr(args, "vl_heatmap_temperature", _SPEC_DEFAULTS.vl_heatmap_temperature)),
+                float(getattr(args, "vl_obs_anchor_gate_init", _SPEC_DEFAULTS.vl_obs_anchor_gate_init)),
+                float(getattr(args, "vl_task_point_gate_init", _SPEC_DEFAULTS.vl_task_point_gate_init)),
+                float(getattr(args, "vl_posterior_bind_gate_init", _SPEC_DEFAULTS.vl_posterior_bind_gate_init)),
+                float(getattr(args, "vl_prior_bias_clip", _SPEC_DEFAULTS.vl_prior_bias_clip)),
+            )
+            logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),
@@ -5403,6 +5477,25 @@ def main() -> None:
     parser.add_argument("--task-visual-reread-topk", type=int, default=_SPEC_DEFAULTS.task_visual_reread_topk)
     parser.add_argument("--task-tactile-reread-groups", type=int, default=_SPEC_DEFAULTS.task_tactile_reread_groups)
     parser.add_argument("--task-point-reread-topk", type=int, default=_SPEC_DEFAULTS.task_point_reread_topk)
+    parser.add_argument(
+        "--vl-anchor-router-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.vl_anchor_router_enabled,
+        help=(
+            "Enable the PaliGemma-guided 2D-to-3D anchor router. "
+            "The default is off; when enabled it requires picf_mode=enabled and semantic_mode=paligemma."
+        ),
+    )
+    parser.add_argument("--vl-grounding-view", default=_SPEC_DEFAULTS.vl_grounding_view)
+    parser.add_argument("--vl-anchor-modes", type=int, default=_SPEC_DEFAULTS.vl_anchor_modes)
+    parser.add_argument("--vl-anchor-nms-radius-m", type=float, default=_SPEC_DEFAULTS.vl_anchor_nms_radius_m)
+    parser.add_argument("--vl-anchor-local-sigma-m", type=float, default=_SPEC_DEFAULTS.vl_anchor_local_sigma_m)
+    parser.add_argument("--vl-min-visible-mass", type=float, default=_SPEC_DEFAULTS.vl_min_visible_mass)
+    parser.add_argument("--vl-heatmap-temperature", type=float, default=_SPEC_DEFAULTS.vl_heatmap_temperature)
+    parser.add_argument("--vl-obs-anchor-gate-init", type=float, default=_SPEC_DEFAULTS.vl_obs_anchor_gate_init)
+    parser.add_argument("--vl-task-point-gate-init", type=float, default=_SPEC_DEFAULTS.vl_task_point_gate_init)
+    parser.add_argument("--vl-posterior-bind-gate-init", type=float, default=_SPEC_DEFAULTS.vl_posterior_bind_gate_init)
+    parser.add_argument("--vl-prior-bias-clip", type=float, default=_SPEC_DEFAULTS.vl_prior_bias_clip)
     parser.add_argument(
         "--require-pi0-action-generator",
         action=argparse.BooleanOptionalAction,

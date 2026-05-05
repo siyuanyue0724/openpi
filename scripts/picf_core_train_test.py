@@ -92,6 +92,17 @@ def _base_args() -> argparse.Namespace:
         task_visual_reread_topk=32,
         task_tactile_reread_groups=2,
         task_point_reread_topk=32,
+        vl_anchor_router_enabled=False,
+        vl_grounding_view="static",
+        vl_anchor_modes=6,
+        vl_anchor_nms_radius_m=0.04,
+        vl_anchor_local_sigma_m=0.04,
+        vl_min_visible_mass=1e-4,
+        vl_heatmap_temperature=1.0,
+        vl_obs_anchor_gate_init=-4.0,
+        vl_task_point_gate_init=-4.0,
+        vl_posterior_bind_gate_init=-6.0,
+        vl_prior_bias_clip=4.0,
         global_scene_point_cap=1024,
         require_pi0_action_generator=True,
         attention_heads=8,
@@ -1795,6 +1806,57 @@ def test_build_model_propagates_v22_conditioned_control_knobs(tmp_path: Path) ->
     assert core.config.task_tactile_reread_groups == 1
     assert core.config.task_point_reread_topk == 9
     assert core.config.require_pi0_action_generator is False
+
+
+def test_build_model_propagates_vl_anchor_router_knobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
+    monkeypatch.setattr(_MODULE, "PaliGemmaSemanticEncoder", lambda config: torch.nn.Identity())
+    args = _base_args()
+    args.calvin_root = str(root)
+    args.device = "cpu"
+    args.point_backbone = "rgb"
+    args.semantic_mode = "paligemma"
+    args.semantic_source = "hf"
+    args.semantic_model_name = "stub-paligemma"
+    args.semantic_checkpoint_path = None
+    args.vl_anchor_router_enabled = True
+    args.vl_grounding_view = "gripper"
+    args.vl_anchor_modes = 5
+    args.vl_anchor_nms_radius_m = 0.031
+    args.vl_anchor_local_sigma_m = 0.047
+    args.vl_min_visible_mass = 0.002
+    args.vl_heatmap_temperature = 0.75
+    args.vl_obs_anchor_gate_init = -3.0
+    args.vl_task_point_gate_init = -2.5
+    args.vl_posterior_bind_gate_init = -5.5
+    args.vl_prior_bias_clip = 2.25
+    _MODULE._normalize_train_args(args)
+
+    core, semantic_encoder, use_visual_override = _MODULE._build_model(args, device=torch.device("cpu"))
+
+    assert semantic_encoder is not None
+    assert use_visual_override is True
+    assert core.config.vl_anchor_router_enabled is True
+    assert core.config.vl_grounding_view == "gripper"
+    assert core.config.vl_anchor_modes == 5
+    assert core.config.vl_anchor_nms_radius_m == pytest.approx(0.031)
+    assert core.config.vl_anchor_local_sigma_m == pytest.approx(0.047)
+    assert core.config.vl_min_visible_mass == pytest.approx(0.002)
+    assert core.config.vl_heatmap_temperature == pytest.approx(0.75)
+    assert core.config.vl_obs_anchor_gate_init == pytest.approx(-3.0)
+    assert core.config.vl_task_point_gate_init == pytest.approx(-2.5)
+    assert core.config.vl_posterior_bind_gate_init == pytest.approx(-5.5)
+    assert core.config.vl_prior_bias_clip == pytest.approx(2.25)
+
+
+def test_validate_train_args_rejects_vl_router_without_paligemma() -> None:
+    args = _base_args()
+    args.semantic_mode = "zero"
+    args.vl_anchor_router_enabled = True
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="vl_anchor_router_enabled requires semantic_mode=paligemma"):
+        _MODULE._validate_train_args(args)
 
 
 def test_build_model_ablated_safely_freezes_lazy_core_parameters(tmp_path: Path) -> None:

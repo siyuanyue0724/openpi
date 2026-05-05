@@ -41,7 +41,9 @@ Implemented in the current local branch:
 - `PaliGemmaViewTransform` records the `resize_with_pad` geometry needed to map
   PaliGemma heatmaps back to original image coordinates.
 - `PicfVLGroundingState` exists as a typed carrier.
-- `PicfCoreConfig` has default-off VL router knobs and zero-weight losses.
+- `PicfCoreConfig` and `scripts/picf_core_train.py` expose default-off VL
+  router knobs. The standard trainer can enable the router without ad-hoc code
+  patches.
 - `_point_prior_from_heatmap(...)` uses column-normalized compatibility so
   point-dense regions do not automatically win.
 - invalid projection returns `valid=False` and zero point prior, not a fake
@@ -70,9 +72,9 @@ vl_anchor_router_enabled=False
 
 ### 0.1 Current Mathematical Guardrails
 
-The current checked-in code intentionally implements only the safe substrate.
-The following invariants are executable and should stay true before any later
-M6/M7 routing stage is enabled:
+The current checked-in code implements the safe substrate and gated core
+consumers. The following invariants are executable and should stay true before
+the router is made default-on or trained with nonzero VL losses:
 
 ```text
 1. Default-off no-op:
@@ -126,6 +128,7 @@ uv run python -m py_compile \
   src/openpi/picf/core/pipeline.py
 
 uv run pytest -q src/openpi/picf/core/pipeline_test.py -k 'vl_'
+uv run pytest -q scripts/picf_core_train_test.py -k 'vl_anchor_router or conditioned_control'
 uv run pytest -q src/openpi/picf/paligemma/wrapper_test.py
 uv run pytest -q src/openpi/picf/core/pipeline_test.py
 uv run pytest -q src/openpi/picf/core/training_test.py
@@ -650,6 +653,37 @@ default False / zero loss -> no behavior change
 negative gate init -> router can be enabled without immediate hard takeover
 loss weights explicit -> no hidden training objective change
 ```
+
+Trainer CLI:
+
+```bash
+python scripts/picf_core_train.py ... \
+  --vl-anchor-router-enabled \
+  --vl-grounding-view static \
+  --vl-anchor-modes 6 \
+  --vl-anchor-nms-radius-m 0.04 \
+  --vl-anchor-local-sigma-m 0.04 \
+  --vl-min-visible-mass 1e-4 \
+  --vl-heatmap-temperature 1.0 \
+  --vl-obs-anchor-gate-init -4.0 \
+  --vl-task-point-gate-init -4.0 \
+  --vl-posterior-bind-gate-init -6.0 \
+  --vl-prior-bias-clip 4.0
+```
+
+The CLI enforces:
+
+```text
+--vl-anchor-router-enabled requires:
+  picf_mode=enabled
+  semantic_mode=paligemma
+
+picf_mode=ablated forces:
+  vl_anchor_router_enabled=False
+```
+
+This is intentional. The router needs PaliGemma image tokens and PICF anchor
+state; it is not meaningful in PI0.5-only ablation mode.
 
 ## 7. Pseudocode: Wrapper Changes
 

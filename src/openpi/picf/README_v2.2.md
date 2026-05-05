@@ -32,7 +32,10 @@ current recurrent burn-in speed-path audit
   explicitly enabled it builds VL grounding state and consumes it through
   role-aware observation-anchor soft seeds/biases, task-readout gated point
   prior fusion, and posterior-binding soft overlap bias. Heatmap supervision
-  losses and CALVIN heatmap export are still not default-live.
+  losses and CALVIN heatmap export are still not default-live. The live trainer
+  exposes this through `--vl-anchor-router-enabled` plus the `--vl-*` gate,
+  radius, temperature, visible-mass, and bias-clip controls; ablated PI0.5 mode
+  forces the router off.
   Use its Current Mathematical Guardrails and Verification Commands sections
   before enabling any router stage beyond the default-off substrate.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
