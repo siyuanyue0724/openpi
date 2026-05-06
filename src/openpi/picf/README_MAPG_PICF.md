@@ -261,6 +261,11 @@ camera rays from `PicfProjectiveGeometryState.visual_ray_world` and
 keeps tactile/posterior visual evidence alive even when point support is weak or
 masked.
 
+PaliGemma-to-visual grounding does not require point support. When projective
+point compatibility is missing, MAPG still receives the PaliGemma visual
+heatmaps and PaliGemma image-token priors; only the point-centric lifted priors
+become explicit no-ops.
+
 ### 3.3 Visual-to-Point Projection
 
 Visual support is lifted to point support only when projective geometry is
@@ -465,8 +470,9 @@ highest-score anchor while preserving role compatibility.
 
 ### 5.2 VICReg Anti-Collapse
 
-`loss_mapg_vicreg` keeps anchor-token dimensions active and decorrelated. It is
-applied over graph anchor tokens.
+`loss_mapg_vicreg` keeps graph and modality embedding dimensions active and
+decorrelated. It is applied to every available valid-row embedding family:
+graph, visual, point, tactile, and posterior.
 
 ### 5.3 Cycle Consistency
 
@@ -481,14 +487,16 @@ This catches transpose mistakes, mass leakage, and projection collapse.
 
 ### 5.4 Masked Modality Prediction
 
-Graph embeddings predict available modality embeddings through cosine
-agreement:
+Available modality embeddings predict the held-out modality through a
+leave-one-modality-out cosine objective. The target modality and fused graph
+embedding are excluded from the predictor side, so the target cannot leak
+through its own pooled representation:
 
 ```text
-graph -> visual
-graph -> point
-graph -> tactile
-graph -> posterior
+{point,tactile,posterior} -> visual
+{visual,tactile,posterior} -> point
+{visual,point,posterior} -> tactile
+{visual,point,tactile} -> posterior
 ```
 
 Each path is masked when the target modality is unavailable.
@@ -501,6 +509,9 @@ over-uniform routing and single-anchor collapse:
 ```text
 entropy(A_slot)
 + JS(anchor_coverage, uniform_anchor_coverage)
++ JS(A_obs visual_priors, observation visual routing)
++ JS(A_task visual_priors, task visual weights)
++ JS(A_task point_priors, task point weights)
 ```
 
 ## 6. CLI

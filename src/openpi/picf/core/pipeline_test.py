@@ -797,6 +797,53 @@ def test_mapg_builds_paligemma_grounding_without_point_router(tmp_path: Path) ->
     assert output.state.task_readout.graph_visual_weights is not None
 
 
+def test_mapg_visual_grounding_survives_missing_pointcloud(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        vl_anchor_router_enabled=False,
+        mapg_enabled=True,
+        mapg_anchor_count=4,
+        mapg_message_rounds=1,
+        mapg_task_gate_init=20.0,
+    )
+    frame = next(iter(replay))
+    missing_point = PicfPointCloudFrame(
+        grid_coord=np.zeros((0, 3), dtype=np.int32),
+        xyz_world=np.zeros((0, 3), dtype=np.float32),
+        rgb=np.zeros((0, 3), dtype=np.float32),
+        normal_world=np.zeros((0, 3), dtype=np.float32),
+        valid_point_mask=np.zeros((0,), dtype=bool),
+        frame_valid=False,
+    )
+    output = core.step(
+        dataclasses.replace(frame, point_set=missing_point),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+
+    assert not output.state.runtime_meta.point_contract_ok
+    assert output.state.vl_grounding is not None
+    # Point-centric consumers stay disabled when point lift is invalid, but MAPG
+    # must still receive language-conditioned visual heatmaps.
+    assert not bool(output.state.vl_grounding.valid.item())
+    assert output.state.vl_grounding.task_heatmap.numel() == output.state.token_field.visual_tokens.shape[0]
+    torch.testing.assert_close(
+        output.state.vl_grounding.task_heatmap.sum(),
+        torch.ones((), dtype=output.state.vl_grounding.task_heatmap.dtype, device=output.state.vl_grounding.task_heatmap.device),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    graph = output.state.anchor_prior_graph
+    assert graph is not None
+    assert bool(graph.valid.item())
+    assert graph.pg_priors is not None
+    assert graph.visual_priors.shape == (core.config.mapg_anchor_count, output.state.token_field.visual_tokens.shape[0])
+    assert graph.point_priors is None
+    assert output.state.task_readout.visual_weights is not None
+    assert output.state.task_readout.geometry_valid is not None
+    assert not bool(output.state.task_readout.geometry_valid.any().item())
+
+
 def test_vl_grounding_enabled_backward_does_not_mutate_query_views(tmp_path: Path) -> None:
     core, replay = _make_core(
         tmp_path,

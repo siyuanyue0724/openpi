@@ -1595,8 +1595,6 @@ class PicfFullCore(nn.Module):
             or semantic.image_tokens.numel() == 0
             or not semantic.image_token_ranges
             or not semantic.image_grid_shapes
-            or geometry.projective_compatibility.numel() == 0
-            or token_field.point_positions.shape[0] == 0
         ):
             return None
 
@@ -1666,37 +1664,53 @@ class PicfFullCore(nn.Module):
             eps=self.config.epsilon_a,
         )
 
-        projectable_mask = None
-        if token_field.point_pool_ids is not None and token_field.point_pool_ids.numel() == token_field.point_positions.shape[0]:
-            projectable_mask = token_field.point_pool_ids.to(device=self.device) == 1
-        # VL task/interaction lift is allowed to no-op. Do not use the global
-        # fallback here: fallback rows are only for coverage seeding, not for
-        # converting language-conditioned heatmaps into physical support.
-        scene_projectable_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=False)
-        task_prior, task_valid, task_mass = _point_prior_from_heatmap(
-            geometry.projective_compatibility,
-            task_heat,
-            point_projectable_mask=scene_projectable_mask,
-            min_visible_mass=float(self.config.vl_min_visible_mass),
-            eps=self.config.epsilon_a,
-        )
-        eff_prior, eff_valid, eff_mass = _point_prior_from_heatmap(
-            geometry.projective_compatibility,
-            eff_heat,
-            point_projectable_mask=projectable_mask,
-            min_visible_mass=float(self.config.vl_min_visible_mass),
-            eps=self.config.epsilon_a,
-        )
-        int_prior, int_valid, int_mass = _point_prior_from_heatmap(
-            geometry.projective_compatibility,
-            int_heat,
-            point_projectable_mask=scene_projectable_mask,
-            min_visible_mass=float(self.config.vl_min_visible_mass),
-            eps=self.config.epsilon_a,
-        )
+        point_count = int(token_field.point_positions.shape[0])
+        compat = geometry.projective_compatibility
+        can_lift_to_point = bool(compat.shape == (point_count, int(task_heat.shape[0])) and compat.numel() > 0 and point_count > 0)
+        if can_lift_to_point:
+            projectable_mask = None
+            if token_field.point_pool_ids is not None and token_field.point_pool_ids.numel() == point_count:
+                projectable_mask = token_field.point_pool_ids.to(device=self.device) == 1
+            # VL task/interaction lift is allowed to no-op. Do not use the global
+            # fallback here: fallback rows are only for coverage seeding, not for
+            # converting language-conditioned heatmaps into physical support.
+            scene_projectable_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=False)
+            task_prior, task_valid, task_mass = _point_prior_from_heatmap(
+                compat,
+                task_heat,
+                point_projectable_mask=scene_projectable_mask,
+                min_visible_mass=float(self.config.vl_min_visible_mass),
+                eps=self.config.epsilon_a,
+            )
+            eff_prior, eff_valid, eff_mass = _point_prior_from_heatmap(
+                compat,
+                eff_heat,
+                point_projectable_mask=projectable_mask,
+                min_visible_mass=float(self.config.vl_min_visible_mass),
+                eps=self.config.epsilon_a,
+            )
+            int_prior, int_valid, int_mass = _point_prior_from_heatmap(
+                compat,
+                int_heat,
+                point_projectable_mask=scene_projectable_mask,
+                min_visible_mass=float(self.config.vl_min_visible_mass),
+                eps=self.config.epsilon_a,
+            )
+        else:
+            # MAPG can consume language-conditioned visual heatmaps without point
+            # support. Point-centric router consumers remain disabled because the
+            # lifted point priors are explicit no-ops.
+            task_prior = torch.zeros((point_count,), device=self.device, dtype=self.dtype)
+            eff_prior = torch.zeros((point_count,), device=self.device, dtype=self.dtype)
+            int_prior = torch.zeros((point_count,), device=self.device, dtype=self.dtype)
+            task_valid = torch.zeros((), device=self.device, dtype=torch.bool)
+            eff_valid = torch.zeros((), device=self.device, dtype=torch.bool)
+            int_valid = torch.zeros((), device=self.device, dtype=torch.bool)
+            task_mass = torch.zeros((), device=self.device, dtype=self.dtype)
+            eff_mass = torch.zeros((), device=self.device, dtype=self.dtype)
+            int_mass = torch.zeros((), device=self.device, dtype=self.dtype)
         valid = task_valid | eff_valid | int_valid
         if not bool(valid.item()):
-            point_count = int(token_field.point_positions.shape[0])
             hidden = int(self.config.hidden_dim)
             empty_cov = torch.zeros((0, 3, 3), device=self.device, dtype=self.dtype)
             return PicfVLGroundingState(
