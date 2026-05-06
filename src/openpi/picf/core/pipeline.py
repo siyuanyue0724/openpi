@@ -1128,12 +1128,12 @@ class PicfFullCore(nn.Module):
             self.vl_posterior_bind_gate_logit = None
         if bool(self.config.mapg_enabled):
             self.mapg_pg_proj = nn.LazyLinear(hidden_dim)
-            self.mapg_visual_proj = nn.LazyLinear(hidden_dim)
-            self.mapg_point_proj = nn.LazyLinear(hidden_dim)
-            self.mapg_tactile_proj = nn.LazyLinear(hidden_dim)
-            self.mapg_posterior_proj = nn.LazyLinear(hidden_dim)
+            self.mapg_visual_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.mapg_point_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.mapg_tactile_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.mapg_posterior_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_anchor_fusion = nn.Sequential(
-                nn.LazyLinear(hidden_dim),
+                nn.Linear(hidden_dim * 5 + 5, hidden_dim),
                 nn.GELU(),
                 nn.LayerNorm(hidden_dim),
                 nn.Linear(hidden_dim, hidden_dim),
@@ -1141,7 +1141,7 @@ class PicfFullCore(nn.Module):
             nn.init.zeros_(self.mapg_anchor_fusion[-1].weight)
             nn.init.zeros_(self.mapg_anchor_fusion[-1].bias)
             self.mapg_role_embedding = nn.Embedding(4, hidden_dim)
-            self.mapg_to_control_proj = nn.LazyLinear(semantic_trunk_dim)
+            self.mapg_to_control_proj = nn.Linear(hidden_dim, semantic_trunk_dim)
             self.mapg_control_role_embedding = nn.Embedding(1, semantic_trunk_dim)
             self.mapg_obs_gate_logit = nn.Parameter(
                 torch.tensor([float(self.config.mapg_obs_gate_init)], device=self.device, dtype=self.dtype)

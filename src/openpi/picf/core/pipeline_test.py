@@ -697,6 +697,18 @@ def test_mapg_enabled_builds_full_anchor_graph_and_live_consumers(tmp_path: Path
         tactile_contact_tau_off=0.005,
         tactile_anchor_prob_on=0.01,
     )
+    # MAPG modality projections must not depend on a modality being present in
+    # the first warmup window; FSDP materialization runs before every modality is
+    # guaranteed to produce tokens.
+    for module in (
+        core.mapg_visual_proj,
+        core.mapg_point_proj,
+        core.mapg_tactile_proj,
+        core.mapg_posterior_proj,
+        core.mapg_to_control_proj,
+    ):
+        assert module is not None
+        assert not isinstance(module.weight, torch.nn.parameter.UninitializedParameter)
     frames = list(replay)[:2]
     frames[0].tactile = _make_tactile_packet(frames[0].step_id, contact_shift=12)
     frames[1].tactile = _make_tactile_packet(frames[1].step_id, contact_shift=16)
