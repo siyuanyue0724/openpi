@@ -125,10 +125,11 @@ on the top image border. The root cause was a combination of three issues:
    global scene rows into one tensor, while projective geometry assumed all
    rows were world coordinates.
 
-3. The live router has no nonzero heatmap/keypose/diversity loss yet.
-   At step 500, the PaliGemma heatmap head is still weakly constrained, so
-   scene/object slots must be protected by geometric validity masks rather than
-   assuming the router has learned object grounding.
+3. That diagnostic run did not enable nonzero heatmap/keypose/diversity loss.
+   In any early run where `loss_vl_heatmap_*`, `loss_vl_point_consistency`,
+   and `loss_vl_anchor_diversity` are zero, the PaliGemma heatmap head is still
+   weakly constrained, so scene/object slots must be protected by geometric
+   validity masks rather than assuming the router has learned object grounding.
 ```
 
 The fix is upstream and geometric, not cosmetic:
@@ -893,7 +894,8 @@ semantic_trainable: true
 effector_persistent_anchors: 1
 effector_observation_anchors: 1
 task_effector_queries: 1
-VL router: enabled, gated, no default heatmap/keypose/diversity loss
+VL router: enabled, gated, heatmap/keypose/diversity losses implemented
+           but default-zero unless --lambda-vl-* is set nonzero
 scene_anchor_border_patches: 1.0
 ```
 
