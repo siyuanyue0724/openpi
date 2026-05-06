@@ -83,6 +83,9 @@ mapg_message_rounds: int = 1
 mapg_visual_sigma_patches: float = 2.0
 mapg_tactile_sigma_m: float = 0.08
 mapg_posterior_sigma_m: float = 0.08
+mapg_confidence_floor: float = 0.05
+mapg_assignment_sinkhorn_iters: int = 6
+mapg_assignment_temperature: float = 1.0
 mapg_obs_gate_init: float = -4.0
 mapg_task_gate_init: float = -4.0
 mapg_posterior_gate_init: float = -6.0
@@ -198,16 +201,16 @@ p_m^{k,0} = normalize(q_m^k)
 
 for r = 1..R:
   p_v^{k,r} =
-    normalize(q_v^k
-      + T_p->v p_p^{k,r-1}
-      + T_t->v p_t^{k,r-1}
-      + T_post->v p_post^{k,r-1})
+    normalize(alpha_v q_v^k
+      + alpha_p T_p->v p_p^{k,r-1}
+      + alpha_t T_t->v p_t^{k,r-1}
+      + alpha_post T_post->v p_post^{k,r-1})
 
   p_p^{k,r} =
-    normalize(q_p^k
-      + T_v->p p_v^{k,r-1}
-      + T_t->p p_t^{k,r-1}
-      + T_post->p p_post^{k,r-1})
+    normalize(alpha_p q_p^k
+      + alpha_v T_v->p p_v^{k,r-1}
+      + alpha_t T_t->p p_t^{k,r-1}
+      + alpha_post T_post->p p_post^{k,r-1})
 
   p_t^{k,r}    = normalize(q_t^k)
   p_post^{k,r} = normalize(q_post^k)
@@ -217,6 +220,12 @@ p_m^k = p_m^{k,R}
 
 `R` is `mapg_message_rounds`. The deployment supports `R >= 1`; current test
 coverage includes `R=2`.
+
+The `alpha` weights are confidence gates derived from valid mass and normalized
+entropy of each support distribution, floored by `mapg_confidence_floor` for
+valid but intentionally broad coverage priors. Anchor token fusion uses the
+same modality-confidence vector as its `beta` weights instead of equal averaging
+across present modalities.
 
 ### 3.2 Compatibility Operator Direction
 
@@ -245,6 +254,12 @@ The code implements this orientation with row-major tensors. For example:
 # compat_col: [P, V]
 point_priors = visual_priors @ compat_col.T  # [K, P]
 ```
+
+Direct tactile/posterior-to-visual operators are also live. They use static
+camera rays from `PicfProjectiveGeometryState.visual_ray_world` and
+`camera_origin_world` to form a world-position-to-visual Gaussian support. This
+keeps tactile/posterior visual evidence alive even when point support is weak or
+masked.
 
 ### 3.3 Visual-to-Point Projection
 
@@ -348,6 +363,8 @@ Task readout uses MAPG through:
 
 ```text
 local task tokens += gate * A_task graph_tokens
+visual weights = normalize((1-g) direct_visual + g * A_task visual_priors)
+local task tokens += gate * visual_pool_proj(pool(V-JEPA, visual weights))
 point weights = normalize((1-g) direct + g * A_task point_priors)
 graph_visual_weights = A_task visual_priors
 graph_tactile_weights = A_task tactile_priors
@@ -355,6 +372,7 @@ graph_tactile_weights = A_task tactile_priors
 
 If point support is unavailable, the graph still retains visual support and
 graph tokens. Geometry moments are only valid when point support exists.
+`PicfTaskReadoutState.geometry_valid` records this explicitly.
 
 ### 4.3 Conditioned Control and PI0.5
 
@@ -410,6 +428,9 @@ supports:
 - no active tactile support -> no tactile positive pair.
 - invalid projection -> no visual-point cycle.
 - no previous posterior -> no posterior pair.
+- invalid per-anchor modality rows -> excluded from SigLIP/VICReg/masked terms.
+- routing consistency compares MAPG assignment priors with live observation and
+  task visual/point distributions when their shapes and masks are valid.
 
 This is not a reduced implementation. It is the mathematically correct
 masked-objective behavior for modality-optional data.
@@ -427,6 +448,20 @@ Same-anchor cross-modal embeddings are positives:
 
 Different anchors in the same frame are negatives even when they are visually
 or semantically similar. This prevents instance merging.
+
+### 5.2 Assignment And Anti-Collapse
+
+`_mapg_slot_assignment(...)` uses role-constrained Sinkhorn-style assignment:
+
+```text
+slot roles -> role mask over anchors
+log(anchor_score * anchor_confidence) / temperature
+row normalization
+column coverage normalization for mapg_assignment_sinkhorn_iters rounds
+```
+
+This prevents all observation/task slots from collapsing onto the single
+highest-score anchor while preserving role compatibility.
 
 ### 5.2 VICReg Anti-Collapse
 
@@ -479,6 +514,9 @@ Core MAPG switches:
 --mapg-visual-sigma-patches 2.0
 --mapg-tactile-sigma-m 0.08
 --mapg-posterior-sigma-m 0.08
+--mapg-confidence-floor 0.05
+--mapg-assignment-sinkhorn-iters 6
+--mapg-assignment-temperature 1.0
 --mapg-obs-gate-init -4.0
 --mapg-task-gate-init -4.0
 --mapg-posterior-gate-init -6.0
@@ -563,7 +601,7 @@ Expected startup log contracts:
 ```text
 Training config: world_size=2 ... num_steps=30000 save_interval=5000 unroll_steps=2
 VL-guided anchor router contract: enabled=True ...
-MAPG anchor prior graph contract: enabled=True anchors=8 message_rounds=2 ...
+MAPG anchor prior graph contract: enabled=True anchors=8 message_rounds=2 ... confidence_floor=0.05 assignment_sinkhorn_iters=6 assignment_temperature=1.0 ...
 Backbone contract: point=sonata(trainable=False) visual=encoder(... trainable=False) tactile=encoder(trainable=False) semantic=paligemma(trainable=True)
 ```
 
@@ -635,6 +673,7 @@ Targeted MAPG tests:
 ```bash
 uv run pytest -q \
   src/openpi/picf/core/pipeline_test.py::test_mapg_enabled_builds_full_anchor_graph_and_live_consumers \
+  src/openpi/picf/core/pipeline_test.py::test_mapg_builds_paligemma_grounding_without_point_router \
   src/openpi/picf/core/training_test.py::test_transition_loss_can_enable_mapg_graph_terms \
   scripts/picf_core_train_test.py::test_build_model_and_loss_config_propagate_mapg_knobs
 ```

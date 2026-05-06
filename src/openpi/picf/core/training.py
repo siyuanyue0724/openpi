@@ -713,24 +713,36 @@ def _vl_router_loss(
     return total, task_loss, eff_loss, int_loss, point_loss, div_loss
 
 
-def _mapg_pair_embeddings(state: PicfCoreState, *, eps: float) -> dict[str, torch.Tensor]:
+def _mapg_pair_embeddings(
+    state: PicfCoreState,
+    *,
+    eps: float,
+) -> tuple[dict[str, torch.Tensor], dict[str, torch.Tensor]]:
     graph = state.anchor_prior_graph
     if graph is None:
-        return {}
+        return {}, {}
     result: dict[str, torch.Tensor] = {"graph": fn.normalize(graph.anchor_tokens.float(), dim=-1).to(dtype=graph.anchor_tokens.dtype)}
+    masks: dict[str, torch.Tensor] = {
+        "graph": torch.ones((graph.anchor_tokens.shape[0],), device=graph.anchor_tokens.device, dtype=torch.bool)
+    }
     if graph.visual_priors.numel() > 0 and state.token_field.visual_align_embeddings.numel() > 0:
         result["visual"] = fn.normalize(graph.visual_priors @ state.token_field.visual_align_embeddings, dim=-1)
+        masks["visual"] = graph.visual_priors.sum(dim=-1) > eps
     if graph.point_priors is not None and graph.point_priors.numel() > 0 and state.token_field.point_align_embeddings.numel() > 0:
         result["point"] = fn.normalize(graph.point_priors @ state.token_field.point_align_embeddings, dim=-1)
+        masks["point"] = graph.point_priors.sum(dim=-1) > eps
     if graph.tactile_priors is not None and graph.tactile_priors.numel() > 0 and state.token_field.tactile_align_embeddings.numel() > 0:
         result["tactile"] = fn.normalize(graph.tactile_priors @ state.token_field.tactile_align_embeddings, dim=-1)
+        masks["tactile"] = graph.tactile_priors.sum(dim=-1) > eps
     if graph.posterior_priors is not None and graph.posterior_priors.numel() > 0 and state.posterior.tokens.numel() > 0:
         result["posterior"] = fn.normalize(graph.posterior_priors @ state.posterior.tokens, dim=-1)
-    return {key: torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0) for key, value in result.items()}
+        masks["posterior"] = graph.posterior_priors.sum(dim=-1) > eps
+    result = {key: torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0) for key, value in result.items()}
+    return result, masks
 
 
 def _mapg_siglip_loss(state: PicfCoreState, *, reference: torch.Tensor, tau: float, eps: float) -> torch.Tensor:
-    embeddings = _mapg_pair_embeddings(state, eps=eps)
+    embeddings, masks = _mapg_pair_embeddings(state, eps=eps)
     names = [name for name in ("visual", "point", "tactile", "posterior", "graph") if name in embeddings]
     if len(names) < 2:
         return _zero_weight_sum(reference, *embeddings.values())
@@ -742,6 +754,12 @@ def _mapg_siglip_loss(state: PicfCoreState, *, reference: torch.Tensor, tau: flo
             right = embeddings[right_name]
             if left.shape != right.shape or left.shape[0] == 0:
                 continue
+            valid = masks.get(left_name, torch.ones((left.shape[0],), device=left.device, dtype=torch.bool))
+            valid = valid & masks.get(right_name, torch.ones((right.shape[0],), device=right.device, dtype=torch.bool)).to(device=valid.device)
+            if int(valid.sum().item()) < 2:
+                continue
+            left = left[valid]
+            right = right[valid]
             logits = (left @ right.T) / temperature
             labels = torch.eye(logits.shape[0], device=logits.device, dtype=logits.dtype)
             targets = (2.0 * labels) - 1.0
@@ -762,14 +780,23 @@ def _mapg_vicreg_loss(
     graph = state.anchor_prior_graph
     if graph is None or graph.anchor_tokens.shape[0] < 2:
         return _zero_weight_sum(reference, None if graph is None else graph.anchor_tokens)
-    x = graph.anchor_tokens.float()
-    x = x - x.mean(dim=0, keepdim=True)
-    std = torch.sqrt(x.var(dim=0, unbiased=False) + eps)
-    var_loss = torch.mean(fn.relu(float(var_target) - std))
-    cov = (x.T @ x) / max(x.shape[0] - 1, 1)
-    offdiag = cov - torch.diag(torch.diag(cov))
-    cov_loss = (offdiag.pow(2).sum() / max(x.shape[1], 1)) * float(cov_weight)
-    return (var_loss + cov_loss).to(device=reference.device, dtype=reference.dtype)
+    embeddings, masks = _mapg_pair_embeddings(state, eps=eps)
+    losses = []
+    for name, values in embeddings.items():
+        mask = masks.get(name, torch.ones((values.shape[0],), device=values.device, dtype=torch.bool))
+        if int(mask.sum().item()) < 2:
+            continue
+        x = values[mask].float()
+        x = x - x.mean(dim=0, keepdim=True)
+        std = torch.sqrt(x.var(dim=0, unbiased=False) + eps)
+        var_loss = torch.mean(fn.relu(float(var_target) - std))
+        cov = (x.T @ x) / max(x.shape[0] - 1, 1)
+        offdiag = cov - torch.diag(torch.diag(cov))
+        cov_loss = (offdiag.pow(2).sum() / max(x.shape[1], 1)) * float(cov_weight)
+        losses.append(var_loss + cov_loss)
+    if not losses:
+        return _zero_weight_sum(reference, graph.anchor_tokens)
+    return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
 
 
 def _mapg_cycle_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: float) -> torch.Tensor:
@@ -786,16 +813,24 @@ def _mapg_cycle_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: floa
         preds = () if graph is None else (graph.visual_priors, graph.point_priors if graph.point_priors is not None else graph.visual_priors)
         return _zero_weight_sum(reference, *preds)
     compat = torch.clamp(torch.nan_to_num(geometry.projective_compatibility.to(device=reference.device, dtype=reference.dtype), nan=0.0), min=0.0)
+    projectable = state.token_field.point_projectable_mask
+    if projectable is not None and projectable.shape == (compat.shape[0],):
+        compat = compat * projectable.to(device=reference.device, dtype=reference.dtype)[:, None]
+    if not bool((compat.sum() > eps).item()):
+        return _zero_weight_sum(reference, graph.visual_priors, graph.point_priors)
     col = compat / torch.clamp(compat.sum(dim=0, keepdim=True), min=eps)
     row = compat / torch.clamp(compat.sum(dim=1, keepdim=True), min=eps)
     v_to_p = graph.visual_priors.to(device=reference.device, dtype=reference.dtype) @ col.T
     p_to_v = v_to_p @ row
     p_to_v = p_to_v / torch.clamp(p_to_v.sum(dim=-1, keepdim=True), min=eps)
-    return _js_distribution_loss(graph.visual_priors.to(device=reference.device, dtype=reference.dtype), p_to_v, eps=eps).mean()
+    valid = (graph.visual_priors.to(device=reference.device, dtype=reference.dtype).sum(dim=-1) > eps) & (p_to_v.sum(dim=-1) > eps)
+    if not bool(valid.any().item()):
+        return _zero_weight_sum(reference, graph.visual_priors, graph.point_priors)
+    return _js_distribution_loss(graph.visual_priors.to(device=reference.device, dtype=reference.dtype)[valid], p_to_v[valid], eps=eps).mean()
 
 
 def _mapg_masked_modality_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: float) -> torch.Tensor:
-    embeddings = _mapg_pair_embeddings(state, eps=eps)
+    embeddings, masks = _mapg_pair_embeddings(state, eps=eps)
     graph_embed = embeddings.get("graph")
     if graph_embed is None:
         return _zero_weight_sum(reference, *embeddings.values())
@@ -804,7 +839,25 @@ def _mapg_masked_modality_loss(state: PicfCoreState, *, reference: torch.Tensor,
         target = embeddings.get(name)
         if target is None or target.shape != graph_embed.shape:
             continue
-        losses.append(1.0 - torch.sum(graph_embed * target.detach(), dim=-1).mean())
+        target_mask = masks.get(name, torch.ones((target.shape[0],), device=target.device, dtype=torch.bool))
+        others = []
+        other_masks = []
+        for other_name, other in embeddings.items():
+            if other_name in (name, "graph") or other.shape != target.shape:
+                continue
+            others.append(other)
+            other_masks.append(masks.get(other_name, torch.ones((other.shape[0],), device=other.device, dtype=torch.bool)).to(device=target.device))
+        if not others:
+            continue
+        stacked = torch.stack(others, dim=0)
+        stacked_masks = torch.stack(other_masks, dim=0).to(dtype=target.dtype)
+        denom = torch.clamp(stacked_masks.sum(dim=0, keepdim=False), min=1.0)
+        pred = torch.sum(stacked * stacked_masks[:, :, None], dim=0) / denom[:, None]
+        pred = fn.normalize(torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0), dim=-1)
+        valid = target_mask.to(device=target.device) & (stacked_masks.sum(dim=0) > 0)
+        if not bool(valid.any().item()):
+            continue
+        losses.append(1.0 - torch.sum(pred[valid] * target[valid].detach(), dim=-1).mean())
     if not losses:
         return _zero_weight_sum(reference, *embeddings.values())
     return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
@@ -828,6 +881,37 @@ def _mapg_routing_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: fl
         else:
             balance = entropy * 0.0
         losses.append(entropy + balance)
+    if graph.obs_slot_assignment is not None and graph.visual_priors.numel() > 0:
+        obs_visual = getattr(state.observation_anchors, "routing_mass_visual", None)
+        if obs_visual is not None and obs_visual.numel() > 0 and obs_visual.shape[-1] == graph.visual_priors.shape[-1]:
+            pred = graph.obs_slot_assignment.to(device=reference.device, dtype=reference.dtype) @ graph.visual_priors.to(
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+            target = obs_visual.to(device=reference.device, dtype=reference.dtype)
+            valid = (pred.sum(dim=-1) > eps) & (target.sum(dim=-1) > eps)
+            if bool(valid.any().item()):
+                losses.append(_js_distribution_loss(pred[valid], target[valid], eps=eps).mean())
+    if graph.task_assignment is not None:
+        task_visual = getattr(state.task_readout, "visual_weights", None)
+        if task_visual is not None and task_visual.numel() > 0 and graph.visual_priors.numel() > 0 and task_visual.shape[-1] == graph.visual_priors.shape[-1]:
+            pred = graph.task_assignment.to(device=reference.device, dtype=reference.dtype) @ graph.visual_priors.to(
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+            target = task_visual.to(device=reference.device, dtype=reference.dtype)
+            valid = (pred.sum(dim=-1) > eps) & (target.sum(dim=-1) > eps)
+            if bool(valid.any().item()):
+                losses.append(_js_distribution_loss(pred[valid], target[valid], eps=eps).mean())
+        if graph.point_priors is not None and graph.point_priors.numel() > 0 and state.task_readout.point_weights.numel() > 0 and state.task_readout.point_weights.shape[-1] == graph.point_priors.shape[-1]:
+            pred = graph.task_assignment.to(device=reference.device, dtype=reference.dtype) @ graph.point_priors.to(
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+            target = state.task_readout.point_weights.to(device=reference.device, dtype=reference.dtype)
+            valid = (pred.sum(dim=-1) > eps) & (target.sum(dim=-1) > eps)
+            if bool(valid.any().item()):
+                losses.append(_js_distribution_loss(pred[valid], target[valid], eps=eps).mean())
     if not losses:
         return _zero_weight_sum(reference, graph.anchor_tokens)
     return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)

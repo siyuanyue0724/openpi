@@ -705,6 +705,7 @@ def test_mapg_enabled_builds_full_anchor_graph_and_live_consumers(tmp_path: Path
         core.mapg_point_proj,
         core.mapg_tactile_proj,
         core.mapg_posterior_proj,
+        core.mapg_task_visual_proj,
         core.mapg_to_control_proj,
     ):
         assert module is not None
@@ -739,10 +740,24 @@ def test_mapg_enabled_builds_full_anchor_graph_and_live_consumers(tmp_path: Path
     assert graph.posterior_priors.shape == (core.config.mapg_anchor_count, core.config.persistent_anchors)
     assert graph.obs_slot_assignment is not None
     assert graph.obs_slot_assignment.shape == (core.config.observation_anchors, core.config.mapg_anchor_count)
+    torch.testing.assert_close(
+        graph.obs_slot_assignment.sum(dim=-1),
+        torch.ones((core.config.observation_anchors,), device=graph.obs_slot_assignment.device, dtype=graph.obs_slot_assignment.dtype),
+        atol=1e-5,
+        rtol=1e-5,
+    )
     assert graph.task_assignment is not None
     assert graph.task_assignment.shape == (core.config.task_local_queries, core.config.mapg_anchor_count)
+    torch.testing.assert_close(
+        graph.task_assignment.sum(dim=-1),
+        torch.ones((core.config.task_local_queries,), device=graph.task_assignment.device, dtype=graph.task_assignment.dtype),
+        atol=1e-5,
+        rtol=1e-5,
+    )
     assert second.state.observation_anchors.graph_assignment is not None
     assert second.state.task_readout.graph_assignment is not None
+    assert second.state.task_readout.visual_weights is not None
+    assert second.state.task_readout.geometry_valid is not None
     assert second.state.task_readout.graph_visual_weights is not None
     assert second.state.task_readout.graph_tactile_weights is not None
     assert second.state.conditioned_control.graph_tokens is not None
@@ -755,6 +770,31 @@ def test_mapg_enabled_builds_full_anchor_graph_and_live_consumers(tmp_path: Path
     assert second.debug["mapg_point_available"] == 1.0
     assert second.debug["mapg_tactile_available"] == 1.0
     assert second.debug["mapg_posterior_available"] == 1.0
+
+
+def test_mapg_builds_paligemma_grounding_without_point_router(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        vl_anchor_router_enabled=False,
+        mapg_enabled=True,
+        mapg_anchor_count=4,
+        mapg_message_rounds=1,
+        mapg_task_gate_init=20.0,
+    )
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+
+    assert output.state.vl_grounding is not None
+    assert output.state.anchor_prior_graph is not None
+    assert output.state.anchor_prior_graph.pg_priors is not None
+    assert output.state.anchor_prior_graph.visual_priors.shape[0] == core.config.mapg_anchor_count
+    assert output.state.task_readout.visual_weights is not None
+    assert output.state.task_readout.graph_visual_weights is not None
 
 
 def test_vl_grounding_enabled_backward_does_not_mutate_query_views(tmp_path: Path) -> None:

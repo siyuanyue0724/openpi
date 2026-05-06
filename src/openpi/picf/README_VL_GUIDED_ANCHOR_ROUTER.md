@@ -11,9 +11,10 @@ bias, task-readout point-prior fusion, and posterior-binding soft overlap bias.
 The router remains disabled by default and does not alter the current canonical
 training profile unless `vl_anchor_router_enabled=True`. The full graph-level
 architecture is now MAPG-PICF, documented in
-[`README_MAPG_PICF.md`](./README_MAPG_PICF.md); MAPG consumes this router as
-one point-centric expert branch and adds visual-native, tactile, posterior,
-graph-token, graph-loss, and PI0.5 action-prefix integration.
+[`README_MAPG_PICF.md`](./README_MAPG_PICF.md); MAPG shares the PaliGemma
+grounding builder and can consume the router's point-centric priors as one
+expert branch while adding visual-native, tactile, posterior, graph-token,
+graph-loss, and PI0.5 action-prefix integration.
 
 Latest local fix audit:
 

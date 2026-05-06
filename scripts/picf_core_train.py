@@ -1044,6 +1044,12 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.mapg_tactile_sigma_m = float(_SPEC_DEFAULTS.mapg_tactile_sigma_m)
     if getattr(args, "mapg_posterior_sigma_m", None) is None:
         args.mapg_posterior_sigma_m = float(_SPEC_DEFAULTS.mapg_posterior_sigma_m)
+    if getattr(args, "mapg_confidence_floor", None) is None:
+        args.mapg_confidence_floor = float(_SPEC_DEFAULTS.mapg_confidence_floor)
+    if getattr(args, "mapg_assignment_sinkhorn_iters", None) is None:
+        args.mapg_assignment_sinkhorn_iters = int(_SPEC_DEFAULTS.mapg_assignment_sinkhorn_iters)
+    if getattr(args, "mapg_assignment_temperature", None) is None:
+        args.mapg_assignment_temperature = float(_SPEC_DEFAULTS.mapg_assignment_temperature)
     if getattr(args, "mapg_obs_gate_init", None) is None:
         args.mapg_obs_gate_init = float(_SPEC_DEFAULTS.mapg_obs_gate_init)
     if getattr(args, "mapg_task_gate_init", None) is None:
@@ -1278,6 +1284,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError("vl_anchor_router_enabled requires semantic_mode=paligemma so PaliGemma image tokens exist.")
     if bool(getattr(args, "mapg_enabled", False)) and not _picf_mode_enabled(args):
         raise ValueError("mapg_enabled requires picf_mode=enabled.")
+    if bool(getattr(args, "mapg_enabled", False)) and str(getattr(args, "semantic_mode", "zero")) != "paligemma":
+        raise ValueError("mapg_enabled requires semantic_mode=paligemma so MAPG can build PaliGemma grounding priors.")
     if int(args.warmup_steps) < 0:
         raise ValueError(f"warmup_steps must be >= 0, got {args.warmup_steps}.")
     if float(args.lr) <= 0.0:
@@ -4162,6 +4170,13 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         mapg_posterior_sigma_m=float(
             _arg_or_default("mapg_posterior_sigma_m", _SPEC_DEFAULTS.mapg_posterior_sigma_m)
         ),
+        mapg_confidence_floor=float(_arg_or_default("mapg_confidence_floor", _SPEC_DEFAULTS.mapg_confidence_floor)),
+        mapg_assignment_sinkhorn_iters=int(
+            _arg_or_default("mapg_assignment_sinkhorn_iters", _SPEC_DEFAULTS.mapg_assignment_sinkhorn_iters)
+        ),
+        mapg_assignment_temperature=float(
+            _arg_or_default("mapg_assignment_temperature", _SPEC_DEFAULTS.mapg_assignment_temperature)
+        ),
         mapg_obs_gate_init=float(_arg_or_default("mapg_obs_gate_init", _SPEC_DEFAULTS.mapg_obs_gate_init)),
         mapg_task_gate_init=float(_arg_or_default("mapg_task_gate_init", _SPEC_DEFAULTS.mapg_task_gate_init)),
         mapg_posterior_gate_init=float(
@@ -4989,13 +5004,16 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "vl_prior_bias_clip", _SPEC_DEFAULTS.vl_prior_bias_clip)),
             )
             logging.info(
-                "MAPG anchor prior graph contract: enabled=%s anchors=%s message_rounds=%s visual_sigma_patches=%s tactile_sigma_m=%s posterior_sigma_m=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s prior_bias_clip=%s losses(siglip=%s vicreg=%s cycle=%s masked=%s routing=%s)",
+                "MAPG anchor prior graph contract: enabled=%s anchors=%s message_rounds=%s visual_sigma_patches=%s tactile_sigma_m=%s posterior_sigma_m=%s confidence_floor=%s assignment_sinkhorn_iters=%s assignment_temperature=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s prior_bias_clip=%s losses(siglip=%s vicreg=%s cycle=%s masked=%s routing=%s)",
                 bool(getattr(args, "mapg_enabled", False)),
                 int(getattr(args, "mapg_anchor_count", _SPEC_DEFAULTS.mapg_anchor_count)),
                 int(getattr(args, "mapg_message_rounds", _SPEC_DEFAULTS.mapg_message_rounds)),
                 float(getattr(args, "mapg_visual_sigma_patches", _SPEC_DEFAULTS.mapg_visual_sigma_patches)),
                 float(getattr(args, "mapg_tactile_sigma_m", _SPEC_DEFAULTS.mapg_tactile_sigma_m)),
                 float(getattr(args, "mapg_posterior_sigma_m", _SPEC_DEFAULTS.mapg_posterior_sigma_m)),
+                float(getattr(args, "mapg_confidence_floor", _SPEC_DEFAULTS.mapg_confidence_floor)),
+                int(getattr(args, "mapg_assignment_sinkhorn_iters", _SPEC_DEFAULTS.mapg_assignment_sinkhorn_iters)),
+                float(getattr(args, "mapg_assignment_temperature", _SPEC_DEFAULTS.mapg_assignment_temperature)),
                 float(getattr(args, "mapg_obs_gate_init", _SPEC_DEFAULTS.mapg_obs_gate_init)),
                 float(getattr(args, "mapg_task_gate_init", _SPEC_DEFAULTS.mapg_task_gate_init)),
                 float(getattr(args, "mapg_posterior_gate_init", _SPEC_DEFAULTS.mapg_posterior_gate_init)),
@@ -5776,6 +5794,9 @@ def main() -> None:
     parser.add_argument("--mapg-visual-sigma-patches", type=float, default=_SPEC_DEFAULTS.mapg_visual_sigma_patches)
     parser.add_argument("--mapg-tactile-sigma-m", type=float, default=_SPEC_DEFAULTS.mapg_tactile_sigma_m)
     parser.add_argument("--mapg-posterior-sigma-m", type=float, default=_SPEC_DEFAULTS.mapg_posterior_sigma_m)
+    parser.add_argument("--mapg-confidence-floor", type=float, default=_SPEC_DEFAULTS.mapg_confidence_floor)
+    parser.add_argument("--mapg-assignment-sinkhorn-iters", type=int, default=_SPEC_DEFAULTS.mapg_assignment_sinkhorn_iters)
+    parser.add_argument("--mapg-assignment-temperature", type=float, default=_SPEC_DEFAULTS.mapg_assignment_temperature)
     parser.add_argument("--mapg-obs-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_obs_gate_init)
     parser.add_argument("--mapg-task-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_task_gate_init)
     parser.add_argument("--mapg-posterior-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_posterior_gate_init)

@@ -57,11 +57,14 @@ deployment.
   Current live implementation record for MAPG-PICF: modality-optional anchor
   prior graph routing over PaliGemma, V-JEPA, Sonata, AnyTouch, and posterior
   supports. This is now the graph-level layer above the point-centric
-  VL-guided router. It records the finite-message-passing math, state objects,
+  VL-guided router. It records the shared PaliGemma grounding builder,
+  confidence-gated finite-message-passing math, role-constrained
+  Sinkhorn-style slot assignment, direct tactile/posterior-to-visual support,
+  explicit visual-native task readout, masked graph losses, state objects,
   live dataflow into observation anchors / task readout / posterior binding /
-  conditioned control, graph losses, CLI flags, diagnostics, verification
-  commands, and the maintained `30000` step / `5000` checkpoint /
-  `unroll_steps=2` MAPG launch template.
+  conditioned control, CLI flags, diagnostics, verification commands, and the
+  maintained `30000` step / `5000` checkpoint / `unroll_steps=2` MAPG launch
+  template.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)

@@ -509,6 +509,24 @@ def _row_has_mass(values: torch.Tensor, *, eps: float) -> torch.Tensor:
     return values.sum(dim=-1) > eps
 
 
+def _distribution_confidence(values: torch.Tensor | None, *, eps: float, floor: float = 0.0) -> torch.Tensor | None:
+    if values is None:
+        return None
+    if values.ndim == 1:
+        values = values[None, :]
+    if values.numel() == 0:
+        return torch.zeros((values.shape[0],), device=values.device, dtype=values.dtype)
+    mass = torch.clamp(values.sum(dim=-1), min=0.0)
+    valid = mass > eps
+    probs = _normalize_rows(values, eps=eps)
+    entropy = -torch.sum(probs * torch.log(torch.clamp(probs, min=eps)), dim=-1)
+    max_entropy = math.log(max(int(values.shape[-1]), 2))
+    confidence = torch.clamp(1.0 - (entropy / max(max_entropy, eps)), min=0.0, max=1.0)
+    if floor > 0.0:
+        confidence = torch.where(valid, torch.clamp(confidence, min=float(floor)), confidence)
+    return torch.where(valid, confidence, torch.zeros_like(confidence))
+
+
 def _distribution_js(p: torch.Tensor, q: torch.Tensor, *, eps: float) -> torch.Tensor:
     p = _normalize_rows(p, eps=eps)
     q = _normalize_rows(q, eps=eps)
@@ -1103,7 +1121,8 @@ class PicfFullCore(nn.Module):
         self.semantic_prefix_proj = nn.Identity()
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
-        if bool(self.config.vl_anchor_router_enabled):
+        shared_pg_grounding_enabled = bool(self.config.vl_anchor_router_enabled) or bool(self.config.mapg_enabled)
+        if shared_pg_grounding_enabled:
             self.vl_heatmap_head = nn.Sequential(
                 nn.LazyLinear(int(self.config.vl_heatmap_hidden_dim)),
                 nn.GELU(),
@@ -1111,6 +1130,10 @@ class PicfFullCore(nn.Module):
                 nn.Linear(int(self.config.vl_heatmap_hidden_dim), 3),
             )
             self.vl_anchor_token_proj = nn.LazyLinear(hidden_dim)
+        else:
+            self.vl_heatmap_head = None
+            self.vl_anchor_token_proj = None
+        if bool(self.config.vl_anchor_router_enabled):
             self.vl_task_point_gate_logit = nn.Parameter(
                 torch.tensor([float(self.config.vl_task_point_gate_init)], device=self.device, dtype=self.dtype)
             )
@@ -1121,8 +1144,6 @@ class PicfFullCore(nn.Module):
                 torch.tensor([float(self.config.vl_posterior_bind_gate_init)], device=self.device, dtype=self.dtype)
             )
         else:
-            self.vl_heatmap_head = None
-            self.vl_anchor_token_proj = None
             self.vl_task_point_gate_logit = None
             self.vl_obs_anchor_gate_logit = None
             self.vl_posterior_bind_gate_logit = None
@@ -1132,6 +1153,7 @@ class PicfFullCore(nn.Module):
             self.mapg_point_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_tactile_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_posterior_proj = nn.Linear(hidden_dim, hidden_dim)
+            self.mapg_task_visual_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_anchor_fusion = nn.Sequential(
                 nn.Linear(hidden_dim * 5 + 5, hidden_dim),
                 nn.GELU(),
@@ -1161,6 +1183,7 @@ class PicfFullCore(nn.Module):
             self.mapg_point_proj = None
             self.mapg_tactile_proj = None
             self.mapg_posterior_proj = None
+            self.mapg_task_visual_proj = None
             self.mapg_anchor_fusion = None
             self.mapg_role_embedding = None
             self.mapg_to_control_proj = None
@@ -1561,7 +1584,7 @@ class PicfFullCore(nn.Module):
         semantic: _SemanticContext,
         token_field: PicfTokenFieldState,
     ) -> PicfVLGroundingState | None:
-        if not bool(self.config.vl_anchor_router_enabled):
+        if not (bool(self.config.vl_anchor_router_enabled) or bool(self.config.mapg_enabled)):
             return None
         if self.vl_heatmap_head is None or self.vl_anchor_token_proj is None:
             return None
@@ -1929,18 +1952,25 @@ class PicfFullCore(nn.Module):
         if not bool((base.sum() > self.config.epsilon_a).item()):
             base = torch.ones_like(base)
         base = base / torch.clamp(base.sum(), min=self.config.epsilon_a)
-        modes = _weighted_anchor_modes(
-            coords.to(device=self.device, dtype=self.dtype),
-            base,
-            count=count,
-            radius_m=max(float(sigma), self.config.epsilon_a),
-            eps=self.config.epsilon_a,
-        )
+        coords_t = coords.to(device=self.device, dtype=self.dtype)
+        flat_source = bool(((torch.max(base) - torch.min(base)) <= (10.0 * self.config.epsilon_a)).item())
+        if flat_source:
+            # Coverage priors must not inherit torch.argmax's first-cell bias when the
+            # evidence is uniform. Use geometry-only FPS over the native support.
+            modes = _fps_indices(coords_t, min(count, support_count))
+        else:
+            modes = _weighted_anchor_modes(
+                coords_t,
+                base,
+                count=count,
+                radius_m=max(float(sigma), self.config.epsilon_a),
+                eps=self.config.epsilon_a,
+            )
         priors = []
         sigma_v = max(float(sigma), self.config.epsilon_a)
         for idx in modes.tolist():
-            center = coords[int(idx)].to(device=self.device, dtype=self.dtype)
-            dist2 = torch.sum((coords.to(device=self.device, dtype=self.dtype) - center[None, :]) ** 2, dim=-1)
+            center = coords_t[int(idx)]
+            dist2 = torch.sum((coords_t - center[None, :]) ** 2, dim=-1)
             local = torch.exp(-dist2 / (2.0 * sigma_v * sigma_v)) * base
             priors.append(_normalize_rows(local, eps=self.config.epsilon_a))
         while len(priors) < count:
@@ -2065,6 +2095,9 @@ class PicfFullCore(nn.Module):
         if geometry is None or geometry.projective_compatibility.numel() == 0 or point_priors.numel() == 0:
             return None
         compat = torch.clamp(torch.nan_to_num(geometry.projective_compatibility.to(device=self.device, dtype=self.dtype), nan=0.0), min=0.0)
+        mask = token_field.point_projectable_mask
+        if mask is not None and mask.shape == (compat.shape[0],):
+            compat = compat * mask.to(device=self.device, dtype=self.dtype)[:, None]
         row_mass = compat.sum(dim=1, keepdim=True)
         compat_row = compat / torch.clamp(row_mass, min=self.config.epsilon_a)
         priors = point_priors.to(device=self.device, dtype=self.dtype) @ compat_row
@@ -2152,6 +2185,66 @@ class PicfFullCore(nn.Module):
         priors = posterior_priors.to(device=self.device, dtype=self.dtype) @ kernel.T
         return _normalize_rows(priors, eps=self.config.epsilon_a)
 
+    def _mapg_world_positions_to_visual(
+        self,
+        source_priors: torch.Tensor | None,
+        source_positions_world: torch.Tensor | None,
+        token_field: PicfTokenFieldState,
+        *,
+        sigma_m: float,
+    ) -> torch.Tensor | None:
+        geometry = token_field.projective_geometry
+        if (
+            source_priors is None
+            or source_positions_world is None
+            or source_priors.numel() == 0
+            or source_positions_world.numel() == 0
+            or geometry is None
+            or geometry.visual_ray_world.numel() == 0
+        ):
+            return None
+        positions = source_positions_world.to(device=self.device, dtype=self.dtype)
+        rays = _normalize_tensor(geometry.visual_ray_world.to(device=self.device, dtype=self.dtype), eps=self.config.epsilon_a)
+        origin = geometry.camera_origin_world.to(device=self.device, dtype=self.dtype).reshape(-1, 3).mean(dim=0)
+        if source_priors.shape[-1] != positions.shape[0] or rays.shape[0] == 0:
+            return None
+        vec = positions[:, None, :] - origin[None, None, :]
+        depth = torch.sum(vec * rays[None, :, :], dim=-1)
+        closest = depth[..., None] * rays[None, :, :]
+        perp2 = torch.sum((vec - closest) ** 2, dim=-1)
+        sigma = max(float(sigma_m), self.config.epsilon_a)
+        kernel = torch.exp(-perp2 / (2.0 * sigma * sigma))
+        kernel = torch.where(depth > float(self.config.z_min_m), kernel, torch.zeros_like(kernel))
+        kernel = kernel / torch.clamp(kernel.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+        priors = source_priors.to(device=self.device, dtype=self.dtype) @ kernel
+        return _normalize_rows(priors, eps=self.config.epsilon_a)
+
+    def _mapg_tactile_to_visual(
+        self,
+        tactile_priors: torch.Tensor | None,
+        token_field: PicfTokenFieldState,
+    ) -> torch.Tensor | None:
+        return self._mapg_world_positions_to_visual(
+            tactile_priors,
+            token_field.tactile_positions_world,
+            token_field,
+            sigma_m=max(float(self.config.mapg_tactile_sigma_m), self.config.epsilon_a),
+        )
+
+    def _mapg_posterior_to_visual(
+        self,
+        posterior_priors: torch.Tensor | None,
+        previous: PicfPreviousState | None,
+        token_field: PicfTokenFieldState,
+    ) -> torch.Tensor | None:
+        positions = None if previous is None else previous.posterior.x
+        return self._mapg_world_positions_to_visual(
+            posterior_priors,
+            positions,
+            token_field,
+            sigma_m=max(float(self.config.mapg_posterior_sigma_m), self.config.epsilon_a),
+        )
+
     def _mapg_slot_assignment(
         self,
         graph: PicfAnchorPriorGraphState | None,
@@ -2160,27 +2253,36 @@ class PicfFullCore(nn.Module):
         if graph is None or not bool(graph.valid.item()) or graph.anchor_tokens.shape[0] == 0 or slot_role_ids.numel() == 0:
             return None
         k = int(graph.anchor_tokens.shape[0])
-        assignment = torch.zeros((int(slot_role_ids.numel()), k), device=self.device, dtype=self.dtype)
+        slot_count = int(slot_role_ids.numel())
         roles = graph.anchor_roles.to(device=self.device, dtype=torch.long)
-        scores = torch.clamp(graph.anchor_scores.to(device=self.device, dtype=self.dtype), min=self.config.epsilon_a)
-        for role in torch.unique(slot_role_ids.to(device=self.device, dtype=torch.long)).tolist():
+        slot_roles = slot_role_ids.to(device=self.device, dtype=torch.long)
+        allowed = torch.zeros((slot_count, k), device=self.device, dtype=torch.bool)
+        for slot_index, role in enumerate(slot_roles.tolist()):
             role_int = int(role)
-            slot_indices = torch.nonzero(slot_role_ids.to(device=self.device, dtype=torch.long) == role_int, as_tuple=False).squeeze(-1)
             if role_int == 0:
                 mask = roles == 0
             elif role_int == 1:
                 mask = (roles == 1) | (roles == 2) | (roles == 3)
             else:
                 mask = roles == role_int
-            candidate_indices = torch.nonzero(mask, as_tuple=False).squeeze(-1)
-            if candidate_indices.numel() == 0:
-                candidate_indices = torch.arange(k, device=self.device, dtype=torch.long)
-            logits = torch.log(scores.index_select(0, candidate_indices))
-            for local_index, slot_index in enumerate(slot_indices.tolist()):
-                local_logits = logits.clone()
-                if candidate_indices.numel() > 0:
-                    local_logits[int(local_index) % int(candidate_indices.numel())] += 2.0
-                assignment[int(slot_index), candidate_indices] = torch.softmax(local_logits, dim=0)
+            if not bool(mask.any().item()):
+                mask = torch.ones((k,), device=self.device, dtype=torch.bool)
+            allowed[slot_index] = mask
+        scores = torch.clamp(graph.anchor_scores.to(device=self.device, dtype=self.dtype), min=self.config.epsilon_a)
+        confidence = torch.clamp(graph.anchor_confidence.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+        scores = torch.clamp(scores * torch.clamp(confidence, min=float(self.config.mapg_confidence_floor)), min=self.config.epsilon_a)
+        temperature = max(float(self.config.mapg_assignment_temperature), self.config.epsilon_a)
+        logits = torch.log(scores)[None, :].expand(slot_count, -1) / temperature
+        logits = logits.masked_fill(~allowed, -1.0e4)
+        assignment = torch.softmax(logits, dim=-1) * allowed.to(dtype=self.dtype)
+        assignment = assignment / torch.clamp(assignment.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+        valid_cols = allowed.any(dim=0)
+        target_col = valid_cols.to(dtype=self.dtype) * (float(slot_count) / torch.clamp(valid_cols.to(dtype=self.dtype).sum(), min=1.0))
+        for _ in range(max(int(self.config.mapg_assignment_sinkhorn_iters), 0)):
+            col_mass = torch.clamp(assignment.sum(dim=0), min=self.config.epsilon_a)
+            assignment = assignment * torch.where(valid_cols, target_col / col_mass, torch.zeros_like(col_mass))[None, :]
+            assignment = assignment * allowed.to(dtype=self.dtype)
+            assignment = assignment / torch.clamp(assignment.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
         return assignment
 
     def _build_anchor_prior_graph(
@@ -2247,6 +2349,8 @@ class PicfFullCore(nn.Module):
         q_post = self._mapg_posterior_seed_priors(previous, roles) if post_count > 0 else None
         t_to_p = self._mapg_tactile_to_point(q_t, token_field) if q_t is not None else None
         post_to_p = self._mapg_posterior_to_point(q_post, previous, token_field) if q_post is not None else None
+        t_to_v_direct = self._mapg_tactile_to_visual(q_t, token_field) if q_t is not None else None
+        post_to_v_direct = self._mapg_posterior_to_visual(q_post, previous, token_field) if q_post is not None else None
         if q_p is None and (t_to_p is not None or post_to_p is not None):
             q_p = torch.zeros((anchor_count, point_count), device=self.device, dtype=self.dtype)
         if q_p is not None:
@@ -2260,35 +2364,60 @@ class PicfFullCore(nn.Module):
         p_p = q_p
         p_t = q_t
         p_post = q_post
+        floor = max(float(self.config.mapg_confidence_floor), 0.0)
+        q_v_conf = _distribution_confidence(q_v, eps=self.config.epsilon_a, floor=floor)
+        q_p_conf = _distribution_confidence(q_p, eps=self.config.epsilon_a, floor=floor)
+        q_t_conf = _distribution_confidence(q_t, eps=self.config.epsilon_a, floor=floor)
+        q_post_conf = _distribution_confidence(q_post, eps=self.config.epsilon_a, floor=floor)
+
+        def _weighted(prior: torch.Tensor | None, confidence: torch.Tensor | None) -> torch.Tensor | None:
+            if prior is None:
+                return None
+            if confidence is None or confidence.shape[0] != prior.shape[0]:
+                confidence = torch.ones((prior.shape[0],), device=self.device, dtype=self.dtype)
+            return prior.to(device=self.device, dtype=self.dtype) * confidence.to(device=self.device, dtype=self.dtype)[:, None]
+
         rounds = max(int(self.config.mapg_message_rounds), 1)
         for _ in range(rounds):
-            next_v = q_v.clone()
+            next_v = _weighted(q_v, q_v_conf)
+            if next_v is None:
+                next_v = torch.zeros_like(q_v)
             p_to_v = self._mapg_point_to_visual(p_p, token_field)
             if p_to_v is not None:
-                next_v = next_v + p_to_v
+                weighted = _weighted(p_to_v, q_p_conf)
+                next_v = next_v + (p_to_v if weighted is None else weighted)
             if p_t is not None:
-                t_point = self._mapg_tactile_to_point(p_t, token_field)
-                t_visual = self._mapg_point_to_visual(t_point, token_field)
+                t_visual = t_to_v_direct
+                if t_visual is None:
+                    t_point = self._mapg_tactile_to_point(p_t, token_field)
+                    t_visual = self._mapg_point_to_visual(t_point, token_field)
                 if t_visual is not None:
-                    next_v = next_v + t_visual
+                    weighted = _weighted(t_visual, q_t_conf)
+                    next_v = next_v + (t_visual if weighted is None else weighted)
             if p_post is not None:
-                post_point = self._mapg_posterior_to_point(p_post, previous, token_field)
-                post_visual = self._mapg_point_to_visual(post_point, token_field)
+                post_visual = post_to_v_direct
+                if post_visual is None:
+                    post_point = self._mapg_posterior_to_point(p_post, previous, token_field)
+                    post_visual = self._mapg_point_to_visual(post_point, token_field)
                 if post_visual is not None:
-                    next_v = next_v + post_visual
+                    weighted = _weighted(post_visual, q_post_conf)
+                    next_v = next_v + (post_visual if weighted is None else weighted)
             p_v = _normalize_rows(next_v, eps=self.config.epsilon_a)
-            next_p = q_p.clone() if q_p is not None else self._mapg_visual_to_point(p_v, token_field)
+            next_p = _weighted(q_p, q_p_conf) if q_p is not None else self._mapg_visual_to_point(p_v, token_field)
             v_to_p = self._mapg_visual_to_point(p_v, token_field)
             if next_p is not None and v_to_p is not None:
-                next_p = next_p + v_to_p
+                weighted = _weighted(v_to_p, q_v_conf)
+                next_p = next_p + (v_to_p if weighted is None else weighted)
             if next_p is not None and p_t is not None:
                 t_point = self._mapg_tactile_to_point(p_t, token_field)
                 if t_point is not None:
-                    next_p = next_p + t_point
+                    weighted = _weighted(t_point, q_t_conf)
+                    next_p = next_p + (t_point if weighted is None else weighted)
             if next_p is not None and p_post is not None:
                 post_point = self._mapg_posterior_to_point(p_post, previous, token_field)
                 if post_point is not None:
-                    next_p = next_p + post_point
+                    weighted = _weighted(post_point, q_post_conf)
+                    next_p = next_p + (post_point if weighted is None else weighted)
             p_p = _normalize_rows(next_p, eps=self.config.epsilon_a) if next_p is not None else None
             p_t = _normalize_rows(p_t, eps=self.config.epsilon_a) if p_t is not None else None
             p_post = _normalize_rows(p_post, eps=self.config.epsilon_a) if p_post is not None else None
@@ -2312,21 +2441,27 @@ class PicfFullCore(nn.Module):
         if p_post is not None and previous is not None and self.mapg_posterior_proj is not None:
             post_h = self.mapg_posterior_proj(p_post @ previous.posterior.tokens.to(device=self.device, dtype=self.dtype))
             post_valid = _row_has_mass(p_post, eps=self.config.epsilon_a)
-        pg_valid = _row_has_mass(pg_priors, eps=self.config.epsilon_a) if pg_priors is not None else torch.zeros((anchor_count,), device=self.device, dtype=torch.bool)
-        visual_valid = _row_has_mass(p_v, eps=self.config.epsilon_a)
+        pg_conf = _distribution_confidence(pg_priors, eps=self.config.epsilon_a, floor=floor)
+        visual_conf = _distribution_confidence(p_v, eps=self.config.epsilon_a, floor=floor)
+        point_conf = _distribution_confidence(p_p, eps=self.config.epsilon_a, floor=floor)
+        tactile_conf = _distribution_confidence(p_t, eps=self.config.epsilon_a, floor=floor)
+        post_conf = _distribution_confidence(p_post, eps=self.config.epsilon_a, floor=floor)
+        zero_conf = torch.zeros((anchor_count,), device=self.device, dtype=self.dtype)
         modality_conf = torch.stack(
             [
-                pg_valid.to(dtype=self.dtype),
-                visual_valid.to(dtype=self.dtype),
-                point_valid.to(dtype=self.dtype),
-                tactile_valid.to(dtype=self.dtype),
-                post_valid.to(dtype=self.dtype),
+                zero_conf if pg_conf is None else pg_conf.to(device=self.device, dtype=self.dtype),
+                zero_conf if visual_conf is None else visual_conf.to(device=self.device, dtype=self.dtype),
+                zero_conf if point_conf is None else point_conf.to(device=self.device, dtype=self.dtype),
+                zero_conf if tactile_conf is None else tactile_conf.to(device=self.device, dtype=self.dtype),
+                zero_conf if post_conf is None else post_conf.to(device=self.device, dtype=self.dtype),
             ],
             dim=-1,
         )
-        pooled_sum = pg_h + visual_h + point_h + tactile_h + post_h
-        denom = torch.clamp(modality_conf.sum(dim=-1, keepdim=True), min=1.0)
-        pooled = pooled_sum / denom
+        modality_h = torch.stack([pg_h, visual_h, point_h, tactile_h, post_h], dim=1)
+        pooled = torch.sum(modality_h * modality_conf[:, :, None], dim=1) / torch.clamp(
+            modality_conf.sum(dim=-1, keepdim=True),
+            min=1.0,
+        )
         fusion_in = torch.cat([pg_h, visual_h, point_h, tactile_h, post_h, modality_conf], dim=-1)
         delta = self.mapg_anchor_fusion(fusion_in) if self.mapg_anchor_fusion is not None else torch.zeros_like(pooled)
         role_emb = self.mapg_role_embedding(roles) if self.mapg_role_embedding is not None else torch.zeros_like(pooled)
@@ -2334,7 +2469,7 @@ class PicfFullCore(nn.Module):
         anchor_scores = torch.max(p_v, dim=-1).values
         if p_p is not None:
             anchor_scores = anchor_scores + torch.max(p_p, dim=-1).values
-        anchor_conf = torch.clamp(modality_conf.mean(dim=-1), min=0.0, max=1.0)
+        anchor_conf = torch.clamp(modality_conf.max(dim=-1).values, min=0.0, max=1.0)
         anchor_x = None
         anchor_S = None
         geometry_valid = torch.zeros((anchor_count,), device=self.device, dtype=torch.bool)
@@ -2658,6 +2793,21 @@ class PicfFullCore(nn.Module):
             if anchor_graph.tactile_priors is not None:
                 graph_tactile_weights = graph_assignment @ anchor_graph.tactile_priors.to(device=self.device, dtype=self.dtype)
 
+        visual_weights = None
+        tactile_weights = graph_tactile_weights
+        if token_field.visual_tokens.shape[0] > 0 and local_count > 0:
+            direct_visual = visual_public_attention[:local_count]
+            direct_visual = direct_visual / torch.clamp(direct_visual.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+            visual_weights = direct_visual
+            if graph_visual_weights is not None and bool((mapg_task_gate > 0.0).item()):
+                graph_visual = _normalize_rows(graph_visual_weights, eps=self.config.epsilon_a)
+                graph_valid = _row_has_mass(graph_visual_weights, eps=self.config.epsilon_a)
+                graph_mix = torch.where(graph_valid[:, None], graph_visual, direct_visual)
+                visual_weights = ((1.0 - mapg_task_gate) * direct_visual) + (mapg_task_gate * graph_mix)
+                visual_weights = _normalize_rows(visual_weights, eps=self.config.epsilon_a)
+                if self.mapg_task_visual_proj is not None:
+                    local_tokens = local_tokens + (mapg_task_gate * self.mapg_task_visual_proj(visual_weights @ token_field.visual_tokens))
+
         if token_field.point_tokens.shape[0] > 0 and local_count > 0:
             geometry_positions = self._world_point_positions(token_field)
             direct_weights = point_public_attention[:local_count]
@@ -2685,12 +2835,14 @@ class PicfFullCore(nn.Module):
             x = point_weights @ geometry_positions
             S = _weighted_cov(geometry_positions, point_weights, x, self.config)
             a = _extent_from_cov(S, self.config)
+            geometry_valid = _row_has_mass(point_weights, eps=self.config.epsilon_a)
             local_tokens = local_tokens + self.task_geom_proj(_geometry_pe(x, a, S, self.config))
         else:
             point_weights = torch.zeros((local_count, 0), device=self.device, dtype=self.dtype)
             x = torch.zeros((local_count, 3), device=self.device, dtype=self.dtype)
             S = _diag_embed(torch.full((local_count, 3), self.config.epsilon_s, device=self.device, dtype=self.dtype))
             a = _to_tensor(self.config.a_min_m, device=self.device, dtype=self.dtype)[None, :].expand(local_count, -1)
+            geometry_valid = torch.zeros((local_count,), device=self.device, dtype=torch.bool)
 
         conditioned_queries = torch.cat([local_tokens, global_tokens, instruction_tokens], dim=0)
         global_token = (
@@ -2717,6 +2869,9 @@ class PicfFullCore(nn.Module):
             point_private_attention=point_private_attention,
             local_role_ids=local_role_ids,
             graph_assignment=graph_assignment,
+            visual_weights=visual_weights,
+            tactile_weights=tactile_weights,
+            geometry_valid=geometry_valid,
             graph_visual_weights=graph_visual_weights,
             graph_tactile_weights=graph_tactile_weights,
         )

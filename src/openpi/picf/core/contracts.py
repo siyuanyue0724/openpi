@@ -156,6 +156,9 @@ class PicfTaskReadoutState:
     point_private_attention: torch.Tensor | None = None
     local_role_ids: torch.Tensor | None = None
     graph_assignment: torch.Tensor | None = None
+    visual_weights: torch.Tensor | None = None
+    tactile_weights: torch.Tensor | None = None
+    geometry_valid: torch.Tensor | None = None
     graph_visual_weights: torch.Tensor | None = None
     graph_tactile_weights: torch.Tensor | None = None
 

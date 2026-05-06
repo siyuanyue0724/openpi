@@ -1902,6 +1902,9 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     args.mapg_visual_sigma_patches = 1.75
     args.mapg_tactile_sigma_m = 0.12
     args.mapg_posterior_sigma_m = 0.11
+    args.mapg_confidence_floor = 0.07
+    args.mapg_assignment_sinkhorn_iters = 9
+    args.mapg_assignment_temperature = 0.8
     args.mapg_obs_gate_init = -3.1
     args.mapg_task_gate_init = -3.2
     args.mapg_posterior_gate_init = -5.1
@@ -1928,6 +1931,9 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     assert core.config.mapg_visual_sigma_patches == pytest.approx(1.75)
     assert core.config.mapg_tactile_sigma_m == pytest.approx(0.12)
     assert core.config.mapg_posterior_sigma_m == pytest.approx(0.11)
+    assert core.config.mapg_confidence_floor == pytest.approx(0.07)
+    assert core.config.mapg_assignment_sinkhorn_iters == 9
+    assert core.config.mapg_assignment_temperature == pytest.approx(0.8)
     assert core.config.mapg_obs_gate_init == pytest.approx(-3.1)
     assert core.config.mapg_task_gate_init == pytest.approx(-3.2)
     assert core.config.mapg_posterior_gate_init == pytest.approx(-5.1)

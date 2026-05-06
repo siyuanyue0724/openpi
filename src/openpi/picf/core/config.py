@@ -125,6 +125,9 @@ class PicfCoreConfig:
     mapg_visual_sigma_patches: float = 2.0
     mapg_tactile_sigma_m: float = 0.08
     mapg_posterior_sigma_m: float = 0.08
+    mapg_confidence_floor: float = 0.05
+    mapg_assignment_sinkhorn_iters: int = 6
+    mapg_assignment_temperature: float = 1.0
     mapg_obs_gate_init: float = -4.0
     mapg_task_gate_init: float = -4.0
     mapg_posterior_gate_init: float = -6.0
