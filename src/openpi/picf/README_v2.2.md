@@ -31,8 +31,10 @@ current recurrent burn-in speed-path audit
   prior router. The current code keeps the router disabled by default, but when
   explicitly enabled it builds VL grounding state and consumes it through
   role-aware observation-anchor soft seeds/biases, task-readout gated point
-  prior fusion, and posterior-binding soft overlap bias. Heatmap supervision
-  losses are still not default-live. The live implementation now records the
+  prior fusion, and posterior-binding soft overlap bias. Heatmap/keypose,
+  point-consistency, and anchor-diversity supervision terms are implemented and
+  logged as default-zero `--lambda-vl-*` loss knobs; they are not active unless
+  explicitly enabled. The live implementation now records the
   top-border scene-anchor diagnostic fix: world-frame point coordinates are
   split from model-frame point coordinates, scene/object slots use a
   projective candidate mask, PaliGemma heatmaps are mapped through
@@ -2295,8 +2297,11 @@ Trainability contract:
 - V-JEPA visual backbone is frozen.
 - AnyTouch tactile backbone is frozen.
 - PaliGemma / PI0.5 semantic-action stack remains trainable in this historical
-  reference only. The current VL-router long-run leaves PaliGemma frozen and
-  trains the PICF/action-side adapters and heads around frozen semantic tokens.
+  reference and in the current VL-router long-run unless an explicit frozen-
+  semantic ablation is launched. The current VL-router long-run freezes the
+  Sonata, V-JEPA, and AnyTouch pretrained feature extractors, while the
+  PaliGemma/PI0.5 semantic-action modules plus PICF/action-side adapters and
+  prediction heads remain trainable.
 - PICF task-readout, conditioned-control, posterior/predictive/future heads,
   and auxiliary losses remain active.
 

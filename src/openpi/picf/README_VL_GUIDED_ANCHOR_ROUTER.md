@@ -66,6 +66,11 @@ Implemented in the current local branch:
   VL point priors through a learnable gate when the router is enabled.
 - `_posterior_update(...)` consumes VL/observation point-overlap as a soft
   binding-logit bias when the router is enabled.
+- `compute_transition_loss(...)` contains default-zero, explicitly weighted VL
+  router supervision terms: current-effector heatmap, next-keypose interaction
+  heatmap, optional task keypose proxy heatmap, task-readout/point-prior
+  consistency, and scene-anchor diversity. These terms are inactive unless the
+  corresponding `--lambda-vl-*` weights are set above zero.
 - point geometry now keeps a row-aligned world-frame coordinate stream:
   `PointFrameContext.points_world` -> `PicfTokenFieldState.point_positions_world`.
   Camera projection, tactile alignment, VL point-prior moments, observation
@@ -87,10 +92,11 @@ Implemented in the current local branch:
   summaries so a top-left/top-border overlay can be traced back to heatmap,
   projection, point prior, or task attention.
 
-Not implemented yet:
+Not enabled by default:
 
-- VL heatmap/keypose/diversity losses
-- any default behavior change in the active training profile
+- VL heatmap/keypose/diversity supervision. The loss terms are live and logged,
+  but all `--lambda-vl-*` weights default to `0.0`.
+- any default behavior change in the active training profile.
 
 ### 0.1A Diagnostic Fix: Top-Border Scene Anchor Collapse
 
@@ -983,6 +989,11 @@ nohup /root/openpi/.venv/bin/torchrun --standalone --nproc_per_node=2 \
   --vl-obs-anchor-gate-init -4.0 \
   --vl-task-point-gate-init -4.0 \
   --vl-posterior-bind-gate-init -6.0 \
+  --lambda-vl-heatmap-task 0.0 \
+  --lambda-vl-heatmap-effector 0.0 \
+  --lambda-vl-heatmap-interaction 0.0 \
+  --lambda-vl-point-consistency 0.0 \
+  --lambda-vl-anchor-diversity 0.0 \
   --no-wandb \
   > "$LOG" 2>&1 &
 echo $! > /mnt/checkpoints/picf_core/debug/${RUN}.pid
@@ -1010,6 +1021,13 @@ Frozen-perception/augmentation contract:
 
 If the log says `tactile=stub` or `semantic=paligemma(trainable=False)`, stop
 the run. It is not the intended profile.
+
+The `--lambda-vl-*` knobs are real training-loss switches. Keep them at `0.0`
+for safety-parity long runs. For a supervised-router diagnostic, set small
+values and require the JSONL logs to include finite nonzero
+`loss_vl_heatmap_effector`, `loss_vl_heatmap_interaction`,
+`loss_vl_point_consistency`, or `loss_vl_anchor_diversity` before claiming that
+heatmap/keypose/diversity supervision is active.
 
 Tail:
 
@@ -1533,6 +1551,16 @@ L_total =
 ```
 
 All new weights default to zero until the router is explicitly enabled.
+
+Current implementation status:
+
+```text
+This subsection is now implemented as default-zero loss terms in
+compute_transition_loss. A run is heatmap/keypose/diversity supervised only when
+the training command sets nonzero --lambda-vl-* weights and the logs show
+nonzero loss_vl_heatmap_*, loss_vl_point_consistency, or
+loss_vl_anchor_diversity metrics.
+```
 
 ## 15. Training Stages
 

@@ -2487,6 +2487,12 @@ class _MetricAccumulator:
     loss_pv_weak: float = 0.0
     loss_focus_pv: float = 0.0
     loss_pt: float = 0.0
+    loss_vl_router: float = 0.0
+    loss_vl_heatmap_task: float = 0.0
+    loss_vl_heatmap_effector: float = 0.0
+    loss_vl_heatmap_interaction: float = 0.0
+    loss_vl_point_consistency: float = 0.0
+    loss_vl_anchor_diversity: float = 0.0
     physical_aux_budget_scale: float = 0.0
     semantic_aux_budget_scale: float = 0.0
     alignment_budget_scale: float = 0.0
@@ -2527,6 +2533,12 @@ class _MetricAccumulator:
         self.loss_pv_weak += float(losses.pv_weak.item())
         self.loss_focus_pv += float(losses.focus_pv.item())
         self.loss_pt += float(losses.pt.item())
+        self.loss_vl_router += float(losses.vl_router.item())
+        self.loss_vl_heatmap_task += float(losses.vl_heatmap_task.item())
+        self.loss_vl_heatmap_effector += float(losses.vl_heatmap_effector.item())
+        self.loss_vl_heatmap_interaction += float(losses.vl_heatmap_interaction.item())
+        self.loss_vl_point_consistency += float(losses.vl_point_consistency.item())
+        self.loss_vl_anchor_diversity += float(losses.vl_anchor_diversity.item())
         self.physical_aux_budget_scale += float(losses.physical_aux_budget_scale.item())
         self.semantic_aux_budget_scale += float(losses.semantic_aux_budget_scale.item())
         self.alignment_budget_scale += float(losses.alignment_budget_scale.item())
@@ -2560,6 +2572,12 @@ class _MetricAccumulator:
         self.loss_pv_weak += float(outputs["loss_pv_weak"].detach().item())
         self.loss_focus_pv += float(outputs["loss_focus_pv"].detach().item())
         self.loss_pt += float(outputs["loss_pt"].detach().item())
+        self.loss_vl_router += float(outputs.get("loss_vl_router", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_vl_heatmap_task += float(outputs.get("loss_vl_heatmap_task", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_vl_heatmap_effector += float(outputs.get("loss_vl_heatmap_effector", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_vl_heatmap_interaction += float(outputs.get("loss_vl_heatmap_interaction", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_vl_point_consistency += float(outputs.get("loss_vl_point_consistency", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_vl_anchor_diversity += float(outputs.get("loss_vl_anchor_diversity", outputs["loss_pt"] * 0.0).detach().item())
         self.physical_aux_budget_scale += float(outputs["physical_aux_budget_scale"].detach().item())
         self.semantic_aux_budget_scale += float(outputs["semantic_aux_budget_scale"].detach().item())
         self.alignment_budget_scale += float(outputs["alignment_budget_scale"].detach().item())
@@ -2595,6 +2613,12 @@ class _MetricAccumulator:
             "loss_pv_weak": self.loss_pv_weak / denom,
             "loss_focus_pv": self.loss_focus_pv / denom,
             "loss_pt": self.loss_pt / denom,
+            "loss_vl_router": self.loss_vl_router / denom,
+            "loss_vl_heatmap_task": self.loss_vl_heatmap_task / denom,
+            "loss_vl_heatmap_effector": self.loss_vl_heatmap_effector / denom,
+            "loss_vl_heatmap_interaction": self.loss_vl_heatmap_interaction / denom,
+            "loss_vl_point_consistency": self.loss_vl_point_consistency / denom,
+            "loss_vl_anchor_diversity": self.loss_vl_anchor_diversity / denom,
             "physical_aux_budget_scale": self.physical_aux_budget_scale / denom,
             "semantic_aux_budget_scale": self.semantic_aux_budget_scale / denom,
             "alignment_budget_scale": self.alignment_budget_scale / denom,
@@ -2673,6 +2697,12 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_pv_weak": losses.pv_weak,
             "loss_focus_pv": losses.focus_pv,
             "loss_pt": losses.pt,
+            "loss_vl_router": losses.vl_router,
+            "loss_vl_heatmap_task": losses.vl_heatmap_task,
+            "loss_vl_heatmap_effector": losses.vl_heatmap_effector,
+            "loss_vl_heatmap_interaction": losses.vl_heatmap_interaction,
+            "loss_vl_point_consistency": losses.vl_point_consistency,
+            "loss_vl_anchor_diversity": losses.vl_anchor_diversity,
             "physical_aux_budget_scale": losses.physical_aux_budget_scale,
             "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
             "alignment_budget_scale": losses.alignment_budget_scale,
@@ -2972,6 +3002,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_pv_weak": losses.pv_weak,
                     "loss_focus_pv": losses.focus_pv,
                     "loss_pt": losses.pt,
+                    "loss_vl_router": losses.vl_router,
+                    "loss_vl_heatmap_task": losses.vl_heatmap_task,
+                    "loss_vl_heatmap_effector": losses.vl_heatmap_effector,
+                    "loss_vl_heatmap_interaction": losses.vl_heatmap_interaction,
+                    "loss_vl_point_consistency": losses.vl_point_consistency,
+                    "loss_vl_anchor_diversity": losses.vl_anchor_diversity,
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3006,6 +3042,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
                 metrics["loss_focus_pv"] = metrics["loss_focus_pv"] + losses.focus_pv
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
+                metrics["loss_vl_router"] = metrics["loss_vl_router"] + losses.vl_router
+                metrics["loss_vl_heatmap_task"] = metrics["loss_vl_heatmap_task"] + losses.vl_heatmap_task
+                metrics["loss_vl_heatmap_effector"] = metrics["loss_vl_heatmap_effector"] + losses.vl_heatmap_effector
+                metrics["loss_vl_heatmap_interaction"] = metrics["loss_vl_heatmap_interaction"] + losses.vl_heatmap_interaction
+                metrics["loss_vl_point_consistency"] = metrics["loss_vl_point_consistency"] + losses.vl_point_consistency
+                metrics["loss_vl_anchor_diversity"] = metrics["loss_vl_anchor_diversity"] + losses.vl_anchor_diversity
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
@@ -3063,6 +3105,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_pv_weak": losses.pv_weak,
                     "loss_focus_pv": losses.focus_pv,
                     "loss_pt": losses.pt,
+                    "loss_vl_router": losses.vl_router,
+                    "loss_vl_heatmap_task": losses.vl_heatmap_task,
+                    "loss_vl_heatmap_effector": losses.vl_heatmap_effector,
+                    "loss_vl_heatmap_interaction": losses.vl_heatmap_interaction,
+                    "loss_vl_point_consistency": losses.vl_point_consistency,
+                    "loss_vl_anchor_diversity": losses.vl_anchor_diversity,
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3094,6 +3142,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
                 metrics["loss_focus_pv"] = metrics["loss_focus_pv"] + losses.focus_pv
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
+                metrics["loss_vl_router"] = metrics["loss_vl_router"] + losses.vl_router
+                metrics["loss_vl_heatmap_task"] = metrics["loss_vl_heatmap_task"] + losses.vl_heatmap_task
+                metrics["loss_vl_heatmap_effector"] = metrics["loss_vl_heatmap_effector"] + losses.vl_heatmap_effector
+                metrics["loss_vl_heatmap_interaction"] = metrics["loss_vl_heatmap_interaction"] + losses.vl_heatmap_interaction
+                metrics["loss_vl_point_consistency"] = metrics["loss_vl_point_consistency"] + losses.vl_point_consistency
+                metrics["loss_vl_anchor_diversity"] = metrics["loss_vl_anchor_diversity"] + losses.vl_anchor_diversity
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
@@ -3129,6 +3183,12 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
             "loss_focus_pv": metrics["loss_focus_pv"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
+            "loss_vl_router": metrics["loss_vl_router"] / denom,
+            "loss_vl_heatmap_task": metrics["loss_vl_heatmap_task"] / denom,
+            "loss_vl_heatmap_effector": metrics["loss_vl_heatmap_effector"] / denom,
+            "loss_vl_heatmap_interaction": metrics["loss_vl_heatmap_interaction"] / denom,
+            "loss_vl_point_consistency": metrics["loss_vl_point_consistency"] / denom,
+            "loss_vl_anchor_diversity": metrics["loss_vl_anchor_diversity"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3167,6 +3227,12 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_pv_weak",
     "loss_focus_pv",
     "loss_pt",
+    "loss_vl_router",
+    "loss_vl_heatmap_task",
+    "loss_vl_heatmap_effector",
+    "loss_vl_heatmap_interaction",
+    "loss_vl_point_consistency",
+    "loss_vl_anchor_diversity",
     "physical_aux_budget_scale",
     "semantic_aux_budget_scale",
     "alignment_budget_scale",
@@ -3993,6 +4059,19 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default("vl_posterior_bind_gate_init", _SPEC_DEFAULTS.vl_posterior_bind_gate_init)
         ),
         vl_prior_bias_clip=float(_arg_or_default("vl_prior_bias_clip", _SPEC_DEFAULTS.vl_prior_bias_clip)),
+        lambda_vl_heatmap_task=float(_arg_or_default("lambda_vl_heatmap_task", _SPEC_DEFAULTS.lambda_vl_heatmap_task)),
+        lambda_vl_heatmap_effector=float(
+            _arg_or_default("lambda_vl_heatmap_effector", _SPEC_DEFAULTS.lambda_vl_heatmap_effector)
+        ),
+        lambda_vl_heatmap_interaction=float(
+            _arg_or_default("lambda_vl_heatmap_interaction", _SPEC_DEFAULTS.lambda_vl_heatmap_interaction)
+        ),
+        lambda_vl_point_consistency=float(
+            _arg_or_default("lambda_vl_point_consistency", _SPEC_DEFAULTS.lambda_vl_point_consistency)
+        ),
+        lambda_vl_anchor_diversity=float(
+            _arg_or_default("lambda_vl_anchor_diversity", _SPEC_DEFAULTS.lambda_vl_anchor_diversity)
+        ),
         visual_real_grid=int(_arg_or_default("visual_real_grid", _SPEC_DEFAULTS.visual_real_grid)),
         action_output_clip=getattr(args, "action_output_clip", None),
         tokenwise_ff_chunk_size=int(_arg_or_default("tokenwise_ff_chunk_size", _SPEC_DEFAULTS.tokenwise_ff_chunk_size)),
@@ -4138,6 +4217,14 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         aux_budget_semantic_ratio=float(getattr(args, "aux_budget_semantic_ratio", 0.10)),
         aux_budget_alignment_ratio=float(getattr(args, "aux_budget_alignment_ratio", 0.05)),
         aux_budget_floor=float(getattr(args, "aux_budget_floor", 0.25)),
+        lambda_vl_heatmap_task=float(getattr(args, "lambda_vl_heatmap_task", 0.0)),
+        lambda_vl_heatmap_effector=float(getattr(args, "lambda_vl_heatmap_effector", 0.0)),
+        lambda_vl_heatmap_interaction=float(getattr(args, "lambda_vl_heatmap_interaction", 0.0)),
+        lambda_vl_point_consistency=float(getattr(args, "lambda_vl_point_consistency", 0.0)),
+        lambda_vl_anchor_diversity=float(getattr(args, "lambda_vl_anchor_diversity", 0.0)),
+        vl_heatmap_sigma_patches=float(getattr(args, "vl_heatmap_sigma_patches", 1.5)),
+        vl_point_consistency_eps=float(getattr(args, "vl_point_consistency_eps", 1e-6)),
+        vl_anchor_diversity_radius_m=float(getattr(args, "vl_anchor_diversity_radius_m", 0.04)),
     )
 
 
@@ -5332,6 +5419,14 @@ def main() -> None:
     parser.add_argument("--lambda-pv-weak", type=float, default=0.02)
     parser.add_argument("--lambda-focus-pv", type=float, default=0.0)
     parser.add_argument("--lambda-pt", type=float, default=1.0)
+    parser.add_argument("--lambda-vl-heatmap-task", type=float, default=_SPEC_DEFAULTS.lambda_vl_heatmap_task)
+    parser.add_argument("--lambda-vl-heatmap-effector", type=float, default=_SPEC_DEFAULTS.lambda_vl_heatmap_effector)
+    parser.add_argument("--lambda-vl-heatmap-interaction", type=float, default=_SPEC_DEFAULTS.lambda_vl_heatmap_interaction)
+    parser.add_argument("--lambda-vl-point-consistency", type=float, default=_SPEC_DEFAULTS.lambda_vl_point_consistency)
+    parser.add_argument("--lambda-vl-anchor-diversity", type=float, default=_SPEC_DEFAULTS.lambda_vl_anchor_diversity)
+    parser.add_argument("--vl-heatmap-sigma-patches", type=float, default=1.5)
+    parser.add_argument("--vl-point-consistency-eps", type=float, default=1e-6)
+    parser.add_argument("--vl-anchor-diversity-radius-m", type=float, default=_SPEC_DEFAULTS.vl_anchor_local_sigma_m)
     parser.add_argument("--enable-aux-budgeting", dest="enable_aux_budgeting", action="store_true")
     parser.add_argument("--disable-aux-budgeting", dest="enable_aux_budgeting", action="store_false")
     parser.add_argument("--aux-budget-physical-ratio", type=float, default=0.20)

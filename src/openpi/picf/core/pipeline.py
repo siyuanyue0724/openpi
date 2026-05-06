@@ -1579,6 +1579,9 @@ class PicfFullCore(nn.Module):
         projectable_mask = None
         if token_field.point_pool_ids is not None and token_field.point_pool_ids.numel() == token_field.point_positions.shape[0]:
             projectable_mask = token_field.point_pool_ids.to(device=self.device) == 1
+        # VL task/interaction lift is allowed to no-op. Do not use the global
+        # fallback here: fallback rows are only for coverage seeding, not for
+        # converting language-conditioned heatmaps into physical support.
         scene_projectable_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=False)
         task_prior, task_valid, task_mass = _point_prior_from_heatmap(
             geometry.projective_compatibility,
@@ -2924,6 +2927,9 @@ class PicfFullCore(nn.Module):
             pool_ids = self._point_pool_ids(token_field)
             seed_parts: list[tuple[slice, torch.Tensor]] = []
             local_indices = torch.nonzero(pool_ids == 0, as_tuple=False).squeeze(-1)
+            # Coverage seeding may fall back to all global rows so every scene
+            # slot has a tensor seed. This is intentionally separate from the
+            # strict no-fallback mask used by VL heatmap lifting above.
             scene_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=True)
             global_indices = torch.nonzero(scene_mask, as_tuple=False).squeeze(-1)
             all_global_indices = torch.nonzero(pool_ids == 1, as_tuple=False).squeeze(-1)
@@ -2966,6 +2972,9 @@ class PicfFullCore(nn.Module):
                     seed_indices[start : start + take] = chosen[:take]
                     queries[0, start : start + take] = token_field.point_tokens[chosen[:take]]
             obs_vl_gate = self._vl_gate(self.vl_obs_anchor_gate_logit, vl_grounding)
+            # Static-camera VL priors are global/scene evidence. Effector
+            # observation anchors keep their local/proprio/tactile seed
+            # contract and never get replaced by a static-camera VL seed.
             scene_vl_slot_valid = vl_slot_valid & (role_ids != 0)
             if bool(scene_vl_slot_valid.any().item()) and bool((obs_vl_gate > 0.0).item()):
                 vl_seed_indices = torch.argmax(vl_slot_priors, dim=-1)
@@ -2986,6 +2995,9 @@ class PicfFullCore(nn.Module):
         attn_public = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
         attn_visual = torch.zeros((n_obs, visual_count), device=self.device, dtype=self.dtype)
         public_role_bias = self._fused_read_role_bias(role_ids, token_field)
+        # Same role boundary for attention bias: role-0 observation anchors may
+        # read local/contact evidence, but they must not be point-biased by a
+        # static-camera global VL prior.
         scene_vl_slot_valid = vl_slot_valid & (role_ids != 0)
         if point_count > 0 and token_field.fused_tokens.shape[0] > 0 and bool(scene_vl_slot_valid.any().item()):
             gate = self._vl_gate(self.vl_obs_anchor_gate_logit, vl_grounding)

@@ -20,8 +20,11 @@ from openpi.picf.core.pipeline import PicfFullCore
 from openpi.picf.core.training import PicfAlignmentLossConfig
 from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.core.training import compute_transition_loss
+from openpi.picf.core.training import PicfTransitionLossConfig
 from openpi.picf.core.training import extract_future_targets
 from openpi.picf.core.training import future_targets_from_current_targets
+from openpi.picf.paligemma.wrapper import PaliGemmaSemanticFeatures
+from openpi.picf.paligemma.wrapper import PaliGemmaViewTransform
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
 from openpi.picf.replay.calvin_replay import CalvinSequentialReplay
 from openpi.picf.test_utils import build_mini_calvin_dataset
@@ -72,7 +75,7 @@ class _StubTactileEncoder:
         )
 
 
-def _make_core(tmp_path: Path) -> tuple[PicfFullCore, CalvinSequentialReplay]:
+def _make_core(tmp_path: Path, *, vl_anchor_router_enabled: bool = False) -> tuple[PicfFullCore, CalvinSequentialReplay]:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
     builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=256)
@@ -97,6 +100,8 @@ def _make_core(tmp_path: Path) -> tuple[PicfFullCore, CalvinSequentialReplay]:
         predictive_semantic_dropout_prob=0.0,
         attention_heads=4,
         query_rounds=2,
+        vl_anchor_router_enabled=vl_anchor_router_enabled,
+        vl_anchor_modes=3,
         device="cpu",
     )
     core = PicfFullCore(
@@ -107,6 +112,34 @@ def _make_core(tmp_path: Path) -> tuple[PicfFullCore, CalvinSequentialReplay]:
         tactile_encoder=_StubTactileEncoder(),
     )
     return core, replay
+
+
+def _semantic_features_for_frame(core: PicfFullCore, observation: PicfObservation) -> PaliGemmaSemanticFeatures:
+    height, width = (int(v) for v in observation.rgb_static.shape[:2])
+    image_tokens = torch.linspace(0.0, 1.0, 4 * core.config.semantic_dim, dtype=torch.float32).reshape(4, core.config.semantic_dim)
+    text_tokens = torch.ones((2, core.config.semantic_dim), dtype=torch.float32)
+    return PaliGemmaSemanticFeatures(
+        tokens=torch.cat([image_tokens, text_tokens], dim=0),
+        summary=torch.cat([text_tokens.mean(dim=0), image_tokens.mean(dim=0)], dim=0),
+        image_tokens=image_tokens,
+        text_tokens=text_tokens,
+        image_token_ranges=((0, 4),),
+        image_grid_shapes=((2, 2),),
+        image_view_names=("static",),
+        image_view_transforms=(
+            PaliGemmaViewTransform(
+                original_hw=(height, width),
+                target_hw=(224, 224),
+                resized_hw=(224, 224),
+                pad_top=0,
+                pad_bottom=0,
+                pad_left=0,
+                pad_right=0,
+                scale_y=224.0 / max(height, 1),
+                scale_x=224.0 / max(width, 1),
+            ),
+        ),
+    )
 
 
 def _point_override(core: PicfFullCore, observation: PicfObservation) -> np.ndarray:
@@ -292,6 +325,40 @@ def test_transition_loss_reports_effective_budgeted_terms_consistently(tmp_path:
     assert torch.isfinite(losses.physical_aux_capped)
     assert torch.isfinite(losses.semantic_group_capped)
     assert torch.isfinite(losses.alignment_raw)
+
+
+def test_transition_loss_can_enable_vl_router_supervision_terms(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path, vl_anchor_router_enabled=True)
+    frames = list(replay)[:2]
+    frames[0].G_t = core.local_frame.make_transform(frames[0].robot_obs)
+    frames[1].G_t = core.local_frame.make_transform(frames[1].robot_obs)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_for_frame(core, frames[0]),
+        action_future=frames[0].action,
+    )
+    assert first.state.vl_grounding is not None
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+        config=PicfTransitionLossConfig(
+            lambda_vl_heatmap_effector=0.1,
+            lambda_vl_heatmap_interaction=0.1,
+            lambda_vl_point_consistency=0.05,
+            lambda_vl_anchor_diversity=0.01,
+        ),
+    )
+    assert torch.isfinite(losses.vl_router)
+    assert torch.isfinite(losses.vl_heatmap_effector)
+    assert torch.isfinite(losses.vl_heatmap_interaction)
+    assert torch.isfinite(losses.vl_point_consistency)
+    assert torch.isfinite(losses.vl_anchor_diversity)
+    assert losses.vl_router.item() >= 0.0
 
 
 def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_unavailable(tmp_path: Path) -> None:

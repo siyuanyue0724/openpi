@@ -56,6 +56,14 @@ class PicfTransitionLossConfig:
     aux_budget_semantic_ratio: float = 0.10
     aux_budget_alignment_ratio: float = 0.05
     aux_budget_floor: float = 0.25
+    lambda_vl_heatmap_task: float = 0.0
+    lambda_vl_heatmap_effector: float = 0.0
+    lambda_vl_heatmap_interaction: float = 0.0
+    lambda_vl_point_consistency: float = 0.0
+    lambda_vl_anchor_diversity: float = 0.0
+    vl_heatmap_sigma_patches: float = 1.5
+    vl_point_consistency_eps: float = 1e-6
+    vl_anchor_diversity_radius_m: float = 0.04
 
 
 @dataclasses.dataclass(frozen=True)
@@ -106,6 +114,12 @@ class PicfTransitionLossBreakdown:
     physical_aux_budget_scale: torch.Tensor
     semantic_aux_budget_scale: torch.Tensor
     alignment_budget_scale: torch.Tensor
+    vl_router: torch.Tensor
+    vl_heatmap_task: torch.Tensor
+    vl_heatmap_effector: torch.Tensor
+    vl_heatmap_interaction: torch.Tensor
+    vl_point_consistency: torch.Tensor
+    vl_anchor_diversity: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -136,6 +150,12 @@ class PicfTransitionLossBreakdown:
             "physical_aux_budget_scale": float(self.physical_aux_budget_scale.item()),
             "semantic_aux_budget_scale": float(self.semantic_aux_budget_scale.item()),
             "alignment_budget_scale": float(self.alignment_budget_scale.item()),
+            "vl_router": float(self.vl_router.item()),
+            "vl_heatmap_task": float(self.vl_heatmap_task.item()),
+            "vl_heatmap_effector": float(self.vl_heatmap_effector.item()),
+            "vl_heatmap_interaction": float(self.vl_heatmap_interaction.item()),
+            "vl_point_consistency": float(self.vl_point_consistency.item()),
+            "vl_anchor_diversity": float(self.vl_anchor_diversity.item()),
         }
 
 
@@ -286,6 +306,12 @@ def make_action_only_transition_loss(
         physical_aux_budget_scale=zero,
         semantic_aux_budget_scale=zero,
         alignment_budget_scale=zero,
+        vl_router=zero,
+        vl_heatmap_task=zero,
+        vl_heatmap_effector=zero,
+        vl_heatmap_interaction=zero,
+        vl_point_consistency=zero,
+        vl_anchor_diversity=zero,
     )
 
 
@@ -420,6 +446,245 @@ def _action_active7_loss(
     action_gripper: torch.Tensor,
 ) -> torch.Tensor:
     return ((3.0 * action_pos) + (3.0 * action_rot) + action_gripper) / 7.0
+
+
+def _world_translation_from_transform(
+    transform: torch.Tensor | np.ndarray | None,
+    *,
+    device: torch.device,
+    dtype: torch.dtype,
+) -> torch.Tensor | None:
+    if transform is None:
+        return None
+    value = torch.as_tensor(transform, device=device, dtype=dtype)
+    if value.shape[-2:] == (4, 4):
+        return value[..., :3, 3].reshape(-1, 3)[0]
+    flat = value.reshape(-1)
+    if flat.numel() < 3:
+        return None
+    return flat[:3]
+
+
+def _visual_gaussian_target_from_world_xyz(
+    core: PicfFullCore,
+    state: PicfCoreState,
+    xyz_world: torch.Tensor | None,
+    *,
+    source_hw: tuple[int, int],
+    sigma_patches: float,
+    reference: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    geometry = state.token_field.projective_geometry
+    if (
+        xyz_world is None
+        or core.camera_model is None
+        or geometry is None
+        or geometry.visual_grid_index.numel() == 0
+    ):
+        return reference.new_zeros((0,)), torch.zeros((), device=reference.device, dtype=torch.bool)
+
+    visual_grid = geometry.visual_grid_index.to(device=reference.device, dtype=reference.dtype)
+    source_h, source_w = int(source_hw[0]), int(source_hw[1])
+    if source_h <= 1 or source_w <= 1:
+        return reference.new_zeros((visual_grid.shape[0],)), torch.zeros((), device=reference.device, dtype=torch.bool)
+
+    C_T_W = torch.as_tensor(core.camera_model.C_T_W, device=reference.device, dtype=reference.dtype)
+    homo = torch.cat([xyz_world.to(device=reference.device, dtype=reference.dtype), reference.new_ones((1,))], dim=0)
+    xyz_cam = (C_T_W @ homo)[:3]
+    z = xyz_cam[2]
+    valid = bool(torch.isfinite(z).item()) and float(z.item()) > float(core.config.z_min_m)
+    if not valid:
+        return reference.new_zeros((visual_grid.shape[0],)), torch.zeros((), device=reference.device, dtype=torch.bool)
+
+    uv_x = (float(core.camera_model.fx) * xyz_cam[0] / torch.clamp(z, min=float(core.config.z_min_m))) + float(core.camera_model.cx)
+    uv_y = (float(core.camera_model.fy) * xyz_cam[1] / torch.clamp(z, min=float(core.config.z_min_m))) + float(core.camera_model.cy)
+    valid = (
+        bool(torch.isfinite(uv_x).item())
+        and bool(torch.isfinite(uv_y).item())
+        and 0.0 <= float(uv_x.item()) <= float(source_w - 1)
+        and 0.0 <= float(uv_y.item()) <= float(source_h - 1)
+    )
+    if not valid:
+        return reference.new_zeros((visual_grid.shape[0],)), torch.zeros((), device=reference.device, dtype=torch.bool)
+
+    grid_w = int(torch.max(visual_grid[:, 0]).item()) + 1
+    grid_h = int(torch.max(visual_grid[:, 1]).item()) + 1
+    center = torch.stack(
+        [
+            uv_x * (float(grid_w - 1) / max(source_w - 1, 1)),
+            uv_y * (float(grid_h - 1) / max(source_h - 1, 1)),
+        ],
+        dim=0,
+    )
+    sigma = max(float(sigma_patches), eps)
+    dist2 = torch.sum((visual_grid - center[None, :]) ** 2, dim=-1)
+    target = torch.exp(-dist2 / (2.0 * sigma * sigma))
+    total = target.sum()
+    if not bool(torch.isfinite(total).item()) or float(total.item()) <= eps:
+        return reference.new_zeros((visual_grid.shape[0],)), torch.zeros((), device=reference.device, dtype=torch.bool)
+    return target / torch.clamp(total, min=eps), torch.ones((), device=reference.device, dtype=torch.bool)
+
+
+def _heatmap_ce_loss(
+    logits: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    valid: torch.Tensor,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    if logits.numel() == 0 or target.numel() == 0 or logits.shape[0] != target.shape[0] or not bool(valid.item()):
+        return _zero_weight_loss(logits, reference)
+    log_probs = torch.log_softmax(logits.reshape(-1).float(), dim=0)
+    target_prob = target.reshape(-1).float().detach()
+    target_prob = target_prob / torch.clamp(target_prob.sum(), min=1e-6)
+    return (-(target_prob * log_probs).sum()).to(device=reference.device, dtype=reference.dtype)
+
+
+def _js_distribution_loss(pred: torch.Tensor, target: torch.Tensor, *, eps: float) -> torch.Tensor:
+    pred = torch.clamp(torch.nan_to_num(pred, nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+    target = torch.clamp(torch.nan_to_num(target, nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+    pred = pred / torch.clamp(pred.sum(dim=-1, keepdim=True), min=eps)
+    target = target / torch.clamp(target.sum(dim=-1, keepdim=True), min=eps)
+    midpoint = 0.5 * (pred + target)
+    kl_pred = torch.sum(pred * (torch.log(torch.clamp(pred, min=eps)) - torch.log(torch.clamp(midpoint, min=eps))), dim=-1)
+    kl_target = torch.sum(target * (torch.log(torch.clamp(target, min=eps)) - torch.log(torch.clamp(midpoint, min=eps))), dim=-1)
+    return 0.5 * (kl_pred + kl_target)
+
+
+def _vl_point_consistency_loss(
+    state: PicfCoreState,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    grounding = state.vl_grounding
+    readout = state.task_readout
+    if (
+        grounding is None
+        or not bool(grounding.valid.item())
+        or readout.point_public_attention is None
+        or readout.point_public_attention.numel() == 0
+        or grounding.task_point_prior.numel() == 0
+    ):
+        preds = () if grounding is None else (grounding.task_point_prior, grounding.interaction_point_prior, grounding.effector_point_prior)
+        return _zero_weight_sum(reference, *preds)
+    local_count = int(readout.point_weights.shape[0])
+    point_count = int(grounding.task_point_prior.shape[0])
+    if local_count == 0 or point_count == 0:
+        return _zero_weight_sum(reference, grounding.task_point_prior, grounding.interaction_point_prior, grounding.effector_point_prior)
+    direct = readout.point_public_attention[:local_count, :point_count]
+    if direct.numel() == 0:
+        return _zero_weight_sum(reference, direct, grounding.task_point_prior)
+    role_ids = (
+        readout.local_role_ids.to(device=direct.device, dtype=torch.long)
+        if readout.local_role_ids is not None and readout.local_role_ids.numel() == local_count
+        else torch.ones((local_count,), device=direct.device, dtype=torch.long)
+    )
+    scene_prior = grounding.task_point_prior.to(device=direct.device, dtype=direct.dtype) + grounding.interaction_point_prior.to(device=direct.device, dtype=direct.dtype)
+    eff_prior = grounding.effector_point_prior.to(device=direct.device, dtype=direct.dtype)
+    targets = torch.where((role_ids == 0)[:, None], eff_prior[None, :], scene_prior[None, :])
+    target_mass = torch.clamp(targets.sum(dim=-1), min=0.0)
+    valid_rows = target_mass > eps
+    if not bool(valid_rows.any().item()):
+        return _zero_weight_sum(reference, direct, targets)
+    losses = _js_distribution_loss(direct[valid_rows].detach(), targets[valid_rows], eps=eps)
+    return losses.mean().to(device=reference.device, dtype=reference.dtype)
+
+
+def _vl_anchor_diversity_loss(
+    state: PicfCoreState,
+    *,
+    reference: torch.Tensor,
+    radius_m: float,
+) -> torch.Tensor:
+    grounding = state.vl_grounding
+    if grounding is None or grounding.anchor_x.numel() == 0 or grounding.anchor_roles.numel() == 0:
+        preds = () if grounding is None else (grounding.anchor_x,)
+        return _zero_weight_sum(reference, *preds)
+    roles = grounding.anchor_roles.to(device=grounding.anchor_x.device, dtype=torch.long)
+    scene_x = grounding.anchor_x[(roles == 1) | (roles == 2)]
+    if scene_x.shape[0] < 2:
+        return _zero_weight_sum(reference, grounding.anchor_x)
+    dists = torch.cdist(scene_x, scene_x)
+    offdiag = ~torch.eye(scene_x.shape[0], device=scene_x.device, dtype=torch.bool)
+    radius = max(float(radius_m), 1e-6)
+    return torch.exp(-dists[offdiag] / radius).mean().to(device=reference.device, dtype=reference.dtype)
+
+
+def _vl_router_loss(
+    core: PicfFullCore,
+    state: PicfCoreState,
+    next_observation: PicfObservation,
+    *,
+    config: PicfTransitionLossConfig,
+    reference: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    grounding = state.vl_grounding
+    zero = _zero_like(reference)
+    if grounding is None:
+        return zero, zero, zero, zero, zero, zero
+
+    source_hw = tuple(int(dim) for dim in np.asarray(next_observation.rgb_static).shape[:2])
+    current_xyz = _world_translation_from_transform(state.G_t, device=reference.device, dtype=reference.dtype)
+    next_transform = next_observation.G_t
+    if next_transform is None and getattr(core, "local_frame", None) is not None:
+        next_transform = core.local_frame.make_transform(next_observation.robot_obs)
+    next_xyz = _world_translation_from_transform(next_transform, device=reference.device, dtype=reference.dtype)
+    eff_target, eff_valid = _visual_gaussian_target_from_world_xyz(
+        core,
+        state,
+        current_xyz,
+        source_hw=source_hw,
+        sigma_patches=float(config.vl_heatmap_sigma_patches),
+        reference=reference,
+        eps=float(config.vl_point_consistency_eps),
+    )
+    int_target, int_valid = _visual_gaussian_target_from_world_xyz(
+        core,
+        state,
+        next_xyz,
+        source_hw=source_hw,
+        sigma_patches=float(config.vl_heatmap_sigma_patches),
+        reference=reference,
+        eps=float(config.vl_point_consistency_eps),
+    )
+    task_loss = _heatmap_ce_loss(
+        grounding.task_heatmap_logits,
+        int_target,
+        valid=int_valid,
+        reference=reference,
+    )
+    eff_loss = _heatmap_ce_loss(
+        grounding.effector_heatmap_logits,
+        eff_target,
+        valid=eff_valid,
+        reference=reference,
+    )
+    int_loss = _heatmap_ce_loss(
+        grounding.interaction_heatmap_logits,
+        int_target,
+        valid=int_valid,
+        reference=reference,
+    )
+    point_loss = _vl_point_consistency_loss(
+        state,
+        reference=reference,
+        eps=max(float(config.vl_point_consistency_eps), 1e-8),
+    )
+    div_loss = _vl_anchor_diversity_loss(
+        state,
+        reference=reference,
+        radius_m=float(config.vl_anchor_diversity_radius_m),
+    )
+    total = (
+        (float(config.lambda_vl_heatmap_task) * task_loss)
+        + (float(config.lambda_vl_heatmap_effector) * eff_loss)
+        + (float(config.lambda_vl_heatmap_interaction) * int_loss)
+        + (float(config.lambda_vl_point_consistency) * point_loss)
+        + (float(config.lambda_vl_anchor_diversity) * div_loss)
+    )
+    return total, task_loss, eff_loss, int_loss, point_loss, div_loss
 
 
 def _routing_responsibilities(mass: torch.Tensor, *, eps: float) -> torch.Tensor:
@@ -904,6 +1169,20 @@ def compute_transition_loss(
         + (cfg.lambda_tactile_real * semantic_tactile_real)
         + (cfg.lambda_point_real * semantic_point_real)
     )
+    (
+        vl_router_raw,
+        vl_heatmap_task,
+        vl_heatmap_effector,
+        vl_heatmap_interaction,
+        vl_point_consistency,
+        vl_anchor_diversity,
+    ) = _vl_router_loss(
+        core,
+        output_t.state,
+        next_observation,
+        config=cfg,
+        reference=predictive.action,
+    )
     physical_aux = (
         (cfg.lambda_visual_latent * visual_latent)
         + (cfg.lambda_visual_real * visual_real)
@@ -911,7 +1190,7 @@ def compute_transition_loss(
         + (cfg.lambda_point_real * point_real)
     )
     semantic_group = cfg.lambda_semantic_future_aux * semantic_future_aux
-    alignment_group = alignment.total
+    alignment_group = alignment.total + vl_router_raw
     physical_aux_capped, physical_scale = _budgeted_group(
         physical_aux,
         action_loss=action_loss,
@@ -969,6 +1248,12 @@ def compute_transition_loss(
         physical_aux_budget_scale=physical_scale,
         semantic_aux_budget_scale=semantic_scale,
         alignment_budget_scale=alignment_scale,
+        vl_router=vl_router_raw,
+        vl_heatmap_task=vl_heatmap_task,
+        vl_heatmap_effector=vl_heatmap_effector,
+        vl_heatmap_interaction=vl_heatmap_interaction,
+        vl_point_consistency=vl_point_consistency,
+        vl_anchor_diversity=vl_anchor_diversity,
     )
 
 

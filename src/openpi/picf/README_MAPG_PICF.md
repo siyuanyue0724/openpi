@@ -6,6 +6,9 @@ construction plan for the next anchor-routing upgrade. It does **not** claim
 that MAPG is fully live in the current code. The current checked-in live
 implementation is the default-off point-centric VL-guided router described in
 [`README_VL_GUIDED_ANCHOR_ROUTER.md`](./README_VL_GUIDED_ANCHOR_ROUTER.md).
+That router now includes default-zero training loss switches for heatmap,
+keypose, point-consistency, and diversity supervision, but it still does not
+construct a graph-level `PicfAnchorPriorGraphState`.
 
 Temporary local audit backing this document:
 
@@ -278,7 +281,19 @@ For anchor `k`, each available modality `m` has a support distribution:
 p_m^k in Delta(|support_m|)
 ```
 
-Compatibility operators map one modality's support to another:
+Compatibility operators map one modality's support to another. Operators use
+the target-by-source convention:
+
+```text
+T_s_to_m has shape [|support_m|, |support_s|]
+p_m_from_s = T_s_to_m @ p_s
+```
+
+Valid columns should conserve source mass over the target support. Invalid
+projection columns are zeroed and masked instead of being mapped to a fake
+top-left, first-point, or uniform support.
+
+Compatibility operators:
 
 ```text
 T_pg_to_v      : PaliGemma padded image grid -> V-JEPA grid
@@ -291,14 +306,35 @@ T_post_to_p    : posterior Gaussian/extent -> point rows
 T_post_to_post : posterior identity prior
 ```
 
-MAPG fuses source priors into each target support:
+MAPG does **not** use an implicit fixed point. Fusion is seed-prior plus a fixed
+number of message-passing rounds. First build source-specific seed evidence:
 
 ```text
-p_m^k = normalize(sum_s alpha_{s->m}^k * T_{s->m}(p_s^k))
+q_pg^k      from PaliGemma language-conditioned heatmaps
+q_v^k       from pg->v, visual saliency, coverage, posterior/tactile projected priors
+q_p^k       from v->p if point support is valid, plus optional direct point candidates
+q_t^k       from tactile contact tokens / contact volume
+q_post^k    from previous posterior identity and role priors
 ```
 
-`alpha` is confidence-gated and role-masked. Missing modalities set
-`alpha=0`.
+Then run finite message passing:
+
+```text
+p_m^{k,0} = normalize(q_m^k)
+
+for r = 1..R:
+  p_m^{k,r} =
+    normalize(
+      lambda_self^m * q_m^k
+      + sum_s alpha_{s->m}^{k,r} * T_s_to_m @ p_s^{k,r-1}
+    )
+
+p_m^k = p_m^{k,R}
+```
+
+`R=1` is the default MVP contract. Larger `R` values are allowed only as an
+explicit fixed-iteration ablation. `alpha` is confidence-gated and role-masked.
+Missing modalities set `alpha=0`.
 
 Each modality produces a pooled embedding:
 
@@ -706,10 +742,11 @@ overwrite current observation evidence.
 
 ### 8.1 Confidence-Gated Mixture
 
-Default fusion is a mixture, not product-of-experts:
+Default fusion is a finite-iteration mixture, not product-of-experts:
 
 ```text
-p_m^k = normalize(sum_s alpha_{s->m}^k * T_{s->m}(p_s^k))
+p_m^{k,r} =
+  normalize(lambda_self^m * q_m^k + sum_s alpha_{s->m}^{k,r} * T_s_to_m @ p_s^{k,r-1})
 ```
 
 Reason:
@@ -722,7 +759,8 @@ Mixture is robust to missing or unreliable modalities.
 PoE is allowed only as an optional high-confidence mode:
 
 ```text
-log p_m^k = sum_s alpha_s * log(T_{s->m}(p_s^k) + eps)
+log p_m^{k,r} =
+  sum_s alpha_s^{k,r} * log(T_s_to_m @ p_s^{k,r-1} + eps)
 ```
 
 ### 8.2 Role-Constrained Candidate Assignment
@@ -1178,9 +1216,9 @@ masked modality prediction under point/tactile dropout.
 Before long training:
 
 ```text
-500-1000 diagnostic steps
+500-1000 diagnostic steps after the MAPG graph state is implemented
 checkpoint interval 250 for diagnostics only
-MAPG enabled but graph losses can start at zero or very small weights
+MAPG explicitly enabled, with graph losses starting at zero or very small weights
 export graph JSONL
 confirm losses finite
 confirm gates finite
