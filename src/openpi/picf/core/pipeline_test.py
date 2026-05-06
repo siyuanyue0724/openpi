@@ -682,6 +682,69 @@ def test_vl_grounding_enabled_builds_state_without_changing_default_anchor_contr
         torch.testing.assert_close(output.state.task_readout.point_weights.sum(dim=-1), expected, atol=1e-5, rtol=1e-5)
 
 
+def test_mapg_enabled_builds_full_anchor_graph_and_live_consumers(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        vl_anchor_router_enabled=True,
+        mapg_enabled=True,
+        mapg_anchor_count=6,
+        mapg_message_rounds=2,
+        mapg_obs_gate_init=20.0,
+        mapg_task_gate_init=20.0,
+        mapg_posterior_gate_init=20.0,
+        mapg_control_gate_init=20.0,
+        tactile_contact_tau_on=0.01,
+        tactile_contact_tau_off=0.005,
+        tactile_anchor_prob_on=0.01,
+    )
+    frames = list(replay)[:2]
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id, contact_shift=12)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, contact_shift=16)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+    second = core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=_visual_override(2.0),
+        semantic_override=_semantic_features_with_spatial(2.0),
+    )
+
+    graph = second.state.anchor_prior_graph
+    assert graph is not None
+    assert bool(graph.valid.item())
+    assert graph.anchor_tokens.shape == (core.config.mapg_anchor_count, core.config.hidden_dim)
+    assert graph.visual_priors.shape == (core.config.mapg_anchor_count, second.state.token_field.visual_tokens.shape[0])
+    assert graph.point_priors is not None
+    assert graph.point_priors.shape == (core.config.mapg_anchor_count, second.state.token_field.point_tokens.shape[0])
+    assert graph.tactile_priors is not None
+    assert graph.tactile_priors.shape[0] == core.config.mapg_anchor_count
+    assert graph.posterior_priors is not None
+    assert graph.posterior_priors.shape == (core.config.mapg_anchor_count, core.config.persistent_anchors)
+    assert graph.obs_slot_assignment is not None
+    assert graph.obs_slot_assignment.shape == (core.config.observation_anchors, core.config.mapg_anchor_count)
+    assert graph.task_assignment is not None
+    assert graph.task_assignment.shape == (core.config.task_local_queries, core.config.mapg_anchor_count)
+    assert second.state.observation_anchors.graph_assignment is not None
+    assert second.state.task_readout.graph_assignment is not None
+    assert second.state.task_readout.graph_visual_weights is not None
+    assert second.state.task_readout.graph_tactile_weights is not None
+    assert second.state.conditioned_control.graph_tokens is not None
+    assert second.state.conditioned_control.graph_tokens.shape == (
+        core.config.mapg_anchor_count,
+        core.config.semantic_dim,
+    )
+    assert second.state.conditioned_control.tokens.shape[0] >= core.config.mapg_anchor_count
+    assert second.debug["mapg_anchor_count"] == float(core.config.mapg_anchor_count)
+    assert second.debug["mapg_point_available"] == 1.0
+    assert second.debug["mapg_tactile_available"] == 1.0
+    assert second.debug["mapg_posterior_available"] == 1.0
+
+
 def test_vl_grounding_enabled_backward_does_not_mutate_query_views(tmp_path: Path) -> None:
     core, replay = _make_core(
         tmp_path,

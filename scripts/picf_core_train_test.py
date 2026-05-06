@@ -103,6 +103,17 @@ def _base_args() -> argparse.Namespace:
         vl_task_point_gate_init=-4.0,
         vl_posterior_bind_gate_init=-6.0,
         vl_prior_bias_clip=4.0,
+        mapg_enabled=False,
+        mapg_anchor_count=8,
+        mapg_message_rounds=1,
+        mapg_visual_sigma_patches=2.0,
+        mapg_tactile_sigma_m=0.08,
+        mapg_posterior_sigma_m=0.08,
+        mapg_obs_gate_init=-4.0,
+        mapg_task_gate_init=-4.0,
+        mapg_posterior_gate_init=-6.0,
+        mapg_control_gate_init=-4.0,
+        mapg_prior_bias_clip=4.0,
         global_scene_point_cap=1024,
         require_pi0_action_generator=True,
         attention_heads=8,
@@ -142,6 +153,14 @@ def _base_args() -> argparse.Namespace:
         vl_heatmap_sigma_patches=1.5,
         vl_point_consistency_eps=1e-6,
         vl_anchor_diversity_radius_m=0.04,
+        lambda_mapg_siglip=0.0,
+        lambda_mapg_vicreg=0.0,
+        lambda_mapg_cycle=0.0,
+        lambda_mapg_masked_modality=0.0,
+        lambda_mapg_routing=0.0,
+        mapg_siglip_tau=0.07,
+        mapg_vicreg_var_target=1.0,
+        mapg_vicreg_cov_weight=0.04,
         tau_pv=0.07,
         tau_pt=0.07,
         tau_route_p=0.1,
@@ -1865,6 +1884,65 @@ def test_build_model_propagates_vl_anchor_router_knobs(tmp_path: Path, monkeypat
     assert core.config.vl_prior_bias_clip == pytest.approx(2.25)
 
 
+def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    root = build_mini_calvin_dataset(tmp_path / "calvin", make_zip=False)
+    monkeypatch.setattr(_MODULE, "PaliGemmaSemanticEncoder", lambda config: torch.nn.Identity())
+    args = _base_args()
+    args.calvin_root = str(root)
+    args.device = "cpu"
+    args.point_backbone = "rgb"
+    args.semantic_mode = "paligemma"
+    args.semantic_source = "hf"
+    args.semantic_model_name = "stub-paligemma"
+    args.semantic_checkpoint_path = None
+    args.vl_anchor_router_enabled = True
+    args.mapg_enabled = True
+    args.mapg_anchor_count = 11
+    args.mapg_message_rounds = 2
+    args.mapg_visual_sigma_patches = 1.75
+    args.mapg_tactile_sigma_m = 0.12
+    args.mapg_posterior_sigma_m = 0.11
+    args.mapg_obs_gate_init = -3.1
+    args.mapg_task_gate_init = -3.2
+    args.mapg_posterior_gate_init = -5.1
+    args.mapg_control_gate_init = -3.3
+    args.mapg_prior_bias_clip = 3.5
+    args.lambda_mapg_siglip = 0.01
+    args.lambda_mapg_vicreg = 0.02
+    args.lambda_mapg_cycle = 0.03
+    args.lambda_mapg_masked_modality = 0.04
+    args.lambda_mapg_routing = 0.05
+    args.mapg_siglip_tau = 0.09
+    args.mapg_vicreg_var_target = 0.8
+    args.mapg_vicreg_cov_weight = 0.06
+    _MODULE._normalize_train_args(args)
+
+    core, semantic_encoder, use_visual_override = _MODULE._build_model(args, device=torch.device("cpu"))
+    loss_config = _MODULE._build_loss_config(args)
+
+    assert semantic_encoder is not None
+    assert use_visual_override is True
+    assert core.config.mapg_enabled is True
+    assert core.config.mapg_anchor_count == 11
+    assert core.config.mapg_message_rounds == 2
+    assert core.config.mapg_visual_sigma_patches == pytest.approx(1.75)
+    assert core.config.mapg_tactile_sigma_m == pytest.approx(0.12)
+    assert core.config.mapg_posterior_sigma_m == pytest.approx(0.11)
+    assert core.config.mapg_obs_gate_init == pytest.approx(-3.1)
+    assert core.config.mapg_task_gate_init == pytest.approx(-3.2)
+    assert core.config.mapg_posterior_gate_init == pytest.approx(-5.1)
+    assert core.config.mapg_control_gate_init == pytest.approx(-3.3)
+    assert core.config.mapg_prior_bias_clip == pytest.approx(3.5)
+    assert loss_config.lambda_mapg_siglip == pytest.approx(0.01)
+    assert loss_config.lambda_mapg_vicreg == pytest.approx(0.02)
+    assert loss_config.lambda_mapg_cycle == pytest.approx(0.03)
+    assert loss_config.lambda_mapg_masked_modality == pytest.approx(0.04)
+    assert loss_config.lambda_mapg_routing == pytest.approx(0.05)
+    assert loss_config.mapg_siglip_tau == pytest.approx(0.09)
+    assert loss_config.mapg_vicreg_var_target == pytest.approx(0.8)
+    assert loss_config.mapg_vicreg_cov_weight == pytest.approx(0.06)
+
+
 def test_validate_train_args_rejects_vl_router_without_paligemma() -> None:
     args = _base_args()
     args.semantic_mode = "zero"
@@ -2031,6 +2109,12 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
         "loss_pv_weak": torch.tensor(0.07),
         "loss_focus_pv": torch.tensor(0.08),
         "loss_pt": torch.tensor(0.09),
+        "loss_mapg_graph": torch.tensor(0.021),
+        "loss_mapg_siglip": torch.tensor(0.022),
+        "loss_mapg_vicreg": torch.tensor(0.023),
+        "loss_mapg_cycle": torch.tensor(0.024),
+        "loss_mapg_masked_modality": torch.tensor(0.025),
+        "loss_mapg_routing": torch.tensor(0.026),
         "physical_aux_budget_scale": torch.tensor(0.8),
         "semantic_aux_budget_scale": torch.tensor(0.7),
         "alignment_budget_scale": torch.tensor(0.6),
@@ -2050,6 +2134,7 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
     assert averages["loss_semantic_group_capped"] == pytest.approx(0.02)
     assert averages["loss_physical_aux_capped"] == pytest.approx(0.03)
     assert averages["loss_total_minus_action"] == pytest.approx(0.8)
+    assert averages["loss_mapg_graph"] == pytest.approx(0.021)
     assert averages["physical_aux_budget_scale"] == pytest.approx(0.8)
     assert averages["tactile_contact_prob_mean"] == pytest.approx(0.12)
 
@@ -2112,6 +2197,12 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
         vl_heatmap_interaction=torch.tensor(0.0),
         vl_point_consistency=torch.tensor(0.0),
         vl_anchor_diversity=torch.tensor(0.0),
+        mapg_graph=torch.tensor(0.0),
+        mapg_siglip=torch.tensor(0.0),
+        mapg_vicreg=torch.tensor(0.0),
+        mapg_cycle=torch.tensor(0.0),
+        mapg_masked_modality=torch.tensor(0.0),
+        mapg_routing=torch.tensor(0.0),
         physical_aux_budget_scale=torch.tensor(1.0),
         semantic_aux_budget_scale=torch.tensor(1.0),
         alignment_budget_scale=torch.tensor(1.0),
@@ -2228,6 +2319,12 @@ def test_picf_window_trainer_reuses_middle_frame_targets_with_detached_override(
         vl_heatmap_interaction=torch.tensor(0.0),
         vl_point_consistency=torch.tensor(0.0),
         vl_anchor_diversity=torch.tensor(0.0),
+        mapg_graph=torch.tensor(0.0),
+        mapg_siglip=torch.tensor(0.0),
+        mapg_vicreg=torch.tensor(0.0),
+        mapg_cycle=torch.tensor(0.0),
+        mapg_masked_modality=torch.tensor(0.0),
+        mapg_routing=torch.tensor(0.0),
         physical_aux_budget_scale=torch.tensor(1.0),
         semantic_aux_budget_scale=torch.tensor(1.0),
         alignment_budget_scale=torch.tensor(1.0),
@@ -2359,6 +2456,12 @@ def test_picf_window_trainer_state_only_burnin_skips_policy_flow_until_suffix() 
         vl_heatmap_interaction=torch.tensor(0.0),
         vl_point_consistency=torch.tensor(0.0),
         vl_anchor_diversity=torch.tensor(0.0),
+        mapg_graph=torch.tensor(0.0),
+        mapg_siglip=torch.tensor(0.0),
+        mapg_vicreg=torch.tensor(0.0),
+        mapg_cycle=torch.tensor(0.0),
+        mapg_masked_modality=torch.tensor(0.0),
+        mapg_routing=torch.tensor(0.0),
         physical_aux_budget_scale=torch.tensor(1.0),
         semantic_aux_budget_scale=torch.tensor(1.0),
         alignment_budget_scale=torch.tensor(1.0),

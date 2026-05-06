@@ -1,88 +1,147 @@
 # MAPG-PICF: Modality-Optional Anchor Prior Graph
 
-Date: 2026-05-05
-Status: architecture and implementation contract. This document is a detailed
-construction plan for the next anchor-routing upgrade. It does **not** claim
-that MAPG is fully live in the current code. The current checked-in live
-implementation is the default-off point-centric VL-guided router described in
-[`README_VL_GUIDED_ANCHOR_ROUTER.md`](./README_VL_GUIDED_ANCHOR_ROUTER.md).
-That router now includes default-zero training loss switches for heatmap,
-keypose, point-consistency, and diversity supervision, but it still does not
-construct a graph-level `PicfAnchorPriorGraphState`.
+Date: 2026-05-06
+Repo: `/home/siyuanyue/Documents/openpi`
+Status: **live implementation record for the MAPG-enabled PICF path**
 
-Temporary local audit backing this document:
+This README is the implementation and math contract for the full MAPG-PICF
+deployment. It supersedes the earlier design-only MAPG wording. The
+point-centric VL router remains available as a lower-level compatibility
+substrate, but the complete graph-level path is now represented by
+`PicfAnchorPriorGraphState` and is connected to:
 
-```text
-/tmp/picf_mapg_picf_code_math_audit_20260505.md
+- PaliGemma spatial grounding tokens / heatmaps.
+- V-JEPA visual support priors.
+- Sonata / point-token support priors when pointcloud is valid.
+- AnyTouch / tactile support priors when tactile evidence is valid.
+- posterior temporal support priors when previous posterior anchors exist.
+- observation anchors.
+- task readout.
+- posterior binding.
+- conditioned-control / PI0.5 action prefix.
+- MAPG graph self-supervision losses.
+
+The runtime switch is:
+
+```bash
+--mapg-enabled
 ```
 
-## 0. Executive Contract
+The graph is intentionally still gated and masked. “Full MAPG” here means the
+complete dataflow and losses exist and are wired into the live model; it does
+not mean every noisy or missing modality is forced to contribute on every
+sample. Missing/invalid modalities are explicit no-ops.
 
-MAPG-PICF upgrades the previous router:
+## 1. Design Contract
+
+The old point-centric route was:
 
 ```text
 PaliGemma heatmap -> point prior -> anchors
 ```
 
-into a modality-optional anchor graph:
+MAPG changes the center of the architecture:
 
 ```text
 PaliGemma / V-JEPA / Sonata / AnyTouch / posterior
--> modality-native priors
--> shared anchor prior graph
+-> modality-native seed priors
+-> finite-round shared anchor prior graph
 -> PICF observation anchors / task readout / posterior binding
 -> PI0.5 action prefix
 ```
 
-The core architectural change is:
-
-```text
-point cloud is no longer the only anchor center.
-V-JEPA visual support becomes a first-class anchor support.
-Point, tactile, PaliGemma, and posterior supports are optional experts.
-```
-
-This is necessary because the long-term data contract should support:
-
-- RGB-only or weak-pointcloud datasets.
-- noisy or missing depth / point cloud.
-- dense V-JEPA 2.1 visual substrate as the always-available support.
-- tactile contact as a broad probabilistic contact volume, not a single point.
-- posterior anchors as temporal physical memory.
-- instance-aware cross-modal alignment without merging visually similar objects.
-
-The resulting anchor object is:
+Each anchor is a latent support, not just a 3D point:
 
 ```text
 anchor k =
   visual support over V-JEPA tokens
-+ optional PaliGemma language-conditioned image support
++ optional PaliGemma image-token support
 + optional point/Sonata support
-+ optional tactile/AnyTouch contact support
++ optional tactile/AnyTouch support
 + optional posterior temporal support
 + role, confidence, and geometry metadata
 ```
 
-## 1. Current Code Facts
+This is the required architecture for datasets where:
 
-This section records what the current branch already provides and what MAPG
-still requires.
+- RGB is available but pointcloud may be missing.
+- pointcloud quality varies or is noisy.
+- tactile evidence is sparse and should be a probabilistic contact volume.
+- posterior anchors carry temporal identity.
+- similar objects must remain separate anchor instances.
 
-### 1.1 PaliGemma Spatial Tokens Already Exist
+## 2. Live Code Surface
 
-`src/openpi/picf/paligemma/wrapper.py` currently exposes enough information for
-a PaliGemma grounding branch:
+### 2.1 Config
+
+`src/openpi/picf/core/config.py` defines:
 
 ```python
-PaliGemmaSemanticFeatures.image_tokens
-PaliGemmaSemanticFeatures.text_tokens
-PaliGemmaSemanticFeatures.image_token_ranges
-PaliGemmaSemanticFeatures.image_grid_shapes
-PaliGemmaSemanticFeatures.image_view_names
-PaliGemmaSemanticFeatures.image_view_transforms
+mapg_enabled: bool = False
+mapg_anchor_count: int = 8
+mapg_message_rounds: int = 1
+mapg_visual_sigma_patches: float = 2.0
+mapg_tactile_sigma_m: float = 0.08
+mapg_posterior_sigma_m: float = 0.08
+mapg_obs_gate_init: float = -4.0
+mapg_task_gate_init: float = -4.0
+mapg_posterior_gate_init: float = -6.0
+mapg_control_gate_init: float = -4.0
+mapg_prior_bias_clip: float = 4.0
 ```
 
-`PaliGemmaViewTransform` records `resize_with_pad` geometry:
+The default is off for backward compatibility. A MAPG run must explicitly pass
+`--mapg-enabled`.
+
+### 2.2 State Object
+
+`src/openpi/picf/core/contracts.py` defines:
+
+```python
+PicfAnchorPriorGraphState(
+    pg_priors,          # [K, V_pg] or None
+    visual_priors,      # [K, V]
+    point_priors,       # [K, P] or None
+    tactile_priors,     # [K, T] or None
+    posterior_priors,   # [K, A] or None
+    anchor_tokens,      # [K, H]
+    anchor_roles,       # [K]
+    anchor_scores,      # [K]
+    anchor_confidence,  # [K]
+    anchor_x,           # [K, 3] or None
+    anchor_S,           # [K, 3, 3] or None
+    geometry_valid,     # [K]
+    obs_slot_assignment,# [N_obs, K] or None
+    task_assignment,    # [N_task, K] or None
+    modality_confidence,# [K, 5]
+    valid,              # scalar bool tensor
+)
+```
+
+`PicfCoreState` now contains:
+
+```python
+anchor_prior_graph: PicfAnchorPriorGraphState | None
+```
+
+Observation anchors, task readout, and conditioned control expose their graph
+assignments / graph tokens so tests and diagnostics can verify live
+consumption.
+
+### 2.3 PaliGemma Spatial Metadata
+
+`src/openpi/picf/paligemma/wrapper.py` exposes:
+
+```python
+image_tokens
+text_tokens
+image_token_ranges
+image_grid_shapes
+image_view_names
+image_view_transforms
+```
+
+`PaliGemmaViewTransform` records the exact `resize_with_pad` mapping:
 
 ```python
 original_hw
@@ -92,1185 +151,563 @@ pad_top / pad_bottom / pad_left / pad_right
 scale_y / scale_x
 ```
 
-This is a hard requirement. Any PaliGemma heatmap or image-token support must be
-mapped through this transform before it is compared with V-JEPA grid cells,
-camera pixels, or point projections.
+All PaliGemma-grid heatmaps must pass through this transform before they are
+mapped to the V-JEPA visual grid or point projection support. A naive resize is
+not part of the contract.
 
-Do not use naive `F.interpolate(pg_heatmap, visual_hw)` as the canonical
-mapping. It ignores padding and can create top-left / center artifacts.
-The current point-centric VL-router substrate already implements the
-transform-aware mapping path; MAPG must preserve that contract when it upgrades
-from point priors to graph-level visual-native supports.
+## 3. Mathematical Contract
 
-### 1.2 Existing VL Router Is Point-Centric
-
-`PicfVLGroundingState` currently represents:
+Let modality support spaces be:
 
 ```text
-PaliGemma heatmaps
--> point priors through projective geometry
--> point-anchor proposals
+pg   PaliGemma image-token grid
+v    V-JEPA visual grid
+p    point/Sonata token rows
+t    tactile/AnyTouch active token rows
+post posterior anchor rows
 ```
 
-This is useful, but it is not MAPG. It still treats point support as the final
-carrier. MAPG keeps this as one expert path, not the entire graph.
-
-### 1.3 Token Field Already Has Alignment Substrate
-
-`PicfTokenFieldState` currently includes:
-
-```python
-point_tokens
-visual_tokens
-tactile_tokens
-fused_tokens
-point_align_embeddings
-visual_align_embeddings
-tactile_align_embeddings
-projective_geometry
-point_pool_ids
-tactile_positions_world
-tactile_contact_logits
-```
-
-This is the right substrate for a shared anchor graph. The missing fields are:
-
-```python
-visual_hw
-point_positions_model_frame
-point_positions_world
-point_projectable_mask
-modality_available
-```
-
-The point-position split is not optional for MAPG. The current code mixes local
-effector point rows and global scene point rows in the point field. Camera
-projection must only use world-projectable rows.
-
-### 1.4 V-JEPA Visual Tokens Are Already Separate
-
-`_build_public_read_memory(...)` exposes:
+For anchor `k`, MAPG maintains distributions:
 
 ```text
-public_read_memory = [fused_tokens, visual_tokens]
+p_pg^k   in Delta(V_pg)
+p_v^k    in Delta(V)
+p_p^k    in Delta(P)
+p_t^k    in Delta(T)
+p_post^k in Delta(A)
 ```
 
-where `fused_tokens` contain point/tactile/context tokens and `visual_tokens`
-remain a separate dense visual memory. Current task readout can attend to
-visual memory, but its final task geometry still comes from point attention.
+Not every distribution exists on every step. Missing pointcloud, no active
+tactile contact, invalid projection, or missing posterior history are explicit
+`None` / zero-confidence paths.
 
-MAPG changes this:
+### 3.1 No Implicit Fixed Point
+
+MAPG does **not** define:
 
 ```text
-task anchor supports are visual-native first.
-point geometry is added when valid.
+p_m^k = normalize(sum_s alpha_s->m T_s->m p_s^k)
 ```
 
-### 1.5 Posterior Binding Is Already Soft-Bias Compatible
-
-`_posterior_update(...)` already uses:
-
-```text
-hidden similarity
-+ geometry distance
-+ role bias
-+ Sinkhorn dustbin
-+ optional VL soft binding bias
-```
-
-This is compatible with MAPG, with one strict rule:
+as an implicit cyclic equation. The live implementation uses seed priors plus
+fixed finite message passing:
 
 ```text
-MAPG may bias posterior binding.
-MAPG must not directly overwrite posterior x/S/a/h/c/mu/Sigma.
-```
-
-## 2. Design Influences
-
-MAPG follows principles from recent VLA and self-supervised representation work:
-
-- BridgeVLA: VLM predicts language-conditioned 2D heatmaps; heatmaps are lifted
-  into 3D instead of injecting raw 3D tokens into the VLM backbone.
-  <https://arxiv.org/abs/2506.07961>
-- FALCON: spatial priors are consumed on the action/control side, preserving
-  the pretrained VLM semantic backbone.
-  <https://arxiv.org/abs/2510.17439>
-- Spatial Forcing: explicit point/depth can be noisy or unavailable; RGB
-  representations can be aligned to spatial representations without requiring
-  explicit 3D at inference.
-  <https://arxiv.org/abs/2510.12276>
-- V-JEPA 2.1: dense visual features are a strong spatial-temporal substrate.
-  <https://arxiv.org/abs/2603.14482>
-- GeoVLA / PointVLA-style systems: 3D point features are valuable action-side
-  experts, not something to force through the VLM backbone.
-  <https://arxiv.org/abs/2508.09071>
-- AnyTouch: tactile representation should use masked modeling and multimodal
-  alignment, not brittle one-point correspondence.
-  <https://arxiv.org/abs/2502.12191>
-- Sonata: point SSL can suffer geometric shortcuts; MAPG must avoid relying on
-  coordinate similarity alone.
-  <https://arxiv.org/abs/2503.16429>
-- VICReg and SigLIP: use mature anti-collapse and pairwise matching losses for
-  anchor-level cross-modal alignment.
-  <https://arxiv.org/abs/2105.04906>
-  <https://arxiv.org/abs/2303.15343>
-
-The implementation must borrow principles, not blindly copy mechanisms.
-
-## 3. Non-Negotiable Invariants
-
-MAPG is only acceptable if these invariants stay true.
-
-```text
-1. Default-off exact no-op:
-   mapg_anchor_graph_enabled=False must preserve current PICF behavior.
-
-2. PI0.5 action path remains final:
-   conditioned_control.pi_prefix_tokens still feed the PI0.5 action path.
-
-3. PaliGemma is not a raw 3D/tactile backbone:
-   no raw point, tactile, posterior, or anchor tokens are inserted into
-   PaliGemma as normal VLM prefix tokens.
-
-4. V-JEPA visual support is primary:
-   every anchor can exist with visual support only.
-
-5. Point support is optional:
-   point cloud improves grounding when valid, but missing/noisy point cloud
-   must not collapse the graph.
-
-6. Tactile support is probabilistic:
-   tactile contact is a broad contact-volume prior, not a hard 3D point.
-
-7. Posterior remains physical memory:
-   graph priors bias binding and rereads; they do not hard-write posterior
-   state.
-
-8. Role constraints are enforced:
-   effector/contact priors cannot consume all task/object slots.
-
-9. Projection validity is explicit:
-   invalid or invisible projection returns invalid/zero support, not fake
-   top-left or first-point support.
-
-10. Same-anchor positives, different-anchor negatives:
-    visually similar objects must not be collapsed into one anchor.
-```
-
-## 4. Mathematical Contract
-
-Let the modality set be:
-
-```text
-M = {pg, v, p, t, post}
-```
-
-where:
-
-```text
-pg   = PaliGemma padded image grid
-v    = V-JEPA dense visual grid
-p    = Sonata / point token support
-t    = AnyTouch tactile token support
-post = PICF posterior anchor support
-```
-
-For anchor `k`, each available modality `m` has a support distribution:
-
-```text
-p_m^k in Delta(|support_m|)
-```
-
-Compatibility operators map one modality's support to another. Operators use
-the target-by-source convention:
-
-```text
-T_s_to_m has shape [|support_m|, |support_s|]
-p_m_from_s = T_s_to_m @ p_s
-```
-
-Valid columns should conserve source mass over the target support. Invalid
-projection columns are zeroed and masked instead of being mapped to a fake
-top-left, first-point, or uniform support.
-
-Compatibility operators:
-
-```text
-T_pg_to_v      : PaliGemma padded image grid -> V-JEPA grid
-T_v_to_p       : V-JEPA grid -> world-projectable point rows
-T_p_to_v       : point rows -> V-JEPA grid
-T_t_to_v       : tactile contact volume -> V-JEPA grid
-T_t_to_p       : tactile contact volume -> point rows
-T_post_to_v    : posterior Gaussian/extent -> V-JEPA grid
-T_post_to_p    : posterior Gaussian/extent -> point rows
-T_post_to_post : posterior identity prior
-```
-
-MAPG does **not** use an implicit fixed point. Fusion is seed-prior plus a fixed
-number of message-passing rounds. First build source-specific seed evidence:
-
-```text
-q_pg^k      from PaliGemma language-conditioned heatmaps
-q_v^k       from pg->v, visual saliency, coverage, posterior/tactile projected priors
-q_p^k       from v->p if point support is valid, plus optional direct point candidates
-q_t^k       from tactile contact tokens / contact volume
-q_post^k    from previous posterior identity and role priors
-```
-
-Then run finite message passing:
-
-```text
+q_m^k = source-specific seed prior
 p_m^{k,0} = normalize(q_m^k)
 
 for r = 1..R:
-  p_m^{k,r} =
-    normalize(
-      lambda_self^m * q_m^k
-      + sum_s alpha_{s->m}^{k,r} * T_s_to_m @ p_s^{k,r-1}
-    )
+  p_v^{k,r} =
+    normalize(q_v^k
+      + T_p->v p_p^{k,r-1}
+      + T_t->v p_t^{k,r-1}
+      + T_post->v p_post^{k,r-1})
+
+  p_p^{k,r} =
+    normalize(q_p^k
+      + T_v->p p_v^{k,r-1}
+      + T_t->p p_t^{k,r-1}
+      + T_post->p p_post^{k,r-1})
+
+  p_t^{k,r}    = normalize(q_t^k)
+  p_post^{k,r} = normalize(q_post^k)
 
 p_m^k = p_m^{k,R}
 ```
 
-`R=1` is the default MVP contract. Larger `R` values are allowed only as an
-explicit fixed-iteration ablation. `alpha` is confidence-gated and role-masked.
-Missing modalities set `alpha=0`.
+`R` is `mapg_message_rounds`. The deployment supports `R >= 1`; current test
+coverage includes `R=2`.
 
-Each modality produces a pooled embedding:
+### 3.2 Compatibility Operator Direction
 
-```text
-e_m^k = normalize(MLP_m(sum_i p_m^k[i] * token_m[i]))
-```
-
-The graph anchor token is:
+Every operator has shape:
 
 ```text
-z_k = sum_m beta_m^k * e_m^k
-    + role_embedding(role_k)
-    + confidence_embedding(conf_k)
-    + geometry_embedding(x_k, S_k) if geometry_valid_k
+T_s->m: [|Omega_m|, |Omega_s|]
 ```
 
-`beta` is also confidence-gated. If point geometry is invalid, the geometry
-embedding is replaced by an invalid-geometry embedding rather than fake `x/S`.
+and is column-normalized over the target support when valid:
 
-## 5. Proposed State Objects
+```text
+sum_i T_s->m[i, j] = 1
+```
 
-### 5.1 `PicfAnchorPriorGraphState`
+So:
 
-Add this to `src/openpi/picf/core/contracts.py`:
+```text
+p_m = T_s->m p_s
+```
+
+The code implements this orientation with row-major tensors. For example:
 
 ```python
-@dataclasses.dataclass
-class PicfAnchorPriorGraphState:
-    # Modality-native supports. Shapes use K graph anchors.
-    pg_priors: torch.Tensor | None        # [K, V_pg]
-    visual_priors: torch.Tensor | None    # [K, V]
-    point_priors: torch.Tensor | None     # [K, P]
-    tactile_priors: torch.Tensor | None   # [K, T]
-    posterior_priors: torch.Tensor | None # [K, A]
-
-    # Graph anchor tokens and metadata.
-    anchor_tokens: torch.Tensor           # [K, H]
-    anchor_roles: torch.Tensor            # [K]
-    anchor_scores: torch.Tensor           # [K]
-    anchor_confidence: torch.Tensor       # [K]
-
-    # Geometry is optional.
-    anchor_x: torch.Tensor | None         # [K, 3]
-    anchor_S: torch.Tensor | None         # [K, 3, 3]
-    geometry_valid: torch.Tensor          # [K]
-
-    # Slot/query assignment.
-    obs_slot_assignment: torch.Tensor | None # [N_obs, K]
-    task_assignment: torch.Tensor | None     # [N_task, K]
-
-    # Diagnostics.
-    modality_confidence: dict[str, torch.Tensor]
-    valid: torch.Tensor                   # [K]
+# visual_priors: [K, V]
+# compat_col: [P, V]
+point_priors = visual_priors @ compat_col.T  # [K, P]
 ```
 
-Do not overload `PicfVLGroundingState` into this object. Keep the existing VL
-router state as the point-centric stage and add MAPG as a graph-level state.
+### 3.3 Visual-to-Point Projection
 
-### 5.2 Token Field Extensions
-
-Extend `PicfTokenFieldState`:
-
-```python
-visual_hw: tuple[int, int] | None
-point_positions_model_frame: torch.Tensor | None # [P, 3]
-point_positions_world: torch.Tensor | None       # [P, 3]
-point_projectable_mask: torch.Tensor | None      # [P]
-modality_available: dict[str, bool]
-```
-
-Required invariant:
+Visual support is lifted to point support only when projective geometry is
+valid:
 
 ```text
-camera projection uses point_positions_world and point_projectable_mask.
-PICF local geometry may still use point_positions_model_frame.
+C[p, v] >= 0
+C_col[p, v] = C[p, v] / clamp(sum_p C[p, v], eps)
+p_p^k = normalize(sum_v C_col[p, v] p_v^k[v])
 ```
 
-### 5.3 Task Readout Extensions
+Important invariants:
 
-Extend `PicfTaskReadoutState`:
+- `point_positions_world` is used for camera projection and geometry moments.
+- local/model-frame `point_positions` are not used as camera coordinates.
+- `point_projectable_mask` is strict scene/global visibility support.
+- strict masks are used for lift; fallback global masks are coverage-only.
+- invalid visible mass produces a no-op, not a fake uniform point prior.
 
-```python
-visual_weights: torch.Tensor | None       # [Q, V]
-tactile_weights: torch.Tensor | None      # [Q, T]
-anchor_assignment: torch.Tensor | None    # [Q, K]
-anchor_tokens: torch.Tensor | None        # [Q, H]
-geometry_valid: torch.Tensor | None       # [Q]
-```
+### 3.4 Roles
 
-Point-derived `x/S/a` remain valid only when `geometry_valid=True`.
-
-## 6. Build-Time Dataflow
-
-### 6.1 High-Level `observe_step` Order
-
-Current simplified order:
+Anchor roles are:
 
 ```text
-semantic
-token_field
-observation_anchors
-posterior
-task_readout
-conditioned_control
+0 effector/contact
+1 task/object
+2 interaction/affordance
+3 coverage/context
 ```
 
-MAPG order:
+Role-constrained assignment maps anchors into observation and task slots:
 
 ```text
-semantic
-token_field
-anchor_prior_graph
-observation_anchors(anchor_prior_graph)
-posterior(observation_anchors, anchor_prior_graph)
-task_readout(anchor_prior_graph)
-conditioned_control(task_readout, posterior, anchor_prior_graph)
-PI0.5 action path
+A_obs  in R^{N_obs x K}
+A_task in R^{N_task x K}
 ```
 
-Pseudocode:
+Effector slots are not allowed to be overwritten by static-camera VL global
+seeds. Scene/task/interaction slots receive scene-compatible graph priors.
 
-```python
-semantic = self._semantic_context(...)
-token_field, dense_memory = self._build_token_field(...)
+### 3.5 Posterior Safety
 
-anchor_graph = self._build_anchor_prior_graph(
-    observation=observation,
-    semantic=semantic,
-    token_field=token_field,
-    previous=previous,
-)
-
-observation_anchors = self._build_observation_anchors(
-    token_field,
-    dense_memory,
-    anchor_graph=anchor_graph,
-)
-
-posterior = self._posterior_update(
-    previous,
-    observation,
-    observation_anchors,
-    dense_memory,
-    anchor_graph=anchor_graph,
-)
-
-task_readout = self._build_task_readout(
-    token_field,
-    dense_memory,
-    semantic,
-    proprio_token,
-    anchor_graph=anchor_graph,
-)
-
-conditioned_control = self._build_conditioned_control_state(
-    posterior=posterior,
-    task_readout=task_readout,
-    anchor_graph=anchor_graph,
-)
-```
-
-### 6.2 `_build_anchor_prior_graph(...)`
-
-Pseudocode:
-
-```python
-def _build_anchor_prior_graph(
-    self,
-    observation,
-    semantic,
-    token_field,
-    previous,
-) -> PicfAnchorPriorGraphState | None:
-    if not self.config.mapg_anchor_graph_enabled:
-        return None
-
-    pg = self._build_paligemma_priors(semantic)
-    visual = self._build_visual_native_priors(pg, semantic, token_field)
-    point = self._build_optional_point_priors(visual, token_field)
-    tactile = self._build_optional_tactile_priors(observation, token_field)
-    post = self._build_optional_posterior_priors(previous, token_field)
-
-    candidates = self._build_graph_candidates(
-        pg_priors=pg,
-        visual_priors=visual,
-        point_priors=point,
-        tactile_priors=tactile,
-        posterior_priors=post,
-    )
-
-    assignments = self._role_constrained_anchor_sinkhorn(candidates)
-
-    anchors = self._pool_anchor_modalities(candidates, assignments, token_field)
-
-    return PicfAnchorPriorGraphState(...)
-```
-
-## 7. Modality Priors
-
-### 7.1 PaliGemma Priors
-
-Inputs:
+MAPG may bias posterior binding:
 
 ```text
-image_tokens over PaliGemma padded grid
-text_tokens
-view_transforms
+binding_logits += gate * graph_binding_bias
 ```
 
-Outputs:
+MAPG never directly overwrites:
 
 ```text
-role-conditioned heatmaps:
-  H_task
-  H_effector
-  H_interaction
+posterior x/S/a/h/c/mu/Sigma
 ```
 
-Pseudocode:
+Posterior remains the physical memory; MAPG supplies a temporal/semantic
+binding prior.
 
-```python
-def _build_paligemma_priors(self, semantic):
-    if semantic.image_tokens is None:
-        return None
+## 4. Live Dataflow
 
-    static_tokens = select_view(semantic, "static")
-    text_summary = semantic.text_tokens.mean(dim=0)
-
-    logits = self.mapg_pg_heatmap_head(static_tokens, text_summary)
-    h_task = softmax(logits[:, ROLE_TASK] / temperature)
-    h_eff = softmax(logits[:, ROLE_EFFECTOR] / temperature)
-    h_int = softmax(logits[:, ROLE_INTERACTION] / temperature)
-
-    return pg_priors_by_role
-```
-
-Rules:
-
-- Keep PaliGemma input distribution intact.
-- Do not inject point/tactile/posterior tokens into PaliGemma.
-- Use view-transform metadata for any coordinate compatibility.
-
-### 7.2 PaliGemma Grid To V-JEPA Grid
-
-Build `T_pg_to_v` with geometry:
+`PicfFullCore.observe_step(...)` executes:
 
 ```text
-PaliGemma padded token center
--> inverse resize-with-pad
--> original static camera pixel
--> V-JEPA visual grid cell
+RGB/depth/tactile/proprio/instruction
+-> runtime meta
+-> point feature extraction when valid
+-> V-JEPA visual map
+-> AnyTouch tactile bundle
+-> PaliGemma semantic/spatial context
+-> PicfTokenFieldState
+-> PicfVLGroundingState
+-> PicfAnchorPriorGraphState
+-> observation anchors consume graph
+-> posterior update consumes graph binding bias
+-> task readout consumes graph supports
+-> conditioned control consumes graph tokens
+-> PI0.5 flow-matching action path
 ```
 
-Pseudocode:
+### 4.1 Observation Anchors
 
-```python
-def _build_pg_to_visual_compatibility(view_transform, pg_hw, visual_hw):
-    pg_centers = grid_centers(pg_hw)
-    original_uv = inverse_resize_with_pad(pg_centers, view_transform)
-    visual_xy = pixel_to_visual_grid(original_uv, visual_hw)
-    return gaussian_grid_compatibility(pg_centers, visual_xy)
-```
-
-Then:
-
-```python
-p_v_from_pg = normalize(T_pg_to_v.T @ p_pg)
-```
-
-This path works without point cloud.
-
-### 7.3 V-JEPA Visual Native Support
-
-Every graph anchor should have:
+Observation anchors use MAPG through:
 
 ```text
-p_v^k over V-JEPA visual tokens
-z_v^k = pool(visual_tokens, p_v^k)
+query blend:
+  q_obs += gate * A_obs graph_tokens
+
+point attention bias:
+  logits_point += gate * centered_log(A_obs point_priors)
+
+visual attention bias:
+  logits_visual += gate * centered_log(A_obs visual_priors)
 ```
 
-If PaliGemma grounding is unavailable, visual supports can still be proposed
-from:
+The point-centric VL router can still contribute point priors when enabled, but
+MAPG supplies the graph-level multimodal prior.
 
-- direct visual saliency heads
-- posterior projection
-- tactile contact projection
-- coverage anchors over the visual grid
+### 4.2 Task Readout
 
-### 7.4 Optional Point / Sonata Support
-
-Only use point support when:
+Task readout uses MAPG through:
 
 ```text
-point_positions_world is available
-point_projectable_mask has valid rows
-projective compatibility has visible mass
+local task tokens += gate * A_task graph_tokens
+point weights = normalize((1-g) direct + g * A_task point_priors)
+graph_visual_weights = A_task visual_priors
+graph_tactile_weights = A_task tactile_priors
 ```
 
-Use column-normalized compatibility:
+If point support is unavailable, the graph still retains visual support and
+graph tokens. Geometry moments are only valid when point support exists.
 
-```python
-C = projective_compatibility * point_projectable_mask[:, None]
-C_col = C / clamp(C.sum(dim=0, keepdim=True), eps)
-p_p_from_v = normalize(C_col @ p_v)
-```
+### 4.3 Conditioned Control and PI0.5
 
-This prevents point-dense regions from winning only because they contain more
-rows.
-
-Point pooling:
-
-```python
-z_p^k = pool(point_tokens, p_p^k)
-```
-
-Point geometry:
-
-```python
-x_k = sum_p p_p^k[p] * point_positions_world[p]
-S_k = weighted_cov(point_positions_world, p_p^k, x_k)
-```
-
-If visible mass is below threshold:
+Conditioned control receives graph tokens:
 
 ```text
-point support invalid
-geometry_valid=False
+graph_control_tokens = gate * mapg_to_control_proj(anchor_tokens)
+control_prefix = [posterior, global_post, innovation, proprio, task, graph, queries]
+control_world(control_prefix)
+pi_prefix_reader(control_tokens)
+PI0.5 action flow matching
 ```
 
-No fake point fallback is allowed.
+The PI0.5 action generator remains the final action path. MAPG adds action-side
+context; it does not replace PI0.5.
 
-### 7.5 Optional Tactile / AnyTouch Support
+## 5. Training Objective
 
-Tactile contact is not a point. It is a contact volume.
-
-Inputs:
+The total loss remains:
 
 ```text
-tactile tokens
-tactile contact logits/probabilities
-wrist pose or tactile sensor pose
-tactile positions/normals if available
+L = L_action + L_existing_PICF + L_VL_router + L_MAPG
 ```
 
-Construct a probabilistic contact volume:
+MAPG terms are implemented in `src/openpi/picf/core/training.py`:
 
 ```text
-center = wrist_position + d * wrist_forward
-covariance = anisotropic ellipsoid
-confidence = contact_probability * tactile_feature_confidence
+loss_mapg_graph
+loss_mapg_siglip
+loss_mapg_vicreg
+loss_mapg_cycle
+loss_mapg_masked_modality
+loss_mapg_routing
 ```
 
-Then project it into supports:
-
-```text
-p_t^k over tactile tokens
-p_v_from_t^k over visual grid
-p_p_from_t^k over point rows
-```
-
-Pseudocode:
-
-```python
-def _build_tactile_contact_volume_prior(observation, token_field):
-    contact = sigmoid(token_field.tactile_contact_logits)
-    if contact.max() < min_contact_confidence:
-        return invalid
-
-    volume = build_ellipsoid_from_wrist_or_sensor_pose(...)
-    p_t = normalize(contact * tactile_role_scores)
-    p_v = project_volume_to_visual_grid(volume)
-    p_p = evaluate_volume_density(point_positions_world)
-    return tactile_priors
-```
-
-### 7.6 Optional Posterior Support
-
-Previous posterior anchors produce temporal priors:
-
-```text
-p_post over previous anchors
-p_v_from_post through camera projection
-p_p_from_post through Mahalanobis kernels over point positions
-```
-
-Pseudocode:
-
-```python
-def _build_posterior_prior(previous, token_field):
-    if previous is None:
-        return invalid
-    for anchor in previous.posterior:
-        if anchor.alpha < threshold:
-            continue
-        p_post = identity_or_role_prior(anchor)
-        p_v = project_gaussian_to_visual(anchor.x, anchor.S)
-        p_p = mahalanobis_kernel(point_positions_world, anchor.x, anchor.S)
-    return posterior_priors
-```
-
-Posterior priors preserve identity and handle temporary occlusion, but do not
-overwrite current observation evidence.
-
-## 8. Shared Graph Fusion
-
-### 8.1 Confidence-Gated Mixture
-
-Default fusion is a finite-iteration mixture, not product-of-experts:
-
-```text
-p_m^{k,r} =
-  normalize(lambda_self^m * q_m^k + sum_s alpha_{s->m}^{k,r} * T_s_to_m @ p_s^{k,r-1})
-```
-
-Reason:
-
-```text
-PoE can over-sharpen and collapse under noisy point/depth/tactile calibration.
-Mixture is robust to missing or unreliable modalities.
-```
-
-PoE is allowed only as an optional high-confidence mode:
-
-```text
-log p_m^{k,r} =
-  sum_s alpha_s^{k,r} * log(T_s_to_m @ p_s^{k,r-1} + eps)
-```
-
-### 8.2 Role-Constrained Candidate Assignment
-
-Each candidate has:
-
-```text
-role
-modality supports
-score
-confidence
-geometry validity
-```
-
-Observation/task slots also have roles:
-
-```text
-effector/contact
-task/object
-interaction/affordance
-posterior-memory
-coverage/background
-```
-
-Use entropic Sinkhorn with role masks:
-
-```python
-cost[j, c] =
-    - role_match(slot_role[j], candidate_role[c])
-    - visual_score[j, c]
-    - point_score[j, c] if point_valid
-    - tactile_score[j, c] if tactile_valid
-    - posterior_score[j, c] if posterior_valid
-    + overlap_penalty[j, c]
-
-cost[role_incompatible] = large_positive
-assignment = sinkhorn(-cost / temperature)
-```
-
-This matches the existing PICF use of Sinkhorn-style posterior binding and
-avoids brittle index-based proposal assignment.
-
-## 9. PICF Consumers
-
-### 9.1 Observation Anchors
-
-Observation anchors receive graph priors as query additions and attention
-biases:
-
-```python
-queries_j += gate_query * graph_anchor_token_j
-
-point_logits_j += gate_p * clipped_centered_log(p_point_j)
-visual_logits_j += gate_v * clipped_centered_log(p_visual_j)
-tactile_logits_j += gate_t * clipped_centered_log(p_tactile_j)
-```
-
-Rules:
-
-- Apply role masks before adding priors.
-- Missing modality bias is zero.
-- Clamp and center log priors before adding to logits.
-- Keep current observation-anchor reader path intact when graph disabled.
-
-### 9.2 Task Readout
-
-Task readout should become visual-native first:
-
-```python
-direct_visual = task_visual_attention
-graph_visual = assigned_graph_visual_prior
-p_v_task = normalize((1 - g_v) * direct_visual + g_v * graph_visual)
-
-task_token = local_task_token + MLP(pool(visual_tokens, p_v_task))
-```
-
-If point support is valid:
-
-```python
-p_p_task = normalize((1 - g_p) * direct_point + g_p * graph_point)
-x, S, a = moments(point_positions_world, p_p_task)
-task_token += MLP(pool(point_tokens, p_p_task))
-task_token += geometry_pe(x, S, a)
-```
-
-If tactile support is valid:
-
-```python
-task_token += MLP(pool(tactile_tokens, p_t_task))
-```
-
-If point support is invalid, task readout remains valid through visual support.
-
-### 9.3 Posterior Binding
-
-Add graph priors as soft binding bias only:
-
-```python
-binding_logits += gate_sem * semantic_anchor_score
-binding_logits += gate_vis * visual_support_overlap
-binding_logits += gate_point * point_support_overlap
-binding_logits += gate_post * posterior_identity_prior
-```
-
-Forbidden:
-
-```text
-graph.x -> posterior.x direct assignment
-graph.token -> posterior.hidden direct assignment
-graph.heatmap -> posterior binding hard assignment
-```
-
-### 9.4 Conditioned Control And PI0.5 Prefix
-
-Conditioned control may consume graph anchor tokens:
-
-```python
-control_context = [
-    posterior tokens,
-    task readout tokens,
-    graph anchor tokens,
-    proprio/innovation tokens,
-]
-```
-
-The final action path stays:
-
-```text
-conditioned_control.pi_prefix_tokens
--> extra_prefix_tokens
--> PI0.5 action flow matching / sampling
-```
-
-## 10. Training Losses
-
-The graph training objective should be one coherent objective, not a pile of
-temporary patch losses:
-
-```text
-L_total =
-  L_action
-+ L_existing_PICF
-+ lambda_graph * L_MAPG
-```
-
-where:
-
-```text
-L_MAPG =
-  L_anchor_siglip_or_infonce
-+ L_anchor_vicreg
-+ L_distribution_cycle
-+ L_masked_modality_prediction
-+ L_role_routing_consistency
-+ optional L_pose_or_object_heatmap
-```
-
-All terms use modality availability masks, confidence masks, and role masks.
-
-### 10.1 Anchor-Level SigLIP / InfoNCE
-
-For each anchor `k` and modality `m`:
-
-```python
-e_m_k = normalize(MLP_m(pool(tokens_m, p_m_k)))
-```
-
-Positive pairs:
-
-```text
-same anchor, different modalities
-```
-
-Hard negatives:
-
-```text
-different anchors in the same frame, including visually similar objects
-```
-
-SigLIP-style pairwise loss:
-
-```text
-L_pos = -log sigmoid(dot(e_m^k, e_n^k) / tau)
-L_neg = -log sigmoid(-dot(e_m^k, e_n^j) / tau), j != k
-```
-
-This is modality-optional and works with variable positive/negative sets.
-
-### 10.2 VICReg Anti-Collapse
-
-For embeddings from each available modality:
-
-```text
-L_var: each dimension std must stay above threshold
-L_cov: off-diagonal covariance should be small
-L_inv: same-anchor cross-modal embeddings should be close
-```
-
-This is the mature replacement for ad-hoc anchor repulsion.
-
-### 10.3 Cycle Consistency
-
-When compatibility maps are valid:
-
-```text
-p_v -> T_v_to_p -> p_p -> T_p_to_v -> p_v_cycle
-L_cycle = JS(stopgrad(p_v), p_v_cycle)
-```
-
-Other valid cycles:
-
-```text
-visual <-> tactile
-visual <-> posterior
-point <-> tactile
-point <-> posterior
-```
-
-Do not apply cycle loss to invalid projections.
-
-### 10.4 Masked Modality Prediction
-
-Randomly mask one modality support and predict its pooled embedding from the
-remaining graph:
-
-```text
-mask point -> predict e_point from visual/tactile/posterior
-mask tactile -> predict e_tactile from visual/point/posterior
-mask visual -> predict e_visual from point/tactile/posterior
-```
-
-Loss:
-
-```text
-1 - cosine(predicted_e_m, stopgrad(e_m))
-```
-
-This makes MAPG robust to missing pointcloud or tactile streams.
-
-### 10.5 Optional Heatmap Supervision
-
-Use only when the target is valid.
-
-Safe targets:
-
-```text
-current gripper projection -> effector heatmap
-future keypose / gripper open-close projection -> interaction heatmap
-true object mask/bbox/label -> task heatmap
-```
-
-Do not pretend a future gripper keypose is object segmentation. If true object
-labels are absent, keep `task_heatmap` unsupervised or weakly supervised only.
-
-## 11. Implementation Milestones
-
-### M0: Documentation And Audit
-
-Deliver:
-
-- this README
-- `/tmp/picf_mapg_picf_code_math_audit_20260505.md`
-- navigation from `README_v2.2.md` and `src/openpi/picf/README.md`
-
-No runtime behavior change.
-
-### M1: State Contracts And Default-Off Config
-
-Add:
-
-```python
-mapg_anchor_graph_enabled: bool = False
-mapg_num_graph_anchors: int = 8
-mapg_visual_primary: bool = True
-mapg_use_point_support: bool = True
-mapg_use_tactile_support: bool = True
-mapg_use_posterior_support: bool = True
-mapg_role_sinkhorn_iters: int = 4
-mapg_log_prior_bias_clip: float = 4.0
-mapg_min_visible_mass: float = 1e-4
-```
-
-Add dataclasses but do not consume them yet.
-
-Required tests:
-
-```text
-config parse
-model construction with enabled/disabled MAPG
-default-off parameter absence or no-op
-```
-
-### M2: Visual-Native Graph
-
-Implement:
-
-```text
-PaliGemma pg priors
-T_pg_to_v with resize-with-pad metadata
-visual-native anchor priors over V-JEPA tokens
-visual coverage fallback
-```
-
-No pointcloud dependency.
-
-### M3: Optional Point Support
-
-Implement:
-
-```text
-point_positions_model_frame
-point_positions_world
-point_projectable_mask
-T_v_to_p and T_p_to_v
-column-normalized compatibility
-visible-mass checks
-```
-
-No fake fallback.
-
-### M4: Tactile Contact-Volume Support
-
-Implement:
-
-```text
-tactile contact volume
-T_t_to_v
-T_t_to_p
-tactile confidence gating
-```
-
-### M5: Posterior Temporal Support
-
-Implement:
-
-```text
-T_post_to_v
-T_post_to_p
-posterior identity prior
-posterior support confidence
-```
-
-### M6: Role-Constrained Assignment
-
-Implement:
-
-```text
-candidate roles
-slot roles
-role masks
-Sinkhorn candidate-to-slot assignment
-coverage/background slots
-```
-
-### M7: Default-Off Consumers
-
-Wire graph into:
-
-```text
-observation anchors
-task readout
-posterior binding
-conditioned control
-```
-
-All gates default no-op.
-
-### M8: Graph Losses
-
-Add zero-default losses:
-
-```text
-anchor SigLIP / InfoNCE
-VICReg
-cycle consistency
-masked modality prediction
-role routing consistency
-optional heatmap loss
-```
-
-### M9: Diagnostics
-
-Export:
-
-```text
-per-anchor visual priors
-per-anchor point priors
-per-anchor tactile priors
-assignment matrices
-support entropy
-top-k support modes
-geometry validity
-covariance ellipses when geometry valid
-role confusion metrics
-```
-
-CALVIN diagnostic videos should include separate products:
-
-```text
-points-only overlay
-heatmap-only overlay
-covariance/ellipse overlay
-raw JSONL
-```
-
-## 12. Verification Plan
-
-### 12.1 Local Static And Unit Checks
-
-Before any cloud run:
+CLI knobs:
 
 ```bash
-cd /home/siyuanyue/Documents/openpi
+--lambda-mapg-siglip
+--lambda-mapg-vicreg
+--lambda-mapg-cycle
+--lambda-mapg-masked-modality
+--lambda-mapg-routing
+--mapg-siglip-tau
+--mapg-vicreg-var-target
+--mapg-vicreg-cov-weight
+```
 
+All MAPG losses are availability/confidence-gated by the presence of graph
+supports:
+
+- no point support -> no point cycle/alignment contribution.
+- no active tactile support -> no tactile positive pair.
+- invalid projection -> no visual-point cycle.
+- no previous posterior -> no posterior pair.
+
+This is not a reduced implementation. It is the mathematically correct
+masked-objective behavior for modality-optional data.
+
+### 5.1 SigLIP-Style Anchor Matching
+
+Same-anchor cross-modal embeddings are positives:
+
+```text
+(graph_k, visual_k)
+(graph_k, point_k)
+(graph_k, tactile_k)
+(graph_k, posterior_k)
+```
+
+Different anchors in the same frame are negatives even when they are visually
+or semantically similar. This prevents instance merging.
+
+### 5.2 VICReg Anti-Collapse
+
+`loss_mapg_vicreg` keeps anchor-token dimensions active and decorrelated. It is
+applied over graph anchor tokens.
+
+### 5.3 Cycle Consistency
+
+When visual-point projection exists:
+
+```text
+p_v -> T_v->p -> p_p -> T_p->v -> p_v_cycle
+JS(p_v, p_v_cycle)
+```
+
+This catches transpose mistakes, mass leakage, and projection collapse.
+
+### 5.4 Masked Modality Prediction
+
+Graph embeddings predict available modality embeddings through cosine
+agreement:
+
+```text
+graph -> visual
+graph -> point
+graph -> tactile
+graph -> posterior
+```
+
+Each path is masked when the target modality is unavailable.
+
+### 5.5 Routing Regularization
+
+Observation and task assignment matrices are regularized to avoid both
+over-uniform routing and single-anchor collapse:
+
+```text
+entropy(A_slot)
++ JS(anchor_coverage, uniform_anchor_coverage)
+```
+
+## 6. CLI
+
+Core MAPG switches:
+
+```bash
+--mapg-enabled
+--mapg-anchor-count 8
+--mapg-message-rounds 2
+--mapg-visual-sigma-patches 2.0
+--mapg-tactile-sigma-m 0.08
+--mapg-posterior-sigma-m 0.08
+--mapg-obs-gate-init -4.0
+--mapg-task-gate-init -4.0
+--mapg-posterior-gate-init -6.0
+--mapg-control-gate-init -4.0
+--mapg-prior-bias-clip 4.0
+```
+
+Graph losses:
+
+```bash
+--lambda-mapg-siglip 0.005
+--lambda-mapg-vicreg 0.001
+--lambda-mapg-cycle 0.002
+--lambda-mapg-masked-modality 0.002
+--lambda-mapg-routing 0.001
+```
+
+VL heatmap/keypose supervision remains live and should be used with MAPG:
+
+```bash
+--vl-anchor-router-enabled
+--lambda-vl-heatmap-effector 0.01
+--lambda-vl-heatmap-interaction 0.01
+--lambda-vl-point-consistency 0.002
+--lambda-vl-anchor-diversity 0.001
+```
+
+`--lambda-vl-heatmap-task` should remain `0.0` unless real object/bbox/mask
+grounding labels exist. A keypose proxy is not an object segmentation label.
+
+## 7. Canonical MAPG 2x40GB Launch
+
+Use this profile for the current cloud MAPG long run:
+
+```bash
+RUN=picf_v22_mapg_semtrain_tactenc_strict2x40_unroll2_30000_ckpt5000_YYYYMMDD_rN
+export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export PYTHONPATH=/path/to/openpi:${PYTHONPATH}
+
+torchrun --standalone --nproc_per_node=2 scripts/picf_core_train.py \
+  --calvin-root /mnt/calvin/task_ABC_D \
+  --output-dir /mnt/checkpoints/picf_core/picf_core \
+  --exp-name ${RUN} \
+  --num-train-steps 30000 \
+  --save-interval 5000 \
+  --log-interval 100 \
+  --diagnostic-interval 500 \
+  --training-strategy fsdp_full_shard \
+  --optimizer-sharding none \
+  --optimizer-checkpoint-mode auto \
+  --accum-steps 1 \
+  --unroll-steps 2 \
+  --action-horizon 16 \
+  --use-foundation-backbones \
+  --perception-finetune-mode frozen \
+  --point-backbone sonata \
+  --visual-mode encoder \
+  --visual-feature-mode hierarchical \
+  --tactile-mode encoder \
+  --semantic-mode paligemma \
+  --semantic-trainable \
+  --semantic-gradient-checkpointing \
+  --semantic-use-gripper \
+  --vl-anchor-router-enabled \
+  --lambda-vl-heatmap-task 0.0 \
+  --lambda-vl-heatmap-effector 0.01 \
+  --lambda-vl-heatmap-interaction 0.01 \
+  --lambda-vl-point-consistency 0.002 \
+  --lambda-vl-anchor-diversity 0.001 \
+  --mapg-enabled \
+  --mapg-anchor-count 8 \
+  --mapg-message-rounds 2 \
+  --lambda-mapg-siglip 0.005 \
+  --lambda-mapg-vicreg 0.001 \
+  --lambda-mapg-cycle 0.002 \
+  --lambda-mapg-masked-modality 0.002 \
+  --lambda-mapg-routing 0.001
+```
+
+Expected startup log contracts:
+
+```text
+Training config: world_size=2 ... num_steps=30000 save_interval=5000 unroll_steps=2
+VL-guided anchor router contract: enabled=True ...
+MAPG anchor prior graph contract: enabled=True anchors=8 message_rounds=2 ...
+Backbone contract: point=sonata(trainable=False) visual=encoder(... trainable=False) tactile=encoder(trainable=False) semantic=paligemma(trainable=True)
+```
+
+Frozen perception means the pretrained Sonata, V-JEPA, and AnyTouch encoder
+weights are frozen. PICF adapters, graph projections, graph gates, action-side
+heads, posterior/task/control/world modules, VL heads, and trainable PaliGemma
+semantic path remain trainable according to the CLI flags.
+
+## 8. Diagnostics
+
+`PicfCoreOutput.debug` emits:
+
+```text
+mapg_valid
+mapg_anchor_count
+mapg_visual_support_mean
+mapg_point_available
+mapg_tactile_available
+mapg_posterior_available
+```
+
+Training logs emit:
+
+```text
+loss_mapg_graph
+loss_mapg_siglip
+loss_mapg_vicreg
+loss_mapg_cycle
+loss_mapg_masked_modality
+loss_mapg_routing
+```
+
+Healthy first checks:
+
+- `mapg_valid == 1.0` when visual tokens exist.
+- `mapg_visual_support_mean` near `1.0` because each visual support row is a
+  normalized distribution.
+- `mapg_point_available == 1.0` when projective point support exists.
+- `mapg_tactile_available == 1.0` only when active tactile tokens exist.
+- `mapg_posterior_available == 1.0` after the first recurrent step.
+- no NaN/Inf in MAPG losses.
+- observation/task graph assignments have correct shape.
+- PI0.5 flow loss still logs through the standard action terms.
+
+## 9. Verification Commands
+
+Compile:
+
+```bash
 uv run python -m py_compile \
-  src/openpi/picf/paligemma/wrapper.py \
-  src/openpi/picf/core/config.py \
-  src/openpi/picf/core/contracts.py \
   src/openpi/picf/core/pipeline.py \
   src/openpi/picf/core/training.py \
-  scripts/picf_core_train.py
+  scripts/picf_core_train.py \
+  src/openpi/picf/core/contracts.py \
+  src/openpi/picf/core/config.py
+```
 
-uv run pytest -q src/openpi/picf/paligemma/wrapper_test.py
-uv run pytest -q src/openpi/picf/core/pipeline_test.py -k 'vl_ or mapg'
-uv run pytest -q src/openpi/picf/core/training_test.py -k 'alignment or mapg'
-uv run pytest -q scripts/picf_core_train_test.py -k 'vl_anchor_router or mapg'
+Core tests:
+
+```bash
+uv run pytest -q \
+  src/openpi/picf/core/pipeline_test.py \
+  src/openpi/picf/core/training_test.py \
+  scripts/picf_core_train_test.py
+```
+
+Targeted MAPG tests:
+
+```bash
+uv run pytest -q \
+  src/openpi/picf/core/pipeline_test.py::test_mapg_enabled_builds_full_anchor_graph_and_live_consumers \
+  src/openpi/picf/core/training_test.py::test_transition_loss_can_enable_mapg_graph_terms \
+  scripts/picf_core_train_test.py::test_build_model_and_loss_config_propagate_mapg_knobs
+```
+
+Contract / diff hygiene:
+
+```bash
 uv run python scripts/verify_picf_contract.py
 git diff --check
 ```
 
-### 12.2 Required New Tests
-
-Add tests for:
+The current local MAPG patch was verified with:
 
 ```text
-PaliGemma padded grid -> original pixel -> V-JEPA grid compatibility.
-RGB-only graph construction.
-pointcloud-missing graph construction.
-pointcloud-invalid visible-mass no-op.
-local-frame point rows excluded from projection.
-column-normalized visual-to-point mass conservation.
-role masks preventing effector prior from occupying all scene slots.
-default-off exact no-op.
-posterior not hard-overwritten.
-VICReg loss finite and non-negative.
-SigLIP/InfoNCE loss with missing modalities.
-cycle loss disabled under invalid compatibility.
-masked modality prediction under point/tactile dropout.
+203 passed, 26 warnings
 ```
 
-### 12.3 Cloud Diagnostic Run
+The warnings are existing PyTorch/FSDP/deprecation warnings in the test
+environment, not MAPG contract failures.
 
-Before long training:
+## 10. Implementation Files
+
+Main code:
+
+- `src/openpi/picf/core/contracts.py`
+- `src/openpi/picf/core/config.py`
+- `src/openpi/picf/core/pipeline.py`
+- `src/openpi/picf/core/training.py`
+- `scripts/picf_core_train.py`
+- `src/openpi/picf/paligemma/wrapper.py`
+
+Tests:
+
+- `src/openpi/picf/core/pipeline_test.py`
+- `src/openpi/picf/core/training_test.py`
+- `scripts/picf_core_train_test.py`
+
+Docs:
+
+- `src/openpi/picf/README_MAPG_PICF.md`
+- `src/openpi/picf/README_v2.2.md`
+- `src/openpi/picf/README.md`
+- `src/openpi/picf/README_VL_GUIDED_ANCHOR_ROUTER.md`
+
+## 11. Non-Negotiable Invariants
+
+- PaliGemma does not ingest raw point, tactile, or posterior tokens.
+- V-JEPA visual support is first-class and exists even when pointcloud is weak.
+- point support is optional and must use world-frame projection.
+- tactile support is probabilistic and contact-gated.
+- posterior support is temporal prior, not hard memory overwrite.
+- compatibility matrices use explicit orientation and normalization.
+- invalid projection is a no-op.
+- role-0 effector anchors keep local/proprio/tactile seed semantics.
+- graph priors enter PICF through gated soft bias / token context.
+- PI0.5 flow-matching remains the final action training path.
+
+## 12. Relationship To The VL Router
+
+`README_VL_GUIDED_ANCHOR_ROUTER.md` now describes the lower-level
+PaliGemma-guided point-centric substrate:
 
 ```text
-500-1000 diagnostic steps after the MAPG graph state is implemented
-checkpoint interval 250 for diagnostics only
-MAPG explicitly enabled, with graph losses starting at zero or very small weights
-export graph JSONL
-confirm losses finite
-confirm gates finite
-confirm visual-native anchors exist when pointcloud invalid
-confirm point support invalid does not destroy task readout
+PaliGemma heatmap -> strict projective point prior -> role-aware soft bias
 ```
 
-Long-run profile should be separate from diagnostics.
-
-## 13. What Not To Do
-
-Do not:
+MAPG consumes and generalizes that substrate:
 
 ```text
-inject point/tactile/posterior tokens into PaliGemma backbone
-replace posterior state with PaliGemma/V-JEPA predictions
-make pointcloud required for anchor existence
-use direct PaliGemma-to-point resize without view-transform metadata
-use local-frame point rows for camera projection
-let gripper/contact priors fill every task/object slot
-use object-looking keypose supervision as if it were object segmentation
-use only coordinate-distance repulsion as anti-collapse training
-enable graph losses by default before no-op and invalid-projection tests pass
+PaliGemma heatmap -> visual/PaliGemma seed support
+visual/point/tactile/posterior supports -> graph
+graph -> observation/task/posterior/control
 ```
 
-## 14. Current Verdict
-
-MAPG is compatible with the current PICF codebase because the repo already has:
-
-```text
-PaliGemma spatial token metadata
-V-JEPA visual tokens
-Sonata point tokens
-AnyTouch tactile tokens
-posterior anchors
-projective geometry
-role-aware observation anchors
-soft posterior binding bias substrate
-```
-
-But MAPG should be implemented as a graph-level state and loss family, not as a
-larger version of the current point-centric VL router.
-
-The correct interpretation is:
-
-```text
-README_VL_GUIDED_ANCHOR_ROUTER.md
-  = current point-centric, default-off router substrate.
-
-README_MAPG_PICF.md
-  = next full architecture contract for modality-optional anchor graph routing.
-```
-
-No long-run training should claim to use MAPG until the milestones above are
-implemented, tested, and explicitly enabled in the training command.
+Do not describe the live MAPG path as “only point-centric”. The point-centric
+router is one expert branch inside the graph-level architecture.

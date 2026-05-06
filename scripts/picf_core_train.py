@@ -976,6 +976,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.use_tactile = False
         args.use_scene_obs = False
         args.vl_anchor_router_enabled = False
+        args.mapg_enabled = False
         args.require_pi0_action_generator = True
     if getattr(args, "grad_clip_percentile", None) is None:
         args.grad_clip_percentile = 75.0
@@ -1031,6 +1032,28 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.vl_posterior_bind_gate_init = float(_SPEC_DEFAULTS.vl_posterior_bind_gate_init)
     if getattr(args, "vl_prior_bias_clip", None) is None:
         args.vl_prior_bias_clip = float(_SPEC_DEFAULTS.vl_prior_bias_clip)
+    if getattr(args, "mapg_enabled", None) is None:
+        args.mapg_enabled = bool(_SPEC_DEFAULTS.mapg_enabled)
+    if getattr(args, "mapg_anchor_count", None) is None:
+        args.mapg_anchor_count = int(_SPEC_DEFAULTS.mapg_anchor_count)
+    if getattr(args, "mapg_message_rounds", None) is None:
+        args.mapg_message_rounds = int(_SPEC_DEFAULTS.mapg_message_rounds)
+    if getattr(args, "mapg_visual_sigma_patches", None) is None:
+        args.mapg_visual_sigma_patches = float(_SPEC_DEFAULTS.mapg_visual_sigma_patches)
+    if getattr(args, "mapg_tactile_sigma_m", None) is None:
+        args.mapg_tactile_sigma_m = float(_SPEC_DEFAULTS.mapg_tactile_sigma_m)
+    if getattr(args, "mapg_posterior_sigma_m", None) is None:
+        args.mapg_posterior_sigma_m = float(_SPEC_DEFAULTS.mapg_posterior_sigma_m)
+    if getattr(args, "mapg_obs_gate_init", None) is None:
+        args.mapg_obs_gate_init = float(_SPEC_DEFAULTS.mapg_obs_gate_init)
+    if getattr(args, "mapg_task_gate_init", None) is None:
+        args.mapg_task_gate_init = float(_SPEC_DEFAULTS.mapg_task_gate_init)
+    if getattr(args, "mapg_posterior_gate_init", None) is None:
+        args.mapg_posterior_gate_init = float(_SPEC_DEFAULTS.mapg_posterior_gate_init)
+    if getattr(args, "mapg_control_gate_init", None) is None:
+        args.mapg_control_gate_init = float(_SPEC_DEFAULTS.mapg_control_gate_init)
+    if getattr(args, "mapg_prior_bias_clip", None) is None:
+        args.mapg_prior_bias_clip = float(_SPEC_DEFAULTS.mapg_prior_bias_clip)
     if getattr(args, "require_pi0_action_generator", None) is None:
         args.require_pi0_action_generator = bool(_SPEC_DEFAULTS.require_pi0_action_generator)
     if getattr(args, "semantic_prefix_dropout_prob", None) is None:
@@ -1225,6 +1248,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "task_visual_reread_topk",
         "task_tactile_reread_groups",
         "task_point_reread_topk",
+        "mapg_anchor_count",
+        "mapg_message_rounds",
     )
     for name in positive_int_fields:
         value = int(getattr(args, name))
@@ -1251,6 +1276,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError("vl_anchor_router_enabled requires picf_mode=enabled.")
     if bool(getattr(args, "vl_anchor_router_enabled", False)) and str(getattr(args, "semantic_mode", "zero")) != "paligemma":
         raise ValueError("vl_anchor_router_enabled requires semantic_mode=paligemma so PaliGemma image tokens exist.")
+    if bool(getattr(args, "mapg_enabled", False)) and not _picf_mode_enabled(args):
+        raise ValueError("mapg_enabled requires picf_mode=enabled.")
     if int(args.warmup_steps) < 0:
         raise ValueError(f"warmup_steps must be >= 0, got {args.warmup_steps}.")
     if float(args.lr) <= 0.0:
@@ -2493,6 +2520,12 @@ class _MetricAccumulator:
     loss_vl_heatmap_interaction: float = 0.0
     loss_vl_point_consistency: float = 0.0
     loss_vl_anchor_diversity: float = 0.0
+    loss_mapg_graph: float = 0.0
+    loss_mapg_siglip: float = 0.0
+    loss_mapg_vicreg: float = 0.0
+    loss_mapg_cycle: float = 0.0
+    loss_mapg_masked_modality: float = 0.0
+    loss_mapg_routing: float = 0.0
     physical_aux_budget_scale: float = 0.0
     semantic_aux_budget_scale: float = 0.0
     alignment_budget_scale: float = 0.0
@@ -2539,6 +2572,12 @@ class _MetricAccumulator:
         self.loss_vl_heatmap_interaction += float(losses.vl_heatmap_interaction.item())
         self.loss_vl_point_consistency += float(losses.vl_point_consistency.item())
         self.loss_vl_anchor_diversity += float(losses.vl_anchor_diversity.item())
+        self.loss_mapg_graph += float(losses.mapg_graph.item())
+        self.loss_mapg_siglip += float(losses.mapg_siglip.item())
+        self.loss_mapg_vicreg += float(losses.mapg_vicreg.item())
+        self.loss_mapg_cycle += float(losses.mapg_cycle.item())
+        self.loss_mapg_masked_modality += float(losses.mapg_masked_modality.item())
+        self.loss_mapg_routing += float(losses.mapg_routing.item())
         self.physical_aux_budget_scale += float(losses.physical_aux_budget_scale.item())
         self.semantic_aux_budget_scale += float(losses.semantic_aux_budget_scale.item())
         self.alignment_budget_scale += float(losses.alignment_budget_scale.item())
@@ -2578,6 +2617,12 @@ class _MetricAccumulator:
         self.loss_vl_heatmap_interaction += float(outputs.get("loss_vl_heatmap_interaction", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_vl_point_consistency += float(outputs.get("loss_vl_point_consistency", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_vl_anchor_diversity += float(outputs.get("loss_vl_anchor_diversity", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_mapg_graph += float(outputs.get("loss_mapg_graph", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_mapg_siglip += float(outputs.get("loss_mapg_siglip", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_mapg_vicreg += float(outputs.get("loss_mapg_vicreg", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_mapg_cycle += float(outputs.get("loss_mapg_cycle", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_mapg_masked_modality += float(outputs.get("loss_mapg_masked_modality", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_mapg_routing += float(outputs.get("loss_mapg_routing", outputs["loss_pt"] * 0.0).detach().item())
         self.physical_aux_budget_scale += float(outputs["physical_aux_budget_scale"].detach().item())
         self.semantic_aux_budget_scale += float(outputs["semantic_aux_budget_scale"].detach().item())
         self.alignment_budget_scale += float(outputs["alignment_budget_scale"].detach().item())
@@ -2619,6 +2664,12 @@ class _MetricAccumulator:
             "loss_vl_heatmap_interaction": self.loss_vl_heatmap_interaction / denom,
             "loss_vl_point_consistency": self.loss_vl_point_consistency / denom,
             "loss_vl_anchor_diversity": self.loss_vl_anchor_diversity / denom,
+            "loss_mapg_graph": self.loss_mapg_graph / denom,
+            "loss_mapg_siglip": self.loss_mapg_siglip / denom,
+            "loss_mapg_vicreg": self.loss_mapg_vicreg / denom,
+            "loss_mapg_cycle": self.loss_mapg_cycle / denom,
+            "loss_mapg_masked_modality": self.loss_mapg_masked_modality / denom,
+            "loss_mapg_routing": self.loss_mapg_routing / denom,
             "physical_aux_budget_scale": self.physical_aux_budget_scale / denom,
             "semantic_aux_budget_scale": self.semantic_aux_budget_scale / denom,
             "alignment_budget_scale": self.alignment_budget_scale / denom,
@@ -2703,6 +2754,12 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_vl_heatmap_interaction": losses.vl_heatmap_interaction,
             "loss_vl_point_consistency": losses.vl_point_consistency,
             "loss_vl_anchor_diversity": losses.vl_anchor_diversity,
+            "loss_mapg_graph": losses.mapg_graph,
+            "loss_mapg_siglip": losses.mapg_siglip,
+            "loss_mapg_vicreg": losses.mapg_vicreg,
+            "loss_mapg_cycle": losses.mapg_cycle,
+            "loss_mapg_masked_modality": losses.mapg_masked_modality,
+            "loss_mapg_routing": losses.mapg_routing,
             "physical_aux_budget_scale": losses.physical_aux_budget_scale,
             "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
             "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3008,6 +3065,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_vl_heatmap_interaction": losses.vl_heatmap_interaction,
                     "loss_vl_point_consistency": losses.vl_point_consistency,
                     "loss_vl_anchor_diversity": losses.vl_anchor_diversity,
+                    "loss_mapg_graph": losses.mapg_graph,
+                    "loss_mapg_siglip": losses.mapg_siglip,
+                    "loss_mapg_vicreg": losses.mapg_vicreg,
+                    "loss_mapg_cycle": losses.mapg_cycle,
+                    "loss_mapg_masked_modality": losses.mapg_masked_modality,
+                    "loss_mapg_routing": losses.mapg_routing,
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3048,6 +3111,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_vl_heatmap_interaction"] = metrics["loss_vl_heatmap_interaction"] + losses.vl_heatmap_interaction
                 metrics["loss_vl_point_consistency"] = metrics["loss_vl_point_consistency"] + losses.vl_point_consistency
                 metrics["loss_vl_anchor_diversity"] = metrics["loss_vl_anchor_diversity"] + losses.vl_anchor_diversity
+                metrics["loss_mapg_graph"] = metrics["loss_mapg_graph"] + losses.mapg_graph
+                metrics["loss_mapg_siglip"] = metrics["loss_mapg_siglip"] + losses.mapg_siglip
+                metrics["loss_mapg_vicreg"] = metrics["loss_mapg_vicreg"] + losses.mapg_vicreg
+                metrics["loss_mapg_cycle"] = metrics["loss_mapg_cycle"] + losses.mapg_cycle
+                metrics["loss_mapg_masked_modality"] = metrics["loss_mapg_masked_modality"] + losses.mapg_masked_modality
+                metrics["loss_mapg_routing"] = metrics["loss_mapg_routing"] + losses.mapg_routing
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
@@ -3111,6 +3180,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_vl_heatmap_interaction": losses.vl_heatmap_interaction,
                     "loss_vl_point_consistency": losses.vl_point_consistency,
                     "loss_vl_anchor_diversity": losses.vl_anchor_diversity,
+                    "loss_mapg_graph": losses.mapg_graph,
+                    "loss_mapg_siglip": losses.mapg_siglip,
+                    "loss_mapg_vicreg": losses.mapg_vicreg,
+                    "loss_mapg_cycle": losses.mapg_cycle,
+                    "loss_mapg_masked_modality": losses.mapg_masked_modality,
+                    "loss_mapg_routing": losses.mapg_routing,
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3148,6 +3223,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_vl_heatmap_interaction"] = metrics["loss_vl_heatmap_interaction"] + losses.vl_heatmap_interaction
                 metrics["loss_vl_point_consistency"] = metrics["loss_vl_point_consistency"] + losses.vl_point_consistency
                 metrics["loss_vl_anchor_diversity"] = metrics["loss_vl_anchor_diversity"] + losses.vl_anchor_diversity
+                metrics["loss_mapg_graph"] = metrics["loss_mapg_graph"] + losses.mapg_graph
+                metrics["loss_mapg_siglip"] = metrics["loss_mapg_siglip"] + losses.mapg_siglip
+                metrics["loss_mapg_vicreg"] = metrics["loss_mapg_vicreg"] + losses.mapg_vicreg
+                metrics["loss_mapg_cycle"] = metrics["loss_mapg_cycle"] + losses.mapg_cycle
+                metrics["loss_mapg_masked_modality"] = metrics["loss_mapg_masked_modality"] + losses.mapg_masked_modality
+                metrics["loss_mapg_routing"] = metrics["loss_mapg_routing"] + losses.mapg_routing
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
@@ -3189,6 +3270,12 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_vl_heatmap_interaction": metrics["loss_vl_heatmap_interaction"] / denom,
             "loss_vl_point_consistency": metrics["loss_vl_point_consistency"] / denom,
             "loss_vl_anchor_diversity": metrics["loss_vl_anchor_diversity"] / denom,
+            "loss_mapg_graph": metrics["loss_mapg_graph"] / denom,
+            "loss_mapg_siglip": metrics["loss_mapg_siglip"] / denom,
+            "loss_mapg_vicreg": metrics["loss_mapg_vicreg"] / denom,
+            "loss_mapg_cycle": metrics["loss_mapg_cycle"] / denom,
+            "loss_mapg_masked_modality": metrics["loss_mapg_masked_modality"] / denom,
+            "loss_mapg_routing": metrics["loss_mapg_routing"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3233,6 +3320,12 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_vl_heatmap_interaction",
     "loss_vl_point_consistency",
     "loss_vl_anchor_diversity",
+    "loss_mapg_graph",
+    "loss_mapg_siglip",
+    "loss_mapg_vicreg",
+    "loss_mapg_cycle",
+    "loss_mapg_masked_modality",
+    "loss_mapg_routing",
     "physical_aux_budget_scale",
     "semantic_aux_budget_scale",
     "alignment_budget_scale",
@@ -4059,6 +4152,25 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default("vl_posterior_bind_gate_init", _SPEC_DEFAULTS.vl_posterior_bind_gate_init)
         ),
         vl_prior_bias_clip=float(_arg_or_default("vl_prior_bias_clip", _SPEC_DEFAULTS.vl_prior_bias_clip)),
+        mapg_enabled=bool(_arg_or_default("mapg_enabled", _SPEC_DEFAULTS.mapg_enabled)),
+        mapg_anchor_count=int(_arg_or_default("mapg_anchor_count", _SPEC_DEFAULTS.mapg_anchor_count)),
+        mapg_message_rounds=int(_arg_or_default("mapg_message_rounds", _SPEC_DEFAULTS.mapg_message_rounds)),
+        mapg_visual_sigma_patches=float(
+            _arg_or_default("mapg_visual_sigma_patches", _SPEC_DEFAULTS.mapg_visual_sigma_patches)
+        ),
+        mapg_tactile_sigma_m=float(_arg_or_default("mapg_tactile_sigma_m", _SPEC_DEFAULTS.mapg_tactile_sigma_m)),
+        mapg_posterior_sigma_m=float(
+            _arg_or_default("mapg_posterior_sigma_m", _SPEC_DEFAULTS.mapg_posterior_sigma_m)
+        ),
+        mapg_obs_gate_init=float(_arg_or_default("mapg_obs_gate_init", _SPEC_DEFAULTS.mapg_obs_gate_init)),
+        mapg_task_gate_init=float(_arg_or_default("mapg_task_gate_init", _SPEC_DEFAULTS.mapg_task_gate_init)),
+        mapg_posterior_gate_init=float(
+            _arg_or_default("mapg_posterior_gate_init", _SPEC_DEFAULTS.mapg_posterior_gate_init)
+        ),
+        mapg_control_gate_init=float(
+            _arg_or_default("mapg_control_gate_init", _SPEC_DEFAULTS.mapg_control_gate_init)
+        ),
+        mapg_prior_bias_clip=float(_arg_or_default("mapg_prior_bias_clip", _SPEC_DEFAULTS.mapg_prior_bias_clip)),
         lambda_vl_heatmap_task=float(_arg_or_default("lambda_vl_heatmap_task", _SPEC_DEFAULTS.lambda_vl_heatmap_task)),
         lambda_vl_heatmap_effector=float(
             _arg_or_default("lambda_vl_heatmap_effector", _SPEC_DEFAULTS.lambda_vl_heatmap_effector)
@@ -4225,6 +4337,14 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         vl_heatmap_sigma_patches=float(getattr(args, "vl_heatmap_sigma_patches", 1.5)),
         vl_point_consistency_eps=float(getattr(args, "vl_point_consistency_eps", 1e-6)),
         vl_anchor_diversity_radius_m=float(getattr(args, "vl_anchor_diversity_radius_m", 0.04)),
+        lambda_mapg_siglip=float(getattr(args, "lambda_mapg_siglip", 0.0)),
+        lambda_mapg_vicreg=float(getattr(args, "lambda_mapg_vicreg", 0.0)),
+        lambda_mapg_cycle=float(getattr(args, "lambda_mapg_cycle", 0.0)),
+        lambda_mapg_masked_modality=float(getattr(args, "lambda_mapg_masked_modality", 0.0)),
+        lambda_mapg_routing=float(getattr(args, "lambda_mapg_routing", 0.0)),
+        mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", 0.07)),
+        mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", 1.0)),
+        mapg_vicreg_cov_weight=float(getattr(args, "mapg_vicreg_cov_weight", 0.04)),
     )
 
 
@@ -4869,6 +4989,25 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "vl_prior_bias_clip", _SPEC_DEFAULTS.vl_prior_bias_clip)),
             )
             logging.info(
+                "MAPG anchor prior graph contract: enabled=%s anchors=%s message_rounds=%s visual_sigma_patches=%s tactile_sigma_m=%s posterior_sigma_m=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s prior_bias_clip=%s losses(siglip=%s vicreg=%s cycle=%s masked=%s routing=%s)",
+                bool(getattr(args, "mapg_enabled", False)),
+                int(getattr(args, "mapg_anchor_count", _SPEC_DEFAULTS.mapg_anchor_count)),
+                int(getattr(args, "mapg_message_rounds", _SPEC_DEFAULTS.mapg_message_rounds)),
+                float(getattr(args, "mapg_visual_sigma_patches", _SPEC_DEFAULTS.mapg_visual_sigma_patches)),
+                float(getattr(args, "mapg_tactile_sigma_m", _SPEC_DEFAULTS.mapg_tactile_sigma_m)),
+                float(getattr(args, "mapg_posterior_sigma_m", _SPEC_DEFAULTS.mapg_posterior_sigma_m)),
+                float(getattr(args, "mapg_obs_gate_init", _SPEC_DEFAULTS.mapg_obs_gate_init)),
+                float(getattr(args, "mapg_task_gate_init", _SPEC_DEFAULTS.mapg_task_gate_init)),
+                float(getattr(args, "mapg_posterior_gate_init", _SPEC_DEFAULTS.mapg_posterior_gate_init)),
+                float(getattr(args, "mapg_control_gate_init", _SPEC_DEFAULTS.mapg_control_gate_init)),
+                float(getattr(args, "mapg_prior_bias_clip", _SPEC_DEFAULTS.mapg_prior_bias_clip)),
+                float(getattr(args, "lambda_mapg_siglip", 0.0)),
+                float(getattr(args, "lambda_mapg_vicreg", 0.0)),
+                float(getattr(args, "lambda_mapg_cycle", 0.0)),
+                float(getattr(args, "lambda_mapg_masked_modality", 0.0)),
+                float(getattr(args, "lambda_mapg_routing", 0.0)),
+            )
+            logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),
@@ -5427,6 +5566,14 @@ def main() -> None:
     parser.add_argument("--vl-heatmap-sigma-patches", type=float, default=1.5)
     parser.add_argument("--vl-point-consistency-eps", type=float, default=1e-6)
     parser.add_argument("--vl-anchor-diversity-radius-m", type=float, default=_SPEC_DEFAULTS.vl_anchor_local_sigma_m)
+    parser.add_argument("--lambda-mapg-siglip", type=float, default=0.0)
+    parser.add_argument("--lambda-mapg-vicreg", type=float, default=0.0)
+    parser.add_argument("--lambda-mapg-cycle", type=float, default=0.0)
+    parser.add_argument("--lambda-mapg-masked-modality", type=float, default=0.0)
+    parser.add_argument("--lambda-mapg-routing", type=float, default=0.0)
+    parser.add_argument("--mapg-siglip-tau", type=float, default=0.07)
+    parser.add_argument("--mapg-vicreg-var-target", type=float, default=1.0)
+    parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=0.04)
     parser.add_argument("--enable-aux-budgeting", dest="enable_aux_budgeting", action="store_true")
     parser.add_argument("--disable-aux-budgeting", dest="enable_aux_budgeting", action="store_false")
     parser.add_argument("--aux-budget-physical-ratio", type=float, default=0.20)
@@ -5614,6 +5761,26 @@ def main() -> None:
     parser.add_argument("--vl-task-point-gate-init", type=float, default=_SPEC_DEFAULTS.vl_task_point_gate_init)
     parser.add_argument("--vl-posterior-bind-gate-init", type=float, default=_SPEC_DEFAULTS.vl_posterior_bind_gate_init)
     parser.add_argument("--vl-prior-bias-clip", type=float, default=_SPEC_DEFAULTS.vl_prior_bias_clip)
+    parser.add_argument(
+        "--mapg-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.mapg_enabled,
+        help=(
+            "Enable MAPG-PICF: modality-native anchor prior graph over PaliGemma, "
+            "V-JEPA, point/Sonata, tactile/AnyTouch, posterior, observation anchors, "
+            "task readout, posterior binding, and PI0.5 action prefix."
+        ),
+    )
+    parser.add_argument("--mapg-anchor-count", type=int, default=_SPEC_DEFAULTS.mapg_anchor_count)
+    parser.add_argument("--mapg-message-rounds", type=int, default=_SPEC_DEFAULTS.mapg_message_rounds)
+    parser.add_argument("--mapg-visual-sigma-patches", type=float, default=_SPEC_DEFAULTS.mapg_visual_sigma_patches)
+    parser.add_argument("--mapg-tactile-sigma-m", type=float, default=_SPEC_DEFAULTS.mapg_tactile_sigma_m)
+    parser.add_argument("--mapg-posterior-sigma-m", type=float, default=_SPEC_DEFAULTS.mapg_posterior_sigma_m)
+    parser.add_argument("--mapg-obs-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_obs_gate_init)
+    parser.add_argument("--mapg-task-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_task_gate_init)
+    parser.add_argument("--mapg-posterior-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_posterior_gate_init)
+    parser.add_argument("--mapg-control-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_control_gate_init)
+    parser.add_argument("--mapg-prior-bias-clip", type=float, default=_SPEC_DEFAULTS.mapg_prior_bias_clip)
     parser.add_argument(
         "--require-pi0-action-generator",
         action=argparse.BooleanOptionalAction,

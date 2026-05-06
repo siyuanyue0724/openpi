@@ -1,10 +1,11 @@
 # PICF v2.2
 
-Date: 2026-04-30
+Date: 2026-05-06
 Repo: `/home/siyuanyue/Documents/openpi`
 Status: current local v2.2 architecture record after the one-shot
-action/control contract rewrite, the frozen-perception bring-up, and the
-current recurrent burn-in speed-path audit
+action/control contract rewrite, the frozen-perception bring-up, the
+VL-router supervised grounding rollout, and the full MAPG anchor-prior-graph
+deployment.
 
 ## Quick Navigation
 
@@ -53,12 +54,14 @@ current recurrent burn-in speed-path audit
   Use its Current Mathematical Guardrails and Verification Commands sections
   before enabling any router stage beyond the default-off substrate.
 - [`src/openpi/picf/README_MAPG_PICF.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_MAPG_PICF.md)
-  Architecture and implementation contract for the proposed MAPG-PICF upgrade:
-  modality-optional anchor prior graph routing over PaliGemma, V-JEPA, Sonata,
-  AnyTouch, and posterior supports. This is the next graph-level design layer
-  above the current point-centric VL-guided router, and records the required
-  mathematical invariants, state objects, dataflow, losses, tests, and rollout
-  milestones before any MAPG-enabled long run should be claimed.
+  Current live implementation record for MAPG-PICF: modality-optional anchor
+  prior graph routing over PaliGemma, V-JEPA, Sonata, AnyTouch, and posterior
+  supports. This is now the graph-level layer above the point-centric
+  VL-guided router. It records the finite-message-passing math, state objects,
+  live dataflow into observation anchors / task readout / posterior binding /
+  conditioned control, graph losses, CLI flags, diagnostics, verification
+  commands, and the maintained `30000` step / `5000` checkpoint /
+  `unroll_steps=2` MAPG launch template.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)

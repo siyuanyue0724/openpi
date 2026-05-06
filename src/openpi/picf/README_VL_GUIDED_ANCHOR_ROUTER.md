@@ -1,7 +1,7 @@
 # VL-Guided Anchor Router for PICF
 
-Date: 2026-05-05
-Status: live implementation and long-run safety record. The current local code implements the
+Date: 2026-05-06
+Status: lower-level live implementation and long-run safety record. The current local code implements the
 default-off safety substrate plus gated live consumption in the core:
 PaliGemma spatial-token metadata, resize-with-pad view metadata,
 transform-aware PaliGemma-grid-to-PICF-grid mapping, `PicfVLGroundingState`,
@@ -9,7 +9,11 @@ router config, column-normalized heatmap-to-point prior helpers,
 `_build_vl_grounding(...)`, role-aware observation-anchor seeding and attention
 bias, task-readout point-prior fusion, and posterior-binding soft overlap bias.
 The router remains disabled by default and does not alter the current canonical
-training profile unless `vl_anchor_router_enabled=True`.
+training profile unless `vl_anchor_router_enabled=True`. The full graph-level
+architecture is now MAPG-PICF, documented in
+[`README_MAPG_PICF.md`](./README_MAPG_PICF.md); MAPG consumes this router as
+one point-centric expert branch and adds visual-native, tactile, posterior,
+graph-token, graph-loss, and PI0.5 action-prefix integration.
 
 Latest local fix audit:
 
@@ -17,7 +21,7 @@ Latest local fix audit:
 /tmp/picf_vl_router_anchor_collapse_fix_audit_20260505.md
 ```
 
-This document records the planned PICF-compatible grounding upgrade:
+This document records the point-centric PICF-compatible grounding substrate:
 
 ```text
 PaliGemma image-language encoder

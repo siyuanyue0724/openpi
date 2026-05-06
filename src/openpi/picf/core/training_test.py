@@ -75,7 +75,12 @@ class _StubTactileEncoder:
         )
 
 
-def _make_core(tmp_path: Path, *, vl_anchor_router_enabled: bool = False) -> tuple[PicfFullCore, CalvinSequentialReplay]:
+def _make_core(
+    tmp_path: Path,
+    *,
+    vl_anchor_router_enabled: bool = False,
+    mapg_enabled: bool = False,
+) -> tuple[PicfFullCore, CalvinSequentialReplay]:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
     builder = CalvinDepthToPicfPointCloud(calvin_root, stride=1, max_points=256)
@@ -102,6 +107,9 @@ def _make_core(tmp_path: Path, *, vl_anchor_router_enabled: bool = False) -> tup
         query_rounds=2,
         vl_anchor_router_enabled=vl_anchor_router_enabled,
         vl_anchor_modes=3,
+        mapg_enabled=mapg_enabled,
+        mapg_anchor_count=6,
+        mapg_message_rounds=2,
         device="cpu",
     )
     core = PicfFullCore(
@@ -359,6 +367,45 @@ def test_transition_loss_can_enable_vl_router_supervision_terms(tmp_path: Path) 
     assert torch.isfinite(losses.vl_point_consistency)
     assert torch.isfinite(losses.vl_anchor_diversity)
     assert losses.vl_router.item() >= 0.0
+
+
+def test_transition_loss_can_enable_mapg_graph_terms(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path, vl_anchor_router_enabled=True, mapg_enabled=True)
+    frames = list(replay)[:2]
+    frames[0].G_t = core.local_frame.make_transform(frames[0].robot_obs)
+    frames[1].G_t = core.local_frame.make_transform(frames[1].robot_obs)
+    frames[0].tactile = _make_tactile_packet(frames[0].step_id, contact_shift=10)
+    frames[1].tactile = _make_tactile_packet(frames[1].step_id, contact_shift=14)
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_for_frame(core, frames[0]),
+        action_future=frames[0].action,
+    )
+    assert first.state.anchor_prior_graph is not None
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+        config=PicfTransitionLossConfig(
+            lambda_mapg_siglip=0.01,
+            lambda_mapg_vicreg=0.01,
+            lambda_mapg_cycle=0.01,
+            lambda_mapg_masked_modality=0.01,
+            lambda_mapg_routing=0.01,
+        ),
+    )
+
+    assert torch.isfinite(losses.mapg_graph)
+    assert torch.isfinite(losses.mapg_siglip)
+    assert torch.isfinite(losses.mapg_vicreg)
+    assert torch.isfinite(losses.mapg_cycle)
+    assert torch.isfinite(losses.mapg_masked_modality)
+    assert torch.isfinite(losses.mapg_routing)
+    assert losses.mapg_graph.item() >= 0.0
 
 
 def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_unavailable(tmp_path: Path) -> None:

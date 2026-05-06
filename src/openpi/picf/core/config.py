@@ -119,6 +119,17 @@ class PicfCoreConfig:
     lambda_vl_heatmap_interaction: float = 0.0
     lambda_vl_point_consistency: float = 0.0
     lambda_vl_anchor_diversity: float = 0.0
+    mapg_enabled: bool = False
+    mapg_anchor_count: int = 8
+    mapg_message_rounds: int = 1
+    mapg_visual_sigma_patches: float = 2.0
+    mapg_tactile_sigma_m: float = 0.08
+    mapg_posterior_sigma_m: float = 0.08
+    mapg_obs_gate_init: float = -4.0
+    mapg_task_gate_init: float = -4.0
+    mapg_posterior_gate_init: float = -6.0
+    mapg_control_gate_init: float = -4.0
+    mapg_prior_bias_clip: float = 4.0
     visual_reread_topk: int = 32
     tactile_reread_groups: int = 2
     task_visual_reread_topk: int = 32

@@ -18,9 +18,10 @@ Current PICF documents:
    Current staged implementation record for the default-off point-centric
    PaliGemma-guided 2D-to-3D anchor prior router.
 5. [`README_MAPG_PICF.md`](./README_MAPG_PICF.md)
-   Architecture and implementation contract for MAPG-PICF, the proposed
-   modality-optional anchor prior graph over PaliGemma, V-JEPA, Sonata,
-   AnyTouch, and posterior supports.
+   Current live implementation record for MAPG-PICF, the modality-optional
+   anchor prior graph over PaliGemma, V-JEPA, Sonata, AnyTouch, and posterior
+   supports. Use this for the MAPG math, code dataflow, graph losses, CLI,
+   tests, diagnostics, and the full MAPG launch template.
 6. [`README_v2.1.md`](./README_v2.1.md)
    Historical v2.1 deployment record retained for reference.
 7. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
@@ -43,9 +44,9 @@ Current PICF documents:
 Use `README_v2.2.md` for the current live system,
 `README_PI05_PARITY_AUDIT.md` for PI0.5/PICF dataflow comparisons,
 `README_FROZEN_PERCEPTION_AUGMENTATION.md` for frozen-perception and
-augmentation design, `README_VL_GUIDED_ANCHOR_ROUTER.md` for the current
-point-centric VL router substrate, `README_MAPG_PICF.md` for the proposed
-modality-optional graph-level anchor design,
+augmentation design, `README_VL_GUIDED_ANCHOR_ROUTER.md` for the lower-level
+point-centric VL router substrate, `README_MAPG_PICF.md` for the current live
+modality-optional graph-level anchor implementation,
 `PICF_FORMAL_CONTRACT.md` for the concise executable contract, and
 `README_v2.1.md` only as the archived pre-v2.2 deployment record.
 
@@ -70,5 +71,5 @@ Fast operator path:
    point-projection bias, or semantic/visual attention failure.
 6. Use
    [`README_MAPG_PICF.md`](./README_MAPG_PICF.md)
-   before designing any graph-level anchor upgrade that should remain robust to
-   missing pointcloud, weak tactile evidence, or RGB-only datasets.
+   for the live MAPG-PICF graph implementation, including `--mapg-enabled`,
+   graph losses, and the 30000-step / 5000-checkpoint launch template.

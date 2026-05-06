@@ -45,6 +45,29 @@ class PicfVLGroundingState:
     visual_pixel_centers: torch.Tensor | None
     valid: torch.Tensor
     confidence: torch.Tensor
+    task_pg_heatmap: torch.Tensor | None = None
+    effector_pg_heatmap: torch.Tensor | None = None
+    interaction_pg_heatmap: torch.Tensor | None = None
+
+
+@dataclasses.dataclass
+class PicfAnchorPriorGraphState:
+    pg_priors: torch.Tensor | None
+    visual_priors: torch.Tensor
+    point_priors: torch.Tensor | None
+    tactile_priors: torch.Tensor | None
+    posterior_priors: torch.Tensor | None
+    anchor_tokens: torch.Tensor
+    anchor_roles: torch.Tensor
+    anchor_scores: torch.Tensor
+    anchor_confidence: torch.Tensor
+    anchor_x: torch.Tensor | None
+    anchor_S: torch.Tensor | None
+    geometry_valid: torch.Tensor
+    obs_slot_assignment: torch.Tensor | None
+    task_assignment: torch.Tensor | None
+    modality_confidence: torch.Tensor
+    valid: torch.Tensor
 
 
 @dataclasses.dataclass
@@ -101,6 +124,7 @@ class PicfObservationAnchorState:
     routing_support_tactile: torch.Tensor | None = None
     routing_gate_tactile: torch.Tensor | None = None
     role_ids: torch.Tensor | None = None
+    graph_assignment: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -131,6 +155,9 @@ class PicfTaskReadoutState:
     tactile_private_attention: torch.Tensor | None = None
     point_private_attention: torch.Tensor | None = None
     local_role_ids: torch.Tensor | None = None
+    graph_assignment: torch.Tensor | None = None
+    graph_visual_weights: torch.Tensor | None = None
+    graph_tactile_weights: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -141,6 +168,7 @@ class PicfConditionedControlState:
     query_state: torch.Tensor
     pi_prefix_tokens: torch.Tensor
     future_condition_tokens: torch.Tensor
+    graph_tokens: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -208,6 +236,7 @@ class PicfCoreState:
     control: PicfControlState
     last_prompt: str | None = None
     vl_grounding: PicfVLGroundingState | None = None
+    anchor_prior_graph: PicfAnchorPriorGraphState | None = None
 
 
 @dataclasses.dataclass

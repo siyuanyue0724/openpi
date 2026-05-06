@@ -64,6 +64,14 @@ class PicfTransitionLossConfig:
     vl_heatmap_sigma_patches: float = 1.5
     vl_point_consistency_eps: float = 1e-6
     vl_anchor_diversity_radius_m: float = 0.04
+    lambda_mapg_siglip: float = 0.0
+    lambda_mapg_vicreg: float = 0.0
+    lambda_mapg_cycle: float = 0.0
+    lambda_mapg_masked_modality: float = 0.0
+    lambda_mapg_routing: float = 0.0
+    mapg_siglip_tau: float = 0.07
+    mapg_vicreg_var_target: float = 1.0
+    mapg_vicreg_cov_weight: float = 0.04
 
 
 @dataclasses.dataclass(frozen=True)
@@ -120,6 +128,12 @@ class PicfTransitionLossBreakdown:
     vl_heatmap_interaction: torch.Tensor
     vl_point_consistency: torch.Tensor
     vl_anchor_diversity: torch.Tensor
+    mapg_graph: torch.Tensor
+    mapg_siglip: torch.Tensor
+    mapg_vicreg: torch.Tensor
+    mapg_cycle: torch.Tensor
+    mapg_masked_modality: torch.Tensor
+    mapg_routing: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -156,6 +170,12 @@ class PicfTransitionLossBreakdown:
             "vl_heatmap_interaction": float(self.vl_heatmap_interaction.item()),
             "vl_point_consistency": float(self.vl_point_consistency.item()),
             "vl_anchor_diversity": float(self.vl_anchor_diversity.item()),
+            "mapg_graph": float(self.mapg_graph.item()),
+            "mapg_siglip": float(self.mapg_siglip.item()),
+            "mapg_vicreg": float(self.mapg_vicreg.item()),
+            "mapg_cycle": float(self.mapg_cycle.item()),
+            "mapg_masked_modality": float(self.mapg_masked_modality.item()),
+            "mapg_routing": float(self.mapg_routing.item()),
         }
 
 
@@ -312,6 +332,12 @@ def make_action_only_transition_loss(
         vl_heatmap_interaction=zero,
         vl_point_consistency=zero,
         vl_anchor_diversity=zero,
+        mapg_graph=zero,
+        mapg_siglip=zero,
+        mapg_vicreg=zero,
+        mapg_cycle=zero,
+        mapg_masked_modality=zero,
+        mapg_routing=zero,
     )
 
 
@@ -685,6 +711,158 @@ def _vl_router_loss(
         + (float(config.lambda_vl_anchor_diversity) * div_loss)
     )
     return total, task_loss, eff_loss, int_loss, point_loss, div_loss
+
+
+def _mapg_pair_embeddings(state: PicfCoreState, *, eps: float) -> dict[str, torch.Tensor]:
+    graph = state.anchor_prior_graph
+    if graph is None:
+        return {}
+    result: dict[str, torch.Tensor] = {"graph": fn.normalize(graph.anchor_tokens.float(), dim=-1).to(dtype=graph.anchor_tokens.dtype)}
+    if graph.visual_priors.numel() > 0 and state.token_field.visual_align_embeddings.numel() > 0:
+        result["visual"] = fn.normalize(graph.visual_priors @ state.token_field.visual_align_embeddings, dim=-1)
+    if graph.point_priors is not None and graph.point_priors.numel() > 0 and state.token_field.point_align_embeddings.numel() > 0:
+        result["point"] = fn.normalize(graph.point_priors @ state.token_field.point_align_embeddings, dim=-1)
+    if graph.tactile_priors is not None and graph.tactile_priors.numel() > 0 and state.token_field.tactile_align_embeddings.numel() > 0:
+        result["tactile"] = fn.normalize(graph.tactile_priors @ state.token_field.tactile_align_embeddings, dim=-1)
+    if graph.posterior_priors is not None and graph.posterior_priors.numel() > 0 and state.posterior.tokens.numel() > 0:
+        result["posterior"] = fn.normalize(graph.posterior_priors @ state.posterior.tokens, dim=-1)
+    return {key: torch.nan_to_num(value, nan=0.0, posinf=0.0, neginf=0.0) for key, value in result.items()}
+
+
+def _mapg_siglip_loss(state: PicfCoreState, *, reference: torch.Tensor, tau: float, eps: float) -> torch.Tensor:
+    embeddings = _mapg_pair_embeddings(state, eps=eps)
+    names = [name for name in ("visual", "point", "tactile", "posterior", "graph") if name in embeddings]
+    if len(names) < 2:
+        return _zero_weight_sum(reference, *embeddings.values())
+    losses = []
+    temperature = max(float(tau), eps)
+    for i, left_name in enumerate(names):
+        for right_name in names[i + 1 :]:
+            left = embeddings[left_name]
+            right = embeddings[right_name]
+            if left.shape != right.shape or left.shape[0] == 0:
+                continue
+            logits = (left @ right.T) / temperature
+            labels = torch.eye(logits.shape[0], device=logits.device, dtype=logits.dtype)
+            targets = (2.0 * labels) - 1.0
+            losses.append(fn.softplus(-targets * logits).mean())
+    if not losses:
+        return _zero_weight_sum(reference, *embeddings.values())
+    return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
+
+
+def _mapg_vicreg_loss(
+    state: PicfCoreState,
+    *,
+    reference: torch.Tensor,
+    var_target: float,
+    cov_weight: float,
+    eps: float,
+) -> torch.Tensor:
+    graph = state.anchor_prior_graph
+    if graph is None or graph.anchor_tokens.shape[0] < 2:
+        return _zero_weight_sum(reference, None if graph is None else graph.anchor_tokens)
+    x = graph.anchor_tokens.float()
+    x = x - x.mean(dim=0, keepdim=True)
+    std = torch.sqrt(x.var(dim=0, unbiased=False) + eps)
+    var_loss = torch.mean(fn.relu(float(var_target) - std))
+    cov = (x.T @ x) / max(x.shape[0] - 1, 1)
+    offdiag = cov - torch.diag(torch.diag(cov))
+    cov_loss = (offdiag.pow(2).sum() / max(x.shape[1], 1)) * float(cov_weight)
+    return (var_loss + cov_loss).to(device=reference.device, dtype=reference.dtype)
+
+
+def _mapg_cycle_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: float) -> torch.Tensor:
+    graph = state.anchor_prior_graph
+    geometry = state.token_field.projective_geometry
+    if (
+        graph is None
+        or graph.point_priors is None
+        or graph.visual_priors.numel() == 0
+        or graph.point_priors.numel() == 0
+        or geometry is None
+        or geometry.projective_compatibility.numel() == 0
+    ):
+        preds = () if graph is None else (graph.visual_priors, graph.point_priors if graph.point_priors is not None else graph.visual_priors)
+        return _zero_weight_sum(reference, *preds)
+    compat = torch.clamp(torch.nan_to_num(geometry.projective_compatibility.to(device=reference.device, dtype=reference.dtype), nan=0.0), min=0.0)
+    col = compat / torch.clamp(compat.sum(dim=0, keepdim=True), min=eps)
+    row = compat / torch.clamp(compat.sum(dim=1, keepdim=True), min=eps)
+    v_to_p = graph.visual_priors.to(device=reference.device, dtype=reference.dtype) @ col.T
+    p_to_v = v_to_p @ row
+    p_to_v = p_to_v / torch.clamp(p_to_v.sum(dim=-1, keepdim=True), min=eps)
+    return _js_distribution_loss(graph.visual_priors.to(device=reference.device, dtype=reference.dtype), p_to_v, eps=eps).mean()
+
+
+def _mapg_masked_modality_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: float) -> torch.Tensor:
+    embeddings = _mapg_pair_embeddings(state, eps=eps)
+    graph_embed = embeddings.get("graph")
+    if graph_embed is None:
+        return _zero_weight_sum(reference, *embeddings.values())
+    losses = []
+    for name in ("visual", "point", "tactile", "posterior"):
+        target = embeddings.get(name)
+        if target is None or target.shape != graph_embed.shape:
+            continue
+        losses.append(1.0 - torch.sum(graph_embed * target.detach(), dim=-1).mean())
+    if not losses:
+        return _zero_weight_sum(reference, *embeddings.values())
+    return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
+
+
+def _mapg_routing_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: float) -> torch.Tensor:
+    graph = state.anchor_prior_graph
+    if graph is None:
+        return _zero_weight_sum(reference)
+    losses = []
+    for assignment in (graph.obs_slot_assignment, graph.task_assignment):
+        if assignment is None or assignment.numel() == 0:
+            continue
+        probs = torch.clamp(assignment.to(device=reference.device, dtype=reference.dtype), min=eps)
+        entropy = -torch.sum(probs * torch.log(probs), dim=-1).mean()
+        coverage = assignment.sum(dim=0)
+        if coverage.numel() > 0:
+            coverage = coverage / torch.clamp(coverage.sum(), min=eps)
+            target = torch.full_like(coverage, 1.0 / max(int(coverage.numel()), 1))
+            balance = _js_distribution_loss(coverage[None, :], target[None, :], eps=eps).mean()
+        else:
+            balance = entropy * 0.0
+        losses.append(entropy + balance)
+    if not losses:
+        return _zero_weight_sum(reference, graph.anchor_tokens)
+    return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
+
+
+def _mapg_graph_loss(
+    state: PicfCoreState,
+    *,
+    config: PicfTransitionLossConfig,
+    reference: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    graph = state.anchor_prior_graph
+    zero = _zero_like(reference)
+    if graph is None:
+        return zero, zero, zero, zero, zero, zero
+    eps = max(float(config.vl_point_consistency_eps), 1e-8)
+    siglip = _mapg_siglip_loss(state, reference=reference, tau=float(config.mapg_siglip_tau), eps=eps)
+    vicreg = _mapg_vicreg_loss(
+        state,
+        reference=reference,
+        var_target=float(config.mapg_vicreg_var_target),
+        cov_weight=float(config.mapg_vicreg_cov_weight),
+        eps=eps,
+    )
+    cycle = _mapg_cycle_loss(state, reference=reference, eps=eps)
+    masked = _mapg_masked_modality_loss(state, reference=reference, eps=eps)
+    routing = _mapg_routing_loss(state, reference=reference, eps=eps)
+    total = (
+        (float(config.lambda_mapg_siglip) * siglip)
+        + (float(config.lambda_mapg_vicreg) * vicreg)
+        + (float(config.lambda_mapg_cycle) * cycle)
+        + (float(config.lambda_mapg_masked_modality) * masked)
+        + (float(config.lambda_mapg_routing) * routing)
+    )
+    return total, siglip, vicreg, cycle, masked, routing
 
 
 def _routing_responsibilities(mass: torch.Tensor, *, eps: float) -> torch.Tensor:
@@ -1183,6 +1361,18 @@ def compute_transition_loss(
         config=cfg,
         reference=predictive.action,
     )
+    (
+        mapg_graph_raw,
+        mapg_siglip,
+        mapg_vicreg,
+        mapg_cycle,
+        mapg_masked_modality,
+        mapg_routing,
+    ) = _mapg_graph_loss(
+        output_t.state,
+        config=cfg,
+        reference=predictive.action,
+    )
     physical_aux = (
         (cfg.lambda_visual_latent * visual_latent)
         + (cfg.lambda_visual_real * visual_real)
@@ -1190,7 +1380,7 @@ def compute_transition_loss(
         + (cfg.lambda_point_real * point_real)
     )
     semantic_group = cfg.lambda_semantic_future_aux * semantic_future_aux
-    alignment_group = alignment.total + vl_router_raw
+    alignment_group = alignment.total + vl_router_raw + mapg_graph_raw
     physical_aux_capped, physical_scale = _budgeted_group(
         physical_aux,
         action_loss=action_loss,
@@ -1254,6 +1444,12 @@ def compute_transition_loss(
         vl_heatmap_interaction=vl_heatmap_interaction,
         vl_point_consistency=vl_point_consistency,
         vl_anchor_diversity=vl_anchor_diversity,
+        mapg_graph=mapg_graph_raw,
+        mapg_siglip=mapg_siglip,
+        mapg_vicreg=mapg_vicreg,
+        mapg_cycle=mapg_cycle,
+        mapg_masked_modality=mapg_masked_modality,
+        mapg_routing=mapg_routing,
     )
 
 

@@ -584,7 +584,8 @@ def verify_static_contract() -> list[CheckResult]:
                 "return _to_tensor(fmap.current_map(use_last_two_mean=self.visual_config.use_last_two_mean), device=self.device, dtype=self.dtype)"
                 in source
                 and "all_tokens = torch.cat([point_tokens, tactile_tokens_active, context_tokens], dim=0)" in source
-                and "queries, visual_weights = self.visual_native_reread(queries, dense_memory.visual_payload[None, :])" in source
+                and "queries, visual_weights = self.visual_native_reread(" in source
+                and "attn_bias=visual_attn_bias" in source
                 and "queries, attn_public = self.obs_reader(" in source
                 and "token_field.fused_tokens[None, :]" in source
                 and "attn_bias=public_role_bias" in source
