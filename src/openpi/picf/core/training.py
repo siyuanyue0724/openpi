@@ -69,9 +69,19 @@ class PicfTransitionLossConfig:
     lambda_mapg_cycle: float = 0.0
     lambda_mapg_masked_modality: float = 0.0
     lambda_mapg_routing: float = 0.0
+    lambda_mapg_support_diversity: float = 0.0
+    lambda_mapg_geometry_diversity: float = 0.0
     mapg_siglip_tau: float = 0.07
     mapg_vicreg_var_target: float = 1.0
     mapg_vicreg_cov_weight: float = 0.04
+    mapg_support_div_margin_visual: float = 0.15
+    mapg_support_div_margin_point: float = 0.15
+    mapg_support_div_margin_tactile: float = 0.25
+    mapg_support_div_margin_posterior: float = 0.10
+    mapg_support_div_sigma_visual_patches: float = 1.0
+    mapg_support_div_sigma_point_m: float = 0.04
+    mapg_geometry_diversity_margin: float = 1.0
+    mapg_geometry_diversity_jitter_m: float = 0.005
 
 
 @dataclasses.dataclass(frozen=True)
@@ -134,6 +144,8 @@ class PicfTransitionLossBreakdown:
     mapg_cycle: torch.Tensor
     mapg_masked_modality: torch.Tensor
     mapg_routing: torch.Tensor
+    mapg_support_diversity: torch.Tensor
+    mapg_geometry_diversity: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -176,6 +188,8 @@ class PicfTransitionLossBreakdown:
             "mapg_cycle": float(self.mapg_cycle.item()),
             "mapg_masked_modality": float(self.mapg_masked_modality.item()),
             "mapg_routing": float(self.mapg_routing.item()),
+            "mapg_support_diversity": float(self.mapg_support_diversity.item()),
+            "mapg_geometry_diversity": float(self.mapg_geometry_diversity.item()),
         }
 
 
@@ -338,6 +352,8 @@ def make_action_only_transition_loss(
         mapg_cycle=zero,
         mapg_masked_modality=zero,
         mapg_routing=zero,
+        mapg_support_diversity=zero,
+        mapg_geometry_diversity=zero,
     )
 
 
@@ -917,16 +933,208 @@ def _mapg_routing_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: fl
     return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
 
 
+def _mapg_anchor_usage(
+    graph,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    usage = torch.zeros((graph.anchor_tokens.shape[0],), device=reference.device, dtype=reference.dtype)
+    used = False
+    for assignment in (graph.obs_slot_assignment, graph.task_assignment):
+        if assignment is None or assignment.numel() == 0 or assignment.shape[-1] != usage.shape[0]:
+            continue
+        usage = usage + torch.clamp(assignment.to(device=reference.device, dtype=reference.dtype), min=0.0).sum(dim=0)
+        used = True
+    if not used:
+        return usage
+    return usage / torch.clamp(usage.max(), min=eps)
+
+
+def _mapg_identity_overlap(priors: torch.Tensor, *, eps: float) -> torch.Tensor:
+    priors = torch.clamp(torch.nan_to_num(priors.float(), nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+    priors = priors / torch.clamp(priors.sum(dim=-1, keepdim=True), min=eps)
+    cross = priors @ priors.T
+    self_mass = torch.clamp(torch.diag(cross), min=eps)
+    return cross / torch.sqrt(torch.clamp(self_mass[:, None] * self_mass[None, :], min=eps))
+
+
+def _mapg_visual_kernel_overlap(state: PicfCoreState, priors: torch.Tensor, *, sigma_patches: float, eps: float) -> torch.Tensor:
+    geometry = state.token_field.projective_geometry
+    if geometry is None or geometry.visual_grid_index.shape[0] != priors.shape[-1]:
+        return _mapg_identity_overlap(priors, eps=eps)
+    coords = geometry.visual_grid_index.to(device=priors.device, dtype=torch.float32)
+    if coords.numel() == 0:
+        return _mapg_identity_overlap(priors, eps=eps)
+    coords = torch.round(coords).to(dtype=torch.long)
+    coords = coords - coords.min(dim=0, keepdim=True).values
+    width = int(coords[:, 0].max().item()) + 1
+    height = int(coords[:, 1].max().item()) + 1
+    support_count = int(priors.shape[-1])
+    if width <= 0 or height <= 0 or (width * height) > max(4 * support_count, 32768):
+        return _mapg_identity_overlap(priors, eps=eps)
+    flat_index = (coords[:, 1] * width + coords[:, 0]).to(device=priors.device, dtype=torch.long)
+    grid_flat = torch.zeros((priors.shape[0], height * width), device=priors.device, dtype=torch.float32)
+    grid_flat.scatter_add_(1, flat_index[None, :].expand(priors.shape[0], -1), priors.to(dtype=torch.float32))
+    grid = grid_flat.reshape(priors.shape[0], 1, height, width)
+    sigma = max(float(sigma_patches), eps)
+    radius = max(int(torch.ceil(torch.tensor(3.0 * sigma)).item()), 1)
+    offsets = torch.arange(-radius, radius + 1, device=priors.device, dtype=torch.float32)
+    kernel = torch.exp(-(offsets**2) / (2.0 * sigma * sigma))
+    kernel = kernel / torch.clamp(kernel.sum(), min=eps)
+    blur = fn.conv2d(grid, kernel.reshape(1, 1, -1, 1), padding=(radius, 0))
+    blur = fn.conv2d(blur, kernel.reshape(1, 1, 1, -1), padding=(0, radius))
+    blur_flat = blur.reshape(priors.shape[0], height * width)
+    cross = grid_flat @ blur_flat.T
+    self_mass = torch.clamp(torch.diag(cross), min=eps)
+    return cross / torch.sqrt(torch.clamp(self_mass[:, None] * self_mass[None, :], min=eps))
+
+
+def _mapg_point_kernel_overlap(state: PicfCoreState, priors: torch.Tensor, *, sigma_m: float, eps: float) -> torch.Tensor:
+    positions = state.token_field.point_positions_world
+    if positions is None or positions.shape[0] != priors.shape[-1] or priors.shape[-1] > 4096:
+        return _mapg_identity_overlap(priors, eps=eps)
+    positions = positions.to(device=priors.device, dtype=torch.float32)
+    dist2 = torch.cdist(positions, positions).pow(2)
+    sigma = max(float(sigma_m), eps)
+    kernel = torch.exp(-dist2 / (2.0 * sigma * sigma))
+    priors_f = torch.clamp(torch.nan_to_num(priors.float(), nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+    priors_f = priors_f / torch.clamp(priors_f.sum(dim=-1, keepdim=True), min=eps)
+    cross = (priors_f @ kernel) @ priors_f.T
+    self_mass = torch.clamp(torch.diag(cross), min=eps)
+    return cross / torch.sqrt(torch.clamp(self_mass[:, None] * self_mass[None, :], min=eps))
+
+
+def _mapg_support_overlap_loss(
+    state: PicfCoreState,
+    *,
+    config: PicfTransitionLossConfig,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    graph = state.anchor_prior_graph
+    if graph is None or graph.anchor_tokens.shape[0] < 2:
+        return _zero_weight_sum(reference, None if graph is None else graph.anchor_tokens)
+    usage = _mapg_anchor_usage(graph, reference=reference, eps=eps)
+    if not bool((usage.sum() > eps).item()):
+        return _zero_weight_sum(reference, graph.anchor_tokens)
+    roles = graph.anchor_roles.to(device=reference.device, dtype=torch.long)
+    same_role = roles[:, None] == roles[None, :]
+    pair_mask = torch.triu(same_role, diagonal=1)
+    confidence = torch.clamp(graph.anchor_confidence.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
+    base_weight = usage[:, None] * usage[None, :] * confidence[:, None] * confidence[None, :]
+    base_weight = torch.where(pair_mask, base_weight, torch.zeros_like(base_weight))
+    if not bool((base_weight.sum() > eps).item()):
+        return _zero_weight_sum(reference, graph.anchor_tokens)
+
+    def _one_modality(priors: torch.Tensor | None, overlap: torch.Tensor | None, margin: float) -> torch.Tensor | None:
+        if priors is None or priors.numel() == 0 or overlap is None:
+            return None
+        priors_ref = priors.to(device=reference.device, dtype=reference.dtype)
+        valid = priors_ref.sum(dim=-1) > eps
+        weights = torch.where(valid[:, None] & valid[None, :], base_weight, torch.zeros_like(base_weight))
+        if not bool((weights.sum() > eps).item()):
+            return None
+        penalty = fn.relu(overlap.to(device=reference.device, dtype=reference.dtype) - float(margin)).pow(2)
+        return (weights * penalty).sum() / torch.clamp(weights.sum(), min=eps)
+
+    losses = []
+    losses.append(
+        _one_modality(
+            graph.visual_priors,
+            _mapg_visual_kernel_overlap(
+                state,
+                graph.visual_priors.to(device=reference.device, dtype=reference.dtype),
+                sigma_patches=float(config.mapg_support_div_sigma_visual_patches),
+                eps=eps,
+            ),
+            float(config.mapg_support_div_margin_visual),
+        )
+    )
+    if graph.point_priors is not None:
+        losses.append(
+            _one_modality(
+                graph.point_priors,
+                _mapg_point_kernel_overlap(
+                    state,
+                    graph.point_priors.to(device=reference.device, dtype=reference.dtype),
+                    sigma_m=float(config.mapg_support_div_sigma_point_m),
+                    eps=eps,
+                ),
+                float(config.mapg_support_div_margin_point),
+            )
+        )
+    if graph.tactile_priors is not None:
+        losses.append(
+            _one_modality(
+                graph.tactile_priors,
+                _mapg_identity_overlap(graph.tactile_priors.to(device=reference.device, dtype=reference.dtype), eps=eps),
+                float(config.mapg_support_div_margin_tactile),
+            )
+        )
+    if graph.posterior_priors is not None:
+        losses.append(
+            _one_modality(
+                graph.posterior_priors,
+                _mapg_identity_overlap(graph.posterior_priors.to(device=reference.device, dtype=reference.dtype), eps=eps),
+                float(config.mapg_support_div_margin_posterior),
+            )
+        )
+    losses = [loss for loss in losses if loss is not None]
+    if not losses:
+        return _zero_weight_sum(reference, graph.anchor_tokens, graph.visual_priors)
+    return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
+
+
+def _mapg_geometry_diversity_loss(
+    state: PicfCoreState,
+    *,
+    config: PicfTransitionLossConfig,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    graph = state.anchor_prior_graph
+    if graph is None or graph.anchor_x is None or graph.anchor_S is None or graph.anchor_x.shape[0] < 2:
+        return _zero_weight_sum(reference, None if graph is None else graph.anchor_tokens)
+    usage = _mapg_anchor_usage(graph, reference=reference, eps=eps)
+    if not bool((usage.sum() > eps).item()):
+        return _zero_weight_sum(reference, graph.anchor_tokens)
+    x = graph.anchor_x.to(device=reference.device, dtype=torch.float32)
+    S = graph.anchor_S.to(device=reference.device, dtype=torch.float32)
+    valid = graph.geometry_valid.to(device=reference.device)
+    roles = graph.anchor_roles.to(device=reference.device, dtype=torch.long)
+    confidence = torch.clamp(graph.anchor_confidence.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
+    same_role = roles[:, None] == roles[None, :]
+    pair_mask = torch.triu(same_role & valid[:, None] & valid[None, :], diagonal=1)
+    if not bool(pair_mask.any().item()):
+        return _zero_weight_sum(reference, graph.anchor_tokens, graph.anchor_x, graph.anchor_S)
+    diff = x[:, None, :] - x[None, :, :]
+    jitter = max(float(config.mapg_geometry_diversity_jitter_m), eps)
+    eye = torch.eye(3, device=reference.device, dtype=torch.float32)
+    cov = S[:, None, :, :] + S[None, :, :, :] + ((jitter * jitter) * eye[None, None, :, :])
+    flat_cov = cov[pair_mask]
+    flat_diff = diff[pair_mask]
+    solved = torch.linalg.solve(flat_cov, flat_diff[..., None]).squeeze(-1)
+    d2 = torch.clamp(torch.sum(flat_diff * solved, dim=-1), min=0.0)
+    distance = torch.sqrt(d2 + eps)
+    weights = usage[:, None] * usage[None, :] * confidence[:, None] * confidence[None, :]
+    flat_weights = torch.clamp(weights[pair_mask].to(device=reference.device, dtype=reference.dtype), min=0.0)
+    if not bool((flat_weights.sum() > eps).item()):
+        return _zero_weight_sum(reference, graph.anchor_tokens, graph.anchor_x, graph.anchor_S)
+    penalty = fn.relu(float(config.mapg_geometry_diversity_margin) - distance.to(dtype=reference.dtype)).pow(2)
+    return (flat_weights * penalty).sum() / torch.clamp(flat_weights.sum(), min=eps)
+
+
 def _mapg_graph_loss(
     state: PicfCoreState,
     *,
     config: PicfTransitionLossConfig,
     reference: torch.Tensor,
-) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     graph = state.anchor_prior_graph
     zero = _zero_like(reference)
     if graph is None:
-        return zero, zero, zero, zero, zero, zero
+        return zero, zero, zero, zero, zero, zero, zero, zero
     eps = max(float(config.vl_point_consistency_eps), 1e-8)
     siglip = _mapg_siglip_loss(state, reference=reference, tau=float(config.mapg_siglip_tau), eps=eps)
     vicreg = _mapg_vicreg_loss(
@@ -939,14 +1147,18 @@ def _mapg_graph_loss(
     cycle = _mapg_cycle_loss(state, reference=reference, eps=eps)
     masked = _mapg_masked_modality_loss(state, reference=reference, eps=eps)
     routing = _mapg_routing_loss(state, reference=reference, eps=eps)
+    support_diversity = _mapg_support_overlap_loss(state, config=config, reference=reference, eps=eps)
+    geometry_diversity = _mapg_geometry_diversity_loss(state, config=config, reference=reference, eps=eps)
     total = (
         (float(config.lambda_mapg_siglip) * siglip)
         + (float(config.lambda_mapg_vicreg) * vicreg)
         + (float(config.lambda_mapg_cycle) * cycle)
         + (float(config.lambda_mapg_masked_modality) * masked)
         + (float(config.lambda_mapg_routing) * routing)
+        + (float(config.lambda_mapg_support_diversity) * support_diversity)
+        + (float(config.lambda_mapg_geometry_diversity) * geometry_diversity)
     )
-    return total, siglip, vicreg, cycle, masked, routing
+    return total, siglip, vicreg, cycle, masked, routing, support_diversity, geometry_diversity
 
 
 def _routing_responsibilities(mass: torch.Tensor, *, eps: float) -> torch.Tensor:
@@ -1452,6 +1664,8 @@ def compute_transition_loss(
         mapg_cycle,
         mapg_masked_modality,
         mapg_routing,
+        mapg_support_diversity,
+        mapg_geometry_diversity,
     ) = _mapg_graph_loss(
         output_t.state,
         config=cfg,
@@ -1534,6 +1748,8 @@ def compute_transition_loss(
         mapg_cycle=mapg_cycle,
         mapg_masked_modality=mapg_masked_modality,
         mapg_routing=mapg_routing,
+        mapg_support_diversity=mapg_support_diversity,
+        mapg_geometry_diversity=mapg_geometry_diversity,
     )
 
 

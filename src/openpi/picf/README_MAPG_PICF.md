@@ -411,6 +411,8 @@ loss_mapg_vicreg
 loss_mapg_cycle
 loss_mapg_masked_modality
 loss_mapg_routing
+loss_mapg_support_diversity
+loss_mapg_geometry_diversity
 ```
 
 CLI knobs:
@@ -421,9 +423,19 @@ CLI knobs:
 --lambda-mapg-cycle
 --lambda-mapg-masked-modality
 --lambda-mapg-routing
+--lambda-mapg-support-diversity
+--lambda-mapg-geometry-diversity
 --mapg-siglip-tau
 --mapg-vicreg-var-target
 --mapg-vicreg-cov-weight
+--mapg-support-div-margin-visual
+--mapg-support-div-margin-point
+--mapg-support-div-margin-tactile
+--mapg-support-div-margin-posterior
+--mapg-support-div-sigma-visual-patches
+--mapg-support-div-sigma-point-m
+--mapg-geometry-diversity-margin
+--mapg-geometry-diversity-jitter-m
 ```
 
 All MAPG losses are availability/confidence-gated by the presence of graph
@@ -454,7 +466,38 @@ Same-anchor cross-modal embeddings are positives:
 Different anchors in the same frame are negatives even when they are visually
 or semantically similar. This prevents instance merging.
 
-### 5.2 Assignment And Anti-Collapse
+### 5.2 Unified Anchor Separation Objective
+
+MAPG anti-collapse is defined over the graph's own mathematical objects, not
+as a defensive geometry-only repulsion:
+
+```text
+L_MAPG =
+  lambda_mapg_siglip * L_siglip
++ lambda_mapg_vicreg * L_vicreg
++ lambda_mapg_cycle * L_cycle
++ lambda_mapg_masked_modality * L_masked
++ lambda_mapg_routing * L_routing
++ lambda_mapg_support_diversity * L_support_overlap
++ lambda_mapg_geometry_diversity * L_geometry_aux
+```
+
+The four separation layers are:
+
+- assignment matrix `A`: role-constrained Sinkhorn/OT competition prevents
+  slots from all binding to one graph anchor.
+- support distributions `p_m`: kernelized normalized overlap prevents active
+  same-role anchors from explaining the same visual/point/tactile/posterior
+  support.
+- anchor/modality embeddings `z_k, e_m^k`: validity-masked SigLIP plus
+  per-modality VICReg prevents representation collapse while keeping same-anchor
+  modalities aligned.
+- geometry moments `x/S`: low-weight covariance-aware Mahalanobis diversity is
+  used only when geometry is valid.
+
+This is a single MAPG objective, not a stack of unrelated patches.
+
+### 5.3 Role-Constrained Assignment
 
 `_mapg_slot_assignment(...)` uses role-constrained Sinkhorn-style assignment:
 
@@ -462,19 +505,50 @@ or semantically similar. This prevents instance merging.
 slot roles -> role mask over anchors
 log(anchor_score * anchor_confidence) / temperature
 row normalization
-column coverage normalization for mapg_assignment_sinkhorn_iters rounds
+quality/uniform column capacity target
+column capacity normalization for mapg_assignment_sinkhorn_iters rounds
 ```
 
 This prevents all observation/task slots from collapsing onto the single
-highest-score anchor while preserving role compatibility.
+highest-score anchor while preserving role compatibility. The capacity target
+uses `mapg_assignment_quality_uniform_mix`: high-quality anchors can receive
+more mass, but the uniform floor prevents one anchor from absorbing every
+compatible slot.
 
-### 5.2 VICReg Anti-Collapse
+### 5.4 Kernelized Support-Overlap Diversity
+
+`loss_mapg_support_diversity` is the support-first anti-collapse term. For
+modality `m`:
+
+```text
+O_m(i,j) =
+  p_m_i^T K_m p_m_j
+  / sqrt((p_m_i^T K_m p_m_i)(p_m_j^T K_m p_m_j) + eps)
+```
+
+The loss is margin-based and only applies to active, high-confidence, same-role
+anchor pairs:
+
+```text
+L_support =
+  mean_{i<j, same_role}
+    usage_i usage_j conf_i conf_j
+    sum_m valid_ij^m relu(O_m(i,j) - rho_m)^2
+```
+
+Visual support uses a Gaussian kernel over the V-JEPA grid. Point support uses a
+Gaussian kernel over world-frame point positions. Tactile/posterior supports use
+identity kernels in the current implementation because they are already compact
+discrete support spaces. This is deliberately stronger and more direct than
+center-only geometry repulsion.
+
+### 5.5 VICReg Anti-Collapse
 
 `loss_mapg_vicreg` keeps graph and modality embedding dimensions active and
 decorrelated. It is applied to every available valid-row embedding family:
 graph, visual, point, tactile, and posterior.
 
-### 5.3 Cycle Consistency
+### 5.6 Cycle Consistency
 
 When visual-point projection exists:
 
@@ -485,7 +559,7 @@ JS(p_v, p_v_cycle)
 
 This catches transpose mistakes, mass leakage, and projection collapse.
 
-### 5.4 Masked Modality Prediction
+### 5.7 Masked Modality Prediction
 
 Available modality embeddings predict the held-out modality through a
 leave-one-modality-out cosine objective. The target modality and fused graph
@@ -501,7 +575,7 @@ through its own pooled representation:
 
 Each path is masked when the target modality is unavailable.
 
-### 5.5 Routing Regularization
+### 5.8 Routing Regularization
 
 Observation and task assignment matrices are regularized to avoid both
 over-uniform routing and single-anchor collapse:
@@ -513,6 +587,26 @@ entropy(A_slot)
 + JS(A_task visual_priors, task visual weights)
 + JS(A_task point_priors, task point weights)
 ```
+
+### 5.9 Geometry Diversity Auxiliary
+
+`loss_mapg_geometry_diversity` is intentionally a low-weight auxiliary. It is
+only active for same-role pairs whose geometry moments are valid:
+
+```text
+d_ij^2 =
+  (x_i - x_j)^T
+  (S_i + S_j + sigma_0^2 I)^-1
+  (x_i - x_j)
+
+L_geom =
+  mean usage_i usage_j conf_i conf_j
+       relu(tau_role - sqrt(d_ij^2 + eps))^2
+```
+
+This term is not the primary anti-collapse mechanism because MAPG must remain
+valid when pointcloud is missing or noisy. Support diversity and assignment
+competition remain the main separation mechanisms.
 
 ## 6. CLI
 
@@ -528,6 +622,8 @@ Core MAPG switches:
 --mapg-confidence-floor 0.05
 --mapg-assignment-sinkhorn-iters 6
 --mapg-assignment-temperature 1.0
+--mapg-assignment-quality-uniform-mix 0.25
+--mapg-mode-confidence-threshold 0.10
 --mapg-obs-gate-init -4.0
 --mapg-task-gate-init -4.0
 --mapg-posterior-gate-init -6.0
@@ -543,6 +639,16 @@ Graph losses:
 --lambda-mapg-cycle 0.002
 --lambda-mapg-masked-modality 0.002
 --lambda-mapg-routing 0.001
+--lambda-mapg-support-diversity 0.002
+--lambda-mapg-geometry-diversity 0.0005
+--mapg-support-div-margin-visual 0.15
+--mapg-support-div-margin-point 0.15
+--mapg-support-div-margin-tactile 0.25
+--mapg-support-div-margin-posterior 0.10
+--mapg-support-div-sigma-visual-patches 1.0
+--mapg-support-div-sigma-point-m 0.04
+--mapg-geometry-diversity-margin 1.0
+--mapg-geometry-diversity-jitter-m 0.005
 ```
 
 VL heatmap/keypose supervision remains live and should be used with MAPG:
@@ -604,7 +710,9 @@ torchrun --standalone --nproc_per_node=2 scripts/picf_core_train.py \
   --lambda-mapg-vicreg 0.001 \
   --lambda-mapg-cycle 0.002 \
   --lambda-mapg-masked-modality 0.002 \
-  --lambda-mapg-routing 0.001
+  --lambda-mapg-routing 0.001 \
+  --lambda-mapg-support-diversity 0.002 \
+  --lambda-mapg-geometry-diversity 0.0005
 ```
 
 Expected startup log contracts:

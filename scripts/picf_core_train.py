@@ -1050,6 +1050,10 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.mapg_assignment_sinkhorn_iters = int(_SPEC_DEFAULTS.mapg_assignment_sinkhorn_iters)
     if getattr(args, "mapg_assignment_temperature", None) is None:
         args.mapg_assignment_temperature = float(_SPEC_DEFAULTS.mapg_assignment_temperature)
+    if getattr(args, "mapg_assignment_quality_uniform_mix", None) is None:
+        args.mapg_assignment_quality_uniform_mix = float(_SPEC_DEFAULTS.mapg_assignment_quality_uniform_mix)
+    if getattr(args, "mapg_mode_confidence_threshold", None) is None:
+        args.mapg_mode_confidence_threshold = float(_SPEC_DEFAULTS.mapg_mode_confidence_threshold)
     if getattr(args, "mapg_obs_gate_init", None) is None:
         args.mapg_obs_gate_init = float(_SPEC_DEFAULTS.mapg_obs_gate_init)
     if getattr(args, "mapg_task_gate_init", None) is None:
@@ -2534,6 +2538,8 @@ class _MetricAccumulator:
     loss_mapg_cycle: float = 0.0
     loss_mapg_masked_modality: float = 0.0
     loss_mapg_routing: float = 0.0
+    loss_mapg_support_diversity: float = 0.0
+    loss_mapg_geometry_diversity: float = 0.0
     physical_aux_budget_scale: float = 0.0
     semantic_aux_budget_scale: float = 0.0
     alignment_budget_scale: float = 0.0
@@ -2586,6 +2592,8 @@ class _MetricAccumulator:
         self.loss_mapg_cycle += float(losses.mapg_cycle.item())
         self.loss_mapg_masked_modality += float(losses.mapg_masked_modality.item())
         self.loss_mapg_routing += float(losses.mapg_routing.item())
+        self.loss_mapg_support_diversity += float(losses.mapg_support_diversity.item())
+        self.loss_mapg_geometry_diversity += float(losses.mapg_geometry_diversity.item())
         self.physical_aux_budget_scale += float(losses.physical_aux_budget_scale.item())
         self.semantic_aux_budget_scale += float(losses.semantic_aux_budget_scale.item())
         self.alignment_budget_scale += float(losses.alignment_budget_scale.item())
@@ -2631,6 +2639,8 @@ class _MetricAccumulator:
         self.loss_mapg_cycle += float(outputs.get("loss_mapg_cycle", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_mapg_masked_modality += float(outputs.get("loss_mapg_masked_modality", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_mapg_routing += float(outputs.get("loss_mapg_routing", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_mapg_support_diversity += float(outputs.get("loss_mapg_support_diversity", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_mapg_geometry_diversity += float(outputs.get("loss_mapg_geometry_diversity", outputs["loss_pt"] * 0.0).detach().item())
         self.physical_aux_budget_scale += float(outputs["physical_aux_budget_scale"].detach().item())
         self.semantic_aux_budget_scale += float(outputs["semantic_aux_budget_scale"].detach().item())
         self.alignment_budget_scale += float(outputs["alignment_budget_scale"].detach().item())
@@ -2678,6 +2688,8 @@ class _MetricAccumulator:
             "loss_mapg_cycle": self.loss_mapg_cycle / denom,
             "loss_mapg_masked_modality": self.loss_mapg_masked_modality / denom,
             "loss_mapg_routing": self.loss_mapg_routing / denom,
+            "loss_mapg_support_diversity": self.loss_mapg_support_diversity / denom,
+            "loss_mapg_geometry_diversity": self.loss_mapg_geometry_diversity / denom,
             "physical_aux_budget_scale": self.physical_aux_budget_scale / denom,
             "semantic_aux_budget_scale": self.semantic_aux_budget_scale / denom,
             "alignment_budget_scale": self.alignment_budget_scale / denom,
@@ -2768,6 +2780,8 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_mapg_cycle": losses.mapg_cycle,
             "loss_mapg_masked_modality": losses.mapg_masked_modality,
             "loss_mapg_routing": losses.mapg_routing,
+            "loss_mapg_support_diversity": losses.mapg_support_diversity,
+            "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
             "physical_aux_budget_scale": losses.physical_aux_budget_scale,
             "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
             "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3079,6 +3093,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_mapg_cycle": losses.mapg_cycle,
                     "loss_mapg_masked_modality": losses.mapg_masked_modality,
                     "loss_mapg_routing": losses.mapg_routing,
+                    "loss_mapg_support_diversity": losses.mapg_support_diversity,
+                    "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3125,6 +3141,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_mapg_cycle"] = metrics["loss_mapg_cycle"] + losses.mapg_cycle
                 metrics["loss_mapg_masked_modality"] = metrics["loss_mapg_masked_modality"] + losses.mapg_masked_modality
                 metrics["loss_mapg_routing"] = metrics["loss_mapg_routing"] + losses.mapg_routing
+                metrics["loss_mapg_support_diversity"] = metrics["loss_mapg_support_diversity"] + losses.mapg_support_diversity
+                metrics["loss_mapg_geometry_diversity"] = metrics["loss_mapg_geometry_diversity"] + losses.mapg_geometry_diversity
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
@@ -3194,6 +3212,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_mapg_cycle": losses.mapg_cycle,
                     "loss_mapg_masked_modality": losses.mapg_masked_modality,
                     "loss_mapg_routing": losses.mapg_routing,
+                    "loss_mapg_support_diversity": losses.mapg_support_diversity,
+                    "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3237,6 +3257,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_mapg_cycle"] = metrics["loss_mapg_cycle"] + losses.mapg_cycle
                 metrics["loss_mapg_masked_modality"] = metrics["loss_mapg_masked_modality"] + losses.mapg_masked_modality
                 metrics["loss_mapg_routing"] = metrics["loss_mapg_routing"] + losses.mapg_routing
+                metrics["loss_mapg_support_diversity"] = metrics["loss_mapg_support_diversity"] + losses.mapg_support_diversity
+                metrics["loss_mapg_geometry_diversity"] = metrics["loss_mapg_geometry_diversity"] + losses.mapg_geometry_diversity
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
@@ -3284,6 +3306,8 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_mapg_cycle": metrics["loss_mapg_cycle"] / denom,
             "loss_mapg_masked_modality": metrics["loss_mapg_masked_modality"] / denom,
             "loss_mapg_routing": metrics["loss_mapg_routing"] / denom,
+            "loss_mapg_support_diversity": metrics["loss_mapg_support_diversity"] / denom,
+            "loss_mapg_geometry_diversity": metrics["loss_mapg_geometry_diversity"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3334,6 +3358,8 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_mapg_cycle",
     "loss_mapg_masked_modality",
     "loss_mapg_routing",
+    "loss_mapg_support_diversity",
+    "loss_mapg_geometry_diversity",
     "physical_aux_budget_scale",
     "semantic_aux_budget_scale",
     "alignment_budget_scale",
@@ -4177,6 +4203,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         mapg_assignment_temperature=float(
             _arg_or_default("mapg_assignment_temperature", _SPEC_DEFAULTS.mapg_assignment_temperature)
         ),
+        mapg_assignment_quality_uniform_mix=float(
+            _arg_or_default("mapg_assignment_quality_uniform_mix", _SPEC_DEFAULTS.mapg_assignment_quality_uniform_mix)
+        ),
+        mapg_mode_confidence_threshold=float(
+            _arg_or_default("mapg_mode_confidence_threshold", _SPEC_DEFAULTS.mapg_mode_confidence_threshold)
+        ),
         mapg_obs_gate_init=float(_arg_or_default("mapg_obs_gate_init", _SPEC_DEFAULTS.mapg_obs_gate_init)),
         mapg_task_gate_init=float(_arg_or_default("mapg_task_gate_init", _SPEC_DEFAULTS.mapg_task_gate_init)),
         mapg_posterior_gate_init=float(
@@ -4357,9 +4389,19 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_mapg_cycle=float(getattr(args, "lambda_mapg_cycle", 0.0)),
         lambda_mapg_masked_modality=float(getattr(args, "lambda_mapg_masked_modality", 0.0)),
         lambda_mapg_routing=float(getattr(args, "lambda_mapg_routing", 0.0)),
+        lambda_mapg_support_diversity=float(getattr(args, "lambda_mapg_support_diversity", 0.0)),
+        lambda_mapg_geometry_diversity=float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
         mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", 0.07)),
         mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", 1.0)),
         mapg_vicreg_cov_weight=float(getattr(args, "mapg_vicreg_cov_weight", 0.04)),
+        mapg_support_div_margin_visual=float(getattr(args, "mapg_support_div_margin_visual", 0.15)),
+        mapg_support_div_margin_point=float(getattr(args, "mapg_support_div_margin_point", 0.15)),
+        mapg_support_div_margin_tactile=float(getattr(args, "mapg_support_div_margin_tactile", 0.25)),
+        mapg_support_div_margin_posterior=float(getattr(args, "mapg_support_div_margin_posterior", 0.10)),
+        mapg_support_div_sigma_visual_patches=float(getattr(args, "mapg_support_div_sigma_visual_patches", 1.0)),
+        mapg_support_div_sigma_point_m=float(getattr(args, "mapg_support_div_sigma_point_m", 0.04)),
+        mapg_geometry_diversity_margin=float(getattr(args, "mapg_geometry_diversity_margin", 1.0)),
+        mapg_geometry_diversity_jitter_m=float(getattr(args, "mapg_geometry_diversity_jitter_m", 0.005)),
     )
 
 
@@ -5004,7 +5046,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "vl_prior_bias_clip", _SPEC_DEFAULTS.vl_prior_bias_clip)),
             )
             logging.info(
-                "MAPG anchor prior graph contract: enabled=%s anchors=%s message_rounds=%s visual_sigma_patches=%s tactile_sigma_m=%s posterior_sigma_m=%s confidence_floor=%s assignment_sinkhorn_iters=%s assignment_temperature=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s prior_bias_clip=%s losses(siglip=%s vicreg=%s cycle=%s masked=%s routing=%s)",
+                "MAPG anchor prior graph contract: enabled=%s anchors=%s message_rounds=%s visual_sigma_patches=%s tactile_sigma_m=%s posterior_sigma_m=%s confidence_floor=%s assignment_sinkhorn_iters=%s assignment_temperature=%s assignment_quality_uniform_mix=%s mode_confidence_threshold=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s prior_bias_clip=%s losses(siglip=%s vicreg=%s cycle=%s masked=%s routing=%s support_div=%s geom_div=%s)",
                 bool(getattr(args, "mapg_enabled", False)),
                 int(getattr(args, "mapg_anchor_count", _SPEC_DEFAULTS.mapg_anchor_count)),
                 int(getattr(args, "mapg_message_rounds", _SPEC_DEFAULTS.mapg_message_rounds)),
@@ -5014,6 +5056,8 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "mapg_confidence_floor", _SPEC_DEFAULTS.mapg_confidence_floor)),
                 int(getattr(args, "mapg_assignment_sinkhorn_iters", _SPEC_DEFAULTS.mapg_assignment_sinkhorn_iters)),
                 float(getattr(args, "mapg_assignment_temperature", _SPEC_DEFAULTS.mapg_assignment_temperature)),
+                float(getattr(args, "mapg_assignment_quality_uniform_mix", _SPEC_DEFAULTS.mapg_assignment_quality_uniform_mix)),
+                float(getattr(args, "mapg_mode_confidence_threshold", _SPEC_DEFAULTS.mapg_mode_confidence_threshold)),
                 float(getattr(args, "mapg_obs_gate_init", _SPEC_DEFAULTS.mapg_obs_gate_init)),
                 float(getattr(args, "mapg_task_gate_init", _SPEC_DEFAULTS.mapg_task_gate_init)),
                 float(getattr(args, "mapg_posterior_gate_init", _SPEC_DEFAULTS.mapg_posterior_gate_init)),
@@ -5024,6 +5068,8 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_cycle", 0.0)),
                 float(getattr(args, "lambda_mapg_masked_modality", 0.0)),
                 float(getattr(args, "lambda_mapg_routing", 0.0)),
+                float(getattr(args, "lambda_mapg_support_diversity", 0.0)),
+                float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
             )
             logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
@@ -5589,9 +5635,19 @@ def main() -> None:
     parser.add_argument("--lambda-mapg-cycle", type=float, default=0.0)
     parser.add_argument("--lambda-mapg-masked-modality", type=float, default=0.0)
     parser.add_argument("--lambda-mapg-routing", type=float, default=0.0)
+    parser.add_argument("--lambda-mapg-support-diversity", type=float, default=0.0)
+    parser.add_argument("--lambda-mapg-geometry-diversity", type=float, default=0.0)
     parser.add_argument("--mapg-siglip-tau", type=float, default=0.07)
     parser.add_argument("--mapg-vicreg-var-target", type=float, default=1.0)
     parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=0.04)
+    parser.add_argument("--mapg-support-div-margin-visual", type=float, default=0.15)
+    parser.add_argument("--mapg-support-div-margin-point", type=float, default=0.15)
+    parser.add_argument("--mapg-support-div-margin-tactile", type=float, default=0.25)
+    parser.add_argument("--mapg-support-div-margin-posterior", type=float, default=0.10)
+    parser.add_argument("--mapg-support-div-sigma-visual-patches", type=float, default=1.0)
+    parser.add_argument("--mapg-support-div-sigma-point-m", type=float, default=0.04)
+    parser.add_argument("--mapg-geometry-diversity-margin", type=float, default=1.0)
+    parser.add_argument("--mapg-geometry-diversity-jitter-m", type=float, default=0.005)
     parser.add_argument("--enable-aux-budgeting", dest="enable_aux_budgeting", action="store_true")
     parser.add_argument("--disable-aux-budgeting", dest="enable_aux_budgeting", action="store_false")
     parser.add_argument("--aux-budget-physical-ratio", type=float, default=0.20)
@@ -5797,6 +5853,8 @@ def main() -> None:
     parser.add_argument("--mapg-confidence-floor", type=float, default=_SPEC_DEFAULTS.mapg_confidence_floor)
     parser.add_argument("--mapg-assignment-sinkhorn-iters", type=int, default=_SPEC_DEFAULTS.mapg_assignment_sinkhorn_iters)
     parser.add_argument("--mapg-assignment-temperature", type=float, default=_SPEC_DEFAULTS.mapg_assignment_temperature)
+    parser.add_argument("--mapg-assignment-quality-uniform-mix", type=float, default=_SPEC_DEFAULTS.mapg_assignment_quality_uniform_mix)
+    parser.add_argument("--mapg-mode-confidence-threshold", type=float, default=_SPEC_DEFAULTS.mapg_mode_confidence_threshold)
     parser.add_argument("--mapg-obs-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_obs_gate_init)
     parser.add_argument("--mapg-task-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_task_gate_init)
     parser.add_argument("--mapg-posterior-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_posterior_gate_init)

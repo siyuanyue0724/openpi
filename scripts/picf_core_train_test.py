@@ -109,6 +109,11 @@ def _base_args() -> argparse.Namespace:
         mapg_visual_sigma_patches=2.0,
         mapg_tactile_sigma_m=0.08,
         mapg_posterior_sigma_m=0.08,
+        mapg_confidence_floor=0.05,
+        mapg_assignment_sinkhorn_iters=6,
+        mapg_assignment_temperature=1.0,
+        mapg_assignment_quality_uniform_mix=0.25,
+        mapg_mode_confidence_threshold=0.10,
         mapg_obs_gate_init=-4.0,
         mapg_task_gate_init=-4.0,
         mapg_posterior_gate_init=-6.0,
@@ -158,9 +163,19 @@ def _base_args() -> argparse.Namespace:
         lambda_mapg_cycle=0.0,
         lambda_mapg_masked_modality=0.0,
         lambda_mapg_routing=0.0,
+        lambda_mapg_support_diversity=0.0,
+        lambda_mapg_geometry_diversity=0.0,
         mapg_siglip_tau=0.07,
         mapg_vicreg_var_target=1.0,
         mapg_vicreg_cov_weight=0.04,
+        mapg_support_div_margin_visual=0.15,
+        mapg_support_div_margin_point=0.15,
+        mapg_support_div_margin_tactile=0.25,
+        mapg_support_div_margin_posterior=0.10,
+        mapg_support_div_sigma_visual_patches=1.0,
+        mapg_support_div_sigma_point_m=0.04,
+        mapg_geometry_diversity_margin=1.0,
+        mapg_geometry_diversity_jitter_m=0.005,
         tau_pv=0.07,
         tau_pt=0.07,
         tau_route_p=0.1,
@@ -1905,6 +1920,8 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     args.mapg_confidence_floor = 0.07
     args.mapg_assignment_sinkhorn_iters = 9
     args.mapg_assignment_temperature = 0.8
+    args.mapg_assignment_quality_uniform_mix = 0.31
+    args.mapg_mode_confidence_threshold = 0.13
     args.mapg_obs_gate_init = -3.1
     args.mapg_task_gate_init = -3.2
     args.mapg_posterior_gate_init = -5.1
@@ -1915,9 +1932,19 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     args.lambda_mapg_cycle = 0.03
     args.lambda_mapg_masked_modality = 0.04
     args.lambda_mapg_routing = 0.05
+    args.lambda_mapg_support_diversity = 0.06
+    args.lambda_mapg_geometry_diversity = 0.007
     args.mapg_siglip_tau = 0.09
     args.mapg_vicreg_var_target = 0.8
     args.mapg_vicreg_cov_weight = 0.06
+    args.mapg_support_div_margin_visual = 0.16
+    args.mapg_support_div_margin_point = 0.17
+    args.mapg_support_div_margin_tactile = 0.27
+    args.mapg_support_div_margin_posterior = 0.12
+    args.mapg_support_div_sigma_visual_patches = 1.3
+    args.mapg_support_div_sigma_point_m = 0.05
+    args.mapg_geometry_diversity_margin = 1.2
+    args.mapg_geometry_diversity_jitter_m = 0.006
     _MODULE._normalize_train_args(args)
 
     core, semantic_encoder, use_visual_override = _MODULE._build_model(args, device=torch.device("cpu"))
@@ -1934,6 +1961,8 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     assert core.config.mapg_confidence_floor == pytest.approx(0.07)
     assert core.config.mapg_assignment_sinkhorn_iters == 9
     assert core.config.mapg_assignment_temperature == pytest.approx(0.8)
+    assert core.config.mapg_assignment_quality_uniform_mix == pytest.approx(0.31)
+    assert core.config.mapg_mode_confidence_threshold == pytest.approx(0.13)
     assert core.config.mapg_obs_gate_init == pytest.approx(-3.1)
     assert core.config.mapg_task_gate_init == pytest.approx(-3.2)
     assert core.config.mapg_posterior_gate_init == pytest.approx(-5.1)
@@ -1944,9 +1973,19 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     assert loss_config.lambda_mapg_cycle == pytest.approx(0.03)
     assert loss_config.lambda_mapg_masked_modality == pytest.approx(0.04)
     assert loss_config.lambda_mapg_routing == pytest.approx(0.05)
+    assert loss_config.lambda_mapg_support_diversity == pytest.approx(0.06)
+    assert loss_config.lambda_mapg_geometry_diversity == pytest.approx(0.007)
     assert loss_config.mapg_siglip_tau == pytest.approx(0.09)
     assert loss_config.mapg_vicreg_var_target == pytest.approx(0.8)
     assert loss_config.mapg_vicreg_cov_weight == pytest.approx(0.06)
+    assert loss_config.mapg_support_div_margin_visual == pytest.approx(0.16)
+    assert loss_config.mapg_support_div_margin_point == pytest.approx(0.17)
+    assert loss_config.mapg_support_div_margin_tactile == pytest.approx(0.27)
+    assert loss_config.mapg_support_div_margin_posterior == pytest.approx(0.12)
+    assert loss_config.mapg_support_div_sigma_visual_patches == pytest.approx(1.3)
+    assert loss_config.mapg_support_div_sigma_point_m == pytest.approx(0.05)
+    assert loss_config.mapg_geometry_diversity_margin == pytest.approx(1.2)
+    assert loss_config.mapg_geometry_diversity_jitter_m == pytest.approx(0.006)
 
 
 def test_validate_train_args_rejects_vl_router_without_paligemma() -> None:
@@ -2121,6 +2160,8 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
         "loss_mapg_cycle": torch.tensor(0.024),
         "loss_mapg_masked_modality": torch.tensor(0.025),
         "loss_mapg_routing": torch.tensor(0.026),
+        "loss_mapg_support_diversity": torch.tensor(0.027),
+        "loss_mapg_geometry_diversity": torch.tensor(0.028),
         "physical_aux_budget_scale": torch.tensor(0.8),
         "semantic_aux_budget_scale": torch.tensor(0.7),
         "alignment_budget_scale": torch.tensor(0.6),
@@ -2141,6 +2182,8 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
     assert averages["loss_physical_aux_capped"] == pytest.approx(0.03)
     assert averages["loss_total_minus_action"] == pytest.approx(0.8)
     assert averages["loss_mapg_graph"] == pytest.approx(0.021)
+    assert averages["loss_mapg_support_diversity"] == pytest.approx(0.027)
+    assert averages["loss_mapg_geometry_diversity"] == pytest.approx(0.028)
     assert averages["physical_aux_budget_scale"] == pytest.approx(0.8)
     assert averages["tactile_contact_prob_mean"] == pytest.approx(0.12)
 
@@ -2209,6 +2252,8 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
         mapg_cycle=torch.tensor(0.0),
         mapg_masked_modality=torch.tensor(0.0),
         mapg_routing=torch.tensor(0.0),
+        mapg_support_diversity=torch.tensor(0.0),
+        mapg_geometry_diversity=torch.tensor(0.0),
         physical_aux_budget_scale=torch.tensor(1.0),
         semantic_aux_budget_scale=torch.tensor(1.0),
         alignment_budget_scale=torch.tensor(1.0),
@@ -2331,6 +2376,8 @@ def test_picf_window_trainer_reuses_middle_frame_targets_with_detached_override(
         mapg_cycle=torch.tensor(0.0),
         mapg_masked_modality=torch.tensor(0.0),
         mapg_routing=torch.tensor(0.0),
+        mapg_support_diversity=torch.tensor(0.0),
+        mapg_geometry_diversity=torch.tensor(0.0),
         physical_aux_budget_scale=torch.tensor(1.0),
         semantic_aux_budget_scale=torch.tensor(1.0),
         alignment_budget_scale=torch.tensor(1.0),
@@ -2468,6 +2515,8 @@ def test_picf_window_trainer_state_only_burnin_skips_policy_flow_until_suffix() 
         mapg_cycle=torch.tensor(0.0),
         mapg_masked_modality=torch.tensor(0.0),
         mapg_routing=torch.tensor(0.0),
+        mapg_support_diversity=torch.tensor(0.0),
+        mapg_geometry_diversity=torch.tensor(0.0),
         physical_aux_budget_scale=torch.tensor(1.0),
         semantic_aux_budget_scale=torch.tensor(1.0),
         alignment_budget_scale=torch.tensor(1.0),

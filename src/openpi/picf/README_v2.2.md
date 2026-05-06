@@ -61,9 +61,10 @@ deployment.
   confidence-gated finite-message-passing math, role-constrained
   Sinkhorn-style slot assignment, direct tactile/posterior-to-visual support,
   PaliGemma-to-visual grounding that stays live without point support, explicit
-  visual-native task readout, masked graph losses, state objects, live dataflow
-  into observation anchors / task readout / posterior binding / conditioned
-  control, CLI flags, diagnostics, verification commands, and the maintained
+  visual-native task readout, masked graph losses, unified MAPG anchor
+  separation over assignment/support/embedding/geometry objects, state objects,
+  live dataflow into observation anchors / task readout / posterior binding /
+  conditioned control, CLI flags, diagnostics, verification commands, and the maintained
   `30000` step / `5000` checkpoint / `unroll_steps=2` MAPG launch template.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.

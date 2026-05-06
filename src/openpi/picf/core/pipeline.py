@@ -1967,10 +1967,15 @@ class PicfFullCore(nn.Module):
             base = torch.ones_like(base)
         base = base / torch.clamp(base.sum(), min=self.config.epsilon_a)
         coords_t = coords.to(device=self.device, dtype=self.dtype)
+        entropy = -torch.sum(base * torch.log(torch.clamp(base, min=self.config.epsilon_a)))
+        max_entropy = torch.log(torch.as_tensor(float(max(support_count, 2)), device=self.device, dtype=self.dtype))
+        confidence = 1.0 - (entropy / torch.clamp(max_entropy, min=self.config.epsilon_a))
         flat_source = bool(((torch.max(base) - torch.min(base)) <= (10.0 * self.config.epsilon_a)).item())
-        if flat_source:
+        low_confidence = bool((confidence < float(self.config.mapg_mode_confidence_threshold)).item())
+        if flat_source or low_confidence:
             # Coverage priors must not inherit torch.argmax's first-cell bias when the
-            # evidence is uniform. Use geometry-only FPS over the native support.
+            # evidence is uniform or too diffuse. Use geometry-only FPS over the
+            # native support rather than treating the first cell as a semantic mode.
             modes = _fps_indices(coords_t, min(count, support_count))
         else:
             modes = _weighted_anchor_modes(
@@ -2286,17 +2291,39 @@ class PicfFullCore(nn.Module):
         confidence = torch.clamp(graph.anchor_confidence.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
         scores = torch.clamp(scores * torch.clamp(confidence, min=float(self.config.mapg_confidence_floor)), min=self.config.epsilon_a)
         temperature = max(float(self.config.mapg_assignment_temperature), self.config.epsilon_a)
-        logits = torch.log(scores)[None, :].expand(slot_count, -1) / temperature
-        logits = logits.masked_fill(~allowed, -1.0e4)
-        assignment = torch.softmax(logits, dim=-1) * allowed.to(dtype=self.dtype)
-        assignment = assignment / torch.clamp(assignment.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
-        valid_cols = allowed.any(dim=0)
-        target_col = valid_cols.to(dtype=self.dtype) * (float(slot_count) / torch.clamp(valid_cols.to(dtype=self.dtype).sum(), min=1.0))
-        for _ in range(max(int(self.config.mapg_assignment_sinkhorn_iters), 0)):
-            col_mass = torch.clamp(assignment.sum(dim=0), min=self.config.epsilon_a)
-            assignment = assignment * torch.where(valid_cols, target_col / col_mass, torch.zeros_like(col_mass))[None, :]
-            assignment = assignment * allowed.to(dtype=self.dtype)
-            assignment = assignment / torch.clamp(assignment.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+        mix = min(max(float(self.config.mapg_assignment_quality_uniform_mix), 0.0), 1.0)
+        assignment = torch.zeros((slot_count, k), device=self.device, dtype=self.dtype)
+        for role in torch.unique(slot_roles).tolist():
+            rows = torch.nonzero(slot_roles == int(role), as_tuple=False).squeeze(-1)
+            if rows.numel() == 0:
+                continue
+            candidate_mask = allowed.index_select(0, rows).any(dim=0)
+            candidate_indices = torch.nonzero(candidate_mask, as_tuple=False).squeeze(-1)
+            if candidate_indices.numel() == 0:
+                continue
+            local_allowed = allowed.index_select(0, rows).index_select(1, candidate_indices)
+            local_scores = scores.index_select(0, candidate_indices)
+            logits = torch.log(local_scores)[None, :].expand(int(rows.numel()), -1) / temperature
+            logits = logits.masked_fill(~local_allowed, -1.0e4)
+            local = torch.softmax(logits, dim=-1) * local_allowed.to(dtype=self.dtype)
+            local = local / torch.clamp(local.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+            valid_cols = local_allowed.any(dim=0)
+            uniform = valid_cols.to(dtype=self.dtype) / torch.clamp(valid_cols.to(dtype=self.dtype).sum(), min=1.0)
+            quality = torch.where(valid_cols, local_scores, torch.zeros_like(local_scores))
+            if bool((quality.sum() > self.config.epsilon_a).item()):
+                quality = quality / torch.clamp(quality.sum(), min=self.config.epsilon_a)
+            else:
+                quality = uniform
+            target_prob = ((1.0 - mix) * quality) + (mix * uniform)
+            target_prob = torch.where(valid_cols, target_prob, torch.zeros_like(target_prob))
+            target_prob = target_prob / torch.clamp(target_prob.sum(), min=self.config.epsilon_a)
+            target_col = target_prob * float(rows.numel())
+            for _ in range(max(int(self.config.mapg_assignment_sinkhorn_iters), 0)):
+                col_mass = torch.clamp(local.sum(dim=0), min=self.config.epsilon_a)
+                local = local * torch.where(valid_cols, target_col / col_mass, torch.zeros_like(col_mass))[None, :]
+                local = local * local_allowed.to(dtype=self.dtype)
+                local = local / torch.clamp(local.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+            assignment[rows[:, None], candidate_indices[None, :]] = local
         return assignment
 
     def _build_anchor_prior_graph(
@@ -4947,6 +4974,24 @@ class PicfFullCore(nn.Module):
             debug["mapg_point_available"] = 1.0 if graph.point_priors is not None else 0.0
             debug["mapg_tactile_available"] = 1.0 if graph.tactile_priors is not None else 0.0
             debug["mapg_posterior_available"] = 1.0 if graph.posterior_priors is not None else 0.0
+            usage = torch.zeros((graph.anchor_tokens.shape[0],), device=self.device, dtype=self.dtype)
+            for assignment in (graph.obs_slot_assignment, graph.task_assignment):
+                if assignment is not None and assignment.numel() > 0 and assignment.shape[-1] == usage.shape[0]:
+                    usage = usage + assignment.to(device=self.device, dtype=self.dtype).sum(dim=0)
+            if usage.numel() > 0 and bool((usage.sum() > self.config.epsilon_a).item()):
+                usage_prob = usage / torch.clamp(usage.sum(), min=self.config.epsilon_a)
+                usage_entropy = -torch.sum(usage_prob * torch.log(torch.clamp(usage_prob, min=self.config.epsilon_a)))
+                debug["mapg_assignment_effective_anchors"] = float(torch.exp(usage_entropy).item())
+                debug["mapg_assignment_max_column_mass"] = float(usage.max().item())
+            if graph.visual_priors.shape[0] > 1 and graph.visual_priors.numel() > 0:
+                visual_priors = _normalize_rows(torch.clamp(graph.visual_priors.to(device=self.device, dtype=self.dtype), min=0.0), eps=self.config.epsilon_a)
+                overlap = visual_priors @ visual_priors.T
+                diag = torch.clamp(torch.diag(overlap), min=self.config.epsilon_a)
+                overlap = overlap / torch.sqrt(torch.clamp(diag[:, None] * diag[None, :], min=self.config.epsilon_a))
+                same_role = graph.anchor_roles[:, None] == graph.anchor_roles[None, :]
+                pair_mask = torch.triu(same_role, diagonal=1)
+                if bool(pair_mask.any().item()):
+                    debug["mapg_same_role_visual_overlap_max"] = float(overlap[pair_mask].max().item())
         return PicfCoreOutput(state=state, debug=debug)
 
     def refresh_predictive_state_for_action(

@@ -396,6 +396,8 @@ def test_transition_loss_can_enable_mapg_graph_terms(tmp_path: Path) -> None:
             lambda_mapg_cycle=0.01,
             lambda_mapg_masked_modality=0.01,
             lambda_mapg_routing=0.01,
+            lambda_mapg_support_diversity=0.01,
+            lambda_mapg_geometry_diversity=0.01,
         ),
     )
 
@@ -405,6 +407,8 @@ def test_transition_loss_can_enable_mapg_graph_terms(tmp_path: Path) -> None:
     assert torch.isfinite(losses.mapg_cycle)
     assert torch.isfinite(losses.mapg_masked_modality)
     assert torch.isfinite(losses.mapg_routing)
+    assert torch.isfinite(losses.mapg_support_diversity)
+    assert torch.isfinite(losses.mapg_geometry_diversity)
     assert losses.mapg_graph.item() >= 0.0
 
 

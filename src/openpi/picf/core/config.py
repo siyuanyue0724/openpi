@@ -128,6 +128,8 @@ class PicfCoreConfig:
     mapg_confidence_floor: float = 0.05
     mapg_assignment_sinkhorn_iters: int = 6
     mapg_assignment_temperature: float = 1.0
+    mapg_assignment_quality_uniform_mix: float = 0.25
+    mapg_mode_confidence_threshold: float = 0.10
     mapg_obs_gate_init: float = -4.0
     mapg_task_gate_init: float = -4.0
     mapg_posterior_gate_init: float = -6.0
