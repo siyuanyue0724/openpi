@@ -147,6 +147,68 @@ run still underperforms, the next investigation should move to action decoding,
 supervision weights, rollout/data mismatch, or policy-level optimization rather
 than re-blaming projection, point-pool validity, or posterior visualization.
 
+### 0.3 Anchor Video Symptom Interpretation
+
+The CALVIN overlay colors are:
+
+```text
+observation local   = orange circle
+observation object  = yellow circle
+posterior local     = purple circle
+posterior object    = red circle
+task local          = magenta cross
+task object         = cyan cross
+```
+
+The `d8eaebb` 5000-step anchor video symptoms match the JSON statistics rather
+than a visualization artifact:
+
+```text
+projection_available_frac = 1.0
+vl_valid_frac             = 1.0
+
+observation role-1:
+  collapsed_frac          = 0.9978
+  median unique pixels    = 1
+  mean pair distance      = 0.008 px
+  bottom-right x>100,y>100 = 0.600
+
+posterior role-1:
+  collapsed_frac          = 1.0
+  median unique pixels    = 1
+  mean pair distance      = 0.000008 px
+  bottom-right x>100,y>100 = 0.600
+
+task role-1:
+  collapsed_frac          = 0.014
+  median unique pixels    = 6
+  mean pair distance      = 11.9 px
+  bottom-right x>100,y>100 = 0.826
+  extreme x>160,y>160     = 0.551
+  p95 same-anchor jump    = 93.7 px
+```
+
+The red posterior-object collapse is therefore downstream of the yellow
+observation-object collapse: posterior pixels are computed from
+`posterior.binding @ observation.pixel`, so posterior object anchors cannot stay
+separated when the observation object anchors have already collapsed to one
+consumer point.
+
+The cyan task-object behavior is different. It is not fully collapsed, but it is
+weakly grounded and unstable at this checkpoint. That matches the near-uniform
+task heatmap statistics and the fact that task readout was only weakly gated by
+MAPG in the failed run. The next run keeps `lambda_vl_heatmap_task=0.0` because
+there is still no real object mask/bbox label, but it strengthens the anchor
+separation losses that are mathematically tied to MAPG's own objects:
+assignment, support distributions, and modality embeddings. Geometry diversity
+remains low-weight auxiliary.
+
+The corresponding remote analysis artifact is:
+
+```text
+/mnt/checkpoints/picf_core/eval/picf_v22_mapg_d8eaebb_step5000_eval20_anchor_health_20260507_r1/logs/anchor_video_symptom_stats.json
+```
+
 ## 1. Design Contract
 
 The old point-centric route was:
@@ -758,13 +820,13 @@ Core MAPG switches:
 Graph losses:
 
 ```bash
---lambda-mapg-siglip 0.005
---lambda-mapg-vicreg 0.001
---lambda-mapg-cycle 0.002
---lambda-mapg-masked-modality 0.002
---lambda-mapg-routing 0.001
---lambda-mapg-support-diversity 0.002
---lambda-mapg-geometry-diversity 0.0005
+--lambda-mapg-siglip 0.01
+--lambda-mapg-vicreg 0.002
+--lambda-mapg-cycle 0.004
+--lambda-mapg-masked-modality 0.004
+--lambda-mapg-routing 0.003
+--lambda-mapg-support-diversity 0.006
+--lambda-mapg-geometry-diversity 0.001
 --mapg-support-div-margin-visual 0.15
 --mapg-support-div-margin-point 0.15
 --mapg-support-div-margin-tactile 0.25
@@ -782,7 +844,7 @@ VL heatmap/keypose supervision remains live and should be used with MAPG:
 --lambda-vl-heatmap-effector 0.01
 --lambda-vl-heatmap-interaction 0.01
 --lambda-vl-point-consistency 0.002
---lambda-vl-anchor-diversity 0.001
+--lambda-vl-anchor-diversity 0.002
 ```
 
 `--lambda-vl-heatmap-task` should remain `0.0` unless real object/bbox/mask
@@ -826,7 +888,7 @@ torchrun --standalone --nproc_per_node=2 scripts/picf_core_train.py \
   --lambda-vl-heatmap-effector 0.01 \
   --lambda-vl-heatmap-interaction 0.01 \
   --lambda-vl-point-consistency 0.002 \
-  --lambda-vl-anchor-diversity 0.001 \
+  --lambda-vl-anchor-diversity 0.002 \
   --mapg-enabled \
   --mapg-anchor-count 8 \
   --mapg-message-rounds 2 \
@@ -835,13 +897,13 @@ torchrun --standalone --nproc_per_node=2 scripts/picf_core_train.py \
   --mapg-posterior-gate-init -4.0 \
   --mapg-control-gate-init -2.0 \
   --mapg-obs-point-mix-floor 0.25 \
-  --lambda-mapg-siglip 0.005 \
-  --lambda-mapg-vicreg 0.001 \
-  --lambda-mapg-cycle 0.002 \
-  --lambda-mapg-masked-modality 0.002 \
-  --lambda-mapg-routing 0.001 \
-  --lambda-mapg-support-diversity 0.002 \
-  --lambda-mapg-geometry-diversity 0.0005
+  --lambda-mapg-siglip 0.01 \
+  --lambda-mapg-vicreg 0.002 \
+  --lambda-mapg-cycle 0.004 \
+  --lambda-mapg-masked-modality 0.004 \
+  --lambda-mapg-routing 0.003 \
+  --lambda-mapg-support-diversity 0.006 \
+  --lambda-mapg-geometry-diversity 0.001
 ```
 
 Expected startup log contracts:
