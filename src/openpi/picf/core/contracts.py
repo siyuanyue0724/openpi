@@ -125,6 +125,8 @@ class PicfObservationAnchorState:
     routing_gate_tactile: torch.Tensor | None = None
     role_ids: torch.Tensor | None = None
     graph_assignment: torch.Tensor | None = None
+    graph_point_weights: torch.Tensor | None = None
+    graph_visual_weights: torch.Tensor | None = None
 
 
 @dataclasses.dataclass

@@ -908,6 +908,22 @@ def _mapg_routing_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: fl
             valid = (pred.sum(dim=-1) > eps) & (target.sum(dim=-1) > eps)
             if bool(valid.any().item()):
                 losses.append(_js_distribution_loss(pred[valid], target[valid], eps=eps).mean())
+        obs_point = getattr(state.observation_anchors, "point_weights", None)
+        if (
+            graph.point_priors is not None
+            and graph.point_priors.numel() > 0
+            and obs_point is not None
+            and obs_point.numel() > 0
+            and obs_point.shape[-1] == graph.point_priors.shape[-1]
+        ):
+            pred = graph.obs_slot_assignment.to(device=reference.device, dtype=reference.dtype) @ graph.point_priors.to(
+                device=reference.device,
+                dtype=reference.dtype,
+            )
+            target = obs_point.to(device=reference.device, dtype=reference.dtype)
+            valid = (pred.sum(dim=-1) > eps) & (target.sum(dim=-1) > eps)
+            if bool(valid.any().item()):
+                losses.append(_js_distribution_loss(pred[valid], target[valid], eps=eps).mean())
     if graph.task_assignment is not None:
         task_visual = getattr(state.task_readout, "visual_weights", None)
         if task_visual is not None and task_visual.numel() > 0 and graph.visual_priors.numel() > 0 and task_visual.shape[-1] == graph.visual_priors.shape[-1]:

@@ -1062,6 +1062,8 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.mapg_posterior_gate_init = float(_SPEC_DEFAULTS.mapg_posterior_gate_init)
     if getattr(args, "mapg_control_gate_init", None) is None:
         args.mapg_control_gate_init = float(_SPEC_DEFAULTS.mapg_control_gate_init)
+    if getattr(args, "mapg_obs_point_mix_floor", None) is None:
+        args.mapg_obs_point_mix_floor = float(_SPEC_DEFAULTS.mapg_obs_point_mix_floor)
     if getattr(args, "mapg_prior_bias_clip", None) is None:
         args.mapg_prior_bias_clip = float(_SPEC_DEFAULTS.mapg_prior_bias_clip)
     if getattr(args, "require_pi0_action_generator", None) is None:
@@ -4217,6 +4219,9 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         mapg_control_gate_init=float(
             _arg_or_default("mapg_control_gate_init", _SPEC_DEFAULTS.mapg_control_gate_init)
         ),
+        mapg_obs_point_mix_floor=float(
+            _arg_or_default("mapg_obs_point_mix_floor", _SPEC_DEFAULTS.mapg_obs_point_mix_floor)
+        ),
         mapg_prior_bias_clip=float(_arg_or_default("mapg_prior_bias_clip", _SPEC_DEFAULTS.mapg_prior_bias_clip)),
         lambda_vl_heatmap_task=float(_arg_or_default("lambda_vl_heatmap_task", _SPEC_DEFAULTS.lambda_vl_heatmap_task)),
         lambda_vl_heatmap_effector=float(
@@ -5046,7 +5051,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "vl_prior_bias_clip", _SPEC_DEFAULTS.vl_prior_bias_clip)),
             )
             logging.info(
-                "MAPG anchor prior graph contract: enabled=%s anchors=%s message_rounds=%s visual_sigma_patches=%s tactile_sigma_m=%s posterior_sigma_m=%s confidence_floor=%s assignment_sinkhorn_iters=%s assignment_temperature=%s assignment_quality_uniform_mix=%s mode_confidence_threshold=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s prior_bias_clip=%s losses(siglip=%s vicreg=%s cycle=%s masked=%s routing=%s support_div=%s geom_div=%s)",
+                "MAPG anchor prior graph contract: enabled=%s anchors=%s message_rounds=%s visual_sigma_patches=%s tactile_sigma_m=%s posterior_sigma_m=%s confidence_floor=%s assignment_sinkhorn_iters=%s assignment_temperature=%s assignment_quality_uniform_mix=%s mode_confidence_threshold=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s obs_point_mix_floor=%s prior_bias_clip=%s losses(siglip=%s vicreg=%s cycle=%s masked=%s routing=%s support_div=%s geom_div=%s)",
                 bool(getattr(args, "mapg_enabled", False)),
                 int(getattr(args, "mapg_anchor_count", _SPEC_DEFAULTS.mapg_anchor_count)),
                 int(getattr(args, "mapg_message_rounds", _SPEC_DEFAULTS.mapg_message_rounds)),
@@ -5062,6 +5067,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "mapg_task_gate_init", _SPEC_DEFAULTS.mapg_task_gate_init)),
                 float(getattr(args, "mapg_posterior_gate_init", _SPEC_DEFAULTS.mapg_posterior_gate_init)),
                 float(getattr(args, "mapg_control_gate_init", _SPEC_DEFAULTS.mapg_control_gate_init)),
+                float(getattr(args, "mapg_obs_point_mix_floor", _SPEC_DEFAULTS.mapg_obs_point_mix_floor)),
                 float(getattr(args, "mapg_prior_bias_clip", _SPEC_DEFAULTS.mapg_prior_bias_clip)),
                 float(getattr(args, "lambda_mapg_siglip", 0.0)),
                 float(getattr(args, "lambda_mapg_vicreg", 0.0)),
@@ -5859,6 +5865,7 @@ def main() -> None:
     parser.add_argument("--mapg-task-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_task_gate_init)
     parser.add_argument("--mapg-posterior-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_posterior_gate_init)
     parser.add_argument("--mapg-control-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_control_gate_init)
+    parser.add_argument("--mapg-obs-point-mix-floor", type=float, default=_SPEC_DEFAULTS.mapg_obs_point_mix_floor)
     parser.add_argument("--mapg-prior-bias-clip", type=float, default=_SPEC_DEFAULTS.mapg_prior_bias_clip)
     parser.add_argument(
         "--require-pi0-action-generator",

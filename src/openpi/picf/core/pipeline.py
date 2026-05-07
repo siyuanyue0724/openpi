@@ -3709,6 +3709,14 @@ class PicfFullCore(nn.Module):
         if anchor_graph is not None:
             anchor_graph.obs_slot_assignment = graph_assignment
         mapg_obs_gate = self._mapg_gate(self.mapg_obs_gate_logit, anchor_graph)
+        obs_point_floor = min(max(float(self.config.mapg_obs_point_mix_floor), 0.0), 1.0)
+        mapg_obs_point_mix_gate = torch.clamp(
+            mapg_obs_gate,
+            min=obs_point_floor if anchor_graph is not None else 0.0,
+            max=1.0,
+        )
+        graph_point_weights = None
+        graph_visual_weights = None
         if point_count > 0:
             pool_ids = self._point_pool_ids(token_field)
             seed_parts: list[tuple[slice, torch.Tensor]] = []
@@ -3803,15 +3811,17 @@ class PicfFullCore(nn.Module):
                 if public_role_bias is None:
                     public_role_bias = torch.zeros((n_obs, token_field.fused_tokens.shape[0]), device=self.device, dtype=self.dtype)
                 graph_point_priors = graph_assignment @ anchor_graph.point_priors.to(device=self.device, dtype=self.dtype)
+                graph_point_weights = _normalize_rows(graph_point_priors, eps=self.config.epsilon_a)
                 graph_bias = torch.zeros_like(public_role_bias)
-                graph_bias[:, :point_count] = self._vl_centered_log_prior_bias(graph_point_priors)
+                graph_bias[:, :point_count] = self._vl_centered_log_prior_bias(graph_point_weights)
                 public_role_bias = public_role_bias + (gate * graph_bias)
         visual_attn_bias = None
         if graph_assignment is not None and visual_count > 0:
             gate = self._mapg_gate(self.mapg_obs_gate_logit, anchor_graph)
             if bool((gate > 0.0).item()):
                 graph_visual_priors = graph_assignment @ anchor_graph.visual_priors.to(device=self.device, dtype=self.dtype)
-                visual_attn_bias = gate * self._vl_centered_log_prior_bias(graph_visual_priors)
+                graph_visual_weights = _normalize_rows(graph_visual_priors, eps=self.config.epsilon_a)
+                visual_attn_bias = gate * self._vl_centered_log_prior_bias(graph_visual_weights)
         for _ in range(max(self.config.query_rounds, 1)):
             if visual_count > 0:
                 queries, visual_weights = self.visual_native_reread(
@@ -3857,6 +3867,12 @@ class PicfFullCore(nn.Module):
             geometry_positions = self._world_point_positions(token_field)
             denom = torch.clamp(routing_mass_point.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
             point_weights = routing_mass_point / denom
+            if graph_point_weights is not None and bool((mapg_obs_point_mix_gate > 0.0).item()):
+                graph_valid = _row_has_mass(graph_point_weights, eps=self.config.epsilon_a)
+                graph_mix = torch.where(graph_valid[:, None], graph_point_weights, point_weights)
+                point_weights = ((1.0 - mapg_obs_point_mix_gate) * point_weights) + (mapg_obs_point_mix_gate * graph_mix)
+                point_weights = torch.clamp(point_weights, min=0.0)
+                point_weights = point_weights / torch.clamp(point_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
             x = point_weights @ geometry_positions
             S = _weighted_cov(geometry_positions, point_weights, x, self.config)
             a = _extent_from_cov(S, self.config)
@@ -3883,6 +3899,8 @@ class PicfFullCore(nn.Module):
             routing_gate_tactile=routing_gate_tactile,
             role_ids=role_ids,
             graph_assignment=graph_assignment,
+            graph_point_weights=graph_point_weights,
+            graph_visual_weights=graph_visual_weights,
         )
 
     def _initial_persistent(self) -> tuple[torch.Tensor, ...]:

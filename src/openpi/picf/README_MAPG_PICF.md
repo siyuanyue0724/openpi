@@ -1,6 +1,6 @@
 # MAPG-PICF: Modality-Optional Anchor Prior Graph
 
-Date: 2026-05-06
+Date: 2026-05-08
 Repo: `/home/siyuanyue/Documents/openpi`
 Status: **live implementation record for the MAPG-enabled PICF path**
 
@@ -31,6 +31,121 @@ The graph is intentionally still gated and masked. “Full MAPG” here means th
 complete dataflow and losses exist and are wired into the live model; it does
 not mean every noisy or missing modality is forced to contribute on every
 sample. Missing/invalid modalities are explicit no-ops.
+
+## 0. 2026-05-08 Anchor-Collapse Root Cause and Fix
+
+The `d8eaebb` 5000-step CALVIN eval located one concrete failure:
+
+```text
+observation role-1 final point anchors collapsed to one projected point.
+posterior role-1 pixels then collapsed because posterior pixels are computed
+from posterior.binding @ observation.pixel.
+task role-1 anchors were partially separated, so the failure was not global.
+```
+
+This was not a projection, point-pool, or VL-lift bug:
+
+- projection availability was `1.0`;
+- VL grounding validity was `1.0`;
+- VL anchor point priors landed on the global/projectable pool;
+- VL top-k priors did not show border collapse;
+- role-0 proprio/local separation remained correct.
+
+The exact code path is:
+
+```text
+serve_picf_policy.py:
+  observation.pixel = weighted_pixels(observation_anchors.point_weights)
+  posterior.pixel = posterior.binding @ observation.pixel
+
+pipeline.py:
+  observation_anchors.point_weights =
+    normalize(obs_reader routing_mass_point)
+```
+
+The root cause was that MAPG graph priors influenced observation anchors only
+through a small query blend and attention bias. In the 5000-step checkpoint,
+the learned gates remained near their initial values:
+
+```text
+mapg_obs_gate ~= 0.018
+mapg_task_gate ~= 0.018
+mapg_posterior_gate ~= 0.0025
+```
+
+Task readout already explicitly mixed `A_task point_priors` into final
+`task_readout.point_weights`; observation anchors did not. The fix is therefore
+not another geometric repulsion patch. The fix is to make the MAPG support
+contract reach the exact consumer variable that collapsed:
+
+```text
+observation graph_point_weights = normalize(A_obs point_priors)
+observation point_weights =
+  normalize((1 - g_obs_point) * direct_point_weights
+          + g_obs_point * graph_point_weights)
+```
+
+`g_obs_point` uses `clamp(max(mapg_obs_gate, mapg_obs_point_mix_floor), 0, 1)`
+so a loaded checkpoint with a tiny learned gate cannot silently bypass the
+graph prior at the final observation point readout while still preserving a
+valid convex mixture. This is MAPG-consistent because it applies the existing
+role-constrained graph assignment to the final support distribution; it does
+not invent a special-case pixel or geometry rule.
+
+The training loss now also compares `A_obs point_priors` with live
+`observation_anchors.point_weights`, matching the existing visual routing
+consistency. Anchor debug now exports MAPG graph assignments and graph
+visual/point priors, so future reports can distinguish:
+
+```text
+graph support collapse
+vs observation consumer collapse
+vs posterior binding inheritance
+vs visualization error
+```
+
+### 0.1 Full Audit Closure Matrix
+
+The earlier MAPG-v0 audit identified several places where a simplified graph
+could be mistaken for the final MAPG contract. The current implementation
+closes those items as follows.
+
+| Audit item | Current resolution |
+| --- | --- |
+| MAPG must not silently depend on the point-centric VL router for PaliGemma grounding. | `_build_vl_grounding(...)` runs when either `vl_anchor_router_enabled` or `mapg_enabled` is true, so MAPG has a shared PaliGemma grounding builder even when the point-centric router is disabled. |
+| Slot-to-graph assignment must be competitive rather than heuristic-only. | `_mapg_slot_assignment(...)` is role-constrained and applies Sinkhorn-style column-capacity normalization for `mapg_assignment_sinkhorn_iters` rounds with a quality/uniform capacity mix. |
+| Uniform or low-confidence source priors must not pick the first/top-left cell. | `_mapg_mode_priors(...)` detects flat or high-entropy sources and switches to geometry FPS coverage modes instead of argmax/NMS modes. |
+| Modality fusion must be finite, confidence-gated, and no fixed-point loop. | `_build_anchor_prior_graph(...)` uses fixed `mapg_message_rounds`, seed priors, distribution-confidence weights, and an anchor fusion MLP over per-modality embeddings plus modality confidence. |
+| Tactile/posterior support must not require pointcloud to reach visual support. | `_mapg_tactile_to_visual(...)` and `_mapg_posterior_to_visual(...)` project world/contact/posterior supports directly into the visual grid, with point-mediated routes only as fallback. |
+| Task readout must be visual-native, not point-only. | `_build_task_readout(...)` explicitly mixes `A_task visual_priors` with direct visual attention and injects the pooled visual token through `mapg_task_visual_proj`; it also records `visual_weights` and `geometry_valid`. |
+| Observation anchors must consume graph support at the final collapsed variable. | `_build_observation_anchors(...)` now records `graph_point_weights = A_obs point_priors` and convexly mixes it into final `observation_anchors.point_weights` with `mapg_obs_point_mix_floor`. |
+| SigLIP positives/negatives must exclude invalid modality rows. | `_mapg_pair_embeddings(...)` returns per-modality masks; `_mapg_siglip_loss(...)` computes pairs only where both modalities are valid. |
+| VICReg must cover modality embeddings, not only graph tokens. | `_mapg_vicreg_loss(...)` iterates over graph, visual, point, tactile, and posterior embeddings when enough valid rows exist. |
+| Masked modality loss must not compare a graph token to a modality it already used. | `_mapg_masked_modality_loss(...)` predicts the held-out modality from the average of the other valid modality embeddings and compares against a detached target. |
+| Cycle loss must not use invalid/non-projectable point rows. | `_mapg_cycle_loss(...)` masks projective compatibility by `point_projectable_mask` and returns no-op when visible mass is invalid. |
+| Anti-collapse must be support-first, not a geometric repulsion patch. | `_mapg_support_overlap_loss(...)` adds role-aware, usage/confidence-gated, margin-based visual/point/tactile/posterior support overlap control; `_mapg_geometry_diversity_loss(...)` is only low-weight auxiliary geometry separation. |
+| Debug must distinguish graph collapse, consumer collapse, and posterior inheritance. | `serve_picf_policy.py` exports `mapg.*`, `observation.graph_point`, `observation.graph_visual`, and same-role overlap summaries. |
+
+The remaining intentional boundary is that MAPG is still default-off. When
+`mapg_enabled=False`, the old PICF path remains unchanged. When MAPG is enabled,
+the graph support path is live, finite-iteration, role-aware, and explicitly
+observable in debug JSON.
+
+### 0.2 Training Readiness Statement
+
+The 2026-05-08 fix is considered training-ready for a new MAPG run because the
+observed failure has a concrete code-level root cause, the collapsed consumer
+variable now directly consumes MAPG graph support, and the regression test
+`test_mapg_observation_point_mix_floor_reaches_final_point_weights` verifies
+that even a near-zero learned observation gate cannot bypass
+`A_obs point_priors` at the final observation point readout.
+
+This is not a claim that CALVIN success is mathematically guaranteed. It is a
+precise claim that the previously observed observation-role collapse path has
+been closed and should not be the reason a new 30000-step run fails. If the new
+run still underperforms, the next investigation should move to action decoding,
+supervision weights, rollout/data mismatch, or policy-level optimization rather
+than re-blaming projection, point-pool validity, or posterior visualization.
 
 ## 1. Design Contract
 
@@ -86,10 +201,11 @@ mapg_posterior_sigma_m: float = 0.08
 mapg_confidence_floor: float = 0.05
 mapg_assignment_sinkhorn_iters: int = 6
 mapg_assignment_temperature: float = 1.0
-mapg_obs_gate_init: float = -4.0
-mapg_task_gate_init: float = -4.0
-mapg_posterior_gate_init: float = -6.0
-mapg_control_gate_init: float = -4.0
+mapg_obs_gate_init: float = -2.0
+mapg_task_gate_init: float = -2.0
+mapg_posterior_gate_init: float = -4.0
+mapg_control_gate_init: float = -2.0
+mapg_obs_point_mix_floor: float = 0.25
 mapg_prior_bias_clip: float = 4.0
 ```
 
@@ -355,12 +471,19 @@ query blend:
 point attention bias:
   logits_point += gate * centered_log(A_obs point_priors)
 
+final point support:
+  graph_point_weights = normalize(A_obs point_priors)
+  point_weights = normalize((1 - g_obs_point) direct + g_obs_point graph_point_weights)
+  g_obs_point = clamp(max(gate, mapg_obs_point_mix_floor), 0, 1)
+
 visual attention bias:
   logits_visual += gate * centered_log(A_obs visual_priors)
 ```
 
 The point-centric VL router can still contribute point priors when enabled, but
-MAPG supplies the graph-level multimodal prior.
+MAPG supplies the graph-level multimodal prior. The final support blend is
+required: without it, a tiny observation gate can leave `obs_reader` free to
+collapse same-role scene anchors even when the graph priors are separated.
 
 ### 4.2 Task Readout
 
@@ -624,10 +747,11 @@ Core MAPG switches:
 --mapg-assignment-temperature 1.0
 --mapg-assignment-quality-uniform-mix 0.25
 --mapg-mode-confidence-threshold 0.10
---mapg-obs-gate-init -4.0
---mapg-task-gate-init -4.0
---mapg-posterior-gate-init -6.0
---mapg-control-gate-init -4.0
+--mapg-obs-gate-init -2.0
+--mapg-task-gate-init -2.0
+--mapg-posterior-gate-init -4.0
+--mapg-control-gate-init -2.0
+--mapg-obs-point-mix-floor 0.25
 --mapg-prior-bias-clip 4.0
 ```
 
@@ -706,6 +830,11 @@ torchrun --standalone --nproc_per_node=2 scripts/picf_core_train.py \
   --mapg-enabled \
   --mapg-anchor-count 8 \
   --mapg-message-rounds 2 \
+  --mapg-obs-gate-init -2.0 \
+  --mapg-task-gate-init -2.0 \
+  --mapg-posterior-gate-init -4.0 \
+  --mapg-control-gate-init -2.0 \
+  --mapg-obs-point-mix-floor 0.25 \
   --lambda-mapg-siglip 0.005 \
   --lambda-mapg-vicreg 0.001 \
   --lambda-mapg-cycle 0.002 \
@@ -720,7 +849,7 @@ Expected startup log contracts:
 ```text
 Training config: world_size=2 ... num_steps=30000 save_interval=5000 unroll_steps=2
 VL-guided anchor router contract: enabled=True ...
-MAPG anchor prior graph contract: enabled=True anchors=8 message_rounds=2 ... confidence_floor=0.05 assignment_sinkhorn_iters=6 assignment_temperature=1.0 ...
+MAPG anchor prior graph contract: enabled=True anchors=8 message_rounds=2 ... confidence_floor=0.05 assignment_sinkhorn_iters=6 assignment_temperature=1.0 ... obs_point_mix_floor=0.25 ...
 Backbone contract: point=sonata(trainable=False) visual=encoder(... trainable=False) tactile=encoder(trainable=False) semantic=paligemma(trainable=True)
 ```
 
@@ -762,6 +891,11 @@ Healthy first checks:
 - `mapg_tactile_available == 1.0` only when active tactile tokens exist.
 - `mapg_posterior_available == 1.0` after the first recurrent step.
 - no NaN/Inf in MAPG losses.
+- anchor debug includes `mapg.obs_assignment`, `mapg.task_assignment`,
+  `mapg.visual_priors`, `mapg.point_priors`,
+  `observation.graph_point`, and `observation.graph_visual`.
+- if `observation.role1` collapses, compare `mapg.point_priors` and
+  `observation.graph_point` before blaming projection or posterior binding.
 - observation/task graph assignments have correct shape.
 - PI0.5 flow loss still logs through the standard action terms.
 

@@ -1926,6 +1926,7 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     args.mapg_task_gate_init = -3.2
     args.mapg_posterior_gate_init = -5.1
     args.mapg_control_gate_init = -3.3
+    args.mapg_obs_point_mix_floor = 0.22
     args.mapg_prior_bias_clip = 3.5
     args.lambda_mapg_siglip = 0.01
     args.lambda_mapg_vicreg = 0.02
@@ -1967,6 +1968,7 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     assert core.config.mapg_task_gate_init == pytest.approx(-3.2)
     assert core.config.mapg_posterior_gate_init == pytest.approx(-5.1)
     assert core.config.mapg_control_gate_init == pytest.approx(-3.3)
+    assert core.config.mapg_obs_point_mix_floor == pytest.approx(0.22)
     assert core.config.mapg_prior_bias_clip == pytest.approx(3.5)
     assert loss_config.lambda_mapg_siglip == pytest.approx(0.01)
     assert loss_config.lambda_mapg_vicreg == pytest.approx(0.02)

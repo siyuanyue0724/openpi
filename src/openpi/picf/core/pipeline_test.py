@@ -755,6 +755,8 @@ def test_mapg_enabled_builds_full_anchor_graph_and_live_consumers(tmp_path: Path
         rtol=1e-5,
     )
     assert second.state.observation_anchors.graph_assignment is not None
+    assert second.state.observation_anchors.graph_point_weights is not None
+    assert second.state.observation_anchors.graph_visual_weights is not None
     assert second.state.task_readout.graph_assignment is not None
     assert second.state.task_readout.visual_weights is not None
     assert second.state.task_readout.geometry_valid is not None
@@ -795,6 +797,35 @@ def test_mapg_builds_paligemma_grounding_without_point_router(tmp_path: Path) ->
     assert output.state.anchor_prior_graph.visual_priors.shape[0] == core.config.mapg_anchor_count
     assert output.state.task_readout.visual_weights is not None
     assert output.state.task_readout.graph_visual_weights is not None
+
+
+def test_mapg_observation_point_mix_floor_reaches_final_point_weights(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        vl_anchor_router_enabled=True,
+        mapg_enabled=True,
+        mapg_anchor_count=6,
+        mapg_message_rounds=2,
+        mapg_obs_gate_init=-20.0,
+        mapg_obs_point_mix_floor=0.5,
+    )
+    frame = next(iter(replay))
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+
+    obs = output.state.observation_anchors
+    assert obs.graph_point_weights is not None
+    assert obs.graph_point_weights.shape == obs.point_weights.shape
+    direct = obs.routing_mass_point / torch.clamp(obs.routing_mass_point.sum(dim=-1, keepdim=True), min=core.config.epsilon_a)
+    graph_valid = obs.graph_point_weights.sum(dim=-1) > core.config.epsilon_a
+    graph_mix = torch.where(graph_valid[:, None], obs.graph_point_weights, direct)
+    expected = (0.5 * direct) + (0.5 * graph_mix)
+    expected = expected / torch.clamp(expected.sum(dim=-1, keepdim=True), min=core.config.epsilon_a)
+    torch.testing.assert_close(obs.point_weights, expected, atol=1e-5, rtol=1e-5)
 
 
 def test_mapg_visual_grounding_survives_missing_pointcloud(tmp_path: Path) -> None:

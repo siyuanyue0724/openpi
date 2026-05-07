@@ -432,6 +432,7 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
     posterior = getattr(state, "posterior", None)
     task_readout = getattr(state, "task_readout", None)
     vl_grounding = getattr(state, "vl_grounding", None)
+    anchor_graph = getattr(state, "anchor_prior_graph", None)
     point_positions_world = getattr(token_field, "point_positions_world", None)
     if point_positions_world is None:
         point_positions_world = getattr(token_field, "point_positions", None)
@@ -524,6 +525,49 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
             ),
         }
 
+    def _same_role_overlap_max(priors: torch.Tensor | None, roles: torch.Tensor | None) -> float | None:
+        if priors is None or roles is None or priors.numel() == 0 or roles.numel() == 0:
+            return None
+        value = torch.clamp(torch.nan_to_num(priors.detach().to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+        if value.ndim != 2 or value.shape[0] < 2:
+            return None
+        value = value / torch.clamp(value.sum(dim=-1, keepdim=True), min=1e-9)
+        overlap = value @ value.T
+        diag = torch.clamp(torch.diag(overlap), min=1e-9)
+        overlap = overlap / torch.sqrt(torch.clamp(diag[:, None] * diag[None, :], min=1e-9))
+        roles_t = roles.detach().to(device=overlap.device, dtype=torch.long)
+        pair_mask = torch.triu(roles_t[:, None] == roles_t[None, :], diagonal=1)
+        if not bool(pair_mask.any().item()):
+            return None
+        return float(overlap[pair_mask].max().item())
+
+    mapg_payload = None
+    if anchor_graph is not None:
+        graph_visual = getattr(anchor_graph, "visual_priors", None)
+        graph_point = getattr(anchor_graph, "point_priors", None)
+        graph_roles = getattr(anchor_graph, "anchor_roles", None)
+        mapg_payload = {
+            "valid": bool(getattr(anchor_graph, "valid", torch.tensor(False)).detach().to(device="cpu").item()),
+            "anchor_roles": _tensor_to_int_list(graph_roles, max_rows=64),
+            "anchor_scores": _tensor_to_list(getattr(anchor_graph, "anchor_scores", None), max_rows=64),
+            "anchor_confidence": _tensor_to_list(getattr(anchor_graph, "anchor_confidence", None), max_rows=64),
+            "modality_confidence": _tensor_to_list(getattr(anchor_graph, "modality_confidence", None), max_rows=64),
+            "obs_assignment": _attention_summary(getattr(anchor_graph, "obs_slot_assignment", None), topk=8, max_queries=32),
+            "task_assignment": _attention_summary(getattr(anchor_graph, "task_assignment", None), topk=8, max_queries=32),
+            "visual_priors": _attention_summary(graph_visual, topk=8, max_queries=16, pixels=visual_pixels),
+            "point_priors": _attention_summary(
+                graph_point,
+                topk=8,
+                max_queries=16,
+                points=point_positions_world,
+                pixels=point_pixels,
+                visibility=point_visibility_t,
+                pool_ids=getattr(token_field, "point_pool_ids", None),
+            ),
+            "same_role_visual_overlap_max": _same_role_overlap_max(graph_visual, graph_roles),
+            "same_role_point_overlap_max": _same_role_overlap_max(graph_point, graph_roles),
+        }
+
     def _vl_heatmap_row(name: str) -> torch.Tensor | None:
         if vl_grounding is None:
             return None
@@ -556,6 +600,22 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
             "support_visual": _tensor_to_list(getattr(observation_anchors, "routing_support_visual", None)),
             "gate_point": _tensor_to_list(getattr(observation_anchors, "routing_gate_point", None)),
             "gate_visual": _tensor_to_list(getattr(observation_anchors, "routing_gate_visual", None)),
+            "graph_assignment": _attention_summary(getattr(observation_anchors, "graph_assignment", None), topk=8, max_queries=32),
+            "graph_point": _attention_summary(
+                getattr(observation_anchors, "graph_point_weights", None),
+                topk=8,
+                max_queries=32,
+                points=point_positions_world,
+                pixels=point_pixels,
+                visibility=point_visibility_t,
+                pool_ids=getattr(token_field, "point_pool_ids", None),
+            ),
+            "graph_visual": _attention_summary(
+                getattr(observation_anchors, "graph_visual_weights", None),
+                topk=8,
+                max_queries=32,
+                pixels=visual_pixels,
+            ),
         },
         "posterior": {
             "xyz": _tensor_to_list(getattr(posterior, "x", None)),
@@ -609,6 +669,7 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
                 pool_ids=getattr(token_field, "point_pool_ids", None),
             ),
         },
+        "mapg": mapg_payload,
         "point_cloud": {
             "xyz": _tensor_to_list(getattr(token_field, "point_positions", None), max_rows=1024),
             "xyz_world": _tensor_to_list(point_positions_world, max_rows=1024),
