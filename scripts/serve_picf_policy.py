@@ -298,6 +298,10 @@ def _attention_summary(
     *,
     topk: int = 5,
     max_queries: int = 8,
+    include_dense: bool = False,
+    dense_max_queries: int | None = None,
+    dense_max_keys: int | None = None,
+    dense_max_values: int = 131_072,
     points: torch.Tensor | None = None,
     pixels: torch.Tensor | None = None,
     visibility: torch.Tensor | None = None,
@@ -346,11 +350,26 @@ def _attention_summary(
                 item["pool_id"] = int(pool_cpu[index].item())
             row.append(item)
         top_payload.append(row)
-    return {
+    payload: dict[str, Any] = {
         "shape": [int(value.shape[0]), key_count],
         "entropy": entropy.tolist(),
         "topk": top_payload,
     }
+    if include_dense:
+        dense_queries = query_count if dense_max_queries is None else min(query_count, int(dense_max_queries))
+        dense_keys = key_count if dense_max_keys is None else min(key_count, int(dense_max_keys))
+        dense_values = dense_queries * dense_keys
+        if dense_queries > 0 and dense_keys > 0 and dense_values <= int(dense_max_values):
+            payload["dense"] = probs[:dense_queries, :dense_keys].tolist()
+            payload["dense_shape"] = [int(dense_queries), int(dense_keys)]
+        else:
+            payload["dense_omitted"] = {
+                "dense_queries": int(dense_queries),
+                "dense_keys": int(dense_keys),
+                "dense_values": int(dense_values),
+                "dense_max_values": int(dense_max_values),
+            }
+    return payload
 
 
 def _slot_diversity(points: torch.Tensor | None, pixels: torch.Tensor | None) -> dict[str, Any]:
@@ -397,7 +416,12 @@ def _near_proprio_point_mass(
     return (weights * mask.to(dtype=weights.dtype)[None, :]).sum(dim=-1).tolist()
 
 
-def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> dict[str, Any] | None:
+def _anchor_debug_payload(
+    output: Any | None,
+    observation: PicfObservation,
+    *,
+    include_dense_intermediates: bool = False,
+) -> dict[str, Any] | None:
     if output is None or getattr(output, "state", None) is None:
         return None
     state = output.state
@@ -554,11 +578,18 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
             "modality_confidence": _tensor_to_list(getattr(anchor_graph, "modality_confidence", None), max_rows=64),
             "obs_assignment": _attention_summary(getattr(anchor_graph, "obs_slot_assignment", None), topk=8, max_queries=32),
             "task_assignment": _attention_summary(getattr(anchor_graph, "task_assignment", None), topk=8, max_queries=32),
-            "visual_priors": _attention_summary(graph_visual, topk=8, max_queries=16, pixels=visual_pixels),
+            "visual_priors": _attention_summary(
+                graph_visual,
+                topk=8,
+                max_queries=16,
+                include_dense=include_dense_intermediates,
+                pixels=visual_pixels,
+            ),
             "point_priors": _attention_summary(
                 graph_point,
                 topk=8,
                 max_queries=16,
+                include_dense=include_dense_intermediates,
                 points=point_positions_world,
                 pixels=point_pixels,
                 visibility=point_visibility_t,
@@ -605,6 +636,7 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
                 getattr(observation_anchors, "graph_point_weights", None),
                 topk=8,
                 max_queries=32,
+                include_dense=include_dense_intermediates,
                 points=point_positions_world,
                 pixels=point_pixels,
                 visibility=point_visibility_t,
@@ -614,6 +646,7 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
                 getattr(observation_anchors, "graph_visual_weights", None),
                 topk=8,
                 max_queries=32,
+                include_dense=include_dense_intermediates,
                 pixels=visual_pixels,
             ),
         },
@@ -645,24 +678,28 @@ def _anchor_debug_payload(output: Any | None, observation: PicfObservation) -> d
                 _vl_heatmap_row("task_heatmap"),
                 topk=12,
                 max_queries=1,
+                include_dense=include_dense_intermediates,
                 pixels=visual_pixels,
             ),
             "effector_heatmap": _attention_summary(
                 _vl_heatmap_row("effector_heatmap"),
                 topk=12,
                 max_queries=1,
+                include_dense=include_dense_intermediates,
                 pixels=visual_pixels,
             ),
             "interaction_heatmap": _attention_summary(
                 _vl_heatmap_row("interaction_heatmap"),
                 topk=12,
                 max_queries=1,
+                include_dense=include_dense_intermediates,
                 pixels=visual_pixels,
             ),
             "anchor_point_prior": _attention_summary(
                 getattr(vl_grounding, "anchor_point_priors", None),
                 topk=8,
                 max_queries=16,
+                include_dense=include_dense_intermediates,
                 points=point_positions_world,
                 pixels=point_pixels,
                 visibility=point_visibility_t,
@@ -692,6 +729,7 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         action_normalizer: PicfActionNormalizer | None,
         frame_dt_s: float = 1.0 / 30.0,
         export_anchor_debug: bool = False,
+        export_anchor_debug_dense: bool = False,
         export_prediction_debug: bool = False,
     ) -> None:
         self._trainer = trainer.eval()
@@ -708,6 +746,7 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         )
         self._action_normalizer = action_normalizer
         self._export_anchor_debug = bool(export_anchor_debug)
+        self._export_anchor_debug_dense = bool(export_anchor_debug_dense)
         self._export_prediction_debug = bool(export_prediction_debug)
         self._frame_dt_s = float(frame_dt_s)
         self._segment_id = 0
@@ -774,7 +813,11 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
             "debug": act_result.debug,
         }
         if self._export_anchor_debug:
-            anchor_debug = _anchor_debug_payload(output, observation)
+            anchor_debug = _anchor_debug_payload(
+                output,
+                observation,
+                include_dense_intermediates=self._export_anchor_debug_dense,
+            )
             if anchor_debug is not None:
                 response["anchor_debug"] = anchor_debug
         if self._export_prediction_debug:
@@ -790,6 +833,7 @@ def _build_policy(
     device: torch.device,
     picf_mode_override: str | None = None,
     export_anchor_debug: bool = False,
+    export_anchor_debug_dense: bool = False,
     export_prediction_debug: bool = False,
 ) -> _PicfCheckpointPolicy:
     output_dir, checkpoint_dir = _resolve_checkpoint_dir(checkpoint_path)
@@ -836,6 +880,7 @@ def _build_policy(
         checkpoint_step=checkpoint_step,
         action_normalizer=action_normalizer,
         export_anchor_debug=export_anchor_debug,
+        export_anchor_debug_dense=export_anchor_debug_dense,
         export_prediction_debug=export_prediction_debug,
     )
 
@@ -863,6 +908,15 @@ def main() -> None:
         help="Return compact PICF anchor projection and point-cloud debug payloads with each websocket action.",
     )
     parser.add_argument(
+        "--export-anchor-debug-dense",
+        action="store_true",
+        default=os.environ.get("OPENPI_PICF_EXPORT_ANCHOR_DENSE", "0").lower() in {"1", "true", "yes", "on"},
+        help=(
+            "Include dense MAPG/VL intermediate arrays in anchor_debug. This is intended for short diagnostic "
+            "CALVIN runs because it substantially increases JSONL size."
+        ),
+    )
+    parser.add_argument(
         "--export-prediction-debug",
         action="store_true",
         default=os.environ.get("OPENPI_PICF_EXPORT_PREDICTIONS", "0").lower() in {"1", "true", "yes", "on"},
@@ -879,6 +933,7 @@ def main() -> None:
         device=device,
         picf_mode_override=args.picf_mode,
         export_anchor_debug=bool(args.export_anchor_debug),
+        export_anchor_debug_dense=bool(args.export_anchor_debug_dense),
         export_prediction_debug=bool(args.export_prediction_debug),
     )
     hostname = socket.gethostname()
