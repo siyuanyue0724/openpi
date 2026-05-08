@@ -708,13 +708,13 @@ def _anchor_debug_payload(
         },
         "mapg": mapg_payload,
         "point_cloud": {
-            "xyz": _tensor_to_list(getattr(token_field, "point_positions", None), max_rows=1024),
-            "xyz_world": _tensor_to_list(point_positions_world, max_rows=1024),
-            "pool_ids": _tensor_to_int_list(getattr(token_field, "point_pool_ids", None), max_rows=1024),
-            "projectable_mask": _tensor_to_int_list(getattr(token_field, "point_projectable_mask", None), max_rows=1024),
-            "projected_pixel": _tensor_to_list(point_pixels, max_rows=1024),
-            "visibility": _tensor_to_list(getattr(geom, "point_visibility", None), max_rows=1024),
-            "visual_projected_pixel": _tensor_to_list(visual_pixels, max_rows=1024),
+            "xyz": _tensor_to_list(getattr(token_field, "point_positions", None), max_rows=4096),
+            "xyz_world": _tensor_to_list(point_positions_world, max_rows=4096),
+            "pool_ids": _tensor_to_int_list(getattr(token_field, "point_pool_ids", None), max_rows=4096),
+            "projectable_mask": _tensor_to_int_list(getattr(token_field, "point_projectable_mask", None), max_rows=4096),
+            "projected_pixel": _tensor_to_list(point_pixels, max_rows=4096),
+            "visibility": _tensor_to_list(getattr(geom, "point_visibility", None), max_rows=4096),
+            "visual_projected_pixel": _tensor_to_list(visual_pixels, max_rows=4096),
         },
     }
 
