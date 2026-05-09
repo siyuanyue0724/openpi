@@ -43,11 +43,16 @@ Read in this order.
 
 3. `/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md`
 
-   Final PICF-AQR-OWM deployment contract. Read this after the AQR direct-final
-   README if you are working on the next architecture step: object-addressable
-   posterior belief state, first-class recent V-JEPA temporal support,
-   first-class PaliGemma image support, posterior-grounded evidence cache,
-   slot-level JEPA prediction, and relation/ordinal grounding.
+   Final PICF-AQR-OWM deployment contract and concrete code-level blueprint.
+   Read this after the AQR direct-final README if you are implementing the next
+   architecture step. It audits the current code file-by-file and specifies the
+   exact final interfaces for object-addressable posterior belief state,
+   first-class recent V-JEPA temporal support, first-class PaliGemma image
+   support, posterior-grounded evidence cache, slot-level JEPA prediction,
+   support prediction, relation/ordinal grounding, diagnostics, tests,
+   acceptance criteria, a file-by-file code audit/deployment map, a final
+   Definition of Done, and a point-by-point resolution of the proposed method as
+   adopted, guarded, or rejected.
 
 4. `/home/siyuanyue/Documents/openpi/docs/AQR_MAPG_DEPLOYMENT_README.md`
 
