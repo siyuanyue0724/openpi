@@ -977,6 +977,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.use_scene_obs = False
         args.vl_anchor_router_enabled = False
         args.mapg_enabled = False
+        args.aqr_mapg_enabled = False
         args.require_pi0_action_generator = True
     if getattr(args, "grad_clip_percentile", None) is None:
         args.grad_clip_percentile = 75.0
@@ -1066,6 +1067,30 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.mapg_obs_point_mix_floor = float(_SPEC_DEFAULTS.mapg_obs_point_mix_floor)
     if getattr(args, "mapg_prior_bias_clip", None) is None:
         args.mapg_prior_bias_clip = float(_SPEC_DEFAULTS.mapg_prior_bias_clip)
+    if getattr(args, "aqr_mapg_enabled", None) is None:
+        args.aqr_mapg_enabled = bool(_SPEC_DEFAULTS.aqr_mapg_enabled)
+    for _name in (
+        "aqr_query_count_physical",
+        "aqr_query_count_task",
+        "aqr_query_rounds",
+        "aqr_sinkhorn_iters",
+        "aqr_temporal_memory_tokens",
+    ):
+        if getattr(args, _name, None) is None:
+            setattr(args, _name, int(getattr(_SPEC_DEFAULTS, _name)))
+    for _name in (
+        "aqr_sinkhorn_temperature",
+        "aqr_pg_entropy_threshold",
+        "aqr_pg_peak_threshold",
+        "aqr_pg_bias_weight",
+        "aqr_support_bias_clip",
+        "aqr_obs_gate_init",
+        "aqr_task_gate_init",
+        "aqr_posterior_gate_init",
+        "aqr_control_gate_init",
+    ):
+        if getattr(args, _name, None) is None:
+            setattr(args, _name, float(getattr(_SPEC_DEFAULTS, _name)))
     if getattr(args, "require_pi0_action_generator", None) is None:
         args.require_pi0_action_generator = bool(_SPEC_DEFAULTS.require_pi0_action_generator)
     if getattr(args, "semantic_prefix_dropout_prob", None) is None:
@@ -1292,6 +1317,12 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError("mapg_enabled requires picf_mode=enabled.")
     if bool(getattr(args, "mapg_enabled", False)) and str(getattr(args, "semantic_mode", "zero")) != "paligemma":
         raise ValueError("mapg_enabled requires semantic_mode=paligemma so MAPG can build PaliGemma grounding priors.")
+    if bool(getattr(args, "aqr_mapg_enabled", False)) and not _picf_mode_enabled(args):
+        raise ValueError("aqr_mapg_enabled requires picf_mode=enabled.")
+    if bool(getattr(args, "aqr_mapg_enabled", False)) and str(getattr(args, "semantic_mode", "zero")) != "paligemma":
+        raise ValueError("aqr_mapg_enabled requires semantic_mode=paligemma for typed support memory and weak PaliGemma priors.")
+    if bool(getattr(args, "aqr_mapg_enabled", False)) and bool(getattr(args, "mapg_enabled", False)):
+        raise ValueError("aqr_mapg_enabled is the direct-final graph path; do not enable legacy mapg_enabled at the same time.")
     if int(args.warmup_steps) < 0:
         raise ValueError(f"warmup_steps must be >= 0, got {args.warmup_steps}.")
     if float(args.lr) <= 0.0:
@@ -4223,6 +4254,37 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default("mapg_obs_point_mix_floor", _SPEC_DEFAULTS.mapg_obs_point_mix_floor)
         ),
         mapg_prior_bias_clip=float(_arg_or_default("mapg_prior_bias_clip", _SPEC_DEFAULTS.mapg_prior_bias_clip)),
+        aqr_mapg_enabled=bool(_arg_or_default("aqr_mapg_enabled", _SPEC_DEFAULTS.aqr_mapg_enabled)),
+        aqr_query_count_physical=int(
+            _arg_or_default("aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)
+        ),
+        aqr_query_count_task=int(_arg_or_default("aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
+        aqr_query_rounds=int(_arg_or_default("aqr_query_rounds", _SPEC_DEFAULTS.aqr_query_rounds)),
+        aqr_sinkhorn_iters=int(_arg_or_default("aqr_sinkhorn_iters", _SPEC_DEFAULTS.aqr_sinkhorn_iters)),
+        aqr_sinkhorn_temperature=float(
+            _arg_or_default("aqr_sinkhorn_temperature", _SPEC_DEFAULTS.aqr_sinkhorn_temperature)
+        ),
+        aqr_pg_entropy_threshold=float(
+            _arg_or_default("aqr_pg_entropy_threshold", _SPEC_DEFAULTS.aqr_pg_entropy_threshold)
+        ),
+        aqr_pg_peak_threshold=float(
+            _arg_or_default("aqr_pg_peak_threshold", _SPEC_DEFAULTS.aqr_pg_peak_threshold)
+        ),
+        aqr_pg_bias_weight=float(_arg_or_default("aqr_pg_bias_weight", _SPEC_DEFAULTS.aqr_pg_bias_weight)),
+        aqr_support_bias_clip=float(
+            _arg_or_default("aqr_support_bias_clip", _SPEC_DEFAULTS.aqr_support_bias_clip)
+        ),
+        aqr_temporal_memory_tokens=int(
+            _arg_or_default("aqr_temporal_memory_tokens", _SPEC_DEFAULTS.aqr_temporal_memory_tokens)
+        ),
+        aqr_obs_gate_init=float(_arg_or_default("aqr_obs_gate_init", _SPEC_DEFAULTS.aqr_obs_gate_init)),
+        aqr_task_gate_init=float(_arg_or_default("aqr_task_gate_init", _SPEC_DEFAULTS.aqr_task_gate_init)),
+        aqr_posterior_gate_init=float(
+            _arg_or_default("aqr_posterior_gate_init", _SPEC_DEFAULTS.aqr_posterior_gate_init)
+        ),
+        aqr_control_gate_init=float(
+            _arg_or_default("aqr_control_gate_init", _SPEC_DEFAULTS.aqr_control_gate_init)
+        ),
         lambda_vl_heatmap_task=float(_arg_or_default("lambda_vl_heatmap_task", _SPEC_DEFAULTS.lambda_vl_heatmap_task)),
         lambda_vl_heatmap_effector=float(
             _arg_or_default("lambda_vl_heatmap_effector", _SPEC_DEFAULTS.lambda_vl_heatmap_effector)
@@ -5867,6 +5929,29 @@ def main() -> None:
     parser.add_argument("--mapg-control-gate-init", type=float, default=_SPEC_DEFAULTS.mapg_control_gate_init)
     parser.add_argument("--mapg-obs-point-mix-floor", type=float, default=_SPEC_DEFAULTS.mapg_obs_point_mix_floor)
     parser.add_argument("--mapg-prior-bias-clip", type=float, default=_SPEC_DEFAULTS.mapg_prior_bias_clip)
+    parser.add_argument(
+        "--aqr-mapg-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_mapg_enabled,
+        help=(
+            "Enable direct-final AQR-MAPG: learned task/role anchor queries over typed "
+            "visual/point/tactile/posterior support memory. Mutually exclusive with legacy mapg_enabled."
+        ),
+    )
+    parser.add_argument("--aqr-query-count-physical", type=int, default=_SPEC_DEFAULTS.aqr_query_count_physical)
+    parser.add_argument("--aqr-query-count-task", type=int, default=_SPEC_DEFAULTS.aqr_query_count_task)
+    parser.add_argument("--aqr-query-rounds", type=int, default=_SPEC_DEFAULTS.aqr_query_rounds)
+    parser.add_argument("--aqr-sinkhorn-iters", type=int, default=_SPEC_DEFAULTS.aqr_sinkhorn_iters)
+    parser.add_argument("--aqr-sinkhorn-temperature", type=float, default=_SPEC_DEFAULTS.aqr_sinkhorn_temperature)
+    parser.add_argument("--aqr-pg-entropy-threshold", type=float, default=_SPEC_DEFAULTS.aqr_pg_entropy_threshold)
+    parser.add_argument("--aqr-pg-peak-threshold", type=float, default=_SPEC_DEFAULTS.aqr_pg_peak_threshold)
+    parser.add_argument("--aqr-pg-bias-weight", type=float, default=_SPEC_DEFAULTS.aqr_pg_bias_weight)
+    parser.add_argument("--aqr-support-bias-clip", type=float, default=_SPEC_DEFAULTS.aqr_support_bias_clip)
+    parser.add_argument("--aqr-temporal-memory-tokens", type=int, default=_SPEC_DEFAULTS.aqr_temporal_memory_tokens)
+    parser.add_argument("--aqr-obs-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_obs_gate_init)
+    parser.add_argument("--aqr-task-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_task_gate_init)
+    parser.add_argument("--aqr-posterior-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_posterior_gate_init)
+    parser.add_argument("--aqr-control-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_control_gate_init)
     parser.add_argument(
         "--require-pi0-action-generator",
         action=argparse.BooleanOptionalAction,

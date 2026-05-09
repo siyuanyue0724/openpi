@@ -1121,7 +1121,11 @@ class PicfFullCore(nn.Module):
         self.semantic_prefix_proj = nn.Identity()
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
-        shared_pg_grounding_enabled = bool(self.config.vl_anchor_router_enabled) or bool(self.config.mapg_enabled)
+        shared_pg_grounding_enabled = (
+            bool(self.config.vl_anchor_router_enabled)
+            or bool(self.config.mapg_enabled)
+            or bool(self.config.aqr_mapg_enabled)
+        )
         if shared_pg_grounding_enabled:
             self.vl_heatmap_head = nn.Sequential(
                 nn.LazyLinear(int(self.config.vl_heatmap_hidden_dim)),
@@ -1147,7 +1151,8 @@ class PicfFullCore(nn.Module):
             self.vl_task_point_gate_logit = None
             self.vl_obs_anchor_gate_logit = None
             self.vl_posterior_bind_gate_logit = None
-        if bool(self.config.mapg_enabled):
+        graph_router_enabled = bool(self.config.mapg_enabled) or bool(self.config.aqr_mapg_enabled)
+        if graph_router_enabled:
             self.mapg_pg_proj = nn.LazyLinear(hidden_dim)
             self.mapg_visual_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_point_proj = nn.Linear(hidden_dim, hidden_dim)
@@ -1165,17 +1170,21 @@ class PicfFullCore(nn.Module):
             self.mapg_role_embedding = nn.Embedding(4, hidden_dim)
             self.mapg_to_control_proj = nn.Linear(hidden_dim, semantic_trunk_dim)
             self.mapg_control_role_embedding = nn.Embedding(1, semantic_trunk_dim)
+            obs_gate_init = float(self.config.aqr_obs_gate_init) if bool(self.config.aqr_mapg_enabled) else float(self.config.mapg_obs_gate_init)
+            task_gate_init = float(self.config.aqr_task_gate_init) if bool(self.config.aqr_mapg_enabled) else float(self.config.mapg_task_gate_init)
+            posterior_gate_init = float(self.config.aqr_posterior_gate_init) if bool(self.config.aqr_mapg_enabled) else float(self.config.mapg_posterior_gate_init)
+            control_gate_init = float(self.config.aqr_control_gate_init) if bool(self.config.aqr_mapg_enabled) else float(self.config.mapg_control_gate_init)
             self.mapg_obs_gate_logit = nn.Parameter(
-                torch.tensor([float(self.config.mapg_obs_gate_init)], device=self.device, dtype=self.dtype)
+                torch.tensor([obs_gate_init], device=self.device, dtype=self.dtype)
             )
             self.mapg_task_gate_logit = nn.Parameter(
-                torch.tensor([float(self.config.mapg_task_gate_init)], device=self.device, dtype=self.dtype)
+                torch.tensor([task_gate_init], device=self.device, dtype=self.dtype)
             )
             self.mapg_posterior_gate_logit = nn.Parameter(
-                torch.tensor([float(self.config.mapg_posterior_gate_init)], device=self.device, dtype=self.dtype)
+                torch.tensor([posterior_gate_init], device=self.device, dtype=self.dtype)
             )
             self.mapg_control_gate_logit = nn.Parameter(
-                torch.tensor([float(self.config.mapg_control_gate_init)], device=self.device, dtype=self.dtype)
+                torch.tensor([control_gate_init], device=self.device, dtype=self.dtype)
             )
         else:
             self.mapg_pg_proj = None
@@ -1192,6 +1201,69 @@ class PicfFullCore(nn.Module):
             self.mapg_task_gate_logit = None
             self.mapg_posterior_gate_logit = None
             self.mapg_control_gate_logit = None
+        if bool(self.config.aqr_mapg_enabled):
+            self.aqr_physical_query_tokens = nn.Parameter(
+                torch.empty((max(int(self.config.aqr_query_count_physical), 0), hidden_dim), device=self.device, dtype=self.dtype)
+            )
+            self.aqr_task_query_tokens = nn.Parameter(
+                torch.empty((max(int(self.config.aqr_query_count_task), 0), hidden_dim), device=self.device, dtype=self.dtype)
+            )
+            nn.init.normal_(self.aqr_physical_query_tokens, mean=0.0, std=0.02)
+            nn.init.normal_(self.aqr_task_query_tokens, mean=0.0, std=0.02)
+            self.aqr_role_embedding = nn.Embedding(4, hidden_dim)
+            self.aqr_type_embedding = nn.Embedding(2, hidden_dim)
+            self.aqr_coverage_proj = nn.Linear(2, hidden_dim)
+            self.aqr_proprio_proj = nn.LazyLinear(hidden_dim)
+            self.aqr_posterior_summary_proj = nn.LazyLinear(hidden_dim)
+            self.aqr_task_conditioner = GatedCrossAttentionRead(
+                hidden_dim,
+                semantic_trunk_dim,
+                heads,
+                inner_dim=max(self.config.semantic_cross_dim, hidden_dim),
+                gate_init=1.0,
+            )
+            self.aqr_task_conditioner.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
+            self.aqr_visual_reader = CrossAttentionRead(
+                hidden_dim,
+                heads,
+                ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+            )
+            self.aqr_point_reader = CrossAttentionRead(
+                hidden_dim,
+                heads,
+                ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+            )
+            self.aqr_tactile_reader = CrossAttentionRead(
+                hidden_dim,
+                heads,
+                ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+            )
+            self.aqr_posterior_reader = CrossAttentionRead(
+                hidden_dim,
+                heads,
+                ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+            )
+            self.aqr_query_self = TransformerStack(
+                hidden_dim,
+                heads,
+                1,
+                activation_checkpointing=True,
+                ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+            )
+        else:
+            self.aqr_physical_query_tokens = None
+            self.aqr_task_query_tokens = None
+            self.aqr_role_embedding = None
+            self.aqr_type_embedding = None
+            self.aqr_coverage_proj = None
+            self.aqr_proprio_proj = None
+            self.aqr_posterior_summary_proj = None
+            self.aqr_task_conditioner = None
+            self.aqr_visual_reader = None
+            self.aqr_point_reader = None
+            self.aqr_tactile_reader = None
+            self.aqr_posterior_reader = None
+            self.aqr_query_self = None
         self.task_query_tokens = nn.Parameter(torch.empty((self.config.task_local_queries, hidden_dim)))
         self.task_global_query_tokens = nn.Parameter(torch.empty((self.config.task_global_queries, hidden_dim)))
         self.task_instruction_query_tokens = nn.Parameter(torch.empty((self.config.task_instruction_queries, hidden_dim)))
@@ -1584,7 +1656,11 @@ class PicfFullCore(nn.Module):
         semantic: _SemanticContext,
         token_field: PicfTokenFieldState,
     ) -> PicfVLGroundingState | None:
-        if not (bool(self.config.vl_anchor_router_enabled) or bool(self.config.mapg_enabled)):
+        if not (
+            bool(self.config.vl_anchor_router_enabled)
+            or bool(self.config.mapg_enabled)
+            or bool(self.config.aqr_mapg_enabled)
+        ):
             return None
         if self.vl_heatmap_head is None or self.vl_anchor_token_proj is None:
             return None
@@ -1948,6 +2024,119 @@ class PicfFullCore(nn.Module):
             roles.append(3)
         return torch.as_tensor(roles[:count], device=self.device, dtype=torch.long)
 
+    def _aqr_coverage_codes(self, count: int) -> torch.Tensor:
+        count = max(int(count), 0)
+        if count == 0:
+            return torch.zeros((0, 2), device=self.device, dtype=self.dtype)
+        index = torch.arange(count, device=self.device, dtype=self.dtype)
+        # Deterministic low-discrepancy query identities break same-role row
+        # symmetry without introducing a separate keypoint extractor.
+        phi = (math.sqrt(5.0) - 1.0) * 0.5
+        x = torch.frac(index * phi)
+        y = torch.frac(index * (phi * phi))
+        return (torch.stack([x, y], dim=-1) * 2.0) - 1.0
+
+    def _aqr_heatmap_confidence(self, heatmap: torch.Tensor | None) -> torch.Tensor:
+        if heatmap is None or heatmap.numel() == 0:
+            return torch.zeros((), device=self.device, dtype=self.dtype)
+        probs = _normalize_rows(heatmap.reshape(-1).to(device=self.device, dtype=self.dtype), eps=self.config.epsilon_a)
+        count = max(int(probs.numel()), 2)
+        entropy = -torch.sum(probs * torch.log(torch.clamp(probs, min=self.config.epsilon_a)))
+        entropy_norm = entropy / torch.log(torch.as_tensor(float(count), device=self.device, dtype=self.dtype))
+        peak_to_uniform = torch.max(probs) * float(count)
+        entropy_gate = torch.sigmoid(12.0 * (float(self.config.aqr_pg_entropy_threshold) - entropy_norm))
+        peak_gate = torch.sigmoid(2.0 * (peak_to_uniform - float(self.config.aqr_pg_peak_threshold)))
+        return torch.clamp(entropy_gate * peak_gate, min=0.0, max=1.0)
+
+    def _aqr_pg_visual_bias(
+        self,
+        vl_grounding: PicfVLGroundingState | None,
+        *,
+        roles: torch.Tensor,
+        query_types: torch.Tensor,
+        visual_count: int,
+    ) -> torch.Tensor | None:
+        if vl_grounding is None or visual_count == 0 or roles.numel() == 0:
+            return None
+        bias = torch.zeros((int(roles.numel()), visual_count), device=self.device, dtype=self.dtype)
+        for role_value, heatmap in (
+            (0, vl_grounding.effector_heatmap),
+            (1, vl_grounding.task_heatmap),
+            (2, vl_grounding.interaction_heatmap),
+            (3, None),
+        ):
+            rows = torch.nonzero((roles == int(role_value)) & (query_types == 1), as_tuple=False).squeeze(-1)
+            if rows.numel() == 0 or heatmap is None or heatmap.numel() != visual_count:
+                continue
+            confidence = self._aqr_heatmap_confidence(heatmap)
+            if not bool((confidence > self.config.epsilon_a).item()):
+                continue
+            prior = _normalize_rows(heatmap.to(device=self.device, dtype=self.dtype), eps=self.config.epsilon_a)
+            centered = torch.log(torch.clamp(prior, min=self.config.epsilon_a))
+            centered = centered - centered.mean()
+            centered = torch.clamp(centered, min=-float(self.config.aqr_support_bias_clip), max=float(self.config.aqr_support_bias_clip))
+            bias[rows] = float(self.config.aqr_pg_bias_weight) * confidence * centered[None, :]
+        return bias
+
+    def _aqr_point_bias(self, token_field: PicfTokenFieldState, roles: torch.Tensor) -> torch.Tensor | None:
+        point_count = int(token_field.point_tokens.shape[0])
+        if point_count == 0 or roles.numel() == 0:
+            return None
+        pool_ids = self._point_pool_ids(token_field)
+        scene_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=True)
+        local_mask = pool_ids == 0
+        bias = torch.zeros((int(roles.numel()), point_count), device=self.device, dtype=self.dtype)
+        neg = torch.full_like(bias, -1.0e4)
+        for row, role in enumerate(roles.tolist()):
+            role_int = int(role)
+            mask = local_mask if role_int == 0 else scene_mask
+            if not bool(mask.any().item()):
+                mask = torch.ones((point_count,), device=self.device, dtype=torch.bool)
+            bias[row] = torch.where(mask, bias[row], neg[row])
+        return bias
+
+    def _aqr_posterior_bias(self, previous: PicfPreviousState | None, roles: torch.Tensor) -> torch.Tensor | None:
+        if previous is None or roles.numel() == 0:
+            return None
+        post_count = int(previous.posterior.tokens.shape[0])
+        if post_count == 0:
+            return None
+        post_roles = previous.posterior.role_ids
+        if post_roles is None or post_roles.numel() != post_count:
+            post_roles = self._posterior_role_ids()
+        post_roles = post_roles.to(device=self.device, dtype=torch.long)
+        bias = torch.zeros((int(roles.numel()), post_count), device=self.device, dtype=self.dtype)
+        neg = torch.full_like(bias, -1.0e4)
+        for row, role in enumerate(roles.tolist()):
+            role_int = int(role)
+            mask = (post_roles == 0) if role_int == 0 else (post_roles != 0)
+            if not bool(mask.any().item()):
+                mask = torch.ones((post_count,), device=self.device, dtype=torch.bool)
+            bias[row] = torch.where(mask, bias[row], neg[row])
+        return bias
+
+    def _aqr_competitive_support(self, weights: torch.Tensor, *, eps: float) -> torch.Tensor:
+        if weights.numel() == 0 or weights.shape[0] == 0 or weights.shape[1] == 0:
+            return weights
+        local = torch.clamp(torch.nan_to_num(weights.to(device=self.device, dtype=self.dtype), nan=0.0), min=0.0)
+        topk = min(int(local.shape[1]), max(32, int(local.shape[0]) * 4))
+        if topk < int(local.shape[1]):
+            _, top_indices = torch.topk(local, k=topk, dim=-1)
+            mask = torch.zeros_like(local, dtype=torch.bool)
+            mask.scatter_(1, top_indices, True)
+            local = torch.where(mask, local, torch.zeros_like(local))
+        local = local / torch.clamp(local.sum(dim=-1, keepdim=True), min=eps)
+        temperature = max(float(self.config.aqr_sinkhorn_temperature), eps)
+        if abs(temperature - 1.0) > 1e-6:
+            local = torch.pow(torch.clamp(local, min=eps), 1.0 / temperature)
+            local = local / torch.clamp(local.sum(dim=-1, keepdim=True), min=eps)
+        active_cols = local.sum(dim=0) > eps
+        target_col = active_cols.to(dtype=self.dtype) * (float(local.shape[0]) / max(int(active_cols.sum().item()), 1))
+        for _ in range(max(int(self.config.aqr_sinkhorn_iters), 0)):
+            local = local * (target_col / torch.clamp(local.sum(dim=0), min=eps))[None, :]
+            local = local / torch.clamp(local.sum(dim=-1, keepdim=True), min=eps)
+        return local
+
     def _mapg_mode_priors(
         self,
         weights: torch.Tensor,
@@ -2264,10 +2453,199 @@ class PicfFullCore(nn.Module):
             sigma_m=max(float(self.config.mapg_posterior_sigma_m), self.config.epsilon_a),
         )
 
+    def _build_aqr_anchor_graph(
+        self,
+        *,
+        semantic: _SemanticContext,
+        token_field: PicfTokenFieldState,
+        previous: PicfPreviousState | None,
+        vl_grounding: PicfVLGroundingState | None,
+        proprio_token: torch.Tensor | None = None,
+    ) -> PicfAnchorPriorGraphState | None:
+        if not bool(self.config.aqr_mapg_enabled):
+            return None
+        if self.aqr_physical_query_tokens is None or self.aqr_task_query_tokens is None:
+            return None
+        visual_count = int(token_field.visual_tokens.shape[0])
+        point_count = int(token_field.point_tokens.shape[0])
+        tactile_count = int(token_field.tactile_tokens.shape[0])
+        post_count = 0 if previous is None else int(previous.posterior.tokens.shape[0])
+        physical_count = max(int(self.config.aqr_query_count_physical), 0)
+        task_count = max(int(self.config.aqr_query_count_task), 0)
+        anchor_count = physical_count + task_count
+        if anchor_count == 0 or visual_count == 0:
+            roles = self._mapg_anchor_roles(anchor_count)
+            return PicfAnchorPriorGraphState(
+                pg_priors=None,
+                visual_priors=torch.zeros((anchor_count, visual_count), device=self.device, dtype=self.dtype),
+                point_priors=None,
+                tactile_priors=None,
+                posterior_priors=None,
+                anchor_tokens=torch.zeros((anchor_count, self.config.hidden_dim), device=self.device, dtype=self.dtype),
+                anchor_roles=roles,
+                anchor_scores=torch.zeros((anchor_count,), device=self.device, dtype=self.dtype),
+                anchor_confidence=torch.zeros((anchor_count,), device=self.device, dtype=self.dtype),
+                anchor_x=None,
+                anchor_S=None,
+                geometry_valid=torch.zeros((anchor_count,), device=self.device, dtype=torch.bool),
+                obs_slot_assignment=None,
+                task_assignment=None,
+                modality_confidence=torch.zeros((anchor_count, 5), device=self.device, dtype=self.dtype),
+                valid=torch.tensor(False, device=self.device),
+            )
+
+        physical_roles = self._mapg_anchor_roles(physical_count)
+        task_roles = self._mapg_anchor_roles(task_count)
+        roles = torch.cat([physical_roles, task_roles], dim=0)
+        query_types = torch.cat(
+            [
+                torch.zeros((physical_count,), device=self.device, dtype=torch.long),
+                torch.ones((task_count,), device=self.device, dtype=torch.long),
+            ],
+            dim=0,
+        )
+        queries = torch.cat(
+            [
+                self.aqr_physical_query_tokens[:physical_count],
+                self.aqr_task_query_tokens[:task_count],
+            ],
+            dim=0,
+        ).to(device=self.device, dtype=self.dtype)
+        coverage = torch.cat(
+            [
+                self._aqr_coverage_codes(physical_count),
+                self._aqr_coverage_codes(task_count),
+            ],
+            dim=0,
+        )
+        queries = queries + self.aqr_role_embedding(roles) + self.aqr_type_embedding(query_types) + self.aqr_coverage_proj(coverage)
+        if proprio_token is not None and self.aqr_proprio_proj is not None:
+            proprio_context = self.aqr_proprio_proj(proprio_token.reshape(1, -1))[0]
+            queries = queries + proprio_context[None, :]
+        if previous is not None and self.aqr_posterior_summary_proj is not None and previous.posterior.tokens.numel() > 0:
+            post_alpha = torch.clamp(previous.posterior.alpha.to(device=self.device, dtype=self.dtype), min=0.0)
+            denom = torch.clamp(post_alpha.sum(), min=self.config.epsilon_a)
+            post_summary = (post_alpha[:, None] * previous.posterior.tokens.to(device=self.device, dtype=self.dtype)).sum(dim=0) / denom
+            queries = queries + self.aqr_posterior_summary_proj(post_summary.reshape(1, -1))[0][None, :]
+        if task_count > 0 and self.aqr_task_conditioner is not None and semantic.tokens.numel() > 0:
+            task_slice = slice(physical_count, physical_count + task_count)
+            task_queries, _ = self.aqr_task_conditioner(
+                queries[task_slice][None, :],
+                semantic.tokens.to(device=self.device, dtype=self.dtype)[None, :],
+            )
+            queries = torch.cat([queries[:physical_count], task_queries[0]], dim=0)
+
+        visual_bias = self._aqr_pg_visual_bias(
+            vl_grounding,
+            roles=roles,
+            query_types=query_types,
+            visual_count=visual_count,
+        )
+        point_bias = self._aqr_point_bias(token_field, roles)
+        posterior_bias = self._aqr_posterior_bias(previous, roles)
+        tactile_bias = None
+        if tactile_count > 0:
+            tactile_bias = torch.zeros((anchor_count, tactile_count), device=self.device, dtype=self.dtype)
+            tactile_roles = (roles == 0) | (roles == 2)
+            tactile_bias = torch.where(tactile_roles[:, None], tactile_bias, torch.full_like(tactile_bias, -2.0))
+
+        visual_priors = torch.zeros((anchor_count, visual_count), device=self.device, dtype=self.dtype)
+        point_priors = torch.zeros((anchor_count, point_count), device=self.device, dtype=self.dtype) if point_count > 0 else None
+        tactile_priors = torch.zeros((anchor_count, tactile_count), device=self.device, dtype=self.dtype) if tactile_count > 0 else None
+        posterior_priors = torch.zeros((anchor_count, post_count), device=self.device, dtype=self.dtype) if post_count > 0 else None
+        rounds = max(int(self.config.aqr_query_rounds), 1)
+        q = queries[None, :, :]
+        for _ in range(rounds):
+            if self.aqr_visual_reader is not None and visual_count > 0:
+                q, visual_weights = self.aqr_visual_reader(
+                    q,
+                    token_field.visual_tokens.to(device=self.device, dtype=self.dtype)[None, :],
+                    attn_bias=visual_bias,
+                )
+                visual_priors = self._aqr_competitive_support(visual_weights, eps=self.config.epsilon_a)
+            if self.aqr_point_reader is not None and point_count > 0:
+                q, point_weights = self.aqr_point_reader(
+                    q,
+                    token_field.point_tokens.to(device=self.device, dtype=self.dtype)[None, :],
+                    attn_bias=point_bias,
+                )
+                point_priors = self._aqr_competitive_support(point_weights, eps=self.config.epsilon_a)
+            if self.aqr_tactile_reader is not None and tactile_count > 0:
+                q, tactile_weights = self.aqr_tactile_reader(
+                    q,
+                    token_field.tactile_tokens.to(device=self.device, dtype=self.dtype)[None, :],
+                    attn_bias=tactile_bias,
+                )
+                tactile_priors = self._aqr_competitive_support(tactile_weights, eps=self.config.epsilon_a)
+            if self.aqr_posterior_reader is not None and previous is not None and post_count > 0:
+                q, posterior_weights = self.aqr_posterior_reader(
+                    q,
+                    previous.posterior.tokens.to(device=self.device, dtype=self.dtype)[None, :],
+                    attn_bias=posterior_bias,
+                )
+                posterior_priors = self._aqr_competitive_support(posterior_weights, eps=self.config.epsilon_a)
+            if self.aqr_query_self is not None:
+                q = self.aqr_query_self(q)
+
+        anchor_tokens = q[0]
+        visual_conf = _distribution_confidence(visual_priors, eps=self.config.epsilon_a, floor=float(self.config.mapg_confidence_floor))
+        point_conf = _distribution_confidence(point_priors, eps=self.config.epsilon_a, floor=float(self.config.mapg_confidence_floor))
+        tactile_conf = _distribution_confidence(tactile_priors, eps=self.config.epsilon_a, floor=float(self.config.mapg_confidence_floor))
+        post_conf = _distribution_confidence(posterior_priors, eps=self.config.epsilon_a, floor=float(self.config.mapg_confidence_floor))
+        zero_conf = torch.zeros((anchor_count,), device=self.device, dtype=self.dtype)
+        modality_conf = torch.stack(
+            [
+                zero_conf,
+                zero_conf if visual_conf is None else visual_conf,
+                zero_conf if point_conf is None else point_conf,
+                zero_conf if tactile_conf is None else tactile_conf,
+                zero_conf if post_conf is None else post_conf,
+            ],
+            dim=-1,
+        )
+        anchor_scores = torch.max(visual_priors, dim=-1).values
+        if point_priors is not None and point_priors.numel() > 0:
+            anchor_scores = anchor_scores + torch.max(point_priors, dim=-1).values
+        anchor_conf = torch.clamp(modality_conf.max(dim=-1).values, min=0.0, max=1.0)
+        anchor_x = None
+        anchor_S = None
+        geometry_valid = torch.zeros((anchor_count,), device=self.device, dtype=torch.bool)
+        if point_priors is not None and point_count > 0:
+            point_positions = self._world_point_positions(token_field)
+            anchor_x = point_priors @ point_positions
+            anchor_S = _weighted_cov(point_positions, point_priors, anchor_x, self.config)
+            geometry_valid = _row_has_mass(point_priors, eps=self.config.epsilon_a)
+        elif posterior_priors is not None and previous is not None:
+            anchor_x = posterior_priors @ previous.posterior.x.to(device=self.device, dtype=self.dtype)
+            anchor_S = torch.eye(3, device=self.device, dtype=self.dtype)[None, :, :].expand(anchor_count, -1, -1).clone()
+            geometry_valid = _row_has_mass(posterior_priors, eps=self.config.epsilon_a)
+        return PicfAnchorPriorGraphState(
+            pg_priors=None,
+            visual_priors=visual_priors,
+            point_priors=point_priors,
+            tactile_priors=tactile_priors,
+            posterior_priors=posterior_priors,
+            anchor_tokens=anchor_tokens,
+            anchor_roles=roles,
+            anchor_scores=anchor_scores,
+            anchor_confidence=anchor_conf,
+            anchor_x=anchor_x,
+            anchor_S=anchor_S,
+            geometry_valid=geometry_valid,
+            obs_slot_assignment=None,
+            task_assignment=None,
+            modality_confidence=modality_conf,
+            valid=torch.tensor(True, device=self.device),
+        )
+
     def _mapg_slot_assignment(
         self,
         graph: PicfAnchorPriorGraphState | None,
         slot_role_ids: torch.Tensor,
+        *,
+        slot_tokens: torch.Tensor | None = None,
+        slot_point_priors: torch.Tensor | None = None,
+        slot_visual_priors: torch.Tensor | None = None,
     ) -> torch.Tensor | None:
         if graph is None or not bool(graph.valid.item()) or graph.anchor_tokens.shape[0] == 0 or slot_role_ids.numel() == 0:
             return None
@@ -2304,6 +2682,29 @@ class PicfFullCore(nn.Module):
             local_allowed = allowed.index_select(0, rows).index_select(1, candidate_indices)
             local_scores = scores.index_select(0, candidate_indices)
             logits = torch.log(local_scores)[None, :].expand(int(rows.numel()), -1) / temperature
+            if slot_tokens is not None and slot_tokens.shape[0] == slot_count:
+                slot_h = fn.normalize(slot_tokens.to(device=self.device, dtype=self.dtype).index_select(0, rows), dim=-1)
+                anchor_h = fn.normalize(graph.anchor_tokens.to(device=self.device, dtype=self.dtype).index_select(0, candidate_indices), dim=-1)
+                logits = logits + ((slot_h @ anchor_h.T) / temperature)
+            if (
+                slot_point_priors is not None
+                and graph.point_priors is not None
+                and slot_point_priors.shape[0] == slot_count
+                and slot_point_priors.shape[-1] == graph.point_priors.shape[-1]
+            ):
+                slot_p = _normalize_rows(slot_point_priors.to(device=self.device, dtype=self.dtype).index_select(0, rows), eps=self.config.epsilon_a)
+                anchor_p = _normalize_rows(graph.point_priors.to(device=self.device, dtype=self.dtype).index_select(0, candidate_indices), eps=self.config.epsilon_a)
+                overlap = slot_p @ anchor_p.T
+                logits = logits + torch.log(torch.clamp(overlap, min=self.config.epsilon_a))
+            if (
+                slot_visual_priors is not None
+                and slot_visual_priors.shape[0] == slot_count
+                and slot_visual_priors.shape[-1] == graph.visual_priors.shape[-1]
+            ):
+                slot_v = _normalize_rows(slot_visual_priors.to(device=self.device, dtype=self.dtype).index_select(0, rows), eps=self.config.epsilon_a)
+                anchor_v = _normalize_rows(graph.visual_priors.to(device=self.device, dtype=self.dtype).index_select(0, candidate_indices), eps=self.config.epsilon_a)
+                overlap = slot_v @ anchor_v.T
+                logits = logits + torch.log(torch.clamp(overlap, min=self.config.epsilon_a))
             logits = logits.masked_fill(~local_allowed, -1.0e4)
             local = torch.softmax(logits, dim=-1) * local_allowed.to(dtype=self.dtype)
             local = local / torch.clamp(local.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
@@ -2821,7 +3222,13 @@ class PicfFullCore(nn.Module):
             ],
             dim=0,
         )
-        graph_assignment = self._mapg_slot_assignment(anchor_graph, local_role_ids)
+        graph_assignment = self._mapg_slot_assignment(
+            anchor_graph,
+            local_role_ids,
+            slot_tokens=local_tokens,
+            slot_point_priors=point_public_attention[:local_count] if point_public_attention.numel() > 0 else None,
+            slot_visual_priors=visual_public_attention[:local_count] if visual_public_attention.numel() > 0 else None,
+        )
         if anchor_graph is not None:
             anchor_graph.task_assignment = graph_assignment
         graph_visual_weights = None
@@ -3705,9 +4112,7 @@ class PicfFullCore(nn.Module):
             role_ids,
             point_count=point_count,
         )
-        graph_assignment = self._mapg_slot_assignment(anchor_graph, role_ids)
-        if anchor_graph is not None:
-            anchor_graph.obs_slot_assignment = graph_assignment
+        graph_assignment = None
         mapg_obs_gate = self._mapg_gate(self.mapg_obs_gate_logit, anchor_graph)
         obs_point_floor = min(max(float(self.config.mapg_obs_point_mix_floor), 0.0), 1.0)
         mapg_obs_point_mix_gate = torch.clamp(
@@ -3786,6 +4191,22 @@ class PicfFullCore(nn.Module):
                         ((1.0 - obs_vl_gate) * queries) + (obs_vl_gate * vl_seed_tokens),
                         queries,
                     )
+        if anchor_graph is not None:
+            slot_point_priors = vl_slot_priors
+            if point_count > 0:
+                seed_priors = torch.zeros((n_obs, point_count), device=self.device, dtype=self.dtype)
+                seed_valid = (seed_indices >= 0) & (seed_indices < point_count)
+                if bool(seed_valid.any().item()):
+                    rows = torch.nonzero(seed_valid, as_tuple=False).squeeze(-1)
+                    seed_priors[rows, seed_indices[rows]] = 1.0
+                slot_point_priors = _normalize_rows(slot_point_priors + seed_priors, eps=self.config.epsilon_a)
+            graph_assignment = self._mapg_slot_assignment(
+                anchor_graph,
+                role_ids,
+                slot_tokens=queries[0],
+                slot_point_priors=slot_point_priors if point_count > 0 else None,
+            )
+            anchor_graph.obs_slot_assignment = graph_assignment
         if graph_assignment is not None and bool((mapg_obs_gate > 0.0).item()):
             graph_tokens = graph_assignment @ anchor_graph.anchor_tokens.to(device=self.device, dtype=self.dtype)
             queries = ((1.0 - mapg_obs_gate) * queries) + (mapg_obs_gate * graph_tokens[None, :, :])
@@ -4066,7 +4487,13 @@ class PicfFullCore(nn.Module):
         obs_roles = obs.role_ids
         if obs_roles is None or obs_roles.numel() != obs.tokens.shape[0]:
             return None
-        obs_assignment = self._mapg_slot_assignment(anchor_graph, obs_roles.to(device=self.device, dtype=torch.long))
+        obs_assignment = self._mapg_slot_assignment(
+            anchor_graph,
+            obs_roles.to(device=self.device, dtype=torch.long),
+            slot_tokens=obs.tokens,
+            slot_point_priors=obs.point_weights if obs.point_weights.numel() > 0 else None,
+            slot_visual_priors=obs.routing_mass_visual if obs.routing_mass_visual.numel() > 0 else None,
+        )
         if obs_assignment is None:
             return None
         anchor_graph.obs_slot_assignment = obs_assignment
@@ -4665,14 +5092,15 @@ class PicfFullCore(nn.Module):
         if observation.reset_scaffold:
             previous = None
         meta = self._build_runtime_meta(observation, previous.runtime_meta if previous is not None else None)
-        if previous is None and not meta.point_contract_ok and not bool(self.config.mapg_enabled):
+        graph_can_run_without_points = bool(self.config.mapg_enabled) or bool(self.config.aqr_mapg_enabled)
+        if previous is None and not meta.point_contract_ok and not graph_can_run_without_points:
             raise RuntimeError("PICF core requires a valid xyzrgb point cloud on the first control step.")
         local_frame_context = self._point_subset(observation) if meta.point_contract_ok else None
         if (
             previous is None
             and local_frame_context is not None
             and local_frame_context.points_local.shape[0] == 0
-            and not bool(self.config.mapg_enabled)
+            and not graph_can_run_without_points
         ):
             raise RuntimeError("PICF core requires non-empty local xyzrgb support on the first control step.")
         point_context = (
@@ -4685,14 +5113,29 @@ class PicfFullCore(nn.Module):
         tactile_bundle = self._tactile_features(observation, meta)
         semantic = self._semantic_context(observation, previous, semantic_override)
         token_field, dense_memory = self._build_token_field(observation, point_context, point_features, visual_map, tactile_bundle, meta, previous)
-        vl_grounding = self._build_vl_grounding(semantic=semantic, token_field=token_field)
-        anchor_prior_graph = self._build_anchor_prior_graph(
-            semantic=semantic,
-            token_field=token_field,
-            dense_memory=dense_memory,
-            previous=previous,
-            vl_grounding=vl_grounding,
+        proprio = _to_tensor(
+            np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
+            device=self.device,
+            dtype=self.dtype,
         )
+        proprio_token = self.proprio_proj(proprio[None, :])[0]
+        vl_grounding = self._build_vl_grounding(semantic=semantic, token_field=token_field)
+        if bool(self.config.aqr_mapg_enabled):
+            anchor_prior_graph = self._build_aqr_anchor_graph(
+                semantic=semantic,
+                token_field=token_field,
+                previous=previous,
+                vl_grounding=vl_grounding,
+                proprio_token=proprio_token,
+            )
+        else:
+            anchor_prior_graph = self._build_anchor_prior_graph(
+                semantic=semantic,
+                token_field=token_field,
+                dense_memory=dense_memory,
+                previous=previous,
+                vl_grounding=vl_grounding,
+            )
         observation_anchors = self._build_observation_anchors(
             token_field,
             dense_memory,
@@ -4709,12 +5152,6 @@ class PicfFullCore(nn.Module):
         )
         current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
         innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
-        proprio = _to_tensor(
-            np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
-            device=self.device,
-            dtype=self.dtype,
-        )
-        proprio_token = self.proprio_proj(proprio[None, :])[0]
         task_readout = self._build_task_readout(
             token_field,
             dense_memory,

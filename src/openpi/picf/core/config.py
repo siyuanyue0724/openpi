@@ -136,6 +136,24 @@ class PicfCoreConfig:
     mapg_control_gate_init: float = -2.0
     mapg_obs_point_mix_floor: float = 0.25
     mapg_prior_bias_clip: float = 4.0
+    # Direct-final AQR-MAPG path. This replaces MAPG-v0 candidate priors with
+    # task/role-conditioned anchor queries over typed support memory while
+    # reusing the existing PICF graph-consumer interfaces.
+    aqr_mapg_enabled: bool = False
+    aqr_query_count_physical: int = 16
+    aqr_query_count_task: int = 8
+    aqr_query_rounds: int = 2
+    aqr_sinkhorn_iters: int = 6
+    aqr_sinkhorn_temperature: float = 0.2
+    aqr_pg_entropy_threshold: float = 0.90
+    aqr_pg_peak_threshold: float = 1.50
+    aqr_pg_bias_weight: float = 1.0
+    aqr_support_bias_clip: float = 4.0
+    aqr_temporal_memory_tokens: int = 32
+    aqr_obs_gate_init: float = 0.0
+    aqr_task_gate_init: float = 0.0
+    aqr_posterior_gate_init: float = -2.0
+    aqr_control_gate_init: float = 0.0
     visual_reread_topk: int = 32
     tactile_reread_groups: int = 2
     task_visual_reread_topk: int = 32

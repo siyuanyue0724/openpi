@@ -7,6 +7,12 @@ action/control contract rewrite, the frozen-perception bring-up, the
 VL-router supervised grounding rollout, and the full MAPG anchor-prior-graph
 deployment.
 
+2026-05-09 update: the maintained direct-final graph path is now **AQR-MAPG**
+(`--aqr-mapg-enabled`, `--mapg-enabled false`). AQR-MAPG replaces MAPG-v0
+candidate-prior graph construction with learned task/role anchor queries over
+typed support memory, while reusing the same observation/task/posterior/control
+graph consumer contract and the same PI0.5 action path.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)
@@ -66,6 +72,13 @@ deployment.
   live dataflow into observation anchors / task readout / posterior binding /
   conditioned control, CLI flags, diagnostics, verification commands, and the maintained
   `30000` step / `5000` checkpoint / `unroll_steps=2` MAPG launch template.
+- [`docs/AQR_MAPG_DIRECT_FINAL_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/AQR_MAPG_DIRECT_FINAL_DEPLOYMENT_README.md)
+  Direct-final replacement contract for the graph layer. The live code now
+  implements the deployable subset of this contract: AQR query tokens,
+  typed visual/point/tactile/posterior support reads, confidence-gated
+  PaliGemma weak visual bias, support-level Sinkhorn normalization,
+  row-specific downstream slot assignment, and default-off CLI flags. Use this
+  path for the next full training run instead of legacy `--mapg-enabled`.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
@@ -95,6 +108,14 @@ As of the latest local audit pass:
 
 - the v2.2 physical / task-readout / conditioned-control / PI0 action contract
   is internally consistent
+- the current final graph path is AQR-MAPG, not MAPG-v0:
+  - `aqr_mapg_enabled=True` builds graph anchors from learned physical/task
+    queries over typed support memory
+  - `mapg_enabled=False` disables legacy candidate-prior graph construction
+  - PaliGemma heatmaps are only confidence-gated weak task-query bias, not the
+    primary anchor source
+  - graph consumers remain observation anchors, task readout, posterior binding,
+    and conditioned control, so the PI0.5 action path stays unchanged
 - the runtime surface now has two explicit modes:
   - `picf_mode=enabled`: full v2.2 PICF path
   - `picf_mode=ablated`: PI0.5-only ablation path with PICF branches disabled
