@@ -89,6 +89,14 @@ graph consumer contract and the same PI0.5 action path.
   contract, trainable/frozen profile, cloud log locations, main code entry
   points, and known limitations such as fine local refinement for tiny adjacent
   objects.
+- [`docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md)
+  Final PICF-AQR-OWM architecture and deployment contract. This document
+  upgrades AQR into an object-addressable predictive belief-state router:
+  posterior is the authoritative belief, recent V-JEPA temporal embeddings and
+  PaliGemma image tokens become first-class typed supports, evidence cache is
+  subordinate to posterior/innovation, and slot-level JEPA, relation grounding,
+  and support prediction are specified as phase-gated parts of the complete
+  final architecture.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)

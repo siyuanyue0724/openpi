@@ -41,25 +41,33 @@ Read in this order.
    replaced, what AQR-MAPG is, how PaliGemma is used, what is trainable, what is
    disabled, and what evidence/acceptance tests matter.
 
-3. `/home/siyuanyue/Documents/openpi/docs/AQR_MAPG_DEPLOYMENT_README.md`
+3. `/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md`
+
+   Final PICF-AQR-OWM deployment contract. Read this after the AQR direct-final
+   README if you are working on the next architecture step: object-addressable
+   posterior belief state, first-class recent V-JEPA temporal support,
+   first-class PaliGemma image support, posterior-grounded evidence cache,
+   slot-level JEPA prediction, and relation/ordinal grounding.
+
+4. `/home/siyuanyue/Documents/openpi/docs/AQR_MAPG_DEPLOYMENT_README.md`
 
    Evidence and reasoning document for the MAPG-v0 failure mode. Read this to
    understand why near-uniform PaliGemma heatmaps and same-role row symmetry
    made the old candidate-prior assignment path behave as control-path noise.
 
-4. `/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md`
+5. `/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md`
 
    CALVIN training/evaluation operations record. Use this for evaluation
    commands, video/debug generation, cloud validation, and checkpoint/eval
    conventions.
 
-5. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_FROZEN_PERCEPTION_AUGMENTATION.md`
+6. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_FROZEN_PERCEPTION_AUGMENTATION.md`
 
    Frozen-perception profile and augmentation details. Useful for understanding
    the current "freeze V-JEPA/Sonata/AnyTouch pretrained parts, train the PICF
    adapters/router/semantic-action stack" profile.
 
-6. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_PI05_PARITY_AUDIT.md`
+7. `/home/siyuanyue/Documents/openpi/src/openpi/picf/README_PI05_PARITY_AUDIT.md`
 
    PI0.5 parity and integration audit. Read this before changing anything that
    touches the action generator path.
