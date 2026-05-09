@@ -83,6 +83,12 @@ graph consumer contract and the same PI0.5 action path.
   fallback guards, and default-off CLI flags. This is not a partial MAPG-v0
   deployment; legacy `--mapg-enabled` candidate-prior graph construction must
   stay disabled for the direct-final AQR run.
+- [`docs/AQR_MAPG_HANDOFF_README.md`](/home/siyuanyue/Documents/openpi/docs/AQR_MAPG_HANDOFF_README.md)
+  Short handoff index for a new engineer or researcher. It lists the
+  authoritative README reading order, current AQR-MAPG design, PaliGemma
+  contract, trainable/frozen profile, cloud log locations, main code entry
+  points, and known limitations such as fine local refinement for tiny adjacent
+  objects.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
