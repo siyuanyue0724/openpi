@@ -753,7 +753,7 @@ python scripts/picf_core_train.py \
   --aqr-pg-bias-weight 0.0 \
   --aqr-pg-entropy-threshold 0.90 \
   --aqr-pg-peak-threshold 1.50 \
-  --save-every 5000 \
+  --save-every 2500 \
   --steps 30000
 ```
 
@@ -1637,7 +1637,7 @@ Live deployment profile:
 --picf-mode enabled
 --perception-finetune-mode frozen
 --num-steps 30000
---save-interval 5000
+--save-interval 2500
 --unroll-steps 2
 ```
 

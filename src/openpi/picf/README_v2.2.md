@@ -143,6 +143,8 @@ As of the latest local audit pass:
   - `--no-aqr-pg-grounding-enabled`
   - `--aqr-pg-bias-weight 0.0`
   - `--perception-finetune-mode frozen`
+  - current cloud run cadence: `--num-train-steps 30000`,
+    `--save-interval 2500`, `--unroll-steps 2`
 - frozen perception means V-JEPA, Sonata, and AnyTouch backbone/pretrain
   parameters are frozen; PICF adapters, AQR query/router modules, graph
   consumers, PaliGemma semantic path, posterior/readout/control layers, and the
