@@ -1151,14 +1151,14 @@ class PicfFullCore(nn.Module):
             self.vl_task_point_gate_logit = None
             self.vl_obs_anchor_gate_logit = None
             self.vl_posterior_bind_gate_logit = None
-        graph_router_enabled = bool(self.config.mapg_enabled) or bool(self.config.aqr_mapg_enabled)
-        if graph_router_enabled:
+        legacy_mapg_enabled = bool(self.config.mapg_enabled)
+        graph_router_enabled = legacy_mapg_enabled or bool(self.config.aqr_mapg_enabled)
+        if legacy_mapg_enabled:
             self.mapg_pg_proj = nn.LazyLinear(hidden_dim)
             self.mapg_visual_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_point_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_tactile_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_posterior_proj = nn.Linear(hidden_dim, hidden_dim)
-            self.mapg_task_visual_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_anchor_fusion = nn.Sequential(
                 nn.Linear(hidden_dim * 5 + 5, hidden_dim),
                 nn.GELU(),
@@ -1168,6 +1168,16 @@ class PicfFullCore(nn.Module):
             nn.init.zeros_(self.mapg_anchor_fusion[-1].weight)
             nn.init.zeros_(self.mapg_anchor_fusion[-1].bias)
             self.mapg_role_embedding = nn.Embedding(4, hidden_dim)
+        else:
+            self.mapg_pg_proj = None
+            self.mapg_visual_proj = None
+            self.mapg_point_proj = None
+            self.mapg_tactile_proj = None
+            self.mapg_posterior_proj = None
+            self.mapg_anchor_fusion = None
+            self.mapg_role_embedding = None
+        if graph_router_enabled:
+            self.mapg_task_visual_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_to_control_proj = nn.Linear(hidden_dim, semantic_trunk_dim)
             self.mapg_control_role_embedding = nn.Embedding(1, semantic_trunk_dim)
             obs_gate_init = float(self.config.aqr_obs_gate_init) if bool(self.config.aqr_mapg_enabled) else float(self.config.mapg_obs_gate_init)
@@ -1187,14 +1197,7 @@ class PicfFullCore(nn.Module):
                 torch.tensor([control_gate_init], device=self.device, dtype=self.dtype)
             )
         else:
-            self.mapg_pg_proj = None
-            self.mapg_visual_proj = None
-            self.mapg_point_proj = None
-            self.mapg_tactile_proj = None
-            self.mapg_posterior_proj = None
             self.mapg_task_visual_proj = None
-            self.mapg_anchor_fusion = None
-            self.mapg_role_embedding = None
             self.mapg_to_control_proj = None
             self.mapg_control_role_embedding = None
             self.mapg_obs_gate_logit = None
