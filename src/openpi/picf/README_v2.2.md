@@ -4,8 +4,8 @@ Date: 2026-05-06
 Repo: `/home/siyuanyue/Documents/openpi`
 Status: current local v2.2 architecture record after the one-shot
 action/control contract rewrite, the frozen-perception bring-up, the
-VL-router supervised grounding rollout, and the full MAPG anchor-prior-graph
-deployment.
+VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
+AQR-MAPG direct-final graph replacement.
 
 2026-05-09 update: the maintained direct-final graph path is now **AQR-MAPG**
 (`--aqr-mapg-enabled`, `--mapg-enabled false`). AQR-MAPG replaces MAPG-v0
@@ -74,11 +74,13 @@ graph consumer contract and the same PI0.5 action path.
   `30000` step / `5000` checkpoint / `unroll_steps=2` MAPG launch template.
 - [`docs/AQR_MAPG_DIRECT_FINAL_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/AQR_MAPG_DIRECT_FINAL_DEPLOYMENT_README.md)
   Direct-final replacement contract for the graph layer. The live code now
-  implements the deployable subset of this contract: AQR query tokens,
-  typed visual/point/tactile/posterior support reads, confidence-gated
-  PaliGemma weak visual bias, support-level Sinkhorn normalization,
-  row-specific downstream slot assignment, and default-off CLI flags. Use this
-  path for the next full training run instead of legacy `--mapg-enabled`.
+  implements the maintained AQR-MAPG contract for this training line: learned
+  physical/task anchor queries, typed visual/point/tactile/posterior support
+  reads, confidence-gated PaliGemma weak visual bias, support-level Sinkhorn
+  normalization, row-specific downstream slot assignment, point-optional graph
+  fallback guards, and default-off CLI flags. This is not a partial MAPG-v0
+  deployment; legacy `--mapg-enabled` candidate-prior graph construction must
+  stay disabled for the direct-final AQR run.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
@@ -128,6 +130,30 @@ As of the latest local audit pass:
   - one final PI0.5 action path
 - no current local regression evidence shows semantic leakage into posterior or
   innovation
+
+2026-05-09 AQR deployment audit:
+
+- the direct-final training mode is:
+  - `--aqr-mapg-enabled true`
+  - `--mapg-enabled false`
+  - `--vl-anchor-router-enabled false`
+  - `--perception-finetune-mode frozen`
+- frozen perception means V-JEPA, Sonata, and AnyTouch backbone/pretrain
+  parameters are frozen; PICF adapters, AQR query/router modules, graph
+  consumers, PaliGemma semantic path, posterior/readout/control layers, and the
+  PI0.5 action-side trainable path remain trainable unless separately frozen by
+  the normal trainer.
+- AQR now participates in the same point-optional runtime contract as the graph
+  path itself: first-step point-cloud hard failures and hold reasons check
+  `mapg_enabled or aqr_mapg_enabled`, so AQR does not silently inherit the old
+  point-mandatory PICF guard.
+- the legacy MAPG-v0 builder remains available only as an explicit comparison
+  path. It is not enabled in the final AQR training profile.
+- the current local verification is syntax and graph-path verification, not a
+  claim that CALVIN behavior has already passed. The required behavioral
+  acceptance evidence starts at the first `5000`-step checkpoint: 20-sequence
+  CALVIN evaluation, raw heatmap exports, heatmap-over-RGB overlays, anchor
+  health videos, and JSON statistics.
 - no current local regression evidence shows dual control semantics reappearing
 
 Latest fully local verification evidence:

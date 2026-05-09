@@ -5242,14 +5242,15 @@ class PicfFullCore(nn.Module):
         if observation.reset_scaffold:
             previous = None
         meta = self._build_runtime_meta(observation, previous.runtime_meta if previous is not None else None)
-        if previous is None and not meta.point_contract_ok and not bool(self.config.mapg_enabled):
+        graph_can_run_without_points = bool(self.config.mapg_enabled) or bool(self.config.aqr_mapg_enabled)
+        if previous is None and not meta.point_contract_ok and not graph_can_run_without_points:
             raise RuntimeError("PICF core requires a valid xyzrgb point cloud on the first control step.")
         local_frame_context = self._point_subset(observation) if meta.point_contract_ok else None
         if (
             previous is None
             and local_frame_context is not None
             and local_frame_context.points_local.shape[0] == 0
-            and not bool(self.config.mapg_enabled)
+            and not graph_can_run_without_points
         ):
             raise RuntimeError("PICF core requires non-empty local xyzrgb support on the first control step.")
         point_context = (
@@ -5492,7 +5493,8 @@ class PicfFullCore(nn.Module):
         return self.finalize_with_action(observation, observed, action_future=action_future).state.predictive
 
     def _hold_reason(self, meta: RuntimeMeta, posterior: PicfPosteriorAnchorState, innovation_token: torch.Tensor) -> str | None:
-        if not meta.point_contract_ok and not bool(self.config.mapg_enabled):
+        graph_can_run_without_points = bool(self.config.mapg_enabled) or bool(self.config.aqr_mapg_enabled)
+        if not meta.point_contract_ok and not graph_can_run_without_points:
             return "point_contract_violation"
         if not meta.sync_valid:
             return "sensor_sync_invalid"

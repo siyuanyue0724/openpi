@@ -15,7 +15,8 @@ This is an experiment: $\pi_0$ was developed for our own robots, which differ fr
 
 - [May 2026] PICF v2.2 local development records are maintained in
   [`src/openpi/picf/README_v2.2.md`](src/openpi/picf/README_v2.2.md). The
-  current direct-final graph path is AQR-MAPG, documented in
+  current direct-final graph path is AQR-MAPG, with legacy MAPG-v0 disabled for
+  the maintained training profile, documented in
   [`docs/AQR_MAPG_DIRECT_FINAL_DEPLOYMENT_README.md`](docs/AQR_MAPG_DIRECT_FINAL_DEPLOYMENT_README.md).
 - [Sept 2025] We released PyTorch support in openpi.
 - [Sept 2025] We released pi05, an upgraded version of pi0 with better open-world generalization.

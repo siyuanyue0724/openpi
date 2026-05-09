@@ -1599,7 +1599,110 @@ Result:
 passed
 ```
 
+Additional 2026-05-09 code audit result:
+
+```text
+AQR is now included in all point-optional graph fallback guards.
+
+Correct guard:
+  graph_can_run_without_points = mapg_enabled or aqr_mapg_enabled
+
+Covered sites:
+  first-step missing point-cloud hard error
+  first-step empty local point support hard error
+  runtime hold reason for point-contract violation
+```
+
+This matters because the direct-final AQR contract is visual/support-first and
+point-optional. Leaving those guards legacy-`mapg_enabled`-only would be a real
+contract bug, not a cosmetic issue.
+
+Live deployment profile:
+
+```text
+--aqr-mapg-enabled true
+--mapg-enabled false
+--vl-anchor-router-enabled false
+--picf-mode enabled
+--perception-finetune-mode frozen
+--num-steps 30000
+--save-interval 5000
+--unroll-steps 2
+```
+
+Trainability contract:
+
+```text
+Frozen:
+  V-JEPA visual backbone
+  Sonata point backbone / pretrained point encoder
+  AnyTouch tactile backbone / pretrained tactile encoder
+
+Trainable:
+  AQR learned physical/task queries
+  AQR support readers and query self-attention
+  AQR/graph consumer projections and gates
+  PICF observation/task/posterior/control heads
+  PaliGemma semantic path under the normal semantic trainable profile
+  PI0.5 action-side trainable path
+```
+
+Historical `mapg_*` loss and assignment flag names are still reused by the
+trainer for shared graph-loss plumbing. They do not enable MAPG-v0 when
+`--mapg-enabled false` and `--aqr-mapg-enabled true`.
+
+Behavioral acceptance is deliberately not certified by a one-step smoke run.
+The first meaningful acceptance point is the `5000`-step checkpoint:
+
+```text
+1. run CALVIN evaluation for 20 sequences
+2. export anchor health videos
+3. export raw PaliGemma/AQR heatmap images
+4. export transparent heatmap-over-RGB overlays
+5. analyze JSON statistics for support entropy, same-role overlap,
+   assignment effective anchors, geometry validity, action loss, and MAPG/AQR
+   loss components
+```
+
+Until those artifacts exist, the correct statement is:
+
+```text
+The final AQR implementation is deployed and smoke-verified.
+The final AQR behavior is pending checkpoint/evaluation evidence.
+```
+
 Local `scripts/picf_core_train.py --help` can currently be blocked by a
 local IPython / wandb vendored pygments import assertion unrelated to AQR
 syntax. Cloud training environments used for previous PICF runs should still
 use the normal training entrypoint.
+
+## 19. Current Finality Boundary
+
+This README intentionally separates the final deployed contract from broader
+research ideas:
+
+```text
+In-contract for this deployment:
+  typed visual / point / tactile / posterior support memory
+  learned physical and task anchor queries
+  query-to-support cross-attention
+  support-level Sinkhorn competition
+  confidence-gated weak PaliGemma task bias
+  row-specific downstream slot assignment
+  point-optional graph runtime
+  graph losses over matching, VICReg, cycle, masked modality, routing,
+  support diversity, and geometry diversity
+  unchanged PI0.5 action generator path
+
+Out-of-contract for this deployment:
+  standalone keypoint extractor
+  MAPG-v0 candidate-prior graph as production path
+  raw point/tactile/posterior tokens inside PaliGemma
+  unbounded dense temporal KV cache
+```
+
+The live temporal support source is the existing posterior anchor memory. A
+separate large temporal KV cache is intentionally not part of the final
+training profile because it would increase memory/latency and reintroduce an
+unclear ownership boundary. This is not a cut-down of AQR; it is the explicit
+final boundary for the current PICF v2.2 deployment.
