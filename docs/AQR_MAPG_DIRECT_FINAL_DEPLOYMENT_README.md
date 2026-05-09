@@ -1603,6 +1603,9 @@ Additional 2026-05-09 code audit result:
 
 ```text
 AQR is now included in all point-optional graph fallback guards.
+The training startup log now prints an explicit AQR-MAPG contract line in
+addition to the legacy MAPG-disabled line, so cloud audit does not have to
+infer AQR state only from the raw command line.
 
 Correct guard:
   graph_can_run_without_points = mapg_enabled or aqr_mapg_enabled

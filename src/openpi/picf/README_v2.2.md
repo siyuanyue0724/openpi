@@ -147,6 +147,9 @@ As of the latest local audit pass:
   path itself: first-step point-cloud hard failures and hold reasons check
   `mapg_enabled or aqr_mapg_enabled`, so AQR does not silently inherit the old
   point-mandatory PICF guard.
+- the training startup log prints an explicit AQR-MAPG contract line, so the
+  cloud run can be audited from logs without inferring AQR state from the raw
+  command line alone.
 - the legacy MAPG-v0 builder remains available only as an explicit comparison
   path. It is not enabled in the final AQR training profile.
 - the current local verification is syntax and graph-path verification, not a

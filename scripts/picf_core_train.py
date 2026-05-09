@@ -5140,6 +5140,26 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
             )
             logging.info(
+                "AQR-MAPG direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s temporal_memory_tokens=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                bool(getattr(args, "aqr_mapg_enabled", False)),
+                int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
+                int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
+                int(getattr(args, "aqr_query_rounds", _SPEC_DEFAULTS.aqr_query_rounds)),
+                int(getattr(args, "aqr_sinkhorn_iters", _SPEC_DEFAULTS.aqr_sinkhorn_iters)),
+                float(getattr(args, "aqr_sinkhorn_temperature", _SPEC_DEFAULTS.aqr_sinkhorn_temperature)),
+                float(getattr(args, "aqr_pg_entropy_threshold", _SPEC_DEFAULTS.aqr_pg_entropy_threshold)),
+                float(getattr(args, "aqr_pg_peak_threshold", _SPEC_DEFAULTS.aqr_pg_peak_threshold)),
+                float(getattr(args, "aqr_pg_bias_weight", _SPEC_DEFAULTS.aqr_pg_bias_weight)),
+                float(getattr(args, "aqr_support_bias_clip", _SPEC_DEFAULTS.aqr_support_bias_clip)),
+                int(getattr(args, "aqr_temporal_memory_tokens", _SPEC_DEFAULTS.aqr_temporal_memory_tokens)),
+                float(getattr(args, "aqr_obs_gate_init", _SPEC_DEFAULTS.aqr_obs_gate_init)),
+                float(getattr(args, "aqr_task_gate_init", _SPEC_DEFAULTS.aqr_task_gate_init)),
+                float(getattr(args, "aqr_posterior_gate_init", _SPEC_DEFAULTS.aqr_posterior_gate_init)),
+                float(getattr(args, "aqr_control_gate_init", _SPEC_DEFAULTS.aqr_control_gate_init)),
+                bool(getattr(args, "mapg_enabled", False)),
+                bool(getattr(args, "vl_anchor_router_enabled", False)),
+            )
+            logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),
