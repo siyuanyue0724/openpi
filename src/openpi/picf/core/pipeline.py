@@ -2159,7 +2159,7 @@ class PicfFullCore(nn.Module):
                 pg_weights[int(local_idx)].to(device=self.device, dtype=self.dtype),
                 src_hw=pg_hw,
                 dst_hw=visual_hw,
-                transform=transform,
+                view_transform=transform,
                 eps=self.config.epsilon_a,
             )
             centered = torch.log(torch.clamp(support, min=self.config.epsilon_a))
