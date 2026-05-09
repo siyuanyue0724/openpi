@@ -420,8 +420,7 @@ PaliGemma is retained, but only as:
 
 ```text
 semantic conditioner
-weak visual prior
-optional auxiliary heatmap target/source
+optional auxiliary heatmap diagnostic/source only when explicitly enabled
 ```
 
 It is not:
@@ -433,7 +432,11 @@ posterior writer
 raw 3D/tactile memory consumer
 ```
 
-PaliGemma heatmap enters visual logits as:
+By default, PaliGemma heatmaps do not enter visual logits at all.
+The production AQR where path is learned query-to-support attention over typed
+support memory. If `aqr_pg_grounding_enabled=True` and
+`aqr_pg_bias_weight>0` are both explicitly set for an ablation, PaliGemma
+heatmap enters task-query visual logits only as:
 
 ```text
 B_pg[k, i] =
@@ -625,9 +628,10 @@ aqr_query_count_task: int = 8
 aqr_query_rounds: int = 2
 aqr_sinkhorn_iters: int = 6
 aqr_sinkhorn_temperature: float = 0.2
+aqr_pg_grounding_enabled: bool = False
 aqr_pg_entropy_threshold: float = 0.90
 aqr_pg_peak_threshold: float = 1.50
-aqr_pg_bias_weight: float = 1.0
+aqr_pg_bias_weight: float = 0.0
 aqr_temporal_memory_tokens: int = 32
 aqr_consumer_mode: Literal["full"] = "full"
 ```
@@ -740,12 +744,13 @@ python scripts/picf_core_train.py \
   --mapg-enabled false \
   --vl-anchor-router-enabled false \
   --aqr-mapg-enabled true \
-  --aqr-consumer-mode full \
   --aqr-query-count-physical 16 \
   --aqr-query-count-task 8 \
   --aqr-query-rounds 2 \
   --aqr-sinkhorn-iters 6 \
   --aqr-sinkhorn-temperature 0.2 \
+  --no-aqr-pg-grounding-enabled \
+  --aqr-pg-bias-weight 0.0 \
   --aqr-pg-entropy-threshold 0.90 \
   --aqr-pg-peak-threshold 1.50 \
   --save-every 5000 \
@@ -1553,8 +1558,10 @@ Implemented live pieces:
    posterior support
 
 3. PaliGemma placement:
-   shared heatmap head is available when AQR is enabled
-   heatmaps are entropy/peak confidence-gated weak task-query visual bias
+   PaliGemma semantic tokens condition task queries
+   the PaliGemma heatmap/grounding head is off by default
+   heatmaps are only generated when --aqr-pg-grounding-enabled is explicit
+   heatmaps influence AQR only when --aqr-pg-bias-weight > 0
    physical queries do not get direct task heatmap overwrite
 
 4. Support competition:
@@ -1577,7 +1584,8 @@ Important non-goals:
 ```text
 1. This is not a standalone keypoint extractor.
 2. This does not restore MAPG-v0 as production graph construction.
-3. This does not let PaliGemma heatmaps dominate anchor placement.
+3. This does not let PaliGemma heatmaps dominate anchor placement; by default
+   they are not computed and do not affect anchor placement.
 4. This does not alter the final PI0.5 action generator path.
 ```
 

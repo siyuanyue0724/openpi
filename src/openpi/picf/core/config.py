@@ -145,9 +145,14 @@ class PicfCoreConfig:
     aqr_query_rounds: int = 2
     aqr_sinkhorn_iters: int = 6
     aqr_sinkhorn_temperature: float = 0.2
+    # PaliGemma language remains active through task-query semantic conditioning.
+    # The heatmap/grounding head is off by default for AQR because where should
+    # be learned by query-to-support attention rather than inherited from weak
+    # VLM heatmaps. Enable this only for explicit diagnostics or ablations.
+    aqr_pg_grounding_enabled: bool = False
     aqr_pg_entropy_threshold: float = 0.90
     aqr_pg_peak_threshold: float = 1.50
-    aqr_pg_bias_weight: float = 1.0
+    aqr_pg_bias_weight: float = 0.0
     aqr_support_bias_clip: float = 4.0
     aqr_temporal_memory_tokens: int = 32
     aqr_obs_gate_init: float = 0.0

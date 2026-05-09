@@ -1121,10 +1121,13 @@ class PicfFullCore(nn.Module):
         self.semantic_prefix_proj = nn.Identity()
         self.proprio_proj = nn.LazyLinear(hidden_dim)
         self.action_cond_proj = nn.LazyLinear(hidden_dim)
+        aqr_pg_grounding_enabled = bool(self.config.aqr_mapg_enabled) and bool(
+            self.config.aqr_pg_grounding_enabled
+        )
         shared_pg_grounding_enabled = (
             bool(self.config.vl_anchor_router_enabled)
             or bool(self.config.mapg_enabled)
-            or bool(self.config.aqr_mapg_enabled)
+            or aqr_pg_grounding_enabled
         )
         if shared_pg_grounding_enabled:
             self.vl_heatmap_head = nn.Sequential(
@@ -1659,10 +1662,13 @@ class PicfFullCore(nn.Module):
         semantic: _SemanticContext,
         token_field: PicfTokenFieldState,
     ) -> PicfVLGroundingState | None:
+        aqr_pg_grounding_enabled = bool(self.config.aqr_mapg_enabled) and bool(
+            self.config.aqr_pg_grounding_enabled
+        )
         if not (
             bool(self.config.vl_anchor_router_enabled)
             or bool(self.config.mapg_enabled)
-            or bool(self.config.aqr_mapg_enabled)
+            or aqr_pg_grounding_enabled
         ):
             return None
         if self.vl_heatmap_head is None or self.vl_anchor_token_proj is None:
@@ -2060,6 +2066,8 @@ class PicfFullCore(nn.Module):
         visual_count: int,
     ) -> torch.Tensor | None:
         if vl_grounding is None or visual_count == 0 or roles.numel() == 0:
+            return None
+        if not bool(self.config.aqr_pg_grounding_enabled) or float(self.config.aqr_pg_bias_weight) <= 0.0:
             return None
         bias = torch.zeros((int(roles.numel()), visual_count), device=self.device, dtype=self.dtype)
         for role_value, heatmap in (

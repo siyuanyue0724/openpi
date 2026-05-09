@@ -76,11 +76,12 @@ graph consumer contract and the same PI0.5 action path.
   Direct-final replacement contract for the graph layer. The live code now
   implements the maintained AQR-MAPG contract for this training line: learned
   physical/task anchor queries, typed visual/point/tactile/posterior support
-  reads, confidence-gated PaliGemma weak visual bias, support-level Sinkhorn
-  normalization, row-specific downstream slot assignment, point-optional graph
-  fallback guards, and default-off CLI flags. This is not a partial MAPG-v0
-  deployment; legacy `--mapg-enabled` candidate-prior graph construction must
-  stay disabled for the direct-final AQR run.
+  reads, PaliGemma semantic conditioning for task queries, production-default
+  PaliGemma heatmap/grounding disabled, support-level Sinkhorn normalization,
+  row-specific downstream slot assignment, point-optional graph fallback
+  guards, and default-off CLI flags. This is not a partial MAPG-v0 deployment;
+  legacy `--mapg-enabled` candidate-prior graph construction must stay disabled
+  for the direct-final AQR run.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
@@ -114,8 +115,10 @@ As of the latest local audit pass:
   - `aqr_mapg_enabled=True` builds graph anchors from learned physical/task
     queries over typed support memory
   - `mapg_enabled=False` disables legacy candidate-prior graph construction
-  - PaliGemma heatmaps are only confidence-gated weak task-query bias, not the
-    primary anchor source
+  - PaliGemma semantic tokens still condition task queries
+  - PaliGemma heatmaps/grounding are production-disabled by default and only
+    exist under explicit `--aqr-pg-grounding-enabled`; they affect AQR only when
+    `--aqr-pg-bias-weight > 0`
   - graph consumers remain observation anchors, task readout, posterior binding,
     and conditioned control, so the PI0.5 action path stays unchanged
 - the runtime surface now has two explicit modes:
@@ -137,6 +140,8 @@ As of the latest local audit pass:
   - `--aqr-mapg-enabled true`
   - `--mapg-enabled false`
   - `--vl-anchor-router-enabled false`
+  - `--no-aqr-pg-grounding-enabled`
+  - `--aqr-pg-bias-weight 0.0`
   - `--perception-finetune-mode frozen`
 - frozen perception means V-JEPA, Sonata, and AnyTouch backbone/pretrain
   parameters are frozen; PICF adapters, AQR query/router modules, graph
