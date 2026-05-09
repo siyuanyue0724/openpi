@@ -1229,6 +1229,14 @@ class PicfFullCore(nn.Module):
                 gate_init=1.0,
             )
             self.aqr_task_conditioner.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
+            self.aqr_pg_image_reader = GatedCrossAttentionRead(
+                hidden_dim,
+                semantic_trunk_dim,
+                heads,
+                inner_dim=max(self.config.semantic_cross_dim, hidden_dim),
+                gate_init=0.5,
+            )
+            self.aqr_pg_image_reader.ff_chunk_size = int(self.config.tokenwise_ff_chunk_size)
             self.aqr_visual_reader = CrossAttentionRead(
                 hidden_dim,
                 heads,
@@ -1265,6 +1273,7 @@ class PicfFullCore(nn.Module):
             self.aqr_proprio_proj = None
             self.aqr_posterior_summary_proj = None
             self.aqr_task_conditioner = None
+            self.aqr_pg_image_reader = None
             self.aqr_visual_reader = None
             self.aqr_point_reader = None
             self.aqr_tactile_reader = None
@@ -2089,6 +2098,80 @@ class PicfFullCore(nn.Module):
             bias[rows] = float(self.config.aqr_pg_bias_weight) * confidence * centered[None, :]
         return bias
 
+    def _aqr_visual_grid_hw(self, token_field: PicfTokenFieldState, visual_count: int) -> tuple[int, int] | None:
+        geometry = token_field.projective_geometry
+        if geometry is not None and geometry.visual_grid_index.shape[0] == visual_count and visual_count > 0:
+            grid = geometry.visual_grid_index
+            width = int(torch.max(grid[:, 0]).item()) + 1
+            height = int(torch.max(grid[:, 1]).item()) + 1
+            if width > 0 and height > 0 and (width * height) == visual_count:
+                return (height, width)
+        side = int(round(math.sqrt(max(int(visual_count), 0))))
+        if side > 0 and (side * side) == int(visual_count):
+            return (side, side)
+        return None
+
+    def _aqr_pg_image_support_read(
+        self,
+        q: torch.Tensor,
+        semantic: _SemanticContext,
+        *,
+        query_types: torch.Tensor,
+        token_field: PicfTokenFieldState,
+        visual_count: int,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        if (
+            not bool(self.config.aqr_pg_image_support_enabled)
+            or self.aqr_pg_image_reader is None
+            or visual_count == 0
+            or semantic.image_tokens is None
+            or semantic.image_tokens.numel() == 0
+            or not semantic.image_token_ranges
+            or not semantic.image_grid_shapes
+        ):
+            return q, None
+        rows = torch.nonzero(query_types == 1, as_tuple=False).squeeze(-1)
+        if rows.numel() == 0:
+            return q, None
+        start, end = semantic.image_token_ranges[0]
+        if end <= start:
+            return q, None
+        pg_tokens = semantic.image_tokens[start:end].to(device=self.device, dtype=self.dtype)
+        pg_hw = semantic.image_grid_shapes[0]
+        if int(pg_hw[0]) * int(pg_hw[1]) != int(pg_tokens.shape[0]):
+            return q, None
+        visual_hw = self._aqr_visual_grid_hw(token_field, visual_count)
+        if visual_hw is None:
+            return q, None
+        transform = semantic.image_view_transforms[0] if len(semantic.image_view_transforms) > 0 else None
+        task_q, pg_weights = self.aqr_pg_image_reader(
+            q[:, rows, :],
+            pg_tokens[None, :],
+        )
+        updated = q.clone()
+        updated[:, rows, :] = task_q
+        bias = torch.zeros((int(query_types.numel()), visual_count), device=self.device, dtype=self.dtype)
+        weight = max(float(self.config.aqr_pg_image_support_weight), 0.0)
+        if weight <= 0.0:
+            return updated, None
+        for local_idx, row_idx in enumerate(rows.tolist()):
+            support = _map_pg_heatmap_to_visual_grid(
+                pg_weights[int(local_idx)].to(device=self.device, dtype=self.dtype),
+                src_hw=pg_hw,
+                dst_hw=visual_hw,
+                transform=transform,
+                eps=self.config.epsilon_a,
+            )
+            centered = torch.log(torch.clamp(support, min=self.config.epsilon_a))
+            centered = centered - centered.mean()
+            centered = torch.clamp(
+                centered,
+                min=-float(self.config.aqr_support_bias_clip),
+                max=float(self.config.aqr_support_bias_clip),
+            )
+            bias[int(row_idx)] = weight * centered
+        return updated, bias
+
     def _aqr_point_bias(self, token_field: PicfTokenFieldState, roles: torch.Tensor) -> torch.Tensor | None:
         point_count = int(token_field.point_tokens.shape[0])
         if point_count == 0 or roles.numel() == 0:
@@ -2567,11 +2650,21 @@ class PicfFullCore(nn.Module):
         rounds = max(int(self.config.aqr_query_rounds), 1)
         q = queries[None, :, :]
         for _ in range(rounds):
+            round_visual_bias = visual_bias
+            q, pg_image_bias = self._aqr_pg_image_support_read(
+                q,
+                semantic,
+                query_types=query_types,
+                token_field=token_field,
+                visual_count=visual_count,
+            )
+            if pg_image_bias is not None:
+                round_visual_bias = pg_image_bias if round_visual_bias is None else (round_visual_bias + pg_image_bias)
             if self.aqr_visual_reader is not None and visual_count > 0:
                 q, visual_weights = self.aqr_visual_reader(
                     q,
                     token_field.visual_tokens.to(device=self.device, dtype=self.dtype)[None, :],
-                    attn_bias=visual_bias,
+                    attn_bias=round_visual_bias,
                 )
                 visual_priors = self._aqr_competitive_support(visual_weights, eps=self.config.epsilon_a)
             if self.aqr_point_reader is not None and point_count > 0:

@@ -150,6 +150,11 @@ class PicfCoreConfig:
     # be learned by query-to-support attention rather than inherited from weak
     # VLM heatmaps. Enable this only for explicit diagnostics or ablations.
     aqr_pg_grounding_enabled: bool = False
+    # PaliGemma image tokens can still assist localization as typed
+    # visual-semantic support. This is not the heatmap head: task queries read
+    # PaliGemma image tokens and project that support onto the V-JEPA grid.
+    aqr_pg_image_support_enabled: bool = True
+    aqr_pg_image_support_weight: float = 0.35
     aqr_pg_entropy_threshold: float = 0.90
     aqr_pg_peak_threshold: float = 1.50
     aqr_pg_bias_weight: float = 0.0

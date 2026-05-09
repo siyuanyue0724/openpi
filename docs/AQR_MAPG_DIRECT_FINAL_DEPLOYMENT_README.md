@@ -420,6 +420,7 @@ PaliGemma is retained, but only as:
 
 ```text
 semantic conditioner
+image-token visual-semantic support for AQR task queries
 optional auxiliary heatmap diagnostic/source only when explicitly enabled
 ```
 
@@ -434,7 +435,16 @@ raw 3D/tactile memory consumer
 
 By default, PaliGemma heatmaps do not enter visual logits at all.
 The production AQR where path is learned query-to-support attention over typed
-support memory. If `aqr_pg_grounding_enabled=True` and
+support memory. PaliGemma still assists localization through image tokens:
+
+```text
+task query -> PaliGemma image tokens -> PG image support distribution
+           -> resize-with-pad projection onto V-JEPA grid
+           -> additive visual support bias for the V-JEPA reader
+```
+
+This uses the PaliGemma visual module without trusting a separate heatmap head.
+If `aqr_pg_grounding_enabled=True` and
 `aqr_pg_bias_weight>0` are both explicitly set for an ablation, PaliGemma
 heatmap enters task-query visual logits only as:
 
@@ -629,6 +639,8 @@ aqr_query_rounds: int = 2
 aqr_sinkhorn_iters: int = 6
 aqr_sinkhorn_temperature: float = 0.2
 aqr_pg_grounding_enabled: bool = False
+aqr_pg_image_support_enabled: bool = True
+aqr_pg_image_support_weight: float = 0.35
 aqr_pg_entropy_threshold: float = 0.90
 aqr_pg_peak_threshold: float = 1.50
 aqr_pg_bias_weight: float = 0.0
@@ -750,6 +762,8 @@ python scripts/picf_core_train.py \
   --aqr-sinkhorn-iters 6 \
   --aqr-sinkhorn-temperature 0.2 \
   --no-aqr-pg-grounding-enabled \
+  --aqr-pg-image-support-enabled \
+  --aqr-pg-image-support-weight 0.35 \
   --aqr-pg-bias-weight 0.0 \
   --aqr-pg-entropy-threshold 0.90 \
   --aqr-pg-peak-threshold 1.50 \
@@ -1559,6 +1573,8 @@ Implemented live pieces:
 
 3. PaliGemma placement:
    PaliGemma semantic tokens condition task queries
+   PaliGemma image tokens are a typed visual-semantic support source
+   PG image support is projected onto the V-JEPA visual grid
    the PaliGemma heatmap/grounding head is off by default
    heatmaps are only generated when --aqr-pg-grounding-enabled is explicit
    heatmaps influence AQR only when --aqr-pg-bias-weight > 0

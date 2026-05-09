@@ -1071,6 +1071,8 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.aqr_mapg_enabled = bool(_SPEC_DEFAULTS.aqr_mapg_enabled)
     if getattr(args, "aqr_pg_grounding_enabled", None) is None:
         args.aqr_pg_grounding_enabled = bool(_SPEC_DEFAULTS.aqr_pg_grounding_enabled)
+    if getattr(args, "aqr_pg_image_support_enabled", None) is None:
+        args.aqr_pg_image_support_enabled = bool(_SPEC_DEFAULTS.aqr_pg_image_support_enabled)
     for _name in (
         "aqr_query_count_physical",
         "aqr_query_count_task",
@@ -1082,6 +1084,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
             setattr(args, _name, int(getattr(_SPEC_DEFAULTS, _name)))
     for _name in (
         "aqr_sinkhorn_temperature",
+        "aqr_pg_image_support_weight",
         "aqr_pg_entropy_threshold",
         "aqr_pg_peak_threshold",
         "aqr_pg_bias_weight",
@@ -4269,6 +4272,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         aqr_pg_grounding_enabled=bool(
             _arg_or_default("aqr_pg_grounding_enabled", _SPEC_DEFAULTS.aqr_pg_grounding_enabled)
         ),
+        aqr_pg_image_support_enabled=bool(
+            _arg_or_default("aqr_pg_image_support_enabled", _SPEC_DEFAULTS.aqr_pg_image_support_enabled)
+        ),
+        aqr_pg_image_support_weight=float(
+            _arg_or_default("aqr_pg_image_support_weight", _SPEC_DEFAULTS.aqr_pg_image_support_weight)
+        ),
         aqr_pg_entropy_threshold=float(
             _arg_or_default("aqr_pg_entropy_threshold", _SPEC_DEFAULTS.aqr_pg_entropy_threshold)
         ),
@@ -5145,7 +5154,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
             )
             logging.info(
-                "AQR-MAPG direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s temporal_memory_tokens=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-MAPG direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s temporal_memory_tokens=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -5153,6 +5162,8 @@ def train(args: argparse.Namespace) -> None:
                 int(getattr(args, "aqr_sinkhorn_iters", _SPEC_DEFAULTS.aqr_sinkhorn_iters)),
                 float(getattr(args, "aqr_sinkhorn_temperature", _SPEC_DEFAULTS.aqr_sinkhorn_temperature)),
                 bool(getattr(args, "aqr_pg_grounding_enabled", _SPEC_DEFAULTS.aqr_pg_grounding_enabled)),
+                bool(getattr(args, "aqr_pg_image_support_enabled", _SPEC_DEFAULTS.aqr_pg_image_support_enabled)),
+                float(getattr(args, "aqr_pg_image_support_weight", _SPEC_DEFAULTS.aqr_pg_image_support_weight)),
                 float(getattr(args, "aqr_pg_entropy_threshold", _SPEC_DEFAULTS.aqr_pg_entropy_threshold)),
                 float(getattr(args, "aqr_pg_peak_threshold", _SPEC_DEFAULTS.aqr_pg_peak_threshold)),
                 float(getattr(args, "aqr_pg_bias_weight", _SPEC_DEFAULTS.aqr_pg_bias_weight)),
@@ -5978,6 +5989,16 @@ def main() -> None:
             "or ablations. Default is off; PaliGemma semantic conditioning remains active."
         ),
     )
+    parser.add_argument(
+        "--aqr-pg-image-support-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_pg_image_support_enabled,
+        help=(
+            "Let AQR task queries read PaliGemma image tokens as typed visual-semantic support "
+            "and project that support onto the V-JEPA grid. This is not the PaliGemma heatmap head."
+        ),
+    )
+    parser.add_argument("--aqr-pg-image-support-weight", type=float, default=_SPEC_DEFAULTS.aqr_pg_image_support_weight)
     parser.add_argument("--aqr-pg-entropy-threshold", type=float, default=_SPEC_DEFAULTS.aqr_pg_entropy_threshold)
     parser.add_argument("--aqr-pg-peak-threshold", type=float, default=_SPEC_DEFAULTS.aqr_pg_peak_threshold)
     parser.add_argument("--aqr-pg-bias-weight", type=float, default=_SPEC_DEFAULTS.aqr_pg_bias_weight)

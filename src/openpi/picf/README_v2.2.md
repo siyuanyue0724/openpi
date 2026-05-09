@@ -77,11 +77,12 @@ graph consumer contract and the same PI0.5 action path.
   implements the maintained AQR-MAPG contract for this training line: learned
   physical/task anchor queries, typed visual/point/tactile/posterior support
   reads, PaliGemma semantic conditioning for task queries, production-default
-  PaliGemma heatmap/grounding disabled, support-level Sinkhorn normalization,
-  row-specific downstream slot assignment, point-optional graph fallback
-  guards, and default-off CLI flags. This is not a partial MAPG-v0 deployment;
-  legacy `--mapg-enabled` candidate-prior graph construction must stay disabled
-  for the direct-final AQR run.
+  PaliGemma heatmap/grounding disabled, PaliGemma image-token support enabled
+  as a visual-semantic bridge into the V-JEPA grid, support-level Sinkhorn
+  normalization, row-specific downstream slot assignment, point-optional graph
+  fallback guards, and default-off CLI flags. This is not a partial MAPG-v0
+  deployment; legacy `--mapg-enabled` candidate-prior graph construction must
+  stay disabled for the direct-final AQR run.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
@@ -116,6 +117,8 @@ As of the latest local audit pass:
     queries over typed support memory
   - `mapg_enabled=False` disables legacy candidate-prior graph construction
   - PaliGemma semantic tokens still condition task queries
+  - PaliGemma image tokens help task queries localize by cross-attention and
+    resize-with-pad projection onto the V-JEPA visual grid
   - PaliGemma heatmaps/grounding are production-disabled by default and only
     exist under explicit `--aqr-pg-grounding-enabled`; they affect AQR only when
     `--aqr-pg-bias-weight > 0`
@@ -141,6 +144,8 @@ As of the latest local audit pass:
   - `--mapg-enabled false`
   - `--vl-anchor-router-enabled false`
   - `--no-aqr-pg-grounding-enabled`
+  - `--aqr-pg-image-support-enabled true`
+  - `--aqr-pg-image-support-weight 0.35`
   - `--aqr-pg-bias-weight 0.0`
   - `--perception-finetune-mode frozen`
   - current cloud run cadence: `--num-train-steps 30000`,
