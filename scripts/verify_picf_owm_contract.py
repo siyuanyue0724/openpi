@@ -25,6 +25,11 @@ def _contains(source: str, *needles: str) -> bool:
     return all(needle in source for needle in needles)
 
 
+def _contains_normalized(source: str, *needles: str) -> bool:
+    normalized = " ".join(source.split())
+    return all(needle in normalized for needle in needles)
+
+
 def run_checks() -> list[Check]:
     contracts = _read("src/openpi/picf/core/contracts.py")
     config = _read("src/openpi/picf/core/config.py")
@@ -34,6 +39,8 @@ def run_checks() -> list[Check]:
     wrapper = _read("src/openpi/picf/vjepa/wrapper.py")
     evidence = _read("scripts/picf_owm_evidence_bundle.py")
     readme = _read("docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md")
+    readme_v22 = _read("src/openpi/picf/README_v2.2.md")
+    mvtrack_readme = _read("docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md")
     burnin_body = pipeline.split("def recurrent_burnin_step", 1)[1].split("def _predictive_state", 1)[0]
 
     checks = [
@@ -174,6 +181,27 @@ def run_checks() -> list[Check]:
             "evidence_bundle_reads_required_keys",
             _contains(evidence, "OWM_KEYS", "loss_slot_jepa", "aqr_temporal_support_entropy_mean", "posterior_identity_switch_rate", "evidence_cache_trust_mean"),
             "Evidence bundle must include OWM loss/debug metrics for reviewer handoff.",
+        ),
+        Check(
+            "mvtrack_next_contract_is_linked_and_guarded",
+            _contains_normalized(
+                readme_v22,
+                "PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md",
+                "not a replacement",
+                "maintained v26 baseline",
+                "future runtime completion gates",
+            )
+            and _contains(
+                mvtrack_readme,
+                "PICF-AQR-OWM-MVTrack",
+                "static+wrist V-JEPA typed memory",
+                "support-signature identity binding",
+                "address-aware cache retrieval",
+                "tracklet typed memory",
+                "matched slot-JEPA/support prediction",
+                "MVTrack should be considered runtime-complete only after Section 16 passes",
+            ),
+            "README_v2.2 must route reviewers to the guarded MVTrack next-version contract without claiming runtime completion.",
         ),
     ]
     return checks

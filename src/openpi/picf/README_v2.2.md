@@ -52,6 +52,17 @@ metadata predates the OWM default and records `semantic_mode=zero` are not
 silently promoted into `aqr_mapg_enabled=True` at serve time. New training uses
 the OWM default; old zero-semantic checkpoints keep their recorded graph path.
 
+2026-05-10 MVTrack next-architecture update: use
+[`docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md)
+as the canonical next-version contract for `PICF-AQR-OWM-MVTrack`. This is not
+a replacement for the maintained v26 baseline; it is the complete v2
+architecture plan for static+wrist V-JEPA typed memory, support-signature
+identity binding, address-aware cache retrieval, tracklet memory, latent local
+refinement, training-only denoising queries, matched predictive losses, and
+gated weak ordinal grounding. It explicitly separates current code facts from
+future runtime completion gates so reviewers do not mistake a design contract
+for behavior-level CALVIN acceptance.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)
@@ -142,6 +153,14 @@ the OWM default; old zero-semantic checkpoints keep their recorded graph path.
   requires `python scripts/verify_picf_owm_contract.py` plus the OWM evidence
   bundle for strict README-to-code diagnosis. It is not a conceptual appendix;
   it is the engineering deployment blueprint for the final architecture.
+- [`docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md)
+  Next-version architecture contract for PICF-AQR-OWM-MVTrack: static+wrist
+  V-JEPA typed multiview support, support-signature identity binding,
+  address-aware cache retrieval, tracklet typed memory, local refinement,
+  denoising queries, matched predictive losses, and gated weak ordinal targets.
+  It records the required math, code touchpoints, paper support, verification
+  gates, and CALVIN/video acceptance boundary before the v2 runtime can be
+  marked complete.
 - [`docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md)
   Temporary live deployment ledger for the OWM implementation. Use this while
   reviewing the current branch because it records which final README contract
