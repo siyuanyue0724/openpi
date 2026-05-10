@@ -52,16 +52,21 @@ metadata predates the OWM default and records `semantic_mode=zero` are not
 silently promoted into `aqr_mapg_enabled=True` at serve time. New training uses
 the OWM default; old zero-semantic checkpoints keep their recorded graph path.
 
-2026-05-10 MVTrack runtime-b update: use
+2026-05-10 MVTrack runtime-c update: use
 [`docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md)
 as the canonical `PICF-AQR-OWM-MVTrack` contract and runtime wiring record.
 This is not a replacement for the maintained v26 baseline; it is the complete
 v2 architecture plan plus the deployed code pass for static+wrist V-JEPA typed
-memory, support-signature identity binding, address-aware cache retrieval,
-tracklet memory, latent local refinement, matched predictive losses, and gated
-weak ordinal grounding, optional proposal memory, and training-only support
-denoising. It explicitly separates code-level runtime completion from
-behavior-level CALVIN/video acceptance.
+memory, optional tracklet/proposal episode-field threading, support-signature
+identity binding, posterior-address-first cache retrieval, innovation-gated
+address inertia based on current measurement mismatch rather than predictive
+cache residuals, latent local refinement, matched predictive losses,
+permutation-tolerant binding consistency, gated weak ordinal diagnostics, and
+training-only support denoising. It explicitly separates code-level runtime
+completion from behavior-level CALVIN/video acceptance; code-level runtime completion
+does not imply CALVIN/video behavior completion. SAM/DINO proposal generation is
+intentionally not part of this maintained pass; proposal tensors are consumed
+only if an upstream source provides them.
 
 ## Quick Navigation
 
@@ -154,11 +159,11 @@ behavior-level CALVIN/video acceptance.
   bundle for strict README-to-code diagnosis. It is not a conceptual appendix;
   it is the engineering deployment blueprint for the final architecture.
 - [`docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md)
-  Architecture contract and runtime-b wiring record for PICF-AQR-OWM-MVTrack:
+  Architecture contract and runtime-c wiring record for PICF-AQR-OWM-MVTrack:
   static+wrist V-JEPA typed multiview support, support-signature identity
-  binding, address-aware cache retrieval, tracklet typed memory, local
-  refinement, optional proposal memory, training-only support denoising,
-  matched predictive losses, and gated weak ordinal targets. It
+  binding, posterior-address-first cache retrieval, optional tracklet/proposal
+  data ingestion, local refinement, training-only support denoising, matched
+  predictive losses, and gated weak ordinal targets. It
   records the math, code touchpoints, paper support, verification gates, and
   CALVIN/video acceptance boundary before behavior-level completion can be
   claimed.
@@ -592,7 +597,7 @@ When verifying the local v2.2 codebase, use this navigation split:
   - [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
 - temporary deep audits for this local rollout:
   - [`docs/PICF_AQR_OWM_MVTRACK_DEEP_AUDIT_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MVTRACK_DEEP_AUDIT_TEMP.md)
-    Generated strict MVTrack runtime-b audit covering cache dataclass flow,
+    Generated strict MVTrack runtime-c audit covering cache dataclass flow,
     residual cache math, typed local refinement, guarded predictive losses,
     weak ordinal no-posterior-rewrite, and documentation overclaim boundaries.
   - [`/tmp/picf_v22_temp_current_dataflow.md`](/tmp/picf_v22_temp_current_dataflow.md)

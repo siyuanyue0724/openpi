@@ -776,6 +776,12 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
     def _build_observation(self, obs: dict[str, Any], *, reset: bool) -> PicfObservation:
         prompt = str(obs.get("prompt", self._last_prompt))
         self._last_prompt = prompt
+        def _optional_array(name: str, dtype: Any | None = None) -> np.ndarray | None:
+            value = obs.get(name, obs.get(f"observation/{name}"))
+            if value is None:
+                return None
+            return np.asarray(value, dtype=dtype) if dtype is not None else np.asarray(value)
+
         return PicfObservation(
             rgb_static=np.asarray(obs["observation/image"], dtype=np.uint8),
             depth_static=np.asarray(obs["observation/depth"], dtype=np.float32),
@@ -792,6 +798,18 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
             timestamp_s=float(self._step_id) * self._frame_dt_s,
             reset_scaffold=bool(reset),
             proprio=np.asarray(obs["observation/state"], dtype=np.float32),
+            tracklet_xy=_optional_array("tracklet_xy", np.float32),
+            tracklet_velocity=_optional_array("tracklet_velocity", np.float32),
+            tracklet_visibility=_optional_array("tracklet_visibility", np.float32),
+            tracklet_confidence=_optional_array("tracklet_confidence", np.float32),
+            tracklet_ids=_optional_array("tracklet_ids", np.int64),
+            tracklet_view_ids=_optional_array("tracklet_view_ids", np.int64),
+            tracklet_age=_optional_array("tracklet_age", np.float32),
+            proposal_centers_xy=_optional_array("proposal_centers_xy", np.float32),
+            proposal_boxes_xyxy=_optional_array("proposal_boxes_xyxy", np.float32),
+            proposal_objectness=_optional_array("proposal_objectness", np.float32),
+            proposal_view_ids=_optional_array("proposal_view_ids", np.int64),
+            proposal_source_ids=_optional_array("proposal_source_ids", np.int64),
         )
 
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:

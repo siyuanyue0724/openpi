@@ -155,6 +155,7 @@ def run_static_checks() -> list[Finding]:
     recurrent_burnin = pipeline.node_source("recurrent_burnin_step")
     predictive_state = pipeline.node_source("_predictive_state")
     matched_loss = training.node_source("_matched_prediction_loss")
+    binding_loss = training.node_source("_binding_consistency_loss")
     denoise_loss = training.node_source("_aqr_support_denoising_loss")
     transition_loss = training.node_source("compute_transition_loss")
 
@@ -289,6 +290,35 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
+            "trainer_replay_serve_feed_optional_mvtrack_fields_when_present",
+            trainer.contains(
+                "_MVTRACK_TRACKLET_KEYS",
+                "_MVTRACK_PROPOSAL_KEYS",
+                "_read_npz_required_optional",
+                "load_tracklet_fields",
+                "tracklet_xy=frame.get(\"tracklet_xy\")",
+                "proposal_centers_xy=frame.get(\"proposal_centers_xy\")",
+            )
+            and Source("src/openpi/picf/replay/calvin_replay.py").contains(
+                "_MVTRACK_TRACKLET_KEYS",
+                "_read_npz_required_optional",
+                "tracklet_xy=frame.get(\"tracklet_xy\")",
+                "proposal_centers_xy=frame.get(\"proposal_centers_xy\")",
+            )
+            and Source("scripts/serve_picf_policy.py").contains(
+                "_optional_array",
+                "tracklet_xy=_optional_array",
+                "proposal_centers_xy=_optional_array",
+            ),
+            severity="fail",
+            detail="Tracklet/proposal runtime branches must be fed by train/replay/serve when optional episode or service fields are present.",
+            evidence=trainer.refs("_MVTRACK_TRACKLET_KEYS", "tracklet_xy=frame.get")
+            + Source("src/openpi/picf/replay/calvin_replay.py").refs("_MVTRACK_TRACKLET_KEYS", "tracklet_xy=frame.get")
+            + Source("scripts/serve_picf_policy.py").refs("_optional_array", "tracklet_xy=_optional_array"),
+        )
+    )
+    checks.append(
+        _finding(
             "local_refinement_uses_existing_typed_memory_not_visual_only",
             "_add_local_component(visual_priors, token_field.visual_tokens)" in aqr_graph
             and "_add_local_component(" in aqr_graph
@@ -325,6 +355,8 @@ def run_static_checks() -> list[Finding]:
             and "valid = valid & ~immediate_posterior" in cache_read
             and "innovation_cost" in cache_read
             and "evidence_cache_address_weight" in aqr_graph
+            and "_aqr_cache_query_addresses" in pipeline.text
+            and "previous.posterior.slot_address" in pipeline.text
             and "evidence_cache_content_weight" in aqr_graph
             and "evidence_cache_role_weight" in aqr_graph
             and "q_before_cache" in aqr_graph
@@ -338,10 +370,10 @@ def run_static_checks() -> list[Finding]:
     checks.append(
         _finding(
             "cache_write_is_after_posterior_correction",
-            _ordered(recurrent_burnin, "posterior = self._posterior_update", "innovation_token, innovation_norm", "evidence_cache = self._write_evidence_cache")
+            _ordered(recurrent_burnin, "innovation_token, innovation_norm", "posterior = self._posterior_update", "evidence_cache = self._write_evidence_cache")
             and _ordered(predictive_state, "posterior", "evidence_cache = self._write_evidence_cache"),
             severity="fail",
-            detail="Evidence cache writes must happen after posterior correction/innovation, never before current belief is computed.",
+            detail="Innovation may be computed before posterior for identity gating, but evidence cache writes must happen after posterior correction.",
             evidence=pipeline.node_refs("recurrent_burnin_step") + pipeline.node_refs("_predictive_state"),
         )
     )
@@ -356,6 +388,8 @@ def run_static_checks() -> list[Finding]:
             and "anchor_address" in binding
             and "bind_address_weight" in binding
             and "prev.recycle_gate" in binding
+            and "innovation_norm" in binding
+            and "_innovation_risk_scalar" in binding
             and "torch.exp(-float(self.config.bind_address_innovation_downweight)" in binding,
             severity="fail",
             detail="Identity binding must first use current support overlap and only then gated address inertia, downweighted by recycle/innovation risk.",
@@ -369,10 +403,12 @@ def run_static_checks() -> list[Finding]:
             and "obs_address = binding_cond @ obs_anchors.anchor_address" in posterior
             and "address_update_rate" in posterior
             and "1.0 - recycle.clamp" in posterior
+            and "_measurement_innovation_norm(x_prior, S_prior, obs_anchors)" in posterior
+            and "_innovation_risk_scalar(identity_innovation_norm)" in posterior
             and "address_update_max_rate" in posterior
             and "slot_address=slot_address" in posterior,
             severity="fail",
-            detail="Slot address must be a slow, evidence-gated identity state rather than a hard immutable ID.",
+            detail="Slot address must be a slow, measurement-innovation-gated identity state rather than a hard immutable ID or predictive-cache side effect.",
             evidence=pipeline.node_refs("_posterior_update") + pipeline.refs("address_update_rate", "slot_address=slot_address"),
         )
     )
@@ -390,6 +426,19 @@ def run_static_checks() -> list[Finding]:
             severity="fail",
             detail="Slot-JEPA/support prediction must use detached, permutation-tolerant matching instead of same-index future slot supervision.",
             evidence=training.node_refs("_matched_prediction_loss") + training.refs("future.posterior_tokens.detach", "future.posterior_support_summary.detach"),
+        )
+    )
+    checks.append(
+        _finding(
+            "binding_consistency_temporal_term_is_matched_not_index_ce",
+            "assign_row = torch.softmax" in binding_loss
+            and "assign_col = torch.softmax" in binding_loss
+            and "matched_target" in binding_loss
+            and "matched_current" in binding_loss
+            and "labels = torch.arange(slot_count" not in binding_loss,
+            severity="fail",
+            detail="Binding consistency must not assume current slot j is future slot j before the guarded loss is enabled.",
+            evidence=training.node_refs("_binding_consistency_loss"),
         )
     )
     checks.append(
@@ -442,12 +491,12 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
-            "audit_scripts_cover_runtime_b_invariants",
+            "audit_scripts_cover_runtime_c_invariants",
             verifier.contains("proposal_priors", "lambda_aqr_denoising")
             and strict.contains("mvtrack_proposal_memory_is_optional_typed_evidence", "aqr_denoising_is_training_only_and_guarded")
             and dataflow.contains("Optional proposal typed memory", "Training-only support denoising"),
             severity="fail",
-            detail="Verifier, strict diagnose, and dataflow trace must cover runtime-b proposal and denoising invariants.",
+            detail="Verifier, strict diagnose, and dataflow trace must cover runtime-c proposal and denoising invariants.",
             evidence=verifier.refs("proposal_priors", "lambda_aqr_denoising")
             + strict.refs("mvtrack_proposal_memory_is_optional_typed_evidence", "aqr_denoising_is_training_only_and_guarded")
             + dataflow.refs("Optional proposal typed memory", "Training-only support denoising"),

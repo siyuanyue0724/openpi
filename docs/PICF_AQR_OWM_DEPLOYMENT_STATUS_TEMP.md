@@ -30,13 +30,14 @@ Version:
 PICF-AQR-OWM v1.3
 Status: complete for the code-level deployment contract after the point/visual cleanup and default-profile cleanup pass.
 
-PICF-AQR-OWM-MVTrack v2.0-runtime-b
+PICF-AQR-OWM-MVTrack v2.0-runtime-c
 Status: code-level runtime complete for multiview temporal evidence,
-tracklet typed support, optional proposal typed support,
-support-signature/address binding, address-aware cache bias, typed local refinement,
-training-only support denoising, matched predictive targets, and weak ordinal
-diagnostics. Behavior-level completion still requires current-checkout
-CALVIN/video/metrics evidence.
+optional train/replay/serve tracklet/proposal field threading, optional
+proposal typed support, support-signature/address binding, posterior-address
+aware cache bias, measurement-innovation-gated address inertia, typed local refinement,
+training-only support denoising, matched predictive targets, permutation-tolerant
+binding consistency, and weak ordinal diagnostics. Behavior-level completion
+still requires current-checkout CALVIN/video/metrics evidence.
 ```
 
 Default-profile result:

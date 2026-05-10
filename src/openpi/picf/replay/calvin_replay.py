@@ -14,6 +14,22 @@ from openpi.picf.geometry import normalize_vectors
 from openpi.training.calvin_dataset import CalvinLangSegmentDataset
 
 _LEGACY_TACTILE_SENSOR_OFFSETS_M = ((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))
+_MVTRACK_TRACKLET_KEYS = (
+    "tracklet_xy",
+    "tracklet_velocity",
+    "tracklet_visibility",
+    "tracklet_confidence",
+    "tracklet_ids",
+    "tracklet_view_ids",
+    "tracklet_age",
+)
+_MVTRACK_PROPOSAL_KEYS = (
+    "proposal_centers_xy",
+    "proposal_boxes_xyxy",
+    "proposal_objectness",
+    "proposal_view_ids",
+    "proposal_source_ids",
+)
 
 
 def _orthonormal_sensor_frame(normal_local: np.ndarray, up_local: np.ndarray) -> np.ndarray:
@@ -135,6 +151,38 @@ def _load_action_chunk(
     return np.stack(actions, axis=0)
 
 
+def _read_optional_npz_fields(reader, step_id: int, keys: Sequence[str]) -> dict[str, np.ndarray]:
+    keys = tuple(str(k) for k in keys)
+    if not keys:
+        return {}
+    optional_reader = getattr(reader, "read_npz_optional", None)
+    if callable(optional_reader):
+        return dict(optional_reader(step_id, list(keys)))
+    try:
+        payload = reader.read_npz(step_id, keys=None)
+    except Exception:
+        return {}
+    return {key: payload[key] for key in keys if key in payload}
+
+
+def _read_npz_required_optional(
+    reader,
+    step_id: int,
+    *,
+    required: Sequence[str],
+    optional: Sequence[str],
+) -> dict[str, np.ndarray]:
+    required = tuple(str(k) for k in required)
+    optional = tuple(str(k) for k in optional)
+    combined_reader = getattr(reader, "read_npz_required_optional", None)
+    if callable(combined_reader):
+        return dict(combined_reader(step_id, required=list(required), optional=list(optional)))
+    frame = dict(reader.read_npz(step_id, keys=list(required)))
+    if optional:
+        frame.update(_read_optional_npz_fields(reader, step_id, optional))
+    return frame
+
+
 class CalvinSequentialReplay:
     """Replay CALVIN segments sequentially for scaffold state continuity."""
 
@@ -154,6 +202,8 @@ class CalvinSequentialReplay:
         tactile_calibration: dict[str, object] | str | Path | None = None,
         tactile_backgrounds_by_sensor: dict[str, np.ndarray] | None = None,
         use_scene_obs: bool = False,
+        load_tracklet_fields: bool = True,
+        load_proposal_fields: bool = True,
     ):
         if int(action_horizon) < 1:
             raise ValueError(f"action_horizon must be >= 1, got {action_horizon}")
@@ -185,6 +235,8 @@ class CalvinSequentialReplay:
             str(name): np.asarray(image) for name, image in tactile_backgrounds_by_sensor.items()
         }
         self._use_scene_obs = bool(use_scene_obs)
+        self._load_tracklet_fields = bool(load_tracklet_fields)
+        self._load_proposal_fields = bool(load_proposal_fields)
 
     def __iter__(self) -> Iterator[PicfObservation]:
         for segment_id in self._segment_indices:
@@ -197,7 +249,12 @@ class CalvinSequentialReplay:
                     keys.extend(["rgb_tactile", "depth_tactile"])
                 if self._use_scene_obs:
                     keys.append("scene_obs")
-                frame = self._reader.read_npz(step_id, keys=keys)
+                optional_keys: list[str] = []
+                if self._load_tracklet_fields:
+                    optional_keys.extend(_MVTRACK_TRACKLET_KEYS)
+                if self._load_proposal_fields:
+                    optional_keys.extend(_MVTRACK_PROPOSAL_KEYS)
+                frame = _read_npz_required_optional(self._reader, step_id, required=keys, optional=optional_keys)
                 timestamp_s = float(step_id) * self._frame_dt_s
                 action_chunk = _load_action_chunk(
                     self._reader,
@@ -221,6 +278,18 @@ class CalvinSequentialReplay:
                     proprio=frame["robot_obs"],
                     action=frame.get("rel_actions"),
                     action_chunk=action_chunk,
+                    tracklet_xy=frame.get("tracklet_xy"),
+                    tracklet_velocity=frame.get("tracklet_velocity"),
+                    tracklet_visibility=frame.get("tracklet_visibility"),
+                    tracklet_confidence=frame.get("tracklet_confidence"),
+                    tracklet_ids=frame.get("tracklet_ids"),
+                    tracklet_view_ids=frame.get("tracklet_view_ids"),
+                    tracklet_age=frame.get("tracklet_age"),
+                    proposal_centers_xy=frame.get("proposal_centers_xy"),
+                    proposal_boxes_xyxy=frame.get("proposal_boxes_xyxy"),
+                    proposal_objectness=frame.get("proposal_objectness"),
+                    proposal_view_ids=frame.get("proposal_view_ids"),
+                    proposal_source_ids=frame.get("proposal_source_ids"),
                     tactile=(
                         _calvin_tactile_packet(
                             frame,

@@ -434,13 +434,15 @@ def run_static_checks() -> list[Finding]:
             training.contains(
                 "def _binding_consistency_loss",
                 "future.posterior_tokens",
-                "fn.cross_entropy(logits, labels",
+                "assign_row = torch.softmax",
+                "matched_target",
+                "matched_current",
                 "future_tokens.detach()",
             )
             and "binding_entropy.mean()" not in training.text,
             severity="warn",
             detail=(
-                "Binding consistency must include detached next-posterior temporal identity contrast, "
+                "Binding consistency must include detached, permutation-tolerant next-posterior temporal matching, "
                 "not only current-step binding entropy/sharpness."
             ),
             evidence=training.refs("def _binding_consistency_loss", "future.posterior_tokens", "fn.cross_entropy(logits, labels"),

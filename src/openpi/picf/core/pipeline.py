@@ -2368,6 +2368,61 @@ class PicfFullCore(nn.Module):
             valid=torch.zeros((0,), device=self.device, dtype=torch.bool),
         )
 
+    def _innovation_risk_scalar(self, innovation_norm: torch.Tensor | None) -> torch.Tensor:
+        if innovation_norm is None or innovation_norm.numel() == 0:
+            return torch.zeros((), device=self.device, dtype=self.dtype)
+        values = torch.clamp(innovation_norm.to(device=self.device, dtype=self.dtype).reshape(-1), min=0.0)
+        if values.numel() == 0:
+            return torch.zeros((), device=self.device, dtype=self.dtype)
+        return torch.linalg.norm(values) / math.sqrt(float(values.numel()))
+
+    def _measurement_innovation_norm(
+        self,
+        x_prior: torch.Tensor,
+        S_prior: torch.Tensor,
+        obs: PicfObservationAnchorState,
+    ) -> torch.Tensor:
+        if obs.x.numel() == 0 or x_prior.numel() == 0:
+            return torch.zeros((0,), device=self.device, dtype=self.dtype)
+        obs_x = obs.x.to(device=self.device, dtype=self.dtype)
+        obs_S = obs.S.to(device=self.device, dtype=self.dtype)
+        prior_x = x_prior.to(device=self.device, dtype=self.dtype)
+        prior_S = S_prior.to(device=self.device, dtype=self.dtype)
+        prior_diag = torch.diagonal(prior_S, dim1=-2, dim2=-1)
+        obs_diag = torch.diagonal(obs_S, dim1=-2, dim2=-1)
+        delta = obs_x[None, :, :] - prior_x[:, None, :]
+        scale = torch.clamp(prior_diag[:, None, :] + obs_diag[None, :, :] + (self.config.bind_sigma_m**2), min=self.config.epsilon_s)
+        maha = torch.sum((delta**2) / scale, dim=-1)
+        nearest = torch.min(maha, dim=-1).values
+        return torch.sqrt(torch.clamp(nearest, min=0.0))
+
+    def _physical_query_addresses(
+        self,
+        previous: PicfPreviousState | None,
+        physical_count: int,
+    ) -> torch.Tensor:
+        base = self.aqr_physical_query_tokens[:physical_count].to(device=self.device, dtype=self.dtype)
+        if previous is None or previous.posterior.slot_address is None or previous.posterior.slot_address.numel() == 0:
+            return base
+        posterior_address = previous.posterior.slot_address.to(device=self.device, dtype=self.dtype)
+        width = min(int(base.shape[-1]), int(posterior_address.shape[-1]))
+        count = min(int(base.shape[0]), int(posterior_address.shape[0]))
+        if count <= 0 or width <= 0:
+            return base
+        out = base.clone()
+        out[:count, :width] = posterior_address[:count, :width]
+        return _normalize_tensor(out, eps=self.config.epsilon_residual)
+
+    def _aqr_cache_query_addresses(
+        self,
+        previous: PicfPreviousState | None,
+        physical_count: int,
+        task_count: int,
+    ) -> torch.Tensor:
+        physical = self._physical_query_addresses(previous, physical_count)
+        task = self.aqr_task_query_tokens[:task_count].to(device=self.device, dtype=self.dtype)
+        return torch.cat([physical, task], dim=0)
+
     def _previous_evidence_cache_tokens(
         self,
         previous: PicfPreviousState | None,
@@ -2868,13 +2923,7 @@ class PicfFullCore(nn.Module):
                         role_mask = torch.ones((cache_count,), device=self.device, dtype=torch.bool)
                     cache_bias[row] = torch.where(role_mask, cache_bias[row] + role_bonus, neg[row])
             if cache_address is not None and cache_address.numel() > 0:
-                query_address = torch.cat(
-                    [
-                        self.aqr_physical_query_tokens[:physical_count],
-                        self.aqr_task_query_tokens[:task_count],
-                    ],
-                    dim=0,
-                ).to(device=self.device, dtype=self.dtype)
+                query_address = self._aqr_cache_query_addresses(previous, physical_count, task_count)
                 addr_score = _normalize_tensor(query_address, eps=self.config.epsilon_residual) @ _normalize_tensor(
                     cache_address.to(device=self.device, dtype=self.dtype),
                     eps=self.config.epsilon_residual,
@@ -3085,7 +3134,7 @@ class PicfFullCore(nn.Module):
             tracklet_priors=tracklet_priors,
             proposal_priors=proposal_priors,
             local_priors=local_priors,
-            slot_address=self.aqr_physical_query_tokens[:physical_count].to(device=self.device, dtype=self.dtype) if self.aqr_physical_query_tokens is not None else None,
+            slot_address=self._physical_query_addresses(previous, physical_count) if self.aqr_physical_query_tokens is not None else None,
             slot_content=anchor_tokens,
             support_uncertainty=1.0 - anchor_conf,
             support_signature=modality_conf,
@@ -5336,6 +5385,7 @@ class PicfFullCore(nn.Module):
         S_prior: torch.Tensor,
         obs: PicfObservationAnchorState,
         previous: PicfPreviousState | None = None,
+        innovation_norm: torch.Tensor | None = None,
     ) -> torch.Tensor:
         if obs.tokens.shape[0] == 0:
             return torch.zeros((self.config.persistent_anchors, 0), device=self.device, dtype=self.dtype)
@@ -5347,6 +5397,9 @@ class PicfFullCore(nn.Module):
         maha = torch.sum((delta**2) / torch.clamp(S_diag[:, None, :] + (self.config.bind_sigma_m**2), min=self.config.epsilon_s), dim=-1)
         logits = (self.config.lambda_bind_hidden * hidden_score) - (self.config.lambda_bind_geom * maha)
         if previous is not None:
+            innovation_decay = torch.exp(
+                -float(self.config.bind_address_innovation_downweight) * self._innovation_risk_scalar(innovation_norm)
+            )
             support_terms: list[torch.Tensor] = []
             prev = previous.posterior
             for prev_name, obs_value in (
@@ -5374,6 +5427,7 @@ class PicfFullCore(nn.Module):
                     inertia = inertia * prev.alpha.to(device=self.device, dtype=self.dtype).reshape(-1)[: logits.shape[0]].clamp(0.0, 1.0)
                 if prev.recycle_gate is not None:
                     inertia = inertia * (1.0 - prev.recycle_gate.to(device=self.device, dtype=self.dtype).reshape(-1)[: logits.shape[0]].clamp(0.0, 1.0))
+                inertia = inertia * innovation_decay
                 logits = logits + (float(self.config.bind_support_signature_weight) * inertia[:, None] * support_score)
             if prev.slot_address is not None and obs.anchor_address is not None and prev.slot_address.numel() > 0 and obs.anchor_address.numel() > 0:
                 prev_addr = prev.slot_address.to(device=self.device, dtype=self.dtype)[: logits.shape[0]]
@@ -5386,6 +5440,7 @@ class PicfFullCore(nn.Module):
                     if prev.recycle_gate is not None:
                         recycle_prev = prev.recycle_gate.to(device=self.device, dtype=self.dtype).reshape(-1)[: logits.shape[0]].clamp(0.0, 1.0)
                         addr_gate = addr_gate * torch.exp(-float(self.config.bind_address_innovation_downweight) * recycle_prev)
+                    addr_gate = addr_gate * innovation_decay
                     logits = logits + (float(self.config.bind_address_weight) * addr_gate[:, None] * address_score)
         return logits
 
@@ -5566,6 +5621,7 @@ class PicfFullCore(nn.Module):
         dense_memory: _StepDenseMemory | None = None,
         vl_grounding: PicfVLGroundingState | None = None,
         anchor_graph: PicfAnchorPriorGraphState | None = None,
+        innovation_norm: torch.Tensor | None = None,
     ) -> PicfPosteriorAnchorState:
         if dense_memory is None:
             dense_memory = _StepDenseMemory(
@@ -5576,7 +5632,15 @@ class PicfFullCore(nn.Module):
         h_prior, c_prior, mu_prior, var_prior, x_prior, S_prior, a_prior, alpha_prior = self._current_prior(previous, observation)
         if previous is None:
             x_prior, S_prior, a_prior = self._bootstrap_prior_geometry_from_observation(x_prior, S_prior, a_prior, obs_anchors)
-        bind_logits = self._binding_logits(h_prior, x_prior, S_prior, obs_anchors, previous=previous)
+        identity_innovation_norm = self._measurement_innovation_norm(x_prior, S_prior, obs_anchors)
+        bind_logits = self._binding_logits(
+            h_prior,
+            x_prior,
+            S_prior,
+            obs_anchors,
+            previous=previous,
+            innovation_norm=identity_innovation_norm,
+        )
         role_bias = self._posterior_binding_role_bias(obs_anchors)
         if role_bias is not None:
             bind_logits = bind_logits + role_bias
@@ -5800,6 +5864,9 @@ class PicfFullCore(nn.Module):
         if obs_anchors.anchor_address is not None and obs_anchors.anchor_address.numel() > 0:
             obs_address = binding_cond @ obs_anchors.anchor_address.to(device=self.device, dtype=self.dtype)
             rate = float(self.config.address_update_rate) * support_mass.clamp(0.0, 1.0) * (1.0 - recycle.clamp(0.0, 1.0))
+            rate = rate * torch.exp(
+                -float(self.config.bind_address_innovation_downweight) * self._innovation_risk_scalar(identity_innovation_norm)
+            )
             rate = torch.clamp(rate, min=0.0, max=float(self.config.address_update_max_rate))
             slot_address = _normalize_tensor(((1.0 - rate[:, None]) * base_address) + (rate[:, None] * obs_address), eps=self.config.epsilon_residual)
         else:
@@ -6158,6 +6225,8 @@ class PicfFullCore(nn.Module):
             vl_grounding=vl_grounding,
             anchor_graph=anchor_prior_graph,
         )
+        current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
+        innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
         posterior = self._posterior_update(
             previous,
             observation,
@@ -6165,9 +6234,8 @@ class PicfFullCore(nn.Module):
             dense_memory,
             vl_grounding=vl_grounding,
             anchor_graph=anchor_prior_graph,
+            innovation_norm=innovation_norm,
         )
-        current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
-        innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
         task_readout = self._build_task_readout(
             token_field,
             dense_memory,
@@ -6316,7 +6384,16 @@ class PicfFullCore(nn.Module):
                 vl_grounding=None,
             )
         observation_anchors = self._build_observation_anchors(token_field, dense_memory, anchor_graph=anchor_prior_graph)
-        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory, anchor_graph=anchor_prior_graph)
+        current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
+        innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
+        posterior = self._posterior_update(
+            previous,
+            observation,
+            observation_anchors,
+            dense_memory,
+            anchor_graph=anchor_prior_graph,
+            innovation_norm=innovation_norm,
+        )
         action_source = (
             action_future
             if action_future is not None
@@ -6329,8 +6406,6 @@ class PicfFullCore(nn.Module):
             proprio_token=proprio_token,
             executed_action=executed_action,
         )
-        current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
-        innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
         evidence_cache = self._write_evidence_cache(
             previous,
             posterior,

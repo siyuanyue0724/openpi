@@ -170,6 +170,17 @@ def run_checks() -> list[Check]:
             "Cache must be read from previous carry and written after posterior correction.",
         ),
         Check(
+            "pipeline_cache_address_prefers_posterior_identity",
+            _contains(
+                pipeline,
+                "def _physical_query_addresses",
+                "previous.posterior.slot_address",
+                "def _aqr_cache_query_addresses",
+                "query_address = self._aqr_cache_query_addresses(previous, physical_count, task_count)",
+            ),
+            "Cache address retrieval must prefer live posterior slot addresses over learned query carriers, with query-token fallback.",
+        ),
+        Check(
             "pipeline_cache_read_weight_scales_residual",
             _contains(pipeline, "q_before_cache", "cache_read - q_before_cache", "evidence_cache_read_weight")
             and "cache_bias = cache_bias + math.log(max(float(self.config.evidence_cache_read_weight)" not in pipeline,
@@ -203,6 +214,17 @@ def run_checks() -> list[Check]:
             "training_uses_next_posterior_teacher",
             _contains(training, "posterior_tokens", "posterior_support_summary", "future.posterior_tokens", "future.posterior_support_summary", "_matched_prediction_loss"),
             "Slot-JEPA/support prediction must prefer detached next posterior targets.",
+        ),
+        Check(
+            "training_binding_consistency_is_permutation_tolerant",
+            _contains(
+                training.split("def _binding_consistency_loss", 1)[1].split("def _matched_prediction_loss", 1)[0],
+                "assign_row = torch.softmax",
+                "assign_col = torch.softmax",
+                "matched_target",
+                "matched_current",
+            ),
+            "Binding consistency must avoid an index-label temporal identity assumption before the loss is enabled.",
         ),
         Check(
             "training_loss_family_exposed",
@@ -240,6 +262,19 @@ def run_checks() -> list[Check]:
                 "(1, 26)",
             ),
             "Trainer warmup must materialize optional tracklet/proposal adapters even when a dataset lacks those modalities.",
+        ),
+        Check(
+            "trainer_threads_optional_mvtrack_episode_fields",
+            _contains(
+                trainer,
+                "_MVTRACK_TRACKLET_KEYS",
+                "_MVTRACK_PROPOSAL_KEYS",
+                "_read_npz_required_optional",
+                "load_tracklet_fields",
+                "tracklet_xy=frame.get(\"tracklet_xy\")",
+                "proposal_centers_xy=frame.get(\"proposal_centers_xy\")",
+            ),
+            "Trainer data source must feed optional tracklet/proposal episode arrays when present and no-op when absent.",
         ),
         Check(
             "trainer_anchor_only_fsdp_ignores_frozen_root_states",

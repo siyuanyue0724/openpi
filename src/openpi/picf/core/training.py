@@ -312,9 +312,13 @@ def _binding_consistency_loss(
             current = fn.normalize(current[:slot_count, :width], dim=-1)
             target = fn.normalize(target[:slot_count, :width], dim=-1)
             logits = (current @ target.t()) / 0.1
-            labels = torch.arange(slot_count, device=reference.device)
-            forward = fn.cross_entropy(logits, labels, reduction="none")
-            backward = fn.cross_entropy(logits.t(), labels, reduction="none")
+            assign_row = torch.softmax(logits, dim=-1)
+            assign_col = torch.softmax(logits.t(), dim=-1).t()
+            assign = 0.5 * (assign_row + assign_col)
+            matched_target = fn.normalize(assign @ target, dim=-1)
+            matched_current = fn.normalize(assign.t() @ current, dim=-1)
+            forward = 1.0 - torch.sum(current * matched_target, dim=-1)
+            backward = 1.0 - torch.sum(target * matched_current, dim=-1)
             weight = torch.ones((slot_count,), device=reference.device, dtype=reference.dtype)
             alpha = getattr(posterior, "alpha", None)
             if alpha is not None:

@@ -163,6 +163,55 @@ class _CalvinReader:
                     out[k] = z[k]
                 return out
 
+    def read_npz_optional(self, step_id: int, keys: List[str]) -> Dict[str, np.ndarray]:
+        """Read optional episode arrays without failing when a modality is absent.
+
+        This is used by PICF MVTrack side channels such as offline tracklets or
+        weak proposal tokens. Standard CALVIN releases do not contain those
+        arrays, so absence must be a clean no-op rather than a dataset error.
+        """
+
+        if not keys:
+            return {}
+        rel = self._npz_path(step_id)
+        if self.backend == "zip":
+            raw = self._zip().read(rel)
+            with np.load(io.BytesIO(raw), allow_pickle=False) as z:
+                return {k: z[k] for k in keys if k in z.files}
+        abs_path = os.path.join(self.root, rel)
+        with np.load(abs_path, allow_pickle=False) as z:
+            return {k: z[k] for k in keys if k in z.files}
+
+    def read_npz_required_optional(
+        self,
+        step_id: int,
+        *,
+        required: List[str],
+        optional: List[str],
+    ) -> Dict[str, np.ndarray]:
+        """Read required arrays and any present optional arrays in one npz pass."""
+
+        rel = self._npz_path(step_id)
+        if self.backend == "zip":
+            raw = self._zip().read(rel)
+            with np.load(io.BytesIO(raw), allow_pickle=False) as z:
+                out: Dict[str, np.ndarray] = {}
+                for k in required:
+                    if k not in z.files:
+                        raise KeyError(f"Missing key '{k}' in {rel}. Available keys: {list(z.files)}")
+                    out[k] = z[k]
+                out.update({k: z[k] for k in optional if k in z.files})
+                return out
+        abs_path = os.path.join(self.root, rel)
+        with np.load(abs_path, allow_pickle=False) as z:
+            out: Dict[str, np.ndarray] = {}
+            for k in required:
+                if k not in z.files:
+                    raise KeyError(f"Missing key '{k}' in {abs_path}. Available keys: {list(z.files)}")
+                out[k] = z[k]
+            out.update({k: z[k] for k in optional if k in z.files})
+            return out
+
     def read_npy(self, rel_path: str) -> Any:
         if self.backend == "zip":
             raw = self._zip().read(rel_path)

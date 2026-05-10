@@ -81,6 +81,22 @@ from openpi.training.calvin_dataset import CalvinLangSegmentDataset
 
 _DEFAULT_TACTILE_SENSOR_NAMES = ("digit", "gelsight_mini")
 _DEFAULT_TACTILE_SENSOR_OFFSETS_M = ((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))
+_MVTRACK_TRACKLET_KEYS = (
+    "tracklet_xy",
+    "tracklet_velocity",
+    "tracklet_visibility",
+    "tracklet_confidence",
+    "tracklet_ids",
+    "tracklet_view_ids",
+    "tracklet_age",
+)
+_MVTRACK_PROPOSAL_KEYS = (
+    "proposal_centers_xy",
+    "proposal_boxes_xyxy",
+    "proposal_objectness",
+    "proposal_view_ids",
+    "proposal_source_ids",
+)
 _SPEC_DEFAULTS = PicfCoreConfig()
 _LOSS_DEFAULTS = PicfTransitionLossConfig()
 _RETRYABLE_FIRST_STEP_ERRORS = (
@@ -2432,6 +2448,40 @@ def _load_action_chunk(
     return np.stack(actions, axis=0)
 
 
+def _read_optional_npz_fields(reader: Any, step_id: int, keys: Sequence[str]) -> dict[str, np.ndarray]:
+    """Read optional per-episode arrays without turning absent modalities into errors."""
+
+    keys = tuple(str(k) for k in keys)
+    if not keys:
+        return {}
+    optional_reader = getattr(reader, "read_npz_optional", None)
+    if callable(optional_reader):
+        return dict(optional_reader(step_id, list(keys)))
+    try:
+        payload = reader.read_npz(step_id, keys=None)
+    except Exception:
+        return {}
+    return {key: payload[key] for key in keys if key in payload}
+
+
+def _read_npz_required_optional(
+    reader: Any,
+    step_id: int,
+    *,
+    required: Sequence[str],
+    optional: Sequence[str],
+) -> dict[str, np.ndarray]:
+    required = tuple(str(k) for k in required)
+    optional = tuple(str(k) for k in optional)
+    combined_reader = getattr(reader, "read_npz_required_optional", None)
+    if callable(combined_reader):
+        return dict(combined_reader(step_id, required=list(required), optional=list(optional)))
+    frame = dict(reader.read_npz(step_id, keys=list(required)))
+    if optional:
+        frame.update(_read_optional_npz_fields(reader, step_id, optional))
+    return frame
+
+
 class _CalvinTransitionSource:
     def __init__(
         self,
@@ -2448,6 +2498,8 @@ class _CalvinTransitionSource:
         tactile_calibration: dict[str, object] | str | Path | None = None,
         tactile_backgrounds_by_sensor: dict[str, np.ndarray] | None = None,
         use_scene_obs: bool = False,
+        load_tracklet_fields: bool = False,
+        load_proposal_fields: bool = False,
         frame_dt_s: float = 1.0 / 30.0,
         action_normalizer: PicfActionNormalizer | None = None,
         augmentation_mode: str = "off",
@@ -2487,6 +2539,8 @@ class _CalvinTransitionSource:
             str(name): np.asarray(image) for name, image in tactile_backgrounds_by_sensor.items()
         }
         self.use_scene_obs = bool(use_scene_obs)
+        self.load_tracklet_fields = bool(load_tracklet_fields)
+        self.load_proposal_fields = bool(load_proposal_fields)
         self.frame_dt_s = float(frame_dt_s)
         self.action_normalizer = action_normalizer
         self.augmentation_mode = str(augmentation_mode).lower().replace("-", "_")
@@ -2547,7 +2601,12 @@ class _CalvinTransitionSource:
             keys.extend(["rgb_tactile", "depth_tactile"])
         if self.use_scene_obs:
             keys.append("scene_obs")
-        frame = self.reader.read_npz(step_id, keys=keys)
+        optional_keys: list[str] = []
+        if self.load_tracklet_fields:
+            optional_keys.extend(_MVTRACK_TRACKLET_KEYS)
+        if self.load_proposal_fields:
+            optional_keys.extend(_MVTRACK_PROPOSAL_KEYS)
+        frame = _read_npz_required_optional(self.reader, step_id, required=keys, optional=optional_keys)
         if self.augmentation_mode == "photometric":
             jitter_rng = rng if rng is not None else np.random.default_rng()
             frame["rgb_static"] = _apply_picf_photometric_augmentation(
@@ -2602,6 +2661,18 @@ class _CalvinTransitionSource:
             action=action,
             action_chunk=action_chunk,
             tactile=tactile,
+            tracklet_xy=frame.get("tracklet_xy"),
+            tracklet_velocity=frame.get("tracklet_velocity"),
+            tracklet_visibility=frame.get("tracklet_visibility"),
+            tracklet_confidence=frame.get("tracklet_confidence"),
+            tracklet_ids=frame.get("tracklet_ids"),
+            tracklet_view_ids=frame.get("tracklet_view_ids"),
+            tracklet_age=frame.get("tracklet_age"),
+            proposal_centers_xy=frame.get("proposal_centers_xy"),
+            proposal_boxes_xyxy=frame.get("proposal_boxes_xyxy"),
+            proposal_objectness=frame.get("proposal_objectness"),
+            proposal_view_ids=frame.get("proposal_view_ids"),
+            proposal_source_ids=frame.get("proposal_source_ids"),
         )
 
     def sample_window_metadata(
@@ -5409,6 +5480,8 @@ def train(args: argparse.Namespace) -> None:
             tactile_calibration=args.tactile_calibration_path,
             tactile_backgrounds_by_sensor=_load_tactile_backgrounds_npz(args.tactile_backgrounds_path),
             use_scene_obs=bool(args.use_scene_obs),
+            load_tracklet_fields=bool(getattr(args, "tracklet_memory_enabled", _SPEC_DEFAULTS.tracklet_memory_enabled)),
+            load_proposal_fields=bool(getattr(args, "proposal_memory_enabled", _SPEC_DEFAULTS.proposal_memory_enabled)),
             action_normalizer=action_normalizer,
             augmentation_mode=args.picf_augmentation_mode,
             photometric_strength=args.picf_photometric_strength,

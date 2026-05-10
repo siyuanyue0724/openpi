@@ -1,6 +1,6 @@
 # PICF-AQR-OWM-MVTrack Deployment Contract
 
-Version: `v2.0-runtime-b`
+Version: `v2.0-runtime-c`
 Date: 2026-05-10
 Status: code-level MVTrack runtime complete; behavior acceptance still pending fresh run evidence.
 
@@ -38,30 +38,36 @@ cache is auxiliary historical evidence, not truth.
 AQR is the typed measurement router.
 PI0.5 remains the final action generator.
 future latents are detached targets only.
+physical predictive-cache innovation is diagnostic/cache metadata and must not
+directly alter posterior identity; posterior identity gating uses current
+measurement innovation from prior geometry vs observation anchors.
 ```
 
 This document is not allowed to claim behavior-level completion until the code,
 verification scripts, metrics, and CALVIN/video evidence satisfy Section 16.
 
-2026-05-10 runtime-b pass:
+2026-05-10 runtime-c pass:
 
 ```text
 Implemented in code:
   static+wrist V-JEPA typed temporal views
-  tracklet typed support state and AQR reader
+  optional train/replay/serve threading for tracklet/proposal episode fields
+  tracklet typed support state and AQR reader when optional tensors are present
   support-signature identity binding
-  gated slot_address update
-  address-aware cache attention bias with residual scaling retained
+  posterior-slot-address-first cache query addressing with learned-query fallback
+  measurement-innovation-gated support/address inertia and gated slot_address update
+  address/content/role-aware cache attention bias with residual scaling retained
   top-k latent local refinement over existing typed visual/temporal/point/tracklet/proposal memory
   optional pseudo-proposal typed memory and AQR proposal reader
   training-only support denoising auxiliary, default weight 0
   matched slot-JEPA/support prediction targets
+  permutation-tolerant binding consistency temporal term
   weak ordinal rank/selection diagnostics
   anchor-only large-batch diagnostic trainability scope
 
 Still external-data dependent:
-  tracklet tensors require an upstream offline/loader source.
-  proposal tensors require an upstream detector/proposal source.
+  tracklet tensors require an upstream offline tracker/preprocessor source.
+  proposal tensors require an upstream detector/proposal source; SAM/DINO is not required by the maintained runtime.
   CALVIN/video behavior acceptance requires a new run on this checkout.
 ```
 
@@ -191,7 +197,7 @@ V-JEPA recent -> temporal visual support branch.
 point/tactile/posterior/cache -> separate typed support branches.
 ```
 
-### 1.4 Evidence cache is safe but not fully address-aware
+### 1.4 Evidence cache is posterior-address aware and residual-gated
 
 Code facts:
 
@@ -201,8 +207,14 @@ src/openpi/picf/core/pipeline.py
     reads previous carry only.
     skips newest posterior cache row.
     applies age, uncertainty, innovation, source, and coarse role gates.
+    returns PicfCacheReadState with token, address, role, source, age,
+    uncertainty, innovation, modality-validity metadata.
 
   _build_aqr_anchor_graph(...)
+    forms cache query addresses from live previous.posterior.slot_address for
+    physical slots, falling back to learned query carriers when no posterior
+    address exists.
+    adds address/content/role terms to the cache attention bias.
     applies evidence_cache_read_weight as residual scale:
       q <- q + lambda_cache * (ReadCache(q) - q)
 
@@ -213,9 +225,11 @@ src/openpi/picf/core/pipeline.py
 Remaining limitation:
 
 ```text
-cache retrieval is not per-query address-conditioned.
-source_ids are present but not yet a rich source enum.
-slot_address is written but not the main retrieval key.
+cache source_ids are still simple because the maintained cache stores
+posterior-grounded belief rows. Rich source enums only matter if future code
+also writes observation-evidence, predicted, tracklet, or proposal rows into
+the cache. The current cache should therefore be described as posterior-address
+aware episodic belief memory, not as a multi-source database.
 ```
 
 ### 1.5 Posterior remains the belief filter
@@ -450,15 +464,19 @@ AQR is default and legacy MAPG is off.
 state-only burn-in uses AQR graph.
 ```
 
-Current v26 already satisfies these checks. MVTrack must preserve them.
+The current maintained runtime satisfies these checks. MVTrack must preserve
+them.
 
 ## 7. Phase 1: Static + Wrist V-JEPA Multiview
 
 ### 7.1 Goal
 
-Current code sends only `rgb_static` into V-JEPA temporal support. MVTrack must
-make wrist RGB a typed V-JEPA temporal view without pretending it has static
-camera geometry.
+The current runtime sends static and gripper/wrist RGB through view-indexed
+V-JEPA clip buffers when the gripper image is available. Wrist RGB is a typed
+temporal view, not a static-camera geometry source. This is the correct split:
+the wrist view is reliable local hand/object evidence, but it should not be
+projected into static-camera rays unless a calibrated wrist RGB camera model is
+available.
 
 ### 7.2 Config
 
@@ -470,7 +488,7 @@ vjepa_views: tuple[str, ...] = ("static", "gripper")
 vjepa_share_encoder_across_views: bool = True
 ```
 
-The runtime-b implementation intentionally does not expose a contact-gated
+The runtime-c implementation intentionally does not expose a contact-gated
 wrist switch. Wrist evidence is a typed visual view whenever it is present;
 contact-dependent use is learned by AQR support mass rather than a hard input
 gate.
@@ -537,11 +555,24 @@ PE_grid(h,w)
 
 ### 7.5 Guard
 
-Without calibrated wrist-to-static geometry:
+`wrist extrinsics` means the calibrated transform from the wrist camera frame
+to the robot/world/static frame, plus the camera intrinsics needed to turn a
+wrist pixel into a metric ray. CALVIN already has the stronger geometry path
+for gripper depth: the point-cloud builder uses `robot_obs` and the gripper
+camera `E_T_C` transform to lift gripper depth into the robot/world frame. This
+is analogous to the tactile path, where sensor-local contact proposals are
+placed through a sensor-to-wrist transform and the current end-effector pose.
+
+The maintained rule is therefore:
 
 ```text
-wrist V-JEPA tokens may be typed visual evidence.
-wrist V-JEPA tokens must not be projected into static grid truth.
+wrist RGB/V-JEPA:
+  typed local visual evidence with view_id=gripper.
+  not static grid truth unless calibrated RGB intrinsics/extrinsics are present.
+
+gripper depth / tactile:
+  may contribute geometry when CALVIN robot pose and calibrated local sensor
+  transforms are available.
 ```
 
 ### 7.6 Diagnostics
@@ -755,6 +786,11 @@ cache_same_role_fraction
 Tracklets provide temporal correspondence without human instance labels. This
 directly targets identity switch and adjacent-object ambiguity.
 
+Runtime-c wires optional tracklet tensors through training, replay, and serve
+paths when those tensors are present in the episode or request. Standard CALVIN
+frames that do not contain tracklets remain clean no-ops. The remaining
+external dependency is tracklet generation, not PICF ingestion.
+
 ### 10.2 Offline preprocessing
 
 Use a tracker such as CoTracker3 or TAPIR over static and wrist videos.
@@ -916,8 +952,10 @@ DN queries do not enter task readout.
 
 ## 13. Phase 7: Matched Slot-JEPA and Support Prediction
 
-The v26 hooks are index-aligned and default zero. MVTrack must replace the
-enableable version with matched targets before any nonzero lambda.
+Runtime-c replaces the enableable slot-JEPA/support prediction path with
+detached soft-matched targets rather than same-index future slots. The losses
+remain default zero because identity metrics, not static code presence, decide
+when they are safe to activate.
 
 Cost:
 
@@ -1045,6 +1083,12 @@ DINO/DINOv2 objectness
 Grounding/proposal boxes
 ```
 
+SAM/DINO are explicitly not required for the maintained runtime and are not
+implemented in this pass. Runtime-c only provides optional proposal tensor
+ingestion and typed proposal routing. If an upstream system supplies proposal
+centers/boxes/objectness/source ids, PICF can consume them; if not, the proposal
+branch is a no-op.
+
 Use only as:
 
 ```text
@@ -1066,7 +1110,7 @@ direct action truth
 
 MVTrack is code-level runtime complete when the static/verifier checks below
 pass on the current code. It cannot be marked behavior-complete until fresh
-training/evaluation artifacts also pass. The `v2.0-runtime-b` implementation
+training/evaluation artifacts also pass. The `v2.0-runtime-c` implementation
 has code paths for multiview, tracklet, support-signature binding,
 address-aware cache, local refinement, optional proposal memory, training-only
 support denoising, matched prediction hooks, and weak ordinal diagnostics.
