@@ -1316,11 +1316,28 @@ def _mapg_support_overlap_loss(
             return None
         priors_ref = priors.to(device=reference.device, dtype=reference.dtype)
         valid = priors_ref.sum(dim=-1) > eps
-        weights = torch.where(valid[:, None] & valid[None, :], base_weight, torch.zeros_like(base_weight))
-        if not bool((weights.sum() > eps).item()):
+        valid_pair = valid[:, None] & valid[None, :] & pair_mask
+        usage_pair = usage[:, None] * usage[None, :]
+        # Confidence should scale the pressure, but it must not let collapsed active
+        # anchors opt out of the anti-overlap objective by lowering confidence.
+        confidence_floor = torch.full_like(confidence, 0.25)
+        confidence_weight = torch.maximum(confidence, confidence_floor)
+        confidence_weight = torch.clamp(confidence_weight, min=0.0, max=1.0)
+        weighted_pair = usage_pair * confidence_weight[:, None] * confidence_weight[None, :]
+        weighted_pair = torch.where(valid_pair, weighted_pair, torch.zeros_like(weighted_pair))
+        active_pair = torch.where(valid_pair, usage_pair, torch.zeros_like(usage_pair))
+        active_pair_mask = valid_pair & (usage_pair > eps)
+        if not bool((active_pair.sum() > eps).item()) or not bool(active_pair_mask.any().item()):
             return None
         penalty = fn.relu(overlap.to(device=reference.device, dtype=reference.dtype) - float(margin)).pow(2)
-        return (weights * penalty).sum() / torch.clamp(weights.sum(), min=eps)
+        weighted_mean = (weighted_pair * penalty).sum() / torch.clamp(weighted_pair.sum(), min=eps)
+        active_mean = (active_pair * penalty).sum() / torch.clamp(active_pair.sum(), min=eps)
+        # Keep the averaged objective aligned with the health metric, which is a
+        # worst-pair same-role overlap. Top-k is less brittle than a single max.
+        active_penalty = penalty[active_pair_mask]
+        topk = min(4, int(active_penalty.numel()))
+        tail_mean = torch.topk(active_penalty, k=topk).values.mean()
+        return (weighted_mean + active_mean + tail_mean) / 3.0
 
     losses = []
     losses.append(

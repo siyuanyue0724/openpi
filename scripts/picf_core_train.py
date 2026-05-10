@@ -4964,7 +4964,8 @@ def _materialize_model_parameters(
             )
             tactile_tokens = core.tactile_token_proj(tactile_sensor_in)
             _ = core.tactile_align_proj(tactile_tokens)
-        if picf_enabled and isinstance(core.tracklet_token_proj.weight, UninitializedParameter):
+        tracklet_token_proj = getattr(core, "tracklet_token_proj", None)
+        if picf_enabled and tracklet_token_proj is not None and isinstance(tracklet_token_proj.weight, UninitializedParameter):
             # Tracklet evidence is optional and absent from raw CALVIN batches.
             # Initialize its lazy adapter explicitly so FSDP/DDP sees the same
             # anchor-only parameter set whether or not precomputed tracks exist.
@@ -4973,8 +4974,9 @@ def _materialize_model_parameters(
                 device=core.device,
                 dtype=core.dtype,
             )
-            _ = core.tracklet_token_proj(tracklet_in)
-        if picf_enabled and isinstance(core.proposal_token_proj.weight, UninitializedParameter):
+            _ = tracklet_token_proj(tracklet_in)
+        proposal_token_proj = getattr(core, "proposal_token_proj", None)
+        if picf_enabled and proposal_token_proj is not None and isinstance(proposal_token_proj.weight, UninitializedParameter):
             # Proposal memory is also optional; keep its typed-evidence adapter
             # materialized instead of weakening the strict lazy-param audit.
             proposal_in = torch.zeros(
@@ -4982,7 +4984,7 @@ def _materialize_model_parameters(
                 device=core.device,
                 dtype=core.dtype,
             )
-            _ = core.proposal_token_proj(proposal_in)
+            _ = proposal_token_proj(proposal_in)
         if picf_enabled and isinstance(core.tactile_error_encoder.weight, UninitializedParameter):
             tactile_error_in = torch.zeros(
                 (1, 3 * core.config.tactile_real_dim),

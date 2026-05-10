@@ -42,7 +42,7 @@ The latest OWM profile must be the default path; legacy routers and risky auxili
 Evidence:
 
 - `src/openpi/picf/core/config.py:143: aqr_mapg_enabled: bool = True`
-- `scripts/picf_core_train.py:6516: default="paligemma",`
+- `scripts/picf_core_train.py:6518: default="paligemma",`
 - `src/openpi/picf/core/training.py:71: lambda_mapg_cycle: float = 0.02`
 - `src/openpi/picf/core/training.py:76: lambda_slot_jepa: float = 0.0`
 
@@ -189,8 +189,8 @@ PV alignment is geometry-projected support consistency, not a cosmetic RoPE/embe
 Evidence:
 
 - `src/openpi/picf/core/pipeline.py:463: projective_compatibility: torch.Tensor,`
-- `src/openpi/picf/core/training.py:1052: point_from_visual = visual @ point_given_visual.T`
-- `src/openpi/picf/core/training.py:1053: visual_from_point = point @ visual_given_point`
+- `src/openpi/picf/core/training.py:1085: point_from_visual = visual @ point_given_visual.T`
+- `src/openpi/picf/core/training.py:1086: visual_from_point = point @ visual_given_point`
 - `src/openpi/picf/core/training.py:71: lambda_mapg_cycle: float = 0.02`
 
 ## 10. Prior prediction - PASS
@@ -291,7 +291,7 @@ Future posterior is a detached target only; it is never current action input.
 
 Evidence:
 
-- `src/openpi/picf/core/training.py:1901: target_slots = future.posterior_tokens.detach().to(device=slot_tokens.device, dtype=slot_tokens.dtype)`
+- `src/openpi/picf/core/training.py:1957: target_slots = future.posterior_tokens.detach().to(device=slot_tokens.device, dtype=slot_tokens.dtype)`
 - `src/openpi/picf/core/training.py:433: def future_targets_from_current_targets(`
 
 ## 15. Temporal binding consistency - PASS
@@ -312,7 +312,7 @@ Evidence:
 
 - `src/openpi/picf/core/training.py:277: def _binding_consistency_loss(`
 - `src/openpi/picf/core/training.py:305: future_tokens = future.posterior_tokens`
-- `src/openpi/picf/core/training.py:1543: losses.append(weight * fn.cross_entropy(logits[None, :], target))`
+- `src/openpi/picf/core/training.py:1593: losses.append(weight * fn.cross_entropy(logits[None, :], target))`
 
 ## 16. Training-only support denoising - PASS
 
@@ -332,8 +332,8 @@ Evidence:
 
 - `src/openpi/picf/core/training.py:385: def _aqr_support_denoising_loss(`
 - `src/openpi/picf/core/training.py:79: lambda_aqr_denoising: float = 0.0`
-- `scripts/picf_core_train.py:6383: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
-- `src/openpi/picf/core/training_test.py:404: def test_aqr_denoising_loss_is_training_only_and_guarded(tmp_path: Path) -> None:`
+- `scripts/picf_core_train.py:6385: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
+- `src/openpi/picf/core/training_test.py:461: def test_aqr_denoising_loss_is_training_only_and_guarded(tmp_path: Path) -> None:`
 
 ## 17. Evidence cache write - PASS
 

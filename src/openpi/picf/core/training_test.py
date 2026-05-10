@@ -20,6 +20,7 @@ from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.pipeline import PicfFullCore
 from openpi.picf.core.training import PicfAlignmentLossConfig
 from openpi.picf.core.training import _mapg_cycle_loss
+from openpi.picf.core.training import _mapg_support_overlap_loss
 from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.core.training import compute_transition_loss
 from openpi.picf.core.training import PicfTransitionLossConfig
@@ -695,6 +696,100 @@ def test_mapg_cycle_loss_penalizes_graph_point_visual_projection_mismatch() -> N
     assert torch.isfinite(aligned)
     assert torch.isfinite(mismatched)
     assert mismatched > aligned + 0.05
+
+
+def test_mapg_support_diversity_penalizes_active_same_role_visual_collapse() -> None:
+    dtype = torch.float32
+
+    def make_state(visual_priors: torch.Tensor, *, confidence: float = 1.0) -> SimpleNamespace:
+        anchor_count = int(visual_priors.shape[0])
+        graph = PicfAnchorPriorGraphState(
+            pg_priors=None,
+            visual_priors=visual_priors,
+            point_priors=None,
+            tactile_priors=None,
+            posterior_priors=None,
+            anchor_tokens=torch.zeros((anchor_count, 4), dtype=dtype),
+            anchor_roles=torch.zeros((anchor_count,), dtype=torch.long),
+            anchor_scores=torch.ones((anchor_count,), dtype=dtype),
+            anchor_confidence=torch.full((anchor_count,), confidence, dtype=dtype),
+            anchor_x=torch.zeros((anchor_count, 3), dtype=dtype),
+            anchor_S=torch.eye(3, dtype=dtype).repeat(anchor_count, 1, 1),
+            geometry_valid=torch.ones((anchor_count,), dtype=torch.bool),
+            obs_slot_assignment=torch.eye(anchor_count, dtype=dtype),
+            task_assignment=None,
+            modality_confidence=torch.ones((anchor_count, 5), dtype=dtype),
+            valid=torch.ones((anchor_count,), dtype=torch.bool),
+        )
+        token_field = SimpleNamespace(projective_geometry=None, point_projectable_mask=None)
+        return SimpleNamespace(anchor_prior_graph=graph, token_field=token_field)
+
+    collapsed = torch.tensor(
+        [
+            [0.95, 0.05, 0.00, 0.00],
+            [0.95, 0.05, 0.00, 0.00],
+            [0.00, 0.00, 0.05, 0.95],
+        ],
+        dtype=dtype,
+    )
+    separated = torch.tensor(
+        [
+            [0.95, 0.05, 0.00, 0.00],
+            [0.05, 0.95, 0.00, 0.00],
+            [0.00, 0.00, 0.05, 0.95],
+        ],
+        dtype=dtype,
+    )
+    reference = torch.zeros((), dtype=dtype)
+    config = PicfTransitionLossConfig(mapg_support_div_margin_visual=0.15)
+
+    collapsed_loss = _mapg_support_overlap_loss(make_state(collapsed), config=config, reference=reference, eps=1e-6)
+    separated_loss = _mapg_support_overlap_loss(make_state(separated), config=config, reference=reference, eps=1e-6)
+
+    assert torch.isfinite(collapsed_loss)
+    assert torch.isfinite(separated_loss)
+    assert collapsed_loss > separated_loss + 0.1
+
+
+def test_mapg_support_diversity_low_confidence_cannot_hide_active_collapse() -> None:
+    dtype = torch.float32
+    collapsed = torch.tensor(
+        [
+            [0.98, 0.02, 0.00],
+            [0.98, 0.02, 0.00],
+            [0.00, 0.02, 0.98],
+        ],
+        dtype=dtype,
+    )
+    anchor_count = int(collapsed.shape[0])
+    graph = PicfAnchorPriorGraphState(
+        pg_priors=None,
+        visual_priors=collapsed,
+        point_priors=None,
+        tactile_priors=None,
+        posterior_priors=None,
+        anchor_tokens=torch.zeros((anchor_count, 4), dtype=dtype),
+        anchor_roles=torch.zeros((anchor_count,), dtype=torch.long),
+        anchor_scores=torch.ones((anchor_count,), dtype=dtype),
+        anchor_confidence=torch.full((anchor_count,), 0.01, dtype=dtype),
+        anchor_x=torch.zeros((anchor_count, 3), dtype=dtype),
+        anchor_S=torch.eye(3, dtype=dtype).repeat(anchor_count, 1, 1),
+        geometry_valid=torch.ones((anchor_count,), dtype=torch.bool),
+        obs_slot_assignment=torch.eye(anchor_count, dtype=dtype),
+        task_assignment=None,
+        modality_confidence=torch.ones((anchor_count, 5), dtype=dtype),
+        valid=torch.ones((anchor_count,), dtype=torch.bool),
+    )
+    state = SimpleNamespace(anchor_prior_graph=graph, token_field=SimpleNamespace(projective_geometry=None, point_projectable_mask=None))
+    loss = _mapg_support_overlap_loss(
+        state,
+        config=PicfTransitionLossConfig(mapg_support_div_margin_visual=0.15),
+        reference=torch.zeros((), dtype=dtype),
+        eps=1e-6,
+    )
+
+    assert torch.isfinite(loss)
+    assert loss > 0.1
 
 
 def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_unavailable(tmp_path: Path) -> None:
