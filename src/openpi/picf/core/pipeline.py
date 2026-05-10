@@ -2273,20 +2273,29 @@ class PicfFullCore(nn.Module):
             bias[row] = torch.where(mask, bias[row], neg[row])
         return bias
 
-    def _previous_evidence_cache_tokens(self, previous: PicfPreviousState | None) -> tuple[torch.Tensor, torch.Tensor | None]:
+    def _previous_evidence_cache_tokens(self, previous: PicfPreviousState | None) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None]:
         if previous is None or not bool(self.config.evidence_cache_enabled):
-            return torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype), None
+            return torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype), None, None
         cache = getattr(previous.predictive, "evidence_cache", None)
         if cache is None or cache.tokens.numel() == 0:
-            return torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype), None
+            return torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype), None, None
         valid = cache.valid.to(device=self.device, dtype=torch.bool)
+        age_all = cache.age.to(device=self.device, dtype=self.dtype)
+        source_all = cache.source_ids.to(device=self.device, dtype=torch.long)
+        # The newest posterior cache row is exactly previous.posterior.tokens,
+        # which AQR already reads through a dedicated posterior branch. Keep the
+        # cache as longer-horizon episodic evidence by skipping that duplicate
+        # source and letting older rows provide history.
+        immediate_posterior = (source_all == 1) & (age_all <= self.config.epsilon_a)
+        valid = valid & ~immediate_posterior
         if valid.numel() == 0 or not bool(valid.any().item()):
-            return torch.zeros((0, cache.tokens.shape[-1]), device=self.device, dtype=self.dtype), None
+            return torch.zeros((0, cache.tokens.shape[-1]), device=self.device, dtype=self.dtype), None, None
         tokens = cache.tokens.to(device=self.device, dtype=self.dtype)[valid]
         uncertainty = cache.uncertainty.to(device=self.device, dtype=self.dtype)[valid]
-        age = cache.age.to(device=self.device, dtype=self.dtype)[valid]
+        age = age_all[valid]
         innovation = cache.innovation_at_write.to(device=self.device, dtype=self.dtype)[valid]
-        source_ids = cache.source_ids.to(device=self.device, dtype=torch.long)[valid]
+        source_ids = source_all[valid]
+        role_ids = cache.role_ids.to(device=self.device, dtype=torch.long)[valid]
         innovation_cost = float(self.config.evidence_cache_innovation_downweight) * torch.clamp(innovation, min=0.0)
         source_factor = torch.where(
             source_ids == 1,
@@ -2294,7 +2303,7 @@ class PicfFullCore(nn.Module):
             torch.full_like(uncertainty, 0.5),
         )
         score = source_factor / torch.clamp(1.0 + uncertainty + age + innovation_cost, min=self.config.epsilon_a)
-        return tokens.reshape(-1, tokens.shape[-1]), score.reshape(-1)
+        return tokens.reshape(-1, tokens.shape[-1]), score.reshape(-1), role_ids.reshape(-1)
 
     def _aqr_competitive_support(self, weights: torch.Tensor, *, eps: float) -> torch.Tensor:
         if weights.numel() == 0 or weights.shape[0] == 0 or weights.shape[1] == 0:
@@ -2652,7 +2661,7 @@ class PicfFullCore(nn.Module):
         point_count = int(token_field.point_tokens.shape[0])
         tactile_count = int(token_field.tactile_tokens.shape[0])
         post_count = 0 if previous is None else int(previous.posterior.tokens.shape[0])
-        cache_tokens, cache_scores = self._previous_evidence_cache_tokens(previous)
+        cache_tokens, cache_scores, cache_roles = self._previous_evidence_cache_tokens(previous)
         cache_count = int(cache_tokens.shape[0])
         physical_count = max(int(self.config.aqr_query_count_physical), 0)
         task_count = max(int(self.config.aqr_query_count_task), 0)
@@ -2729,7 +2738,15 @@ class PicfFullCore(nn.Module):
         posterior_bias = self._aqr_posterior_bias(previous, roles)
         cache_bias = None
         if cache_scores is not None and cache_count > 0:
-            cache_bias = torch.log(torch.clamp(cache_scores, min=self.config.epsilon_a))[None, :].expand(anchor_count, -1)
+            cache_bias = torch.log(torch.clamp(cache_scores, min=self.config.epsilon_a))[None, :].expand(anchor_count, -1).clone()
+            if cache_roles is not None and cache_roles.numel() == cache_count:
+                neg = torch.full_like(cache_bias, -1.0e4)
+                for row, role in enumerate(roles.tolist()):
+                    role_int = int(role)
+                    role_mask = (cache_roles == 0) if role_int == 0 else (cache_roles != 0)
+                    if not bool(role_mask.any().item()):
+                        role_mask = torch.ones((cache_count,), device=self.device, dtype=torch.bool)
+                    cache_bias[row] = torch.where(role_mask, cache_bias[row], neg[row])
         tactile_bias = None
         if tactile_count > 0:
             tactile_bias = torch.zeros((anchor_count, tactile_count), device=self.device, dtype=self.dtype)
@@ -5974,7 +5991,12 @@ class PicfFullCore(nn.Module):
             valid = cache.valid.to(dtype=self.dtype)
             debug["owm_evidence_cache_valid_entries"] = float(valid.sum().item())
             debug["owm_evidence_cache_read_weight"] = float(self.config.evidence_cache_read_weight)
-            debug["owm_evidence_cache_read_active"] = 1.0 if float(self.config.evidence_cache_read_weight) > 0.0 else 0.0
+            cache_read_active = (
+                observed.anchor_prior_graph is not None
+                and observed.anchor_prior_graph.cache_priors is not None
+                and float(self.config.evidence_cache_read_weight) > 0.0
+            )
+            debug["owm_evidence_cache_read_active"] = 1.0 if cache_read_active else 0.0
             if bool(cache.valid.any().item()):
                 debug["owm_evidence_cache_age_mean"] = float(cache.age[cache.valid].mean().item())
                 debug["owm_evidence_cache_uncertainty_mean"] = float(cache.uncertainty[cache.valid].mean().item())

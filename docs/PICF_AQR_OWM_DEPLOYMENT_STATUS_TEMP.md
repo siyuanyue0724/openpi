@@ -258,6 +258,13 @@ logits, because that would disappear under softmax normalization and behave
 like a binary reader switch. This keeps the deployment complete while preserving
 posterior authority.
 
+The cache reader also skips the newest posterior cache row because that row is
+identical to `previous.posterior.tokens`, which AQR already reads through the
+posterior branch. Cache read therefore contributes older episodic context rather
+than double-counting t-1 posterior evidence. Cache attention is also role-aware:
+role-0 effector anchors read role-0 history, while nonzero task/scene anchors
+read nonzero scene/object history where available.
+
 ### New Strict Diagnosis Script
 
 Added:

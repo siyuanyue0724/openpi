@@ -76,10 +76,10 @@ NODES: tuple[TraceNode, ...] = (
     ),
     TraceNode(
         name="Previous evidence cache read",
-        formula="w_c proportional source_factor/(1+age+uncertainty+lambda_innov*innovation_at_write); q<-q+lambda_cache*(Read_C(q)-q)",
-        invariant="A step can read only previous carry cache; read_weight scales the cache residual; current posterior writes cache for the next step only.",
+        formula="skip newest posterior duplicate; role-filter cache; w_c proportional source_factor/(1+age+uncertainty+lambda_innov*innovation_at_write); q<-q+lambda_cache*(Read_C(q)-q)",
+        invariant="A step can read only previous carry cache; t-1 posterior is read by posterior_reader, cache supplies older role-compatible episodic context; read_weight scales the cache residual; current posterior writes cache for the next step only.",
         sources=("src/openpi/picf/core/pipeline.py", "src/openpi/picf/core/config.py"),
-        needles=("cache = getattr(previous.predictive, \"evidence_cache\", None)", "innovation_cost", "q_before_cache", "cache_read - q_before_cache"),
+        needles=("cache = getattr(previous.predictive, \"evidence_cache\", None)", "immediate_posterior", "cache_roles", "cache_read - q_before_cache"),
     ),
     TraceNode(
         name="AQR measurement routing",

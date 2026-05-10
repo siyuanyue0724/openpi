@@ -121,6 +121,11 @@ def run_checks() -> list[Check]:
             "Cache read weight must scale the cache residual, not disappear as a constant softmax bias.",
         ),
         Check(
+            "pipeline_cache_skips_immediate_previous_posterior_duplicate",
+            _contains(pipeline, "immediate_posterior", "valid = valid & ~immediate_posterior", "aqr_posterior_reader", "cache_roles", "role_mask"),
+            "Cache must skip the newest posterior cache row and apply role-aware filtering because previous posterior has a dedicated AQR reader.",
+        ),
+        Check(
             "pipeline_recurrent_burnin_uses_aqr_graph",
             _contains(burnin_body, "if bool(self.config.aqr_mapg_enabled):", "anchor_prior_graph = self._build_aqr_anchor_graph("),
             "State-only burn-in must use the same AQR measurement graph as the suffix path when AQR is enabled.",

@@ -989,7 +989,7 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
         aqr_query_rounds=1,
         evidence_cache_read_weight=0.25,
     )
-    frames = list(replay)[:2]
+    frames = list(replay)[:3]
     first = core.step(
         frames[0],
         point_features_override=_point_override(core, frames[0]),
@@ -1011,8 +1011,10 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
 
     graph = second.state.anchor_prior_graph
     assert graph is not None
-    assert graph.cache_priors is not None
-    assert graph.cache_priors.shape[1] == core.config.persistent_anchors
+    # The immediately previous posterior is read through a dedicated posterior
+    # branch, so cache read skips the newest posterior cache row to avoid double
+    # counting it.
+    assert graph.cache_priors is None
     assert second.state.predictive.evidence_cache is not None
     assert bool(second.state.predictive.evidence_cache.valid[0].all().item())
     assert bool(second.state.predictive.evidence_cache.valid[1].all().item())
@@ -1020,14 +1022,26 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
     assert "evidence_cache_trust_mean" in second.debug
     assert "evidence_cache_age_mean" in second.debug
     assert "owm_evidence_cache_innovation_mean" in second.debug
-    assert second.debug["owm_evidence_cache_read_active"] == 1.0
     assert "posterior_identity_switch_rate" in second.debug
     assert "posterior_recycle_rate" in second.debug
 
-    _, low_innovation_scores = core._previous_evidence_cache_tokens(second.state)
+    third = core.step(
+        frames[2],
+        previous=second.state,
+        point_features_override=_point_override(core, frames[2]),
+        visual_map_override=np.stack([_visual_override(3.0), _visual_override(3.5)], axis=0),
+        semantic_override=_semantic_features_with_spatial(3.0),
+    )
+    graph = third.state.anchor_prior_graph
+    assert graph is not None
+    assert graph.cache_priors is not None
+    assert graph.cache_priors.shape[1] == core.config.persistent_anchors
+    assert third.debug["owm_evidence_cache_read_active"] == 1.0
+
+    _, low_innovation_scores, _ = core._previous_evidence_cache_tokens(second.state)
     assert low_innovation_scores is not None
     second.state.predictive.evidence_cache.innovation_at_write[:] = 100.0
-    _, high_innovation_scores = core._previous_evidence_cache_tokens(second.state)
+    _, high_innovation_scores, _ = core._previous_evidence_cache_tokens(second.state)
     assert high_innovation_scores is not None
     assert bool((high_innovation_scores < low_innovation_scores).all().item())
 
@@ -1041,15 +1055,23 @@ def test_evidence_cache_read_weight_scales_residual_not_softmax_only(tmp_path: P
         aqr_query_rounds=1,
         evidence_cache_read_weight=0.0,
     )
-    frame = next(iter(replay))
+    frames = list(replay)[:2]
     first = core.step(
-        frame,
-        point_features_override=_point_override(core, frame),
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
         visual_map_override=np.stack([_visual_override(1.0), _visual_override(1.5)], axis=0),
         semantic_override=_semantic_features_with_spatial(1.0),
     )
     assert first.state.predictive.evidence_cache is not None
     assert bool(first.state.predictive.evidence_cache.valid.any().item())
+    second = core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=np.stack([_visual_override(1.5), _visual_override(2.0)], axis=0),
+        semantic_override=_semantic_features_with_spatial(1.5),
+    )
+    assert second.state.predictive.evidence_cache is not None
 
     core.aqr_cache_reader = _UnitCacheReader()
     core.aqr_query_self = None
@@ -1059,22 +1081,22 @@ def test_evidence_cache_read_weight_scales_residual_not_softmax_only(tmp_path: P
     core.config = dataclasses.replace(core.config, evidence_cache_read_weight=0.0)
     graph_zero = core._build_aqr_anchor_graph(
         semantic=semantic,
-        token_field=first.state.token_field,
-        previous=first.state,
+        token_field=second.state.token_field,
+        previous=second.state,
         vl_grounding=None,
     )
     core.config = dataclasses.replace(core.config, evidence_cache_read_weight=0.25)
     graph_quarter = core._build_aqr_anchor_graph(
         semantic=semantic,
-        token_field=first.state.token_field,
-        previous=first.state,
+        token_field=second.state.token_field,
+        previous=second.state,
         vl_grounding=None,
     )
     core.config = dataclasses.replace(core.config, evidence_cache_read_weight=0.50)
     graph_half = core._build_aqr_anchor_graph(
         semantic=semantic,
-        token_field=first.state.token_field,
-        previous=first.state,
+        token_field=second.state.token_field,
+        previous=second.state,
         vl_grounding=None,
     )
 

@@ -57,6 +57,14 @@ innovation trust. This avoids the softmax-invariant failure mode where
 `log(weight)` is added to every cache key and therefore acts only as an on/off
 switch once the weight is positive.
 
+The cache reader also skips the newest posterior cache row. That row is exactly
+`previous.posterior.tokens`, which already has a dedicated AQR posterior reader.
+The cache therefore supplies older role-compatible episodic context rather than
+duplicating the authoritative t-1 posterior evidence. It is not yet a learned
+address-nearest-neighbor retrieval module; current address fields are persistent
+carriers and diagnostics, while cache read is source/age/uncertainty/
+innovation/role-gated.
+
 Full temporal OWM training also requires a real visual encoder path:
 
 ```text
@@ -385,17 +393,17 @@ This section maps the proposed method item by item to the current codebase.
 
 | Method claim | Current code fact | Deployment decision |
 | --- | --- | --- |
-| Last-two-frame JEPA evidence should be explicit | `VjepaFeatureMap.current_map(...)` returns last latent slice or mean of last two latent slices; `_visual_map(...)` passes one 2D map downstream | Replace mean-only path with first-class recent temporal V-JEPA tokens; keep mean as ablation only |
+| Last-two-frame JEPA evidence should be explicit | `VjepaFeatureMap.recent_maps(n)` preserves recent temporal latent maps; AQR routes over `PicfTemporalVisualSupportState` and writes `vjepa_temporal_priors` | Keep recent temporal V-JEPA tokens as the production path; keep mean-only behavior as ablation only |
 | PICF already has memory | `PicfPosteriorAnchorState` carries `h/c/mu/Sigma/x/S/alpha/binding/evidence_tokens/tokens`; recurrent carry preserves posterior | Treat posterior as authoritative belief, not as a cache to be replaced |
 | Posterior predicts and corrects | `_current_prior(...)`, `_posterior_update(...)`, `_innovation(...)`, and `physical_prediction_cache` already implement prior/measurement/correction/error | Preserve and strengthen this belief-filter loop; do not let AQR/cache bypass it |
 | AQR should read typed memory | Current AQR separately reads visual, point, tactile, posterior; PaliGemma semantic conditions task queries | Keep AQR as the routing skeleton and extend typed memory rather than reverting to MAPG-v0 |
-| PaliGemma image tokens should be first-class | `_aqr_pg_image_support_read(...)` reads image tokens but remaps support into V-JEPA bias; AQR returns `pg_priors=None` | Fill `graph.pg_priors`; preserve per-view PaliGemma image support as a typed branch |
+| PaliGemma image tokens should be first-class | `_aqr_pg_image_support_read(...)` consumes all available `image_token_ranges`, returns first-class `pg_priors`, and may also provide optional visual-grid bias | Preserve `graph.pg_priors`; do not collapse PaliGemma image evidence into V-JEPA bias only |
 | PaliGemma heatmap should not dominate | `aqr_pg_grounding_enabled=False`, `aqr_pg_bias_weight=0.0` defaults already encode this | Keep heatmap off by default; use only explicit ablation/diagnostic flags |
 | V-JEPA temporal support should be first-class | `VjepaFeatureMap.recent_maps(n)` and `PicfTemporalVisualSupportState` preserve recent temporal maps | Route AQR over `[time, h, w]` tokens through `aqr_vjepa_temporal_mode/tokens/include_delta` |
 | Physical slots and task anchors should be separated | Code already has `aqr_physical_query_tokens` and `aqr_task_query_tokens`; only task queries read semantic conditioner | Freeze this as a core invariant |
-| Address/content split should exist | Current posterior has latent/content-like fields, binding, recycle, and roles, but no explicit address vector | Add address vectors after verifying current binding stability |
-| Cache must be subordinate to posterior | Current recurrent carry stores `physical_prediction_cache`, not a long causal evidence cache | Add bounded evidence cache with age/source/uncertainty metadata; never bypass posterior |
-| Slot-level JEPA world prediction is desired | Current prediction is global/posterior-token level and produces `physical_prediction_cache` | Add slot-level JEPA after identity/binding diagnostics are stable |
+| Address/content split should exist | Posterior and graph contracts expose `slot_address` / `slot_content`; `slot_address` is a persistent carrier, not a standalone identity-quality metric | Keep address/content separation, but judge identity quality with switch/recycle/support diagnostics |
+| Cache must be subordinate to posterior | Fixed-size evidence cache is written after posterior correction, reads previous carry only, skips the newest posterior duplicate, and applies a residual-scale read weight | Keep cache as auxiliary episodic evidence; never bypass posterior |
+| Slot-level JEPA world prediction is desired | Slot prediction and support prediction hooks exist and use detached next-posterior targets; their loss weights default to zero | Keep hooks guarded until identity/binding diagnostics are stable |
 | Ordinal/relation grounding is required for tasks like "fourth from left" | No explicit rank/relation head in current AQR/PICF losses | Add gated relation head later, only for high-confidence relation language |
 | Fine adjacent-object selection needs more than global support | V-JEPA native map is `384/16 ~= 24x24`; current AQR can bind supports but cannot create sub-token evidence | Add point-neighborhood, temporal, and latent local refinement; do not promise impossible sub-token identity |
 
@@ -627,12 +635,12 @@ Current problem:
 
 ```text
 _aqr_pg_image_support_read(...)
-  only reads semantic.image_token_ranges[0]
-  only uses semantic.image_view_transforms[0]
-  returns updated query and visual-grid bias
+  reads all available semantic.image_token_ranges
+  keeps per-range image/grid metadata when available
+  returns updated query, first-class pg_priors, and optional visual-grid bias
 
 _build_aqr_anchor_graph(...)
-  returns pg_priors=None
+  returns pg_priors=pg_priors
 ```
 
 Required implementation:
@@ -881,8 +889,11 @@ src/openpi/picf/core/pipeline.py
 Current state:
 
 ```text
-recurrent carry preserves posterior and physical_prediction_cache.
-There is no full object-addressable evidence cache yet.
+recurrent carry preserves posterior, physical_prediction_cache, and a fixed-size
+posterior-grounded evidence_cache. The cache is source/age/uncertainty/
+innovation-gated, skips the newest posterior duplicate because previous
+posterior has its own reader, and applies evidence_cache_read_weight as a true
+residual scale.
 ```
 
 Required implementation:
@@ -1725,27 +1736,26 @@ Current facts:
 
 ```text
 PicfAnchorPriorGraphState:
-  has pg_priors but AQR currently returns pg_priors=None
+  has pg_priors and AQR now returns first-class pg_priors
   has visual_priors / point_priors / tactile_priors / posterior_priors
   has anchor_tokens / roles / confidence / geometry
-  lacks vjepa_temporal_priors, cache_priors, slot_address, slot_content,
+  has vjepa_temporal_priors, cache_priors, slot_address, slot_content,
   support_uncertainty
 
 PicfTokenFieldState:
-  has visual_tokens as one flattened 2D visual map
-  lacks temporal_visual support state
+  has visual_tokens plus temporal_visual support state
 
 PicfPosteriorAnchorState:
   has h/c/mu/Sigma/x/S/a/alpha/contact/support/binding/evidence/tokens
-  lacks explicit address/content fields
+  has explicit slot_address / slot_content fields
 
 PicfPredictiveState:
   has physical_prediction_cache and prediction_cache
-  lacks slot_prediction_tokens, slot_prediction_supports, evidence_cache
+  has slot_prediction_tokens, slot_prediction_supports, evidence_cache
 
 PicfRecurrentCarryState:
   carries posterior and physical_prediction_cache
-  lacks bounded object-addressable evidence cache
+  carries bounded posterior-grounded evidence cache
 ```
 
 Final deployment changes:
@@ -2002,13 +2012,13 @@ Current facts:
 
 ```text
 _aqr_pg_image_support_read(...):
-  only reads semantic.image_token_ranges[0]
-  only uses semantic.image_view_transforms[0]
-  returns updated queries plus a V-JEPA visual-grid bias
+  reads all available semantic.image_token_ranges
+  uses image grid/view metadata when available
+  returns updated queries, first-class pg_priors, and optional V-JEPA visual-grid bias
 
 _build_aqr_anchor_graph(...):
   calls _aqr_pg_image_support_read(...)
-  still returns pg_priors=None
+  returns pg_priors=pg_priors
 ```
 
 Final deployment changes:
@@ -2590,11 +2600,11 @@ Current code:
 
 ```text
 _aqr_pg_image_support_read(...)
-  reads first image_token_range
-  returns updated task queries and visual-grid bias
+  reads all image_token_ranges
+  returns updated task queries, pg_priors, and optional visual-grid bias
 
 _build_aqr_anchor_graph(...)
-  returns pg_priors=None
+  returns pg_priors=pg_priors
 ```
 
 Final behavior:

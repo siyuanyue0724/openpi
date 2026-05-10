@@ -226,6 +226,10 @@ As of the latest local audit pass:
     - this is a true cache residual scale:
       `q <- q + 0.05 * (ReadCache(q) - q)`, not a softmax-bias-only
       switch
+    - cache read skips the newest posterior cache row because
+      `previous.posterior.tokens` already has a dedicated AQR posterior reader;
+      cache contributes older role-compatible episodic context rather than
+      duplicating t-1 posterior evidence
   - guarded OWM losses remain `lambda_slot_jepa=0`,
     `lambda_support_pred=0`, and `lambda_binding_consistency=0`
 - equivalent CLI flags still exist for explicit overrides and ablations, but

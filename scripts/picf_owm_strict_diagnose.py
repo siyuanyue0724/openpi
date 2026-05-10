@@ -349,6 +349,21 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
+            "cache_skips_immediate_previous_posterior_duplicate",
+            pipeline.contains("immediate_posterior", "valid = valid & ~immediate_posterior")
+            and pipeline.contains("aqr_posterior_reader", "cache_read_active")
+            and pipeline.contains("cache_roles", "role_mask"),
+            severity="fail",
+            detail=(
+                "The cache must not re-read the newest posterior cache row, because previous.posterior.tokens "
+                "already has a dedicated AQR posterior branch. Cache read should provide older episodic context "
+                "and apply role-aware filtering before attention."
+            ),
+            evidence=pipeline.refs("immediate_posterior", "valid = valid & ~immediate_posterior", "cache_roles", "role_mask", "aqr_posterior_reader"),
+        )
+    )
+    checks.append(
+        _finding(
             "state_only_burnin_uses_aqr_graph_when_enabled",
             "if bool(self.config.aqr_mapg_enabled):" in burnin_body
             and "anchor_prior_graph = self._build_aqr_anchor_graph(" in burnin_body,
