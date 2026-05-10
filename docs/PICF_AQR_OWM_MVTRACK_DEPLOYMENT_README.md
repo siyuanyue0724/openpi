@@ -1,8 +1,8 @@
 # PICF-AQR-OWM-MVTrack Deployment Contract
 
-Version: `v2.0-runtime-a`
+Version: `v2.0-runtime-b`
 Date: 2026-05-10
-Status: architecture contract with first runtime wiring pass implemented.
+Status: code-level MVTrack runtime complete; behavior acceptance still pending fresh run evidence.
 
 This document is linked from `src/openpi/picf/README_v2.2.md`. It is the
 canonical design contract for the next version after the current maintained
@@ -43,7 +43,7 @@ future latents are detached targets only.
 This document is not allowed to claim behavior-level completion until the code,
 verification scripts, metrics, and CALVIN/video evidence satisfy Section 16.
 
-2026-05-10 runtime pass:
+2026-05-10 runtime-b pass:
 
 ```text
 Implemented in code:
@@ -53,11 +53,14 @@ Implemented in code:
   gated slot_address update
   address-aware cache attention bias with residual scaling retained
   top-k latent local refinement over existing visual memory
+  optional pseudo-proposal typed memory and AQR proposal reader
+  training-only support denoising auxiliary, default weight 0
   matched slot-JEPA/support prediction targets
   weak ordinal rank/selection diagnostics
 
 Still external-data dependent:
   tracklet tensors require an upstream offline/loader source.
+  proposal tensors require an upstream detector/proposal source.
   CALVIN/video behavior acceptance requires a new run on this checkout.
 ```
 
@@ -241,7 +244,8 @@ correction:
   support-signature binding, gated address compatibility, address-aware cache.
 
 training-only teacher:
-  denoising queries, matched slot-JEPA, support prediction, weak ordinal loss.
+  support denoising auxiliary, matched slot-JEPA, support prediction,
+  weak ordinal loss.
 ```
 
 The plan is rejected if it violates any invariant:
@@ -427,7 +431,7 @@ vjepa_views: tuple[str, ...] = ("static", "gripper")
 vjepa_share_encoder_across_views: bool = True
 ```
 
-The runtime-a implementation intentionally does not expose a contact-gated
+The runtime-b implementation intentionally does not expose a contact-gated
 wrist switch. Wrist evidence is a typed visual view whenever it is present;
 contact-dependent use is learned by AQR support mass rather than a hard input
 gate.
@@ -1021,12 +1025,12 @@ direct action truth
 
 ## 16. Required Verification
 
-MVTrack cannot be marked behavior-complete until all checks below pass on the
-current code and fresh training/evaluation artifacts. The `v2.0-runtime-a`
-implementation has passed the static/verifier subset for multiview, tracklet,
-support-signature binding, address-aware cache, local refinement, matched
-prediction hooks, and weak ordinal diagnostics; DN/proposal phases remain
-guarded contract items until their dedicated runtime paths are added.
+MVTrack is code-level runtime complete when the static/verifier checks below
+pass on the current code. It cannot be marked behavior-complete until fresh
+training/evaluation artifacts also pass. The `v2.0-runtime-b` implementation
+has code paths for multiview, tracklet, support-signature binding,
+address-aware cache, local refinement, optional proposal memory, training-only
+support denoising, matched prediction hooks, and weak ordinal diagnostics.
 
 ### 16.1 Static/verifier checks
 
@@ -1186,8 +1190,9 @@ Deformable DETR:
   https://arxiv.org/abs/2010.04159
 
 DN-DETR and DINO:
-  denoising queries and improved anchor initialization stabilize query-based
-  detection training.
+  denoising-style auxiliary targets and improved anchor initialization
+  stabilize query-based detection training. MVTrack uses this as a guarded
+  support-denoising auxiliary, not as an inference-time query path.
   https://arxiv.org/abs/2203.01305
   https://arxiv.org/abs/2203.03605
 
@@ -1256,7 +1261,7 @@ Phase 5:
   latent local refinement.
 
 Phase 6:
-  training-only denoising queries.
+  training-only support denoising auxiliary.
 
 Phase 7:
   matched slot-JEPA/support prediction.
@@ -1277,8 +1282,10 @@ cache address gate:
 tracklet branch:
   safe to add as typed evidence, but train/eval must no-op when missing.
 
-denoising queries:
-  keep as a training-only future phase; no inference effect when implemented.
+support denoising:
+  implemented as a training-only support-denoising auxiliary.
+  default lambda_aqr_denoising remains 0.
+  no inference effect.
 
 matched predictive losses:
   default zero until identity switch/recycle metrics are stable.
@@ -1313,5 +1320,7 @@ training-only detached teacher
 
 and none of it bypasses posterior authority.
 
-MVTrack should be considered runtime-complete only after Section 16 passes on
-current code and fresh training artifacts.
+MVTrack should be considered code-level runtime-complete after Section 16
+static/verifier checks pass on current code. It should be considered
+behavior-complete only after fresh training artifacts, videos, and CALVIN
+evaluation also pass.

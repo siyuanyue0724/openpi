@@ -71,6 +71,7 @@ class PicfAnchorPriorGraphState:
     vjepa_temporal_priors: torch.Tensor | None = None
     cache_priors: torch.Tensor | None = None
     tracklet_priors: torch.Tensor | None = None
+    proposal_priors: torch.Tensor | None = None
     local_priors: torch.Tensor | None = None
     slot_address: torch.Tensor | None = None
     slot_content: torch.Tensor | None = None
@@ -104,6 +105,17 @@ class PicfTrackletSupportState:
     track_ids: torch.Tensor
     view_ids: torch.Tensor
     age: torch.Tensor
+    valid: torch.Tensor
+
+
+@dataclasses.dataclass
+class PicfPseudoProposalState:
+    tokens: torch.Tensor
+    centers_xy: torch.Tensor
+    boxes_xyxy: torch.Tensor
+    objectness: torch.Tensor
+    view_ids: torch.Tensor
+    source_ids: torch.Tensor
     valid: torch.Tensor
 
 
@@ -162,6 +174,7 @@ class PicfTokenFieldState:
     point_projectable_mask: torch.Tensor | None = None
     temporal_visual: PicfTemporalVisualSupportState | None = None
     tracklet: PicfTrackletSupportState | None = None
+    proposal: PicfPseudoProposalState | None = None
 
 
 @dataclasses.dataclass
@@ -196,6 +209,7 @@ class PicfObservationAnchorState:
     graph_temporal_weights: torch.Tensor | None = None
     graph_tactile_weights: torch.Tensor | None = None
     graph_tracklet_weights: torch.Tensor | None = None
+    graph_proposal_weights: torch.Tensor | None = None
     anchor_address: torch.Tensor | None = None
     support_signature: torch.Tensor | None = None
 
@@ -280,6 +294,7 @@ class PicfPosteriorAnchorState:
     pg_signature: torch.Tensor | None = None
     tactile_signature: torch.Tensor | None = None
     tracklet_signature: torch.Tensor | None = None
+    proposal_signature: torch.Tensor | None = None
     support_signature: torch.Tensor | None = None
 
 

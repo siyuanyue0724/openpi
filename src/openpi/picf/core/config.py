@@ -181,6 +181,10 @@ class PicfCoreConfig:
     tracklet_max_tokens: int = 256
     tracklet_confidence_floor: float = 0.05
     tracklet_read_weight: float = 0.25
+    proposal_memory_enabled: bool = True
+    proposal_max_tokens: int = 128
+    proposal_confidence_floor: float = 0.05
+    proposal_read_weight: float = 0.15
     bind_support_signature_weight: float = 0.50
     bind_address_weight: float = 0.25
     bind_address_innovation_downweight: float = 1.0
@@ -193,6 +197,7 @@ class PicfCoreConfig:
     support_prediction_enabled: bool = True
     ordinal_relation_enabled: bool = True
     ordinal_weak_target_enabled: bool = True
+    lambda_aqr_denoising: float = 0.0
     visual_reread_topk: int = 32
     tactile_reread_groups: int = 2
     task_visual_reread_topk: int = 32

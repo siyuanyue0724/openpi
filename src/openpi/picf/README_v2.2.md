@@ -52,16 +52,16 @@ metadata predates the OWM default and records `semantic_mode=zero` are not
 silently promoted into `aqr_mapg_enabled=True` at serve time. New training uses
 the OWM default; old zero-semantic checkpoints keep their recorded graph path.
 
-2026-05-10 MVTrack runtime-a update: use
+2026-05-10 MVTrack runtime-b update: use
 [`docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md)
 as the canonical `PICF-AQR-OWM-MVTrack` contract and runtime wiring record.
 This is not a replacement for the maintained v26 baseline; it is the complete
-v2 architecture plan plus the first code pass for static+wrist V-JEPA typed
+v2 architecture plan plus the deployed code pass for static+wrist V-JEPA typed
 memory, support-signature identity binding, address-aware cache retrieval,
 tracklet memory, latent local refinement, matched predictive losses, and gated
-weak ordinal grounding. It explicitly separates current code facts from future
-runtime completion gates so reviewers do not mistake implementation wiring for
-behavior-level CALVIN acceptance.
+weak ordinal grounding, optional proposal memory, and training-only support
+denoising. It explicitly separates code-level runtime completion from
+behavior-level CALVIN/video acceptance.
 
 ## Quick Navigation
 
@@ -154,10 +154,11 @@ behavior-level CALVIN acceptance.
   bundle for strict README-to-code diagnosis. It is not a conceptual appendix;
   it is the engineering deployment blueprint for the final architecture.
 - [`docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md)
-  Architecture contract and runtime-a wiring record for PICF-AQR-OWM-MVTrack:
+  Architecture contract and runtime-b wiring record for PICF-AQR-OWM-MVTrack:
   static+wrist V-JEPA typed multiview support, support-signature identity
   binding, address-aware cache retrieval, tracklet typed memory, local
-  refinement, matched predictive losses, and gated weak ordinal targets. It
+  refinement, optional proposal memory, training-only support denoising,
+  matched predictive losses, and gated weak ordinal targets. It
   records the math, code touchpoints, paper support, verification gates, and
   CALVIN/video acceptance boundary before behavior-level completion can be
   claimed.
@@ -250,7 +251,8 @@ As of the latest local audit pass:
       cache contributes older role-compatible episodic context rather than
       duplicating t-1 posterior evidence
   - guarded OWM losses remain `lambda_slot_jepa=0`,
-    `lambda_support_pred=0`, and `lambda_binding_consistency=0`
+    `lambda_support_pred=0`, `lambda_binding_consistency=0`, and
+    `lambda_aqr_denoising=0`
 - equivalent CLI flags still exist for explicit overrides and ablations, but
   they are no longer required for the latest OWM default profile
 - recommended large-run perception profile remains explicit:

@@ -69,10 +69,17 @@ NODES: tuple[TraceNode, ...] = (
     ),
     TraceNode(
         name="Typed token field",
-        formula="M_t={M_text,M_pg,M_vjepa,M_point,M_tactile,M_post,M_cache}",
+        formula="M_t={M_text,M_pg,M_vjepa,M_point,M_tactile,M_track,M_prop,M_post,M_cache}",
         invariant="Missing modalities are masked/empty; typed support must not be collapsed into one opaque token before AQR.",
         sources=("src/openpi/picf/core/contracts.py", "src/openpi/picf/core/pipeline.py"),
-        needles=("class PicfTokenFieldState", "temporal_visual", "cache_tokens"),
+        needles=("class PicfTokenFieldState", "temporal_visual", "tracklet", "proposal", "cache_tokens"),
+    ),
+    TraceNode(
+        name="Optional proposal typed memory",
+        formula="M_prop={box,center,objectness,view,source}; q<-q+lambda_prop(Read_prop(q)-q)",
+        invariant="Proposal/SAM/DINO-style evidence is optional typed evidence only; missing proposals no-op and proposals never overwrite posterior identity.",
+        sources=("src/openpi/picf/core/contracts.py", "src/openpi/picf/core/pipeline.py", "src/openpi/picf/core/pipeline_test.py"),
+        needles=("class PicfPseudoProposalState", "aqr_proposal_reader", "proposal_priors", "test_mvtrack_proposal_support_is_optional_and_guarded"),
     ),
     TraceNode(
         name="Previous evidence cache read",
@@ -136,6 +143,13 @@ NODES: tuple[TraceNode, ...] = (
         invariant="Binding consistency must include temporal identity contrast, not only current binding sharpness.",
         sources=("src/openpi/picf/core/training.py",),
         needles=("def _binding_consistency_loss", "future.posterior_tokens", "fn.cross_entropy"),
+    ),
+    TraceNode(
+        name="Training-only support denoising",
+        formula="L_dn=CE(argmax(stopgrad(p_support)), p_support) on confident typed supports; lambda_dn defaults 0",
+        invariant="Denoising is a guarded training-only auxiliary and cannot alter inference, posterior authority, or the PI0.5 action path.",
+        sources=("src/openpi/picf/core/training.py", "scripts/picf_core_train.py", "src/openpi/picf/core/training_test.py"),
+        needles=("_aqr_support_denoising_loss", "lambda_aqr_denoising", "--lambda-aqr-denoising", "test_aqr_denoising_loss_is_training_only_and_guarded"),
     ),
     TraceNode(
         name="Evidence cache write",

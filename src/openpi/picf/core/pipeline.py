@@ -32,6 +32,7 @@ from openpi.picf.core.contracts import PicfPredictionCache
 from openpi.picf.core.contracts import PicfPreviousState
 from openpi.picf.core.contracts import PicfPredictiveState
 from openpi.picf.core.contracts import PicfProjectiveGeometryState
+from openpi.picf.core.contracts import PicfPseudoProposalState
 from openpi.picf.core.contracts import PicfRecurrentCarryState
 from openpi.picf.core.contracts import PicfRecurrentPredictiveState
 from openpi.picf.core.contracts import PicfTemporalVisualSupportState
@@ -1049,6 +1050,7 @@ class PicfFullCore(nn.Module):
         self.point_token_proj = nn.LazyLinear(hidden_dim)
         self.visual_token_proj = nn.LazyLinear(hidden_dim)
         self.tracklet_token_proj = nn.LazyLinear(hidden_dim)
+        self.proposal_token_proj = nn.LazyLinear(hidden_dim)
         self.tactile_token_proj = nn.LazyLinear(hidden_dim)
         self.point_align_proj = nn.LazyLinear(hidden_dim)
         self.visual_align_proj = nn.LazyLinear(hidden_dim)
@@ -1286,6 +1288,11 @@ class PicfFullCore(nn.Module):
                 heads,
                 ff_chunk_size=self.config.tokenwise_ff_chunk_size,
             )
+            self.aqr_proposal_reader = CrossAttentionRead(
+                hidden_dim,
+                heads,
+                ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+            )
             self.aqr_query_self = TransformerStack(
                 hidden_dim,
                 heads,
@@ -1310,6 +1317,7 @@ class PicfFullCore(nn.Module):
             self.aqr_posterior_reader = None
             self.aqr_cache_reader = None
             self.aqr_tracklet_reader = None
+            self.aqr_proposal_reader = None
             self.aqr_query_self = None
         self.temporal_visual_time_proj = nn.Linear(1, hidden_dim)
         self.temporal_visual_view_embedding = nn.Embedding(max(int(self.config.vjepa_max_views), 1), hidden_dim)
@@ -2740,6 +2748,7 @@ class PicfFullCore(nn.Module):
         visual_count = int(token_field.visual_tokens.shape[0])
         temporal_count = 0 if token_field.temporal_visual is None else int(token_field.temporal_visual.tokens.shape[0])
         tracklet_count = 0 if token_field.tracklet is None else int(token_field.tracklet.tokens.shape[0])
+        proposal_count = 0 if token_field.proposal is None else int(token_field.proposal.tokens.shape[0])
         point_count = int(token_field.point_tokens.shape[0])
         tactile_count = int(token_field.tactile_tokens.shape[0])
         post_count = 0 if previous is None else int(previous.posterior.tokens.shape[0])
@@ -2765,7 +2774,7 @@ class PicfFullCore(nn.Module):
                 geometry_valid=torch.zeros((anchor_count,), device=self.device, dtype=torch.bool),
                 obs_slot_assignment=None,
                 task_assignment=None,
-                modality_confidence=torch.zeros((anchor_count, 9), device=self.device, dtype=self.dtype),
+                modality_confidence=torch.zeros((anchor_count, 10), device=self.device, dtype=self.dtype),
                 valid=torch.tensor(False, device=self.device),
             )
 
@@ -2863,6 +2872,7 @@ class PicfFullCore(nn.Module):
         posterior_priors = torch.zeros((anchor_count, post_count), device=self.device, dtype=self.dtype) if post_count > 0 else None
         cache_priors = torch.zeros((anchor_count, cache_count), device=self.device, dtype=self.dtype) if cache_count > 0 else None
         tracklet_priors = torch.zeros((anchor_count, tracklet_count), device=self.device, dtype=self.dtype) if tracklet_count > 0 else None
+        proposal_priors = torch.zeros((anchor_count, proposal_count), device=self.device, dtype=self.dtype) if proposal_count > 0 else None
         local_priors = None
         rounds = max(int(self.config.aqr_query_rounds), 1)
         q = queries[None, :, :]
@@ -2943,6 +2953,18 @@ class PicfFullCore(nn.Module):
                 )
                 q = q_before_track + (float(self.config.tracklet_read_weight) * (track_read - q_before_track))
                 tracklet_priors = self._aqr_competitive_support(track_weights, eps=self.config.epsilon_a)
+            if self.aqr_proposal_reader is not None and token_field.proposal is not None and proposal_count > 0:
+                proposal_bias = torch.log(
+                    torch.clamp(token_field.proposal.objectness, min=self.config.epsilon_a)
+                )[None, :].expand(anchor_count, -1)
+                q_before_prop = q
+                prop_read, prop_weights = self.aqr_proposal_reader(
+                    q,
+                    token_field.proposal.tokens.to(device=self.device, dtype=self.dtype)[None, :],
+                    attn_bias=proposal_bias,
+                )
+                q = q_before_prop + (float(self.config.proposal_read_weight) * (prop_read - q_before_prop))
+                proposal_priors = self._aqr_competitive_support(prop_weights, eps=self.config.epsilon_a)
             if self.aqr_query_self is not None:
                 q = self.aqr_query_self(q)
 
@@ -2955,6 +2977,7 @@ class PicfFullCore(nn.Module):
         post_conf = _distribution_confidence(posterior_priors, eps=self.config.epsilon_a, floor=float(self.config.mapg_confidence_floor))
         cache_conf = _distribution_confidence(cache_priors, eps=self.config.epsilon_a, floor=float(self.config.mapg_confidence_floor))
         tracklet_conf = _distribution_confidence(tracklet_priors, eps=self.config.epsilon_a, floor=float(self.config.mapg_confidence_floor))
+        proposal_conf = _distribution_confidence(proposal_priors, eps=self.config.epsilon_a, floor=float(self.config.mapg_confidence_floor))
         zero_conf = torch.zeros((anchor_count,), device=self.device, dtype=self.dtype)
         modality_conf = torch.stack(
             [
@@ -2967,6 +2990,7 @@ class PicfFullCore(nn.Module):
                 zero_conf if post_conf is None else post_conf,
                 zero_conf if cache_conf is None else cache_conf,
                 zero_conf if tracklet_conf is None else tracklet_conf,
+                zero_conf if proposal_conf is None else proposal_conf,
             ],
             dim=-1,
         )
@@ -3006,6 +3030,7 @@ class PicfFullCore(nn.Module):
             vjepa_temporal_priors=vjepa_temporal_priors,
             cache_priors=cache_priors,
             tracklet_priors=tracklet_priors,
+            proposal_priors=proposal_priors,
             local_priors=local_priors,
             slot_address=self.aqr_physical_query_tokens[:physical_count].to(device=self.device, dtype=self.dtype) if self.aqr_physical_query_tokens is not None else None,
             slot_content=anchor_tokens,
@@ -4718,6 +4743,87 @@ class PicfFullCore(nn.Module):
                     valid=valid_track[:n_track],
                 )
 
+        proposal_state = None
+        if bool(self.config.proposal_memory_enabled) and (
+            observation.proposal_centers_xy is not None or observation.proposal_boxes_xyxy is not None
+        ):
+            centers = (
+                _to_tensor(observation.proposal_centers_xy, device=self.device, dtype=self.dtype).reshape(-1, 2)
+                if observation.proposal_centers_xy is not None
+                else None
+            )
+            boxes = (
+                _to_tensor(observation.proposal_boxes_xyxy, device=self.device, dtype=self.dtype).reshape(-1, 4)
+                if observation.proposal_boxes_xyxy is not None
+                else None
+            )
+            if boxes is not None and centers is None:
+                centers = 0.5 * (boxes[:, :2] + boxes[:, 2:])
+            if centers is not None:
+                max_props = max(int(self.config.proposal_max_tokens), 0)
+                n_prop = int(centers.shape[0])
+                if boxes is not None:
+                    n_prop = min(n_prop, int(boxes.shape[0]))
+                if max_props > 0:
+                    n_prop = min(n_prop, max_props)
+                if n_prop > 0:
+                    centers = centers[:n_prop].clamp(0.0, 1.0)
+                    if boxes is None:
+                        boxes = torch.cat([centers, centers], dim=-1)
+                    boxes = boxes[:n_prop].clamp(0.0, 1.0)
+                    objectness = (
+                        _to_tensor(observation.proposal_objectness, device=self.device, dtype=self.dtype).reshape(-1)
+                        if observation.proposal_objectness is not None
+                        else torch.ones((n_prop,), device=self.device, dtype=self.dtype)
+                    )
+                    if objectness.numel() < n_prop:
+                        objectness = fn.pad(objectness, (0, n_prop - objectness.numel()), value=0.0)
+                    objectness = objectness[:n_prop].clamp(0.0, 1.0)
+                    view_ids = (
+                        torch.as_tensor(observation.proposal_view_ids, device=self.device, dtype=torch.long).reshape(-1)
+                        if observation.proposal_view_ids is not None
+                        else torch.zeros((n_prop,), device=self.device, dtype=torch.long)
+                    )
+                    source_ids = (
+                        torch.as_tensor(observation.proposal_source_ids, device=self.device, dtype=torch.long).reshape(-1)
+                        if observation.proposal_source_ids is not None
+                        else torch.zeros((n_prop,), device=self.device, dtype=torch.long)
+                    )
+                    if view_ids.numel() < n_prop:
+                        view_ids = fn.pad(view_ids, (0, n_prop - view_ids.numel()), value=0)
+                    if source_ids.numel() < n_prop:
+                        source_ids = fn.pad(source_ids, (0, n_prop - source_ids.numel()), value=0)
+                    wh = torch.clamp(boxes[:, 2:] - boxes[:, :2], min=0.0)
+                    area = (wh[:, :1] * wh[:, 1:2]).clamp(0.0, 1.0)
+                    proposal_features = torch.cat(
+                        [
+                            centers,
+                            boxes,
+                            objectness[:, None],
+                            area,
+                            view_ids[:n_prop, None].to(dtype=self.dtype) / max(float(self.config.vjepa_max_views), 1.0),
+                            source_ids[:n_prop, None].to(dtype=self.dtype) / 16.0,
+                            _point_proj_fourier(centers, bands=4),
+                        ],
+                        dim=-1,
+                    )
+                    proposal_tokens = (
+                        self.proposal_token_proj(proposal_features)
+                        + self.modality_embedding.weight[3][None, :]
+                        + self.temporal_visual_view_embedding(
+                            torch.clamp(view_ids[:n_prop], min=0, max=self.temporal_visual_view_embedding.num_embeddings - 1)
+                        )
+                    )
+                    proposal_state = PicfPseudoProposalState(
+                        tokens=proposal_tokens,
+                        centers_xy=centers,
+                        boxes_xyxy=boxes,
+                        objectness=objectness,
+                        view_ids=view_ids[:n_prop],
+                        source_ids=source_ids[:n_prop],
+                        valid=objectness >= float(self.config.proposal_confidence_floor),
+                    )
+
         context_tokens = self._encode_context_tokens(observation, meta, previous) + self.modality_embedding.weight[3][None, :]
         contact_context = self.contact_context_proj(
             summarize_contact_context(tactile_contact_prob, tactile_anchor_mask)[None, :]
@@ -4770,6 +4876,7 @@ class PicfFullCore(nn.Module):
             point_projectable_mask=None,
             temporal_visual=temporal_visual,
             tracklet=tracklet_state,
+            proposal=proposal_state,
         )
         token_field.point_projectable_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=False)
         dense_memory = _StepDenseMemory(
@@ -4826,6 +4933,7 @@ class PicfFullCore(nn.Module):
         graph_temporal_weights = None
         graph_tactile_weights = None
         graph_tracklet_weights = None
+        graph_proposal_weights = None
         anchor_address = None
         if point_count > 0:
             pool_ids = self._point_pool_ids(token_field)
@@ -4962,6 +5070,11 @@ class PicfFullCore(nn.Module):
                     graph_assignment @ anchor_graph.tracklet_priors.to(device=self.device, dtype=self.dtype),
                     eps=self.config.epsilon_a,
                 )
+            if anchor_graph.proposal_priors is not None and anchor_graph.proposal_priors.numel() > 0:
+                graph_proposal_weights = _normalize_rows(
+                    graph_assignment @ anchor_graph.proposal_priors.to(device=self.device, dtype=self.dtype),
+                    eps=self.config.epsilon_a,
+                )
             if anchor_graph.slot_address is not None and anchor_graph.slot_address.numel() > 0:
                 address = anchor_graph.slot_address.to(device=self.device, dtype=self.dtype)
                 if address.shape[0] < anchor_graph.anchor_tokens.shape[0]:
@@ -5058,6 +5171,7 @@ class PicfFullCore(nn.Module):
             graph_temporal_weights=graph_temporal_weights,
             graph_tactile_weights=graph_tactile_weights,
             graph_tracklet_weights=graph_tracklet_weights,
+            graph_proposal_weights=graph_proposal_weights,
             anchor_address=anchor_address if anchor_address is not None else obs_tokens,
             support_signature=torch.cat(
                 [
@@ -5189,6 +5303,7 @@ class PicfFullCore(nn.Module):
                 ("pg_signature", obs.graph_pg_weights),
                 ("tactile_signature", obs.graph_tactile_weights),
                 ("tracklet_signature", obs.graph_tracklet_weights),
+                ("proposal_signature", obs.graph_proposal_weights),
             ):
                 prev_sig = getattr(prev, prev_name, None)
                 if prev_sig is None or obs_value is None or prev_sig.numel() == 0 or obs_value.numel() == 0:
@@ -5609,9 +5724,18 @@ class PicfFullCore(nn.Module):
         pg_signature = _posterior_signature(obs_anchors.graph_pg_weights)
         tactile_signature = _posterior_signature(obs_anchors.graph_tactile_weights if obs_anchors.graph_tactile_weights is not None else obs_anchors.routing_mass_tactile)
         tracklet_signature = _posterior_signature(obs_anchors.graph_tracklet_weights)
+        proposal_signature = _posterior_signature(obs_anchors.graph_proposal_weights)
         signature_parts = [
             sig.mean(dim=-1, keepdim=True)
-            for sig in (point_signature, visual_signature, temporal_signature, pg_signature, tactile_signature, tracklet_signature)
+            for sig in (
+                point_signature,
+                visual_signature,
+                temporal_signature,
+                pg_signature,
+                tactile_signature,
+                tracklet_signature,
+                proposal_signature,
+            )
             if sig is not None and sig.numel() > 0
         ]
         support_signature = torch.cat(signature_parts, dim=-1) if signature_parts else support_mass[:, None]
@@ -5652,6 +5776,7 @@ class PicfFullCore(nn.Module):
             pg_signature=pg_signature,
             tactile_signature=tactile_signature,
             tracklet_signature=tracklet_signature,
+            proposal_signature=proposal_signature,
             support_signature=support_signature,
         )
 
@@ -6317,6 +6442,7 @@ class PicfFullCore(nn.Module):
             debug["owm_temporal_priors_available"] = 1.0 if graph.vjepa_temporal_priors is not None else 0.0
             debug["owm_cache_priors_available"] = 1.0 if graph.cache_priors is not None else 0.0
             debug["owm_tracklet_priors_available"] = 1.0 if graph.tracklet_priors is not None else 0.0
+            debug["owm_proposal_priors_available"] = 1.0 if graph.proposal_priors is not None else 0.0
             debug["owm_local_priors_available"] = 1.0 if graph.local_priors is not None else 0.0
             if graph.vjepa_temporal_priors is not None and graph.vjepa_temporal_priors.numel() > 0:
                 temporal = _normalize_rows(
@@ -6357,6 +6483,15 @@ class PicfFullCore(nn.Module):
                 tr_entropy = tr_entropy / math.log(max(int(tr.shape[-1]), 2))
                 debug["aqr_tracklet_support_entropy_mean"] = float(tr_entropy.mean().item())
                 debug["aqr_tracklet_support_max"] = float(tr.max(dim=-1).values.max().item())
+            if graph.proposal_priors is not None and graph.proposal_priors.numel() > 0:
+                prop = _normalize_rows(
+                    torch.clamp(graph.proposal_priors.to(device=self.device, dtype=self.dtype), min=0.0),
+                    eps=self.config.epsilon_a,
+                )
+                prop_entropy = -(prop * torch.log(torch.clamp(prop, min=self.config.epsilon_a))).sum(dim=-1)
+                prop_entropy = prop_entropy / math.log(max(int(prop.shape[-1]), 2))
+                debug["aqr_proposal_support_entropy_mean"] = float(prop_entropy.mean().item())
+                debug["aqr_proposal_support_max"] = float(prop.max(dim=-1).values.max().item())
             if graph.local_priors is not None and graph.local_priors.numel() > 0:
                 lp = _normalize_rows(torch.clamp(graph.local_priors.to(device=self.device, dtype=self.dtype), min=0.0), eps=self.config.epsilon_a)
                 lp_entropy = -(lp * torch.log(torch.clamp(lp, min=self.config.epsilon_a))).sum(dim=-1)
@@ -6391,6 +6526,9 @@ class PicfFullCore(nn.Module):
         if observed.token_field.tracklet is not None:
             debug["owm_tracklet_tokens"] = float(observed.token_field.tracklet.tokens.shape[0])
             debug["owm_tracklet_valid_fraction"] = float(observed.token_field.tracklet.valid.to(dtype=self.dtype).mean().item())
+        if observed.token_field.proposal is not None:
+            debug["owm_proposal_tokens"] = float(observed.token_field.proposal.tokens.shape[0])
+            debug["owm_proposal_valid_fraction"] = float(observed.token_field.proposal.valid.to(dtype=self.dtype).mean().item())
         if observed.posterior.slot_address is not None:
             debug["owm_slot_address_norm_mean"] = float(torch.linalg.norm(observed.posterior.slot_address, dim=-1).mean().item())
         if observed.posterior.support_signature is not None:

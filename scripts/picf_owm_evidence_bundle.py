@@ -13,6 +13,7 @@ OWM_KEYS: tuple[str, ...] = (
     "loss_slot_jepa",
     "loss_support_pred",
     "loss_binding_consistency",
+    "loss_aqr_denoising",
     "aqr_temporal_support_entropy_mean",
     "aqr_temporal_support_time_mass_t0",
     "aqr_temporal_support_time_mass_t1",
@@ -23,6 +24,8 @@ OWM_KEYS: tuple[str, ...] = (
     "aqr_pg_support_peak_mean",
     "aqr_tracklet_support_entropy_mean",
     "aqr_tracklet_support_max",
+    "aqr_proposal_support_entropy_mean",
+    "aqr_proposal_support_max",
     "aqr_local_support_entropy_mean",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
@@ -30,6 +33,8 @@ OWM_KEYS: tuple[str, ...] = (
     "posterior_recycle_rate",
     "owm_tracklet_tokens",
     "owm_tracklet_valid_fraction",
+    "owm_proposal_tokens",
+    "owm_proposal_valid_fraction",
     "owm_posterior_support_signature_mean",
     "evidence_cache_trust_mean",
     "evidence_cache_age_mean",
@@ -53,6 +58,9 @@ OWM_ARG_KEYS: tuple[str, ...] = (
     "tracklet_memory_enabled",
     "tracklet_max_tokens",
     "tracklet_read_weight",
+    "proposal_memory_enabled",
+    "proposal_max_tokens",
+    "proposal_read_weight",
     "bind_support_signature_weight",
     "bind_address_weight",
     "local_refinement_enabled",
@@ -64,6 +72,7 @@ OWM_ARG_KEYS: tuple[str, ...] = (
     "lambda_slot_jepa",
     "lambda_support_pred",
     "lambda_binding_consistency",
+    "lambda_aqr_denoising",
 )
 
 

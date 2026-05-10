@@ -30,10 +30,11 @@ Version:
 PICF-AQR-OWM v1.3
 Status: complete for the code-level deployment contract after the point/visual cleanup and default-profile cleanup pass.
 
-PICF-AQR-OWM-MVTrack v2.0-runtime-a
-Status: runtime wiring pass implemented for multiview temporal evidence,
-tracklet typed support, support-signature/address binding, address-aware cache
-bias, local refinement, matched predictive targets, and weak ordinal
+PICF-AQR-OWM-MVTrack v2.0-runtime-b
+Status: code-level runtime complete for multiview temporal evidence,
+tracklet typed support, optional proposal typed support,
+support-signature/address binding, address-aware cache bias, local refinement,
+training-only support denoising, matched predictive targets, and weak ordinal
 diagnostics. Behavior-level completion still requires current-checkout
 CALVIN/video/metrics evidence.
 ```
@@ -51,7 +52,7 @@ aqr_vjepa_temporal_mode=last_two_tokens
 evidence_cache_read_weight=0.05
 lambda_mapg_cycle=0.02
 lambda_mapg_support_diversity=0.01
-lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=0.0
+lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=lambda_aqr_denoising=0.0
 ```
 
 This means the latest OWM wiring is the default training profile. Explicit CLI
@@ -86,9 +87,11 @@ zero-semantic checkpoints into a PaliGemma-required AQR path.
 | Tests | shape, no-leakage, cache causality, PG priors, temporal priors, script entry stability | deployed | Targeted and broad PICF/script suites pass locally; see verification block |
 | MVTrack multiview temporal support | static+wrist/gripper V-JEPA clip buffers, temporal `view_ids`, no wrist-to-static geometry projection without extrinsics | deployed, behavior pending | `_visual_maps` keeps per-view buffers; temporal support emits `view_ids`; formal training still needs foundation visual encoder and current run evidence |
 | MVTrack tracklet typed memory | optional tracklet tensors on `PicfObservation`, typed support state, AQR tracklet reader, tracklet debug metrics | deployed, data-source dependent | Forward path no-ops when tracklets are absent; nonempty behavior depends on upstream offline/loader tracklet tensors |
+| MVTrack proposal typed memory | optional proposal boxes/centers/objectness on `PicfObservation`, typed support state, AQR proposal reader, proposal debug metrics | deployed, data-source dependent | Forward path no-ops when proposals are absent; proposal evidence is weak typed support and never posterior truth |
 | MVTrack identity binding | support-signature overlap, gated address compatibility, slow address update | deployed, guarded | Binding now combines hidden/geometry with support signatures and address gate; recycle/innovation downweights address inertia |
 | MVTrack address-aware cache | address/content/role/age/uncertainty/innovation cache bias with residual read scale | deployed, guarded | Cache read remains a small residual auxiliary context; newest posterior row is skipped because posterior has a dedicated reader |
 | MVTrack local refinement | top-k latent local reread over existing visual memory | deployed | Local priors are produced without high-res crop dependency or new geometry truth |
+| MVTrack support denoising | training-only support denoising auxiliary over confident typed supports | deployed, default zero | `lambda_aqr_denoising=0`; no inference-time query/path changes |
 | MVTrack matched predictive targets | permutation-tolerant matched slot-JEPA/support target hook | deployed, default zero | Future targets stay detached; loss weights remain 0 until identity diagnostics justify enabling |
 | MVTrack weak ordinal diagnostics | prompt-gated axis/rank/selected-slot diagnostics | deployed, no posterior rewrite | Weak target can be disabled separately; no ordinal loss is enabled by default |
 
@@ -182,6 +185,7 @@ python -m py_compile \
   scripts/picf_core_train.py \
   scripts/verify_picf_owm_contract.py \
   scripts/picf_owm_strict_diagnose.py \
+  scripts/picf_owm_dataflow_trace.py \
   scripts/picf_owm_evidence_bundle.py
   passed
 
@@ -201,34 +205,28 @@ python scripts/picf_owm_dataflow_trace.py \
   --markdown-out docs/PICF_AQR_OWM_RECURSIVE_DATAFLOW_AUDIT_TEMP.md \
   --json-out /tmp/picf_owm_dataflow_trace.json \
   --fail-on-fail
-  passed 17 recursive dataflow nodes
+  passed 19 recursive dataflow nodes
 
 pytest -q \
   src/openpi/picf/core/pipeline_test.py \
   src/openpi/picf/core/training_test.py \
-  scripts/verify_picf_owm_contract_test.py \
-  scripts/picf_owm_evidence_bundle_test.py
-  97 passed, 1 warning
-
-pytest -q \
   scripts/picf_core_train_test.py \
   scripts/verify_picf_owm_contract_test.py \
-  scripts/picf_owm_evidence_bundle_test.py \
-  scripts/picf_loss_audit_test.py \
-  scripts/picf_replay_windows_test.py
-  143 passed, 26 warnings
+  scripts/picf_owm_evidence_bundle_test.py
+  224 passed, 26 warnings
 
 pytest -q \
   src/openpi/picf \
   scripts/picf_owm_evidence_bundle_test.py \
   scripts/verify_picf_owm_contract_test.py \
   scripts/picf_core_train_test.py \
-  scripts/picf_loss_audit_test.py \
-  scripts/picf_replay_windows_test.py \
-  scripts/picf_resume_train_test.py \
-  scripts/picf_plot_metrics_test.py \
   scripts/serve_picf_policy_test.py
-  346 passed, 1 skipped, 28 warnings
+  331 passed, 1 skipped, 28 warnings
+
+pytest -q src/openpi/picf scripts
+  blocked during collection by environment dependency:
+  ModuleNotFoundError: wandb_watchdog.observers.polling in scripts/train_test.py.
+  The PICF/MVTrack targeted and broad suites above passed.
 ```
 
 ## Remaining Guarded Items
@@ -238,6 +236,7 @@ The final graph objects and forward paths are present. The following remain guar
 1. `lambda_slot_jepa`
 2. `lambda_support_pred`
 3. `lambda_binding_consistency`
+4. `lambda_aqr_denoising`
 
 This is not a reduced deployment. It is the full graph with guarded optimization pressure.
 

@@ -401,6 +401,34 @@ def test_transition_loss_computes_guarded_owm_objectives_when_weighted(tmp_path:
     assert losses.binding_consistency.item() >= 0.0
 
 
+def test_aqr_denoising_loss_is_training_only_and_guarded(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path, aqr_mapg_enabled=True)
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    assert first.state.anchor_prior_graph is not None
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+        config=PicfTransitionLossConfig(lambda_aqr_denoising=0.1),
+    )
+
+    assert torch.isfinite(losses.aqr_denoising)
+    assert losses.aqr_denoising.item() >= 0.0
+    torch.testing.assert_close(
+        losses.total,
+        losses.action + losses.physical_aux_capped + losses.semantic_group_capped + losses.alignment,
+    )
+
+
 def test_slot_jepa_prefers_next_posterior_teacher_over_visual_fallback(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]

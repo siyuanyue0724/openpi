@@ -135,6 +135,11 @@ class PicfObservation:
     tracklet_ids: np.ndarray | None = None
     tracklet_view_ids: np.ndarray | None = None
     tracklet_age: np.ndarray | None = None
+    proposal_centers_xy: np.ndarray | None = None
+    proposal_boxes_xyxy: np.ndarray | None = None
+    proposal_objectness: np.ndarray | None = None
+    proposal_view_ids: np.ndarray | None = None
+    proposal_source_ids: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.rgb_static = np.asarray(self.rgb_static)
@@ -164,6 +169,16 @@ class PicfObservation:
             self.tracklet_view_ids = np.asarray(self.tracklet_view_ids, dtype=np.int64).reshape(-1)
         if self.tracklet_age is not None:
             self.tracklet_age = np.asarray(self.tracklet_age, dtype=np.float32).reshape(-1)
+        if self.proposal_centers_xy is not None:
+            self.proposal_centers_xy = np.asarray(self.proposal_centers_xy, dtype=np.float32).reshape(-1, 2)
+        if self.proposal_boxes_xyxy is not None:
+            self.proposal_boxes_xyxy = np.asarray(self.proposal_boxes_xyxy, dtype=np.float32).reshape(-1, 4)
+        if self.proposal_objectness is not None:
+            self.proposal_objectness = np.asarray(self.proposal_objectness, dtype=np.float32).reshape(-1)
+        if self.proposal_view_ids is not None:
+            self.proposal_view_ids = np.asarray(self.proposal_view_ids, dtype=np.int64).reshape(-1)
+        if self.proposal_source_ids is not None:
+            self.proposal_source_ids = np.asarray(self.proposal_source_ids, dtype=np.int64).reshape(-1)
         if self.action is not None:
             self.action = np.asarray(self.action, dtype=np.float32).reshape(-1)
         if self.action_chunk is not None:

@@ -291,6 +291,22 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
+            "mvtrack_proposal_memory_is_optional_typed_evidence",
+            contracts.contains("class PicfPseudoProposalState", "proposal: PicfPseudoProposalState | None")
+            and config.contains("proposal_memory_enabled: bool = True", "proposal_read_weight: float = 0.15")
+            and pipeline.contains("aqr_proposal_reader", "proposal_priors", "graph_proposal_weights", "proposal_signature"),
+            severity="fail",
+            detail=(
+                "Optional proposal memory must be typed evidence only: no proposal data is a no-op, "
+                "and provided proposal boxes/tokens route through AQR rather than overwriting posterior identity."
+            ),
+            evidence=contracts.refs("class PicfPseudoProposalState", "proposal: PicfPseudoProposalState | None")
+            + config.refs("proposal_memory_enabled", "proposal_read_weight")
+            + pipeline.refs("aqr_proposal_reader", "proposal_priors", "graph_proposal_weights", "proposal_signature"),
+        )
+    )
+    checks.append(
+        _finding(
             "projective_geometry_reaches_alignment_losses",
             pipeline.contains("projective_compatibility", "projective_candidate_mask", "projective_attention_bias")
             and training.contains("anchor_pv", "_routing_consistency", "_mapg_cycle_loss"),
@@ -394,6 +410,22 @@ def run_static_checks() -> list[Finding]:
             detail="Slot-JEPA/support prediction targets must come from detached next posterior, not future input leakage.",
             evidence=training.refs("future.posterior_tokens", "target_slots = future.posterior_tokens.detach()", "posterior_support_summary")
             + trainer.refs("future_targets_from_current_targets(current_targets, availability, posterior=posterior)"),
+        )
+    )
+    checks.append(
+        _finding(
+            "aqr_denoising_is_training_only_and_guarded",
+            config.contains("lambda_aqr_denoising: float = 0.0")
+            and training.contains("lambda_aqr_denoising: float = 0.0", "_aqr_support_denoising_loss", "cfg.lambda_aqr_denoising")
+            and trainer.contains("--lambda-aqr-denoising", "_LOSS_DEFAULTS.lambda_aqr_denoising", "loss_aqr_denoising"),
+            severity="fail",
+            detail=(
+                "AQR denoising must be a guarded training-only support auxiliary with default zero weight; "
+                "it must not introduce inference-time query/path changes."
+            ),
+            evidence=config.refs("lambda_aqr_denoising")
+            + training.refs("lambda_aqr_denoising", "_aqr_support_denoising_loss", "cfg.lambda_aqr_denoising")
+            + trainer.refs("--lambda-aqr-denoising", "loss_aqr_denoising"),
         )
     )
     checks.append(

@@ -1164,6 +1164,49 @@ def test_mvtrack_tracklet_support_is_optional_and_first_class(tmp_path: Path) ->
     assert "aqr_tracklet_support_entropy_mean" in with_track.debug
 
 
+def test_mvtrack_proposal_support_is_optional_and_guarded(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_query_count_physical=4,
+        aqr_query_count_task=2,
+        aqr_query_rounds=1,
+        proposal_memory_enabled=True,
+    )
+    frame = next(iter(replay))
+    no_proposal = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+    assert no_proposal.state.token_field.proposal is None
+    assert no_proposal.state.anchor_prior_graph is not None
+    assert no_proposal.state.anchor_prior_graph.proposal_priors is None
+
+    proposal_frame = dataclasses.replace(
+        frame,
+        proposal_boxes_xyxy=np.asarray([[0.1, 0.2, 0.3, 0.4], [0.55, 0.55, 0.8, 0.9]], dtype=np.float32),
+        proposal_objectness=np.asarray([0.95, 0.7], dtype=np.float32),
+        proposal_view_ids=np.asarray([0, 1], dtype=np.int64),
+        proposal_source_ids=np.asarray([5, 5], dtype=np.int64),
+    )
+    with_proposal = core.step(
+        proposal_frame,
+        point_features_override=_point_override(core, proposal_frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+    assert with_proposal.state.token_field.proposal is not None
+    assert with_proposal.state.token_field.proposal.tokens.shape[0] == 2
+    assert with_proposal.state.anchor_prior_graph is not None
+    assert with_proposal.state.anchor_prior_graph.proposal_priors is not None
+    assert with_proposal.state.anchor_prior_graph.proposal_priors.shape[-1] == 2
+    assert with_proposal.state.posterior.proposal_signature is not None
+    assert with_proposal.debug["owm_proposal_tokens"] == 2.0
+    assert "aqr_proposal_support_entropy_mean" in with_proposal.debug
+
+
 def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     core, replay = _make_core(
         tmp_path,

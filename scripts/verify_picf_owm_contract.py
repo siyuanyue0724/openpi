@@ -79,9 +79,11 @@ def run_checks() -> list[Check]:
             _contains(
                 contracts,
                 "class PicfTrackletSupportState",
+                "class PicfPseudoProposalState",
                 "class PicfCacheReadState",
                 "visual_signature",
                 "tracklet_signature",
+                "proposal_signature",
                 "ordinal_target_rank",
             ),
             "MVTrack contracts must expose typed tracklets, cache read metadata, support signatures, and weak ordinal targets.",
@@ -114,6 +116,7 @@ def run_checks() -> list[Check]:
                 "ordinal_relation_enabled: bool = True",
                 "vjepa_multiview_enabled: bool = True",
                 "tracklet_memory_enabled: bool = True",
+                "proposal_memory_enabled: bool = True",
                 "bind_support_signature_weight",
                 "evidence_cache_address_weight",
             ),
@@ -144,8 +147,11 @@ def run_checks() -> list[Check]:
                 "self.clip_buffers",
                 "PicfTrackletSupportState",
                 "aqr_tracklet_reader",
+                "aqr_proposal_reader",
                 "tracklet_priors",
+                "proposal_priors",
                 "graph_tracklet_weights",
+                "graph_proposal_weights",
                 "bind_support_signature_weight",
                 "bind_address_weight",
                 "local_priors",
@@ -185,6 +191,7 @@ def run_checks() -> list[Check]:
                 pipeline,
                 "aqr_temporal_support_entropy_mean",
                 "aqr_pg_support_entropy_mean",
+                "aqr_proposal_support_entropy_mean",
                 "posterior_identity_switch_rate",
                 "evidence_cache_trust_mean",
                 "innovation_norm_visual",
@@ -199,7 +206,14 @@ def run_checks() -> list[Check]:
         ),
         Check(
             "training_loss_family_exposed",
-            _contains(training, "lambda_slot_jepa", "lambda_support_pred", "lambda_binding_consistency")
+            _contains(
+                training,
+                "lambda_slot_jepa",
+                "lambda_support_pred",
+                "lambda_binding_consistency",
+                "lambda_aqr_denoising",
+                "_aqr_support_denoising_loss",
+            )
             and not _contains(
                 training,
                 "lambda_cross_modal_align",
@@ -221,7 +235,16 @@ def run_checks() -> list[Check]:
         ),
         Check(
             "evidence_bundle_reads_required_keys",
-            _contains(evidence, "OWM_KEYS", "loss_slot_jepa", "aqr_temporal_support_entropy_mean", "posterior_identity_switch_rate", "evidence_cache_trust_mean"),
+            _contains(
+                evidence,
+                "OWM_KEYS",
+                "loss_slot_jepa",
+                "loss_aqr_denoising",
+                "aqr_temporal_support_entropy_mean",
+                "aqr_proposal_support_entropy_mean",
+                "posterior_identity_switch_rate",
+                "evidence_cache_trust_mean",
+            ),
             "Evidence bundle must include OWM loss/debug metrics for reviewer handoff.",
         ),
         Check(
@@ -231,7 +254,7 @@ def run_checks() -> list[Check]:
                 "PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md",
                 "not a replacement",
                 "maintained v26 baseline",
-                "future runtime completion gates",
+                "code-level runtime completion",
             )
             and _contains(
                 mvtrack_readme,
@@ -240,8 +263,10 @@ def run_checks() -> list[Check]:
                 "support-signature identity binding",
                 "address-aware cache retrieval",
                 "tracklet typed memory",
+                "optional proposal memory",
+                "training-only support denoising",
                 "matched slot-JEPA/support prediction",
-                "MVTrack should be considered runtime-complete only after Section 16 passes",
+                "MVTrack should be considered code-level runtime-complete after Section 16",
             ),
             "README_v2.2 must route reviewers to the guarded MVTrack next-version contract without claiming runtime completion.",
         ),

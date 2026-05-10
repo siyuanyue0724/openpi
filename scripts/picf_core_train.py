@@ -1083,6 +1083,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "evidence_cache_len",
         "vjepa_max_views",
         "tracklet_max_tokens",
+        "proposal_max_tokens",
         "local_refinement_topk",
     ):
         if getattr(args, _name, None) is None:
@@ -1094,6 +1095,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "vjepa_multiview_enabled",
         "evidence_cache_enabled",
         "tracklet_memory_enabled",
+        "proposal_memory_enabled",
         "local_refinement_enabled",
         "slot_jepa_enabled",
         "support_prediction_enabled",
@@ -1116,6 +1118,8 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "evidence_cache_role_weight",
         "tracklet_confidence_floor",
         "tracklet_read_weight",
+        "proposal_confidence_floor",
+        "proposal_read_weight",
         "bind_support_signature_weight",
         "bind_address_weight",
         "bind_address_innovation_downweight",
@@ -2594,6 +2598,8 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_pg_support_peak_mean",
     "aqr_tracklet_support_entropy_mean",
     "aqr_tracklet_support_max",
+    "aqr_proposal_support_entropy_mean",
+    "aqr_proposal_support_max",
     "aqr_local_support_entropy_mean",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
@@ -2601,6 +2607,8 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "posterior_recycle_rate",
     "owm_tracklet_tokens",
     "owm_tracklet_valid_fraction",
+    "owm_proposal_tokens",
+    "owm_proposal_valid_fraction",
     "owm_posterior_support_signature_mean",
     "evidence_cache_trust_mean",
     "evidence_cache_age_mean",
@@ -2671,6 +2679,7 @@ class _MetricAccumulator:
     loss_slot_jepa: float = 0.0
     loss_support_pred: float = 0.0
     loss_binding_consistency: float = 0.0
+    loss_aqr_denoising: float = 0.0
     physical_aux_budget_scale: float = 0.0
     semantic_aux_budget_scale: float = 0.0
     alignment_budget_scale: float = 0.0
@@ -2728,6 +2737,7 @@ class _MetricAccumulator:
         self.loss_slot_jepa += float(_loss_component_or_zero(losses, "slot_jepa").item())
         self.loss_support_pred += float(_loss_component_or_zero(losses, "support_pred").item())
         self.loss_binding_consistency += float(_loss_component_or_zero(losses, "binding_consistency").item())
+        self.loss_aqr_denoising += float(_loss_component_or_zero(losses, "aqr_denoising").item())
         self.physical_aux_budget_scale += float(losses.physical_aux_budget_scale.item())
         self.semantic_aux_budget_scale += float(losses.semantic_aux_budget_scale.item())
         self.alignment_budget_scale += float(losses.alignment_budget_scale.item())
@@ -2777,6 +2787,7 @@ class _MetricAccumulator:
         self.loss_slot_jepa += float(outputs.get("loss_slot_jepa", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_support_pred += float(outputs.get("loss_support_pred", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_binding_consistency += float(outputs.get("loss_binding_consistency", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_aqr_denoising += float(outputs.get("loss_aqr_denoising", outputs["loss_pt"] * 0.0).detach().item())
         self.physical_aux_budget_scale += float(outputs["physical_aux_budget_scale"].detach().item())
         self.semantic_aux_budget_scale += float(outputs["semantic_aux_budget_scale"].detach().item())
         self.alignment_budget_scale += float(outputs["alignment_budget_scale"].detach().item())
@@ -2832,6 +2843,7 @@ class _MetricAccumulator:
             "loss_slot_jepa": self.loss_slot_jepa / denom,
             "loss_support_pred": self.loss_support_pred / denom,
             "loss_binding_consistency": self.loss_binding_consistency / denom,
+            "loss_aqr_denoising": self.loss_aqr_denoising / denom,
             "physical_aux_budget_scale": self.physical_aux_budget_scale / denom,
             "semantic_aux_budget_scale": self.semantic_aux_budget_scale / denom,
             "alignment_budget_scale": self.alignment_budget_scale / denom,
@@ -2928,6 +2940,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
             "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
             "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
+            "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
             "physical_aux_budget_scale": losses.physical_aux_budget_scale,
             "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
             "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3042,6 +3055,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_slot_jepa": metrics["loss_slot_jepa"] / denom,
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
+            "loss_aqr_denoising": metrics["loss_aqr_denoising"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3265,6 +3279,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
+                    "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3317,6 +3332,9 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_support_pred"] = metrics["loss_support_pred"] + _loss_component_or_zero(losses, "support_pred")
                 metrics["loss_binding_consistency"] = metrics["loss_binding_consistency"] + _loss_component_or_zero(
                     losses, "binding_consistency"
+                )
+                metrics["loss_aqr_denoising"] = metrics["loss_aqr_denoising"] + _loss_component_or_zero(
+                    losses, "aqr_denoising"
                 )
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
@@ -3392,6 +3410,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
+                    "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3441,6 +3460,9 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_support_pred"] = metrics["loss_support_pred"] + _loss_component_or_zero(losses, "support_pred")
                 metrics["loss_binding_consistency"] = metrics["loss_binding_consistency"] + _loss_component_or_zero(
                     losses, "binding_consistency"
+                )
+                metrics["loss_aqr_denoising"] = metrics["loss_aqr_denoising"] + _loss_component_or_zero(
+                    losses, "aqr_denoising"
                 )
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
@@ -3494,6 +3516,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_slot_jepa": metrics["loss_slot_jepa"] / denom,
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
+            "loss_aqr_denoising": metrics["loss_aqr_denoising"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3550,6 +3573,7 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_slot_jepa",
     "loss_support_pred",
     "loss_binding_consistency",
+    "loss_aqr_denoising",
     "physical_aux_budget_scale",
     "semantic_aux_budget_scale",
     "alignment_budget_scale",
@@ -4496,6 +4520,14 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default("tracklet_confidence_floor", _SPEC_DEFAULTS.tracklet_confidence_floor)
         ),
         tracklet_read_weight=float(_arg_or_default("tracklet_read_weight", _SPEC_DEFAULTS.tracklet_read_weight)),
+        proposal_memory_enabled=bool(
+            _arg_or_default("proposal_memory_enabled", _SPEC_DEFAULTS.proposal_memory_enabled)
+        ),
+        proposal_max_tokens=int(_arg_or_default("proposal_max_tokens", _SPEC_DEFAULTS.proposal_max_tokens)),
+        proposal_confidence_floor=float(
+            _arg_or_default("proposal_confidence_floor", _SPEC_DEFAULTS.proposal_confidence_floor)
+        ),
+        proposal_read_weight=float(_arg_or_default("proposal_read_weight", _SPEC_DEFAULTS.proposal_read_weight)),
         bind_support_signature_weight=float(
             _arg_or_default("bind_support_signature_weight", _SPEC_DEFAULTS.bind_support_signature_weight)
         ),
@@ -4700,6 +4732,7 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_slot_jepa=float(getattr(args, "lambda_slot_jepa", defaults.lambda_slot_jepa)),
         lambda_support_pred=float(getattr(args, "lambda_support_pred", defaults.lambda_support_pred)),
         lambda_binding_consistency=float(getattr(args, "lambda_binding_consistency", defaults.lambda_binding_consistency)),
+        lambda_aqr_denoising=float(getattr(args, "lambda_aqr_denoising", defaults.lambda_aqr_denoising)),
         mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", defaults.mapg_siglip_tau)),
         mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", defaults.mapg_vicreg_var_target)),
         mapg_vicreg_cov_weight=float(getattr(args, "mapg_vicreg_cov_weight", defaults.mapg_vicreg_cov_weight)),
@@ -5382,7 +5415,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s local_refinement_enabled=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -5415,12 +5448,16 @@ def train(args: argparse.Namespace) -> None:
                         _SPEC_DEFAULTS.evidence_cache_innovation_downweight,
                     )
                 ),
+                bool(getattr(args, "tracklet_memory_enabled", _SPEC_DEFAULTS.tracklet_memory_enabled)),
+                bool(getattr(args, "proposal_memory_enabled", _SPEC_DEFAULTS.proposal_memory_enabled)),
+                bool(getattr(args, "local_refinement_enabled", _SPEC_DEFAULTS.local_refinement_enabled)),
                 bool(getattr(args, "slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
                 bool(getattr(args, "support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)),
                 bool(getattr(args, "ordinal_relation_enabled", _SPEC_DEFAULTS.ordinal_relation_enabled)),
                 float(getattr(args, "lambda_slot_jepa", _LOSS_DEFAULTS.lambda_slot_jepa)),
                 float(getattr(args, "lambda_support_pred", _LOSS_DEFAULTS.lambda_support_pred)),
                 float(getattr(args, "lambda_binding_consistency", _LOSS_DEFAULTS.lambda_binding_consistency)),
+                float(getattr(args, "lambda_aqr_denoising", _LOSS_DEFAULTS.lambda_aqr_denoising)),
                 float(getattr(args, "aqr_obs_gate_init", _SPEC_DEFAULTS.aqr_obs_gate_init)),
                 float(getattr(args, "aqr_task_gate_init", _SPEC_DEFAULTS.aqr_task_gate_init)),
                 float(getattr(args, "aqr_posterior_gate_init", _SPEC_DEFAULTS.aqr_posterior_gate_init)),
@@ -5996,6 +6033,7 @@ def main() -> None:
     parser.add_argument("--lambda-slot-jepa", type=float, default=_LOSS_DEFAULTS.lambda_slot_jepa)
     parser.add_argument("--lambda-support-pred", type=float, default=_LOSS_DEFAULTS.lambda_support_pred)
     parser.add_argument("--lambda-binding-consistency", type=float, default=_LOSS_DEFAULTS.lambda_binding_consistency)
+    parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)
     parser.add_argument("--mapg-siglip-tau", type=float, default=_LOSS_DEFAULTS.mapg_siglip_tau)
     parser.add_argument("--mapg-vicreg-var-target", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_var_target)
     parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_cov_weight)
@@ -6307,6 +6345,15 @@ def main() -> None:
     parser.add_argument("--tracklet-max-tokens", type=int, default=_SPEC_DEFAULTS.tracklet_max_tokens)
     parser.add_argument("--tracklet-confidence-floor", type=float, default=_SPEC_DEFAULTS.tracklet_confidence_floor)
     parser.add_argument("--tracklet-read-weight", type=float, default=_SPEC_DEFAULTS.tracklet_read_weight)
+    parser.add_argument(
+        "--proposal-memory-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.proposal_memory_enabled,
+        help="Enable optional pseudo-proposal typed memory. Missing proposal data remains a no-op.",
+    )
+    parser.add_argument("--proposal-max-tokens", type=int, default=_SPEC_DEFAULTS.proposal_max_tokens)
+    parser.add_argument("--proposal-confidence-floor", type=float, default=_SPEC_DEFAULTS.proposal_confidence_floor)
+    parser.add_argument("--proposal-read-weight", type=float, default=_SPEC_DEFAULTS.proposal_read_weight)
     parser.add_argument("--bind-support-signature-weight", type=float, default=_SPEC_DEFAULTS.bind_support_signature_weight)
     parser.add_argument("--bind-address-weight", type=float, default=_SPEC_DEFAULTS.bind_address_weight)
     parser.add_argument(

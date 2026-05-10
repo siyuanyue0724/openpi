@@ -6,8 +6,8 @@ Current PICF documents:
 
 1. [`README_v2.2.md`](./README_v2.2.md)
    The current local v2.2 architecture record and implementation audit for the
-   live codebase, including the explicit effector/object anchor role split and
-   global scene point-pool contract.
+   live codebase, including the explicit effector/object anchor role split,
+   global scene point-pool contract, and PICF-AQR-OWM/MVTrack deployment links.
 2. [`README_PI05_PARITY_AUDIT.md`](./README_PI05_PARITY_AUDIT.md)
    Code-level comparison of reference PI0.5 / PI0.5+Sonata dataflow against
    current PICF enabled and PI0.5-only ablated modes.

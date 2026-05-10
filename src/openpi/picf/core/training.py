@@ -76,6 +76,7 @@ class PicfTransitionLossConfig:
     lambda_slot_jepa: float = 0.0
     lambda_support_pred: float = 0.0
     lambda_binding_consistency: float = 0.0
+    lambda_aqr_denoising: float = 0.0
     mapg_siglip_tau: float = 0.07
     mapg_vicreg_var_target: float = 1.0
     mapg_vicreg_cov_weight: float = 0.04
@@ -152,6 +153,7 @@ class PicfTransitionLossBreakdown:
     slot_jepa: torch.Tensor
     support_pred: torch.Tensor
     binding_consistency: torch.Tensor
+    aqr_denoising: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -198,6 +200,7 @@ class PicfTransitionLossBreakdown:
             "slot_jepa": float(self.slot_jepa.item()),
             "support_pred": float(self.support_pred.item()),
             "binding_consistency": float(self.binding_consistency.item()),
+            "aqr_denoising": float(self.aqr_denoising.item()),
         }
 
 
@@ -375,6 +378,54 @@ def _matched_prediction_loss(
     return 0.5 * (forward + backward), assign.detach()
 
 
+def _aqr_support_denoising_loss(
+    state: PicfCoreState,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Training-only pseudo-target denoising over confident typed supports.
+
+    This auxiliary never creates inference-time queries and never writes to the
+    posterior/action path. It only asks already-produced AQR support distributions
+    to be self-consistent around their detached high-confidence peaks. That keeps
+    it mathematically a guarded teacher signal, not a new source of truth.
+    """
+
+    graph = getattr(state, "anchor_prior_graph", None)
+    if graph is None:
+        return _zero_like(reference)
+
+    terms: list[torch.Tensor] = []
+    priors: tuple[torch.Tensor | None, ...] = (
+        getattr(graph, "visual_priors", None),
+        getattr(graph, "point_priors", None),
+        getattr(graph, "vjepa_temporal_priors", None),
+        getattr(graph, "pg_priors", None),
+        getattr(graph, "tracklet_priors", None),
+        getattr(graph, "proposal_priors", None),
+        getattr(graph, "local_priors", None),
+    )
+    for prior in priors:
+        if prior is None or prior.numel() == 0 or prior.shape[-1] <= 1:
+            continue
+        prob = prior.to(device=reference.device, dtype=reference.dtype).clamp_min(0.0)
+        prob = prob / torch.clamp(prob.sum(dim=-1, keepdim=True), min=eps)
+        peak = prob.max(dim=-1).values.detach()
+        uniform = torch.full_like(peak, 1.0 / float(prob.shape[-1]))
+        active = (peak > torch.clamp(uniform + 0.05, max=0.95)).to(dtype=prob.dtype)
+        if not bool((active.sum() > 0).item()):
+            terms.append(_zero_weight_loss(prior, reference))
+            continue
+        target = prob.detach().argmax(dim=-1)
+        ce = fn.nll_loss(torch.log(torch.clamp(prob, min=eps)), target, reduction="none")
+        terms.append((ce * active).sum() / torch.clamp(active.sum(), min=eps))
+
+    if not terms:
+        return _zero_like(reference)
+    return sum(terms) / float(len(terms))
+
+
 def future_targets_from_current_targets(
     targets: dict[str, torch.Tensor | None],
     availability: torch.Tensor,
@@ -500,6 +551,7 @@ def make_action_only_transition_loss(
         slot_jepa=zero,
         support_pred=zero,
         binding_consistency=zero,
+        aqr_denoising=zero,
     )
 
 
@@ -1903,11 +1955,17 @@ def compute_transition_loss(
         reference=predictive.action,
         eps=float(core.config.epsilon_a),
     )
+    aqr_denoising = _aqr_support_denoising_loss(
+        output_t.state,
+        reference=predictive.action,
+        eps=float(core.config.epsilon_a),
+    )
 
     guarded_owm_aux = (
         (cfg.lambda_slot_jepa * slot_jepa)
         + (cfg.lambda_support_pred * support_pred)
         + (cfg.lambda_binding_consistency * binding_consistency)
+        + (cfg.lambda_aqr_denoising * aqr_denoising)
     )
     semantic_group = cfg.lambda_semantic_future_aux * semantic_future_aux
     alignment_group = alignment.total + vl_router_raw + mapg_graph_raw + guarded_owm_aux
@@ -1984,6 +2042,7 @@ def compute_transition_loss(
         slot_jepa=slot_jepa,
         support_pred=support_pred,
         binding_consistency=binding_consistency,
+        aqr_denoising=aqr_denoising,
     )
 
 
