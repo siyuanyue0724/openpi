@@ -426,6 +426,8 @@ def test_window_output_tensor_tuple_roundtrip() -> None:
     assert tuple(restored) == _MODULE._WINDOW_OUTPUT_TENSOR_KEYS
     for key in _MODULE._WINDOW_OUTPUT_TENSOR_KEYS:
         torch.testing.assert_close(restored[key], outputs[key])
+    for key in _MODULE.OWM_DEBUG_METRIC_KEYS:
+        assert key in restored
 
 
 def test_checkpoint_dummy_input_is_not_a_parameter_view() -> None:
@@ -1935,6 +1937,23 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     args.lambda_mapg_routing = 0.05
     args.lambda_mapg_support_diversity = 0.06
     args.lambda_mapg_geometry_diversity = 0.007
+    args.aqr_vjepa_temporal_mode = "last4_tokens"
+    args.aqr_vjepa_temporal_tokens = 4
+    args.aqr_vjepa_temporal_include_delta = False
+    args.evidence_cache_enabled = True
+    args.evidence_cache_len = 5
+    args.evidence_cache_read_weight = 0.125
+    args.evidence_cache_innovation_downweight = 0.7
+    args.slot_jepa_enabled = True
+    args.support_prediction_enabled = True
+    args.ordinal_relation_enabled = True
+    args.ordinal_confidence_threshold = 0.82
+    args.lambda_slot_jepa = 0.011
+    args.lambda_support_pred = 0.012
+    args.lambda_binding_consistency = 0.013
+    args.lambda_cross_modal_align = 0.014
+    args.lambda_ordinal_relation = 0.015
+    args.lambda_innovation_calib = 0.016
     args.mapg_siglip_tau = 0.09
     args.mapg_vicreg_var_target = 0.8
     args.mapg_vicreg_cov_weight = 0.06
@@ -1977,6 +1996,23 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     assert loss_config.lambda_mapg_routing == pytest.approx(0.05)
     assert loss_config.lambda_mapg_support_diversity == pytest.approx(0.06)
     assert loss_config.lambda_mapg_geometry_diversity == pytest.approx(0.007)
+    assert core.config.aqr_vjepa_temporal_mode == "last4_tokens"
+    assert core.config.aqr_vjepa_temporal_tokens == 4
+    assert core.config.aqr_vjepa_temporal_include_delta is False
+    assert core.config.evidence_cache_enabled is True
+    assert core.config.evidence_cache_len == 5
+    assert core.config.evidence_cache_read_weight == pytest.approx(0.125)
+    assert core.config.evidence_cache_innovation_downweight == pytest.approx(0.7)
+    assert core.config.slot_jepa_enabled is True
+    assert core.config.support_prediction_enabled is True
+    assert core.config.ordinal_relation_enabled is True
+    assert core.config.ordinal_confidence_threshold == pytest.approx(0.82)
+    assert loss_config.lambda_slot_jepa == pytest.approx(0.011)
+    assert loss_config.lambda_support_pred == pytest.approx(0.012)
+    assert loss_config.lambda_binding_consistency == pytest.approx(0.013)
+    assert loss_config.lambda_cross_modal_align == pytest.approx(0.014)
+    assert loss_config.lambda_ordinal_relation == pytest.approx(0.015)
+    assert loss_config.lambda_innovation_calib == pytest.approx(0.016)
     assert loss_config.mapg_siglip_tau == pytest.approx(0.09)
     assert loss_config.mapg_vicreg_var_target == pytest.approx(0.8)
     assert loss_config.mapg_vicreg_cov_weight == pytest.approx(0.06)
@@ -2624,6 +2660,9 @@ def test_picf_window_trainer_ablated_uses_action_only_metrics() -> None:
     assert result["loss_semantic_future_aux"].item() == pytest.approx(0.0)
     assert result["loss_alignment"].item() == pytest.approx(0.0)
     assert result["projective_candidate_density"].item() == pytest.approx(0.0)
+    for key in _MODULE.OWM_DEBUG_METRIC_KEYS:
+        assert key in result
+        assert result[key].item() == pytest.approx(0.0)
     assert result["diagnostic_physical_visual_real_seq"] == []
     assert result["diagnostic_semantic_visual_real_seq"] == []
 

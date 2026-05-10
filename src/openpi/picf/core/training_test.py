@@ -21,6 +21,7 @@ from openpi.picf.core.training import PicfAlignmentLossConfig
 from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.core.training import compute_transition_loss
 from openpi.picf.core.training import PicfTransitionLossConfig
+from openpi.picf.core.training import PicfFutureTargets
 from openpi.picf.core.training import extract_future_targets
 from openpi.picf.core.training import future_targets_from_current_targets
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticFeatures
@@ -269,6 +270,36 @@ def test_future_targets_from_current_targets_detaches_teacher_values() -> None:
     assert future.availability.requires_grad is False
 
 
+def test_future_targets_from_current_targets_carries_detached_posterior_teacher() -> None:
+    token_weight = torch.nn.Parameter(torch.ones((2, 3)))
+    tokens = token_weight * 2.0
+    posterior = SimpleNamespace(
+        tokens=tokens,
+        alpha=torch.tensor([0.9, 0.2], requires_grad=True),
+        support_mass=torch.tensor([0.7, 0.3], requires_grad=True),
+        contact_prob=torch.tensor([0.1, 0.8], requires_grad=True),
+        binding=torch.tensor([[0.2, 0.8], [0.6, 0.4]], requires_grad=True),
+    )
+    future = future_targets_from_current_targets(
+        {
+            "visual_latent": None,
+            "visual_real": None,
+            "tactile_real": None,
+            "point_real": None,
+        },
+        torch.ones((4,), requires_grad=True),
+        posterior=posterior,
+    )
+
+    assert future.posterior_tokens is not None
+    assert future.posterior_tokens.requires_grad is False
+    assert torch.allclose(future.posterior_tokens, tokens.detach())
+    assert future.posterior_support_summary is not None
+    assert future.posterior_support_summary.requires_grad is False
+    assert future.posterior_support_summary.shape == (2, 4)
+    assert torch.allclose(future.posterior_support_summary[:, -1], torch.tensor([0.8, 0.6]))
+
+
 def test_transition_loss_closes_one_step_future_supervision_and_backward(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
@@ -333,6 +364,73 @@ def test_transition_loss_reports_effective_budgeted_terms_consistently(tmp_path:
     assert torch.isfinite(losses.physical_aux_capped)
     assert torch.isfinite(losses.semantic_group_capped)
     assert torch.isfinite(losses.alignment_raw)
+
+
+def test_transition_loss_computes_guarded_owm_objectives_when_weighted(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+        config=PicfTransitionLossConfig(
+            lambda_slot_jepa=0.1,
+            lambda_support_pred=0.1,
+            lambda_binding_consistency=0.1,
+            lambda_innovation_calib=0.1,
+        ),
+    )
+
+    assert torch.isfinite(losses.slot_jepa)
+    assert torch.isfinite(losses.support_pred)
+    assert torch.isfinite(losses.binding_consistency)
+    assert torch.isfinite(losses.innovation_calib)
+    assert losses.slot_jepa.item() >= 0.0
+    assert losses.support_pred.item() >= 0.0
+    assert losses.binding_consistency.item() >= 0.0
+    assert losses.innovation_calib.item() >= 0.0
+
+
+def test_slot_jepa_prefers_next_posterior_teacher_over_visual_fallback(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    slot_tokens = first.state.predictive.slot_prediction_tokens
+    assert slot_tokens is not None
+    future = PicfFutureTargets(
+        visual_latent=torch.zeros_like(first.state.predictive.physical_prediction_cache.visual_latent),
+        visual_real=None,
+        tactile_real=None,
+        point_real=None,
+        availability=torch.ones((4,), dtype=slot_tokens.dtype),
+        posterior_tokens=(slot_tokens.detach() + 1.0),
+        posterior_support_summary=None,
+    )
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        config=PicfTransitionLossConfig(lambda_slot_jepa=1.0),
+        future_targets_override=future,
+    )
+
+    assert torch.allclose(losses.slot_jepa, torch.ones_like(losses.slot_jepa), atol=1e-5)
 
 
 def test_transition_loss_can_enable_vl_router_supervision_terms(tmp_path: Path) -> None:

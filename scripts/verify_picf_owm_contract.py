@@ -1,0 +1,149 @@
+#!/usr/bin/env python3
+from __future__ import annotations
+
+import argparse
+import json
+from dataclasses import dataclass
+from pathlib import Path
+
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+
+
+@dataclass(frozen=True)
+class Check:
+    name: str
+    ok: bool
+    detail: str
+
+
+def _read(relpath: str) -> str:
+    return (REPO_ROOT / relpath).read_text(encoding="utf-8")
+
+
+def _contains(source: str, *needles: str) -> bool:
+    return all(needle in source for needle in needles)
+
+
+def run_checks() -> list[Check]:
+    contracts = _read("src/openpi/picf/core/contracts.py")
+    config = _read("src/openpi/picf/core/config.py")
+    pipeline = _read("src/openpi/picf/core/pipeline.py")
+    training = _read("src/openpi/picf/core/training.py")
+    trainer = _read("scripts/picf_core_train.py")
+    wrapper = _read("src/openpi/picf/vjepa/wrapper.py")
+    evidence = _read("scripts/picf_owm_evidence_bundle.py")
+    readme = _read("docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md")
+
+    checks = [
+        Check(
+            "readme_definition_of_done_present",
+            _contains(readme, "Final Definition Of Done", "posterior is the authoritative current belief state"),
+            "README must define the final OWM acceptance contract and posterior authority.",
+        ),
+        Check(
+            "contracts_expose_temporal_visual_support",
+            _contains(contracts, "class PicfTemporalVisualSupportState", "temporal_visual: PicfTemporalVisualSupportState | None"),
+            "Token field must expose typed recent V-JEPA support.",
+        ),
+        Check(
+            "contracts_expose_fixed_evidence_cache",
+            _contains(contracts, "class PicfEvidenceCacheState", "tokens: torch.Tensor", "slot_address: torch.Tensor", "age: torch.Tensor", "innovation_at_write: torch.Tensor"),
+            "Evidence cache must be a fixed tensor state with address/age/innovation metadata.",
+        ),
+        Check(
+            "contracts_expose_graph_owm_fields",
+            _contains(contracts, "vjepa_temporal_priors", "cache_priors", "slot_address", "slot_content", "support_uncertainty"),
+            "Anchor graph must expose temporal/cache/address/content/uncertainty fields.",
+        ),
+        Check(
+            "vjepa_recent_maps_preserves_time",
+            _contains(
+                wrapper,
+                "def recent_maps",
+                "without averaging time",
+                "return tokens[-min(count, int(tokens.shape[0])) :]",
+                "return tokens_np[-min(count, int(tokens_np.shape[0])) :]",
+            ),
+            "V-JEPA wrapper must expose recent maps without averaging.",
+        ),
+        Check(
+            "config_defaults_owm_graph_enabled",
+            _contains(config, 'aqr_vjepa_temporal_mode: str = "last_two_tokens"', "evidence_cache_enabled: bool = True", "slot_jepa_enabled: bool = True", "support_prediction_enabled: bool = True", "ordinal_relation_enabled: bool = True"),
+            "Config must default to the full OWM graph objects being present.",
+        ),
+        Check(
+            "pipeline_builds_temporal_tokens_and_priors",
+            _contains(pipeline, "def _visual_maps", "PicfTemporalVisualSupportState", "vjepa_temporal_priors", "temporal_visual_reader"),
+            "Pipeline must construct temporal support and route AQR over it.",
+        ),
+        Check(
+            "pipeline_preserves_pg_priors",
+            _contains(pipeline, "def _aqr_pg_image_support_read", "pg_priors", "image_token_ranges", "pg_visual_bias"),
+            "AQR PG image support must survive as graph.pg_priors, not only visual bias.",
+        ),
+        Check(
+            "pipeline_cache_order_is_causal",
+            _contains(pipeline, "def _previous_evidence_cache_tokens", "def _write_evidence_cache", "previous.predictive", "evidence_cache=evidence_cache"),
+            "Cache must be read from previous carry and written after posterior correction.",
+        ),
+        Check(
+            "pipeline_outputs_required_owm_debug_keys",
+            _contains(
+                pipeline,
+                "aqr_temporal_support_entropy_mean",
+                "aqr_pg_support_entropy_mean",
+                "posterior_address_drift_mean",
+                "posterior_identity_switch_rate",
+                "evidence_cache_trust_mean",
+                "innovation_norm_visual",
+                "ordinal_loss_active",
+            ),
+            "Pipeline debug output must expose every OWM branch required for diagnosis.",
+        ),
+        Check(
+            "training_uses_next_posterior_teacher",
+            _contains(training, "posterior_tokens", "posterior_support_summary", "future.posterior_tokens", "future.posterior_support_summary"),
+            "Slot-JEPA/support prediction must prefer detached next posterior targets.",
+        ),
+        Check(
+            "training_loss_family_exposed",
+            _contains(training, "lambda_slot_jepa", "lambda_support_pred", "lambda_binding_consistency", "lambda_cross_modal_align", "lambda_ordinal_relation", "lambda_innovation_calib"),
+            "All final OWM loss knobs must be available.",
+        ),
+        Check(
+            "trainer_threads_next_posterior_teacher",
+            _contains(trainer, "future_targets_from_current_targets(current_targets, availability, posterior=posterior)"),
+            "Window trainer must pass the next observed posterior as detached teacher target.",
+        ),
+        Check(
+            "trainer_logs_required_owm_metrics",
+            _contains(trainer, "OWM_DEBUG_METRIC_KEYS", "aqr_temporal_support_entropy_mean", "evidence_cache_trust_mean", "_owm_debug_metrics_from_output"),
+            "Training metrics must carry OWM debug keys into metrics.jsonl.",
+        ),
+        Check(
+            "evidence_bundle_reads_required_keys",
+            _contains(evidence, "OWM_KEYS", "loss_slot_jepa", "aqr_temporal_support_entropy_mean", "posterior_identity_switch_rate", "evidence_cache_trust_mean"),
+            "Evidence bundle must include OWM loss/debug metrics for reviewer handoff.",
+        ),
+    ]
+    return checks
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(description="Verify the PICF-AQR-OWM README-to-code deployment contract.")
+    parser.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    args = parser.parse_args(argv)
+    checks = run_checks()
+    failed = [check for check in checks if not check.ok]
+    if args.json:
+        print(json.dumps({"ok": not failed, "checks": [check.__dict__ for check in checks]}, indent=2, sort_keys=True))
+    else:
+        for check in checks:
+            status = "PASS" if check.ok else "FAIL"
+            print(f"{status} {check.name}: {check.detail}")
+    return 1 if failed else 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

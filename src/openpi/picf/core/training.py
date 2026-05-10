@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import dataclasses
+import math
 from typing import Any
 
 import numpy as np
@@ -20,6 +21,8 @@ class PicfFutureTargets:
     tactile_real: torch.Tensor | None
     point_real: torch.Tensor | None
     availability: torch.Tensor
+    posterior_tokens: torch.Tensor | None = None
+    posterior_support_summary: torch.Tensor | None = None
 
 
 @dataclasses.dataclass(frozen=True)
@@ -71,6 +74,12 @@ class PicfTransitionLossConfig:
     lambda_mapg_routing: float = 0.0
     lambda_mapg_support_diversity: float = 0.0
     lambda_mapg_geometry_diversity: float = 0.0
+    lambda_slot_jepa: float = 0.0
+    lambda_support_pred: float = 0.0
+    lambda_binding_consistency: float = 0.0
+    lambda_cross_modal_align: float = 0.0
+    lambda_ordinal_relation: float = 0.0
+    lambda_innovation_calib: float = 0.0
     mapg_siglip_tau: float = 0.07
     mapg_vicreg_var_target: float = 1.0
     mapg_vicreg_cov_weight: float = 0.04
@@ -146,6 +155,12 @@ class PicfTransitionLossBreakdown:
     mapg_routing: torch.Tensor
     mapg_support_diversity: torch.Tensor
     mapg_geometry_diversity: torch.Tensor
+    slot_jepa: torch.Tensor
+    support_pred: torch.Tensor
+    binding_consistency: torch.Tensor
+    cross_modal_align: torch.Tensor
+    ordinal_relation: torch.Tensor
+    innovation_calib: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -190,6 +205,12 @@ class PicfTransitionLossBreakdown:
             "mapg_routing": float(self.mapg_routing.item()),
             "mapg_support_diversity": float(self.mapg_support_diversity.item()),
             "mapg_geometry_diversity": float(self.mapg_geometry_diversity.item()),
+            "slot_jepa": float(self.slot_jepa.item()),
+            "support_pred": float(self.support_pred.item()),
+            "binding_consistency": float(self.binding_consistency.item()),
+            "cross_modal_align": float(self.cross_modal_align.item()),
+            "ordinal_relation": float(self.ordinal_relation.item()),
+            "innovation_calib": float(self.innovation_calib.item()),
         }
 
 
@@ -235,9 +256,41 @@ def extract_future_targets(
     )
 
 
+def _posterior_support_summary(posterior: Any | None) -> torch.Tensor | None:
+    if posterior is None:
+        return None
+    tokens = getattr(posterior, "tokens", None)
+    if tokens is None or tokens.numel() == 0:
+        return None
+    device = tokens.device
+    dtype = tokens.dtype
+    slot_count = int(tokens.shape[0])
+
+    def _slot_scalar(name: str) -> torch.Tensor:
+        value = getattr(posterior, name, None)
+        if value is None:
+            return torch.zeros((slot_count,), device=device, dtype=dtype)
+        scalar = value.to(device=device, dtype=dtype).reshape(-1)
+        if scalar.numel() < slot_count:
+            scalar = fn.pad(scalar, (0, slot_count - scalar.numel()))
+        return scalar[:slot_count]
+
+    alpha = _slot_scalar("alpha").clamp(0.0, 1.0)
+    support_mass = _slot_scalar("support_mass").clamp(0.0, 1.0)
+    contact_prob = _slot_scalar("contact_prob").clamp(0.0, 1.0)
+    binding = getattr(posterior, "binding", None)
+    if binding is not None and binding.numel() > 0:
+        bind_conf = binding.to(device=device, dtype=dtype).reshape(slot_count, -1).amax(dim=-1).clamp(0.0, 1.0)
+    else:
+        bind_conf = torch.zeros((slot_count,), device=device, dtype=dtype)
+    return torch.stack([alpha, support_mass, contact_prob, bind_conf], dim=-1).detach()
+
+
 def future_targets_from_current_targets(
     targets: dict[str, torch.Tensor | None],
     availability: torch.Tensor,
+    *,
+    posterior: Any | None = None,
 ) -> PicfFutureTargets:
     """Convert current-step targets into detached teacher targets.
 
@@ -256,6 +309,8 @@ def future_targets_from_current_targets(
         tactile_real=_maybe_detach(targets.get("tactile_real")),
         point_real=_maybe_detach(targets.get("point_real")),
         availability=availability.detach(),
+        posterior_tokens=_maybe_detach(getattr(posterior, "tokens", None)),
+        posterior_support_summary=_posterior_support_summary(posterior),
     )
 
 
@@ -354,6 +409,12 @@ def make_action_only_transition_loss(
         mapg_routing=zero,
         mapg_support_diversity=zero,
         mapg_geometry_diversity=zero,
+        slot_jepa=zero,
+        support_pred=zero,
+        binding_consistency=zero,
+        cross_modal_align=zero,
+        ordinal_relation=zero,
+        innovation_calib=zero,
     )
 
 
@@ -1693,8 +1754,109 @@ def compute_transition_loss(
         + (cfg.lambda_tactile_real * tactile_real)
         + (cfg.lambda_point_real * point_real)
     )
+    if (
+        predictive.slot_prediction_tokens is not None
+    ):
+        slot_tokens = predictive.slot_prediction_tokens
+        if future.posterior_tokens is not None and future.posterior_tokens.numel() > 0:
+            target_slots = future.posterior_tokens.detach().to(device=slot_tokens.device, dtype=slot_tokens.dtype)
+            slot_count = min(int(slot_tokens.shape[0]), int(target_slots.shape[0]))
+            width = min(int(slot_tokens.shape[-1]), int(target_slots.shape[-1]))
+            if slot_count > 0 and width > 0:
+                slot_jepa = fn.mse_loss(slot_tokens[:slot_count, :width], target_slots[:slot_count, :width])
+            else:
+                slot_jepa = _zero_weight_loss(slot_tokens, predictive.action)
+        elif future.visual_latent is not None and bool(future.availability[0].item()):
+            target_visual = future.visual_latent.detach().reshape(-1)
+            hidden_dim = int(slot_tokens.shape[-1])
+            if hidden_dim > 0 and target_visual.numel() % hidden_dim == 0:
+                target_summary = target_visual.reshape(-1, hidden_dim).mean(dim=0)
+                slot_jepa = fn.mse_loss(slot_tokens.mean(dim=0), target_summary)
+            else:
+                slot_jepa = _zero_weight_loss(slot_tokens, predictive.action)
+        else:
+            slot_jepa = _zero_weight_loss(slot_tokens, predictive.action)
+    else:
+        slot_jepa = _zero_weight_loss(predictive.slot_prediction_tokens, predictive.action)
+
+    if predictive.slot_prediction_supports is not None:
+        if future.posterior_support_summary is not None and future.posterior_support_summary.numel() > 0:
+            support_target = future.posterior_support_summary.detach().to(
+                device=predictive.slot_prediction_supports.device,
+                dtype=predictive.slot_prediction_supports.dtype,
+            )
+            slot_count = min(int(support_target.shape[0]), int(predictive.slot_prediction_supports.shape[0]))
+            width = min(int(support_target.shape[-1]), int(predictive.slot_prediction_supports.shape[-1]))
+            support_target = support_target[:slot_count, :width]
+            support_pred = fn.mse_loss(predictive.slot_prediction_supports[:slot_count, :width], support_target.clamp(0.0, 1.0))
+        else:
+            support_target = future.availability.detach().to(
+                device=predictive.slot_prediction_supports.device,
+                dtype=predictive.slot_prediction_supports.dtype,
+            )
+            support_target = support_target.clamp(0.0, 1.0)[None, :].expand_as(predictive.slot_prediction_supports)
+            support_pred = fn.mse_loss(predictive.slot_prediction_supports, support_target)
+    else:
+        support_pred = _zero_weight_loss(None, predictive.action)
+
+    binding = output_t.state.posterior.binding
+    if binding is not None and binding.numel() > 0 and binding.shape[-1] > 1:
+        eps = float(core.config.epsilon_a)
+        binding_prob = binding.to(device=predictive.action.device, dtype=predictive.action.dtype).clamp_min(eps)
+        binding_prob = binding_prob / torch.clamp(binding_prob.sum(dim=-1, keepdim=True), min=eps)
+        binding_entropy = -(binding_prob * torch.log(binding_prob)).sum(dim=-1) / math.log(float(binding_prob.shape[-1]))
+        binding_consistency = binding_entropy.mean()
+    else:
+        binding_consistency = _zero_weight_loss(binding, predictive.action)
+
+    graph = output_t.state.anchor_prior_graph
+    if graph is not None and graph.modality_confidence is not None and graph.modality_confidence.numel() > 0:
+        confidence = graph.modality_confidence.to(device=predictive.action.device, dtype=predictive.action.dtype)
+        align_terms = []
+        if confidence.shape[-1] > 2 and graph.vjepa_temporal_priors is not None:
+            align_terms.append(fn.l1_loss(confidence[:, 2], confidence[:, 1]))
+        if confidence.shape[-1] > 3 and graph.pg_priors is not None:
+            align_terms.append(fn.l1_loss(confidence[:, 3], confidence[:, 1]))
+        if confidence.shape[-1] > 4 and graph.point_priors is not None:
+            align_terms.append(fn.l1_loss(confidence[:, 4], confidence[:, 1]))
+        if confidence.shape[-1] > 5 and graph.tactile_priors is not None:
+            align_terms.append(fn.l1_loss(confidence[:, 5], confidence[:, 1]))
+        cross_modal_align = sum(align_terms) / float(len(align_terms)) if align_terms else _zero_weight_loss(confidence, predictive.action)
+    else:
+        cross_modal_align = _zero_weight_loss(None, predictive.action)
+
+    ordinal_scores = output_t.state.task_readout.ordinal_scores
+    if (
+        bool(output_t.state.task_readout.ordinal_active.item())
+        and ordinal_scores is not None
+        and ordinal_scores.numel() > 1
+    ):
+        # Without external rank labels, keep this weak objective geometric:
+        # relation prompts should induce separable candidate scores, not rewrite
+        # posterior identity or force a pseudo target into non-relation data.
+        score_spread = ordinal_scores.to(device=predictive.action.device, dtype=predictive.action.dtype).std(unbiased=False)
+        ordinal_relation = torch.exp(-score_spread)
+    else:
+        ordinal_relation = _zero_weight_loss(ordinal_scores, predictive.action)
+
+    if predictive.innovation_norm is not None and predictive.innovation_norm.numel() > 0:
+        innov = predictive.innovation_norm.to(device=predictive.action.device, dtype=predictive.action.dtype)
+        target_innov = torch.ones_like(innov)
+        availability_mask = future.availability.to(device=innov.device, dtype=innov.dtype).clamp(0.0, 1.0)
+        denom = torch.clamp(availability_mask.sum(), min=1.0)
+        innovation_calib = (((innov - target_innov) ** 2) * availability_mask).sum() / denom
+    else:
+        innovation_calib = _zero_weight_loss(predictive.innovation_norm, predictive.action)
+    guarded_owm_aux = (
+        (cfg.lambda_slot_jepa * slot_jepa)
+        + (cfg.lambda_support_pred * support_pred)
+        + (cfg.lambda_binding_consistency * binding_consistency)
+        + (cfg.lambda_cross_modal_align * cross_modal_align)
+        + (cfg.lambda_ordinal_relation * ordinal_relation)
+        + (cfg.lambda_innovation_calib * innovation_calib)
+    )
     semantic_group = cfg.lambda_semantic_future_aux * semantic_future_aux
-    alignment_group = alignment.total + vl_router_raw + mapg_graph_raw
+    alignment_group = alignment.total + vl_router_raw + mapg_graph_raw + guarded_owm_aux
     physical_aux_capped, physical_scale = _budgeted_group(
         physical_aux,
         action_loss=action_loss,
@@ -1766,6 +1928,12 @@ def compute_transition_loss(
         mapg_routing=mapg_routing,
         mapg_support_diversity=mapg_support_diversity,
         mapg_geometry_diversity=mapg_geometry_diversity,
+        slot_jepa=slot_jepa,
+        support_pred=support_pred,
+        binding_consistency=binding_consistency,
+        cross_modal_align=cross_modal_align,
+        ordinal_relation=ordinal_relation,
+        innovation_calib=innovation_calib,
     )
 
 

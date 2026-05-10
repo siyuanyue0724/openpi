@@ -68,6 +68,35 @@ class PicfAnchorPriorGraphState:
     task_assignment: torch.Tensor | None
     modality_confidence: torch.Tensor
     valid: torch.Tensor
+    vjepa_temporal_priors: torch.Tensor | None = None
+    cache_priors: torch.Tensor | None = None
+    slot_address: torch.Tensor | None = None
+    slot_content: torch.Tensor | None = None
+    support_uncertainty: torch.Tensor | None = None
+
+
+@dataclasses.dataclass
+class PicfTemporalVisualSupportState:
+    tokens: torch.Tensor
+    time_ids: torch.Tensor
+    view_ids: torch.Tensor
+    grid_index: torch.Tensor
+    grid_hw: torch.Tensor
+    current_token_count: torch.Tensor
+    valid: torch.Tensor
+
+
+@dataclasses.dataclass
+class PicfEvidenceCacheState:
+    tokens: torch.Tensor
+    slot_address: torch.Tensor
+    role_ids: torch.Tensor
+    source_ids: torch.Tensor
+    age: torch.Tensor
+    uncertainty: torch.Tensor
+    innovation_at_write: torch.Tensor
+    modality_validity: torch.Tensor
+    valid: torch.Tensor
 
 
 @dataclasses.dataclass
@@ -97,6 +126,7 @@ class PicfTokenFieldState:
     point_pool_ids: torch.Tensor | None = None
     point_positions_world: torch.Tensor | None = None
     point_projectable_mask: torch.Tensor | None = None
+    temporal_visual: PicfTemporalVisualSupportState | None = None
 
 
 @dataclasses.dataclass
@@ -163,6 +193,10 @@ class PicfTaskReadoutState:
     geometry_valid: torch.Tensor | None = None
     graph_visual_weights: torch.Tensor | None = None
     graph_tactile_weights: torch.Tensor | None = None
+    ordinal_active: torch.Tensor | None = None
+    ordinal_scores: torch.Tensor | None = None
+    ordinal_ranks: torch.Tensor | None = None
+    ordinal_axis: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -194,6 +228,8 @@ class PicfPosteriorAnchorState:
     tokens: torch.Tensor
     global_post: torch.Tensor
     role_ids: torch.Tensor | None = None
+    slot_address: torch.Tensor | None = None
+    slot_content: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -215,12 +251,16 @@ class PicfPredictiveState:
     predictive_query_state: torch.Tensor
     global_pred: torch.Tensor
     prediction_cache: PicfPredictionCache
+    slot_prediction_tokens: torch.Tensor | None = None
+    slot_prediction_supports: torch.Tensor | None = None
+    evidence_cache: PicfEvidenceCacheState | None = None
 
 
 @dataclasses.dataclass
 class PicfRecurrentPredictiveState:
     executed_action: torch.Tensor
     physical_prediction_cache: PicfPredictionCache
+    evidence_cache: PicfEvidenceCacheState | None = None
 
 
 @dataclasses.dataclass

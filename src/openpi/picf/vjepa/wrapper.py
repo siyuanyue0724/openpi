@@ -59,6 +59,19 @@ class VjepaFeatureMap:
             return tokens_np[-2:].mean(axis=0, dtype=np.float32)
         return tokens_np[-1]
 
+    def recent_maps(self, n: int = 2) -> torch.Tensor | np.ndarray:
+        """Return the most recent temporal latent maps without averaging time."""
+        count = max(int(n), 1)
+        tokens = self.tokens_thwc
+        if isinstance(tokens, torch.Tensor):
+            if tokens.shape[0] == 0:
+                raise RuntimeError("V-JEPA feature map has no temporal slices.")
+            return tokens[-min(count, int(tokens.shape[0])) :]
+        tokens_np = np.asarray(tokens, dtype=np.float32)
+        if tokens_np.shape[0] == 0:
+            raise RuntimeError("V-JEPA feature map has no temporal slices.")
+        return tokens_np[-min(count, int(tokens_np.shape[0])) :]
+
 
 def vjepa_runtime_available() -> bool:
     try:

@@ -11,12 +11,11 @@ It does not delete current AQR; it upgrades AQR into an object-addressable,
 predictive, posterior-centered belief-state architecture.
 ```
 
-Source note:
+Source:
 
 ```text
-The user-provided method was expected at docs/temp_method.md, but the local
-file is currently empty. This README is built from the method text provided in
-the conversation and from direct code inspection of the current repository.
+Consolidated PICF-AQR-OWM architecture contract based on the current AQR/PICF
+code, posterior audit, deployment discussion, and docs/temp_method.md review.
 ```
 
 ## 1. Final Verdict
@@ -34,6 +33,21 @@ AQR:
 
 OWM:
   object-addressable predictive world/belief model
+```
+
+Deployment verdict:
+
+```text
+GO:
+  implement the complete PICF-AQR-OWM architecture as the final target.
+
+NO-GO:
+  treat the current repo as already being final OWM.
+
+GO WITH HARD GUARDS:
+  run the final implementation only after the Definition of Done passes:
+  state contracts, forward wiring, tests, diagnostics, no-leakage checks, and
+  CALVIN/debug evidence.
 ```
 
 The central invariant is:
@@ -304,9 +318,10 @@ This section maps the proposed method item by item to the current codebase.
 
 ## 3.5 Complete Deployment Definition
 
-This document uses "phase" only as an engineering safety gate. It does **not**
-mean a reduced architecture. The complete deployment target is the following
-single graph:
+This document targets a direct final implementation of the complete graph below.
+When later sections mention gates, they mean reviewable build and validation
+checks inside one final deployment, not a reduced architecture and not a claim
+that the current code is already final OWM.
 
 ```text
 Observation / prompt / previous carry
@@ -365,30 +380,34 @@ Required extensions:
 ```python
 @dataclasses.dataclass
 class PicfTemporalVisualSupportState:
-    tokens: torch.Tensor          # [T_recent * V * H * W, D]
+    tokens: torch.Tensor          # [N, D]
     time_ids: torch.Tensor        # [N]
-    view_ids: torch.Tensor        # [N]
+    view_ids: torch.Tensor        # [N], zero for current static-only V-JEPA
     grid_index: torch.Tensor      # [N, 2]
     grid_norm: torch.Tensor       # [N, 2]
     valid: torch.Tensor
 
 
 @dataclasses.dataclass
-class PicfEvidenceCacheEntry:
-    tokens: torch.Tensor
-    slot_address: torch.Tensor
-    role_ids: torch.Tensor
-    source_ids: torch.Tensor      # real_observation/posterior/predicted
-    age: torch.Tensor
-    uncertainty: torch.Tensor
-    innovation_at_write: torch.Tensor
-    modality_validity: torch.Tensor
-
-
-@dataclasses.dataclass
 class PicfEvidenceCacheState:
-    entries: tuple[PicfEvidenceCacheEntry, ...]
-    valid: torch.Tensor
+    tokens: torch.Tensor                  # [H, K, D]
+    slot_address: torch.Tensor            # [H, K, D_addr]
+    role_ids: torch.Tensor                # [H, K]
+    source_ids: torch.Tensor              # [H, K]
+    age: torch.Tensor                     # [H, K]
+    uncertainty: torch.Tensor             # [H, K]
+    innovation_at_write: torch.Tensor     # [H, K]
+    modality_validity: torch.Tensor       # [H, K, M]
+    valid: torch.Tensor                   # [H, K]
+```
+
+Cache implementation rule:
+
+```text
+Use a fixed-size ring buffer in code. A dynamic tuple of entries is acceptable
+for prose examples, but it should not be the main training/checkpoint contract
+because it makes batching, shape checks, and recurrent carry compatibility less
+stable.
 ```
 
 Required changes to existing states:
@@ -426,6 +445,8 @@ Existing graph consumers must continue to read visual_priors / point_priors /
 tactile_priors / posterior_priors / anchor_tokens. New fields are additive.
 Do not break current observation/task/posterior/control consumers while adding
 the OWM fields.
+All newly added dataclass fields must have default None/default factory values
+or every construction path must be updated in the same commit.
 ```
 
 ### 3.6.2 V-JEPA Temporal Support
@@ -677,6 +698,15 @@ Required implementation:
 6. Keep existing h/c/tokens until all consumers are migrated.
 ```
 
+Binding rule:
+
+```text
+Address is one compatibility term, not the whole identity solution.
+Binding should combine address compatibility, predicted geometry compatibility,
+current content/evidence similarity, role compatibility, and innovation/recycle
+gates. Otherwise a wrong identity can become overly sticky.
+```
+
 Do not implement:
 
 ```text
@@ -692,6 +722,7 @@ address remains stable across low-innovation consecutive frames
 content changes when measurement changes
 recycle gate can intentionally reset address
 semantic prompt changes do not rewrite physical addresses
+identity switch rate does not increase against current AQR baseline
 posterior carry preserves address/content
 ```
 
@@ -717,7 +748,8 @@ Required implementation:
 1. Add PicfEvidenceCacheState to recurrent carry.
 2. Write cache entries after posterior correction, not before correction.
 3. Store source/age/uncertainty/address/role/innovation metadata.
-4. Let AQR and task readout read cache as auxiliary typed memory.
+4. Let AQR and task readout read only the previous-carry cache as auxiliary
+   typed memory.
 5. Downweight cache when current innovation is high.
 6. Clear/reset cache on reset_scaffold and segment boundary.
 ```
@@ -727,6 +759,8 @@ Hard rule:
 ```text
 cache cannot bypass posterior into action.
 cache is read as evidence/context; posterior remains current truth.
+current-step cache write happens after posterior correction and is available
+only to the next recurrent step.
 ```
 
 Required tests:
@@ -781,6 +815,14 @@ They cannot enter current AQR queries, posterior correction, task readout, or
 PI0.5 action input.
 ```
 
+Identity guard:
+
+```text
+Slot-JEPA can be implemented in the final code immediately, but its loss must
+start disabled or very small until address/content diagnostics show stable
+binding. Otherwise a slot-index mismatch can train false identity continuity.
+```
+
 Required tests:
 
 ```text
@@ -788,6 +830,7 @@ future target tensors are detached
 current action logits are unchanged when future target values are perturbed
 slot JEPA loss is finite on short unroll
 binding target masks invalid/recycled slots
+slot matching does not assume raw slot-index equality before identity stability
 innovation calibration decreases trust in stale predictions
 ```
 
@@ -814,6 +857,9 @@ Implementation rule:
 ```text
 Only activate relation loss on high-confidence relation language.
 On non-relation tasks the head may produce features but its supervised loss is off.
+The axis head must make the frame explicit: camera-left, world-left, and
+robot-left are different labels unless calibration says they coincide.
+Relation features cannot rewrite physical posterior identity.
 ```
 
 Required tests:
@@ -822,6 +868,7 @@ Required tests:
 rank loss inactive on prompts without relation/ordinal words
 soft-rank is differentiable and finite
 axis changes under left/right/front/back prompt changes
+camera/world/robot frame choices are logged in debug metrics
 relation head cannot overwrite posterior identity
 ```
 
@@ -873,6 +920,60 @@ Acceptance cannot be based only on action loss. The final path must pass both:
    anchors/supports follow task-relevant objects over time, innovation corrects
    errors quickly, and cache does not lock onto stale hallucinated evidence.
 ```
+
+### 3.6.10 Strict Scripted Contract Diagnosis
+
+Manual README review is not sufficient. The final OWM path must also pass the
+static README-to-code verifier:
+
+```text
+python scripts/verify_picf_owm_contract.py
+python scripts/verify_picf_owm_contract.py --json
+```
+
+The verifier is intentionally strict and checks the architecture contract, not
+just importability:
+
+```text
+README final definition of done and posterior authority
+temporal V-JEPA support contracts and recent_maps time preservation
+fixed tensor evidence cache with address/age/uncertainty/innovation metadata
+graph fields for temporal priors, cache priors, address/content, uncertainty
+pipeline temporal-token construction and AQR temporal priors
+PaliGemma image support surviving as graph.pg_priors
+cache causality: previous-cache read and post-correction write
+debug keys for temporal, PG, posterior identity, cache trust, innovation, ordinal
+next-posterior detached teacher targets for slot-JEPA/support prediction
+all final OWM loss knobs exposed
+trainer propagation of next posterior teacher and OWM debug metrics
+evidence-bundle coverage of OWM loss/debug metrics and verifier status
+```
+
+The evidence bundle must include the verifier snapshot so a reviewer can audit
+one run directory without re-reading the entire repository:
+
+```text
+python scripts/picf_owm_evidence_bundle.py --run-dir <run_dir>
+```
+
+The produced `owm_evidence_bundle.json` must include:
+
+```text
+contract_verifier.ok
+contract_verifier.checks
+args_owm
+latest_owm_metrics
+metrics_tail[*].owm
+diagnostics[*].files
+audit_rules.posterior_authoritative
+audit_rules.cache_auxiliary_only
+audit_rules.future_targets_are_loss_only
+```
+
+This scripted diagnosis is a necessary condition for long-run deployment. It is
+not sufficient by itself: real CALVIN/robot evidence must still show stable
+temporal support, posterior correction after innovation spikes, and no cache
+lock-in.
 
 ## 3.7 Proposal Point-By-Point Resolution
 
@@ -1320,13 +1421,14 @@ against noisy or mismatched targets.
 Resolution:
 
 ```text
-ADOPT, BUT INTERPRET AS RELEASE GATES.
+ADOPT, BUT INTERPRET AS DIRECT IMPLEMENTATION GATES.
 ```
 
 Final rule:
 
 ```text
-Phases are not architectural omissions. They are gates for adding code safely:
+Gates are not separate deployments. They are checks for adding the complete code
+safely:
   state/interface -> forward wiring -> loss -> diagnostics -> tests -> cloud run.
 ```
 
@@ -1401,10 +1503,11 @@ These are explicit rejections. They are not optional ablations.
 10. Do not solve anchor collapse only with geometry repulsion.
 ```
 
-## 3.9 End-To-End Deployment Task List
+## 3.9 End-To-End Implementation Task List
 
-The final implementation should be cut into reviewable PRs or commits, but the
-target is one complete architecture. The required order is:
+The final implementation target is one complete architecture. The work can be
+cut into reviewable commits for engineering control, but those commits are not
+separate production deployments. A practical decomposition is:
 
 ```text
 1. State/interface commit:
@@ -1451,7 +1554,10 @@ target is one complete architecture. The required order is:
 Every commit must keep these invariants passing:
 
 ```text
-python -m py_compile core/contracts.py core/config.py core/pipeline.py core/training.py
+python -m py_compile src/openpi/picf/core/contracts.py
+python -m py_compile src/openpi/picf/core/config.py
+python -m py_compile src/openpi/picf/core/pipeline.py
+python -m py_compile src/openpi/picf/core/training.py
 python -m py_compile scripts/picf_core_train.py scripts/serve_picf_policy.py
 git diff --check
 targeted pipeline/training tests for changed contracts
@@ -1497,7 +1603,7 @@ Final deployment changes:
 
 ```text
 1. Add PicfTemporalVisualSupportState.
-2. Add PicfEvidenceCacheEntry and PicfEvidenceCacheState.
+2. Add PicfEvidenceCacheState as a fixed-size recurrent ring buffer.
 3. Extend PicfTokenFieldState with temporal_visual.
 4. Extend PicfAnchorPriorGraphState with temporal/cache/address/content fields.
 5. Extend PicfPosteriorAnchorState with address/content while preserving h/c/tokens.
@@ -1558,7 +1664,7 @@ Why this is required:
 
 ```text
 The final architecture needs temporal measurement evidence. Averaging time
-before AQR destroys motion/contact timing and cannot support posterior
+before AQR can smear or erase motion/contact timing and can weaken posterior
 correction or slot-level prediction at the required fidelity.
 ```
 
@@ -1982,10 +2088,14 @@ python -m py_compile src/openpi/picf/core/config.py
 python -m py_compile src/openpi/picf/core/pipeline.py
 python -m py_compile src/openpi/picf/core/training.py
 python -m py_compile scripts/picf_core_train.py
+python -m py_compile scripts/verify_picf_owm_contract.py
+python -m py_compile scripts/picf_owm_evidence_bundle.py
 python -m py_compile scripts/serve_picf_policy.py
+python scripts/verify_picf_owm_contract.py
 targeted unit tests for changed contracts/readers/losses
 short AQR forward smoke run
 short CALVIN debug export with JSON and support videos
+python scripts/picf_owm_evidence_bundle.py --run-dir <short_debug_run_dir>
 ```
 
 Canonical long-run launch must preserve:
@@ -2391,16 +2501,16 @@ physical_prediction_cache
 Final evidence cache:
 
 ```text
-PicfEvidenceCacheEntry:
-  tokens
-  source: real_observation | posterior | predicted
-  slot_address
-  role
-  age
-  uncertainty
-  innovation_at_write
-  modality_validity
-  support summaries
+PicfEvidenceCacheState fixed ring buffer:
+  tokens: [H, K, D]
+  source: [H, K]
+  slot_address: [H, K, D_addr]
+  role: [H, K]
+  age: [H, K]
+  uncertainty: [H, K]
+  innovation_at_write: [H, K]
+  modality_validity: [H, K, M]
+  support summaries: fixed tensor fields or masked optional tensors
 ```
 
 Read gate:
@@ -2421,6 +2531,14 @@ Never do:
 
 ```text
 old cache -> direct action truth
+```
+
+Causal order:
+
+```text
+previous cache -> AQR/task read as weak evidence
+current evidence -> posterior correction
+corrected posterior -> write cache for the next step
 ```
 
 ## 12. Address / Content Separation
@@ -2602,35 +2720,38 @@ geometry diversity
 alignment budget scaling
 ```
 
-Final activation order:
+Guarded activation policy for the direct final implementation:
 
 ```text
-Stage A:
+Core path:
   current AQR losses + first-class PG/V-JEPA temporal support diagnostics
 
-Stage B:
+Identity path:
   binding consistency + address/content diagnostics
 
-Stage C:
+Prediction path:
   slot JEPA next-token/content prediction
 
-Stage D:
+Support prediction path:
   support prediction
 
-Stage E:
+Relation path:
   ordinal/relation loss for high-confidence language only
 ```
 
-The final architecture is not cut down; staged activation is required to avoid
-turning unverified future targets and noisy weak relation labels into
-optimization noise.
+The final architecture is implemented as one complete target. The gates above
+are runtime/training guards, not separate reduced deployments. They prevent
+future-target, cache, identity, and weak-relation objectives from becoming
+optimization noise while still keeping the final modules present and testable.
 
-## 17. Full Deployment Plan
+## 17. Direct Full Deployment Plan
 
 This section is the concrete full deployment plan. Every item belongs to the
-final architecture; phases are validation gates, not architectural omissions.
+final architecture. The numbered gates are review and acceptance gates inside a
+direct-to-final implementation, not a recommendation to stop at intermediate
+architectures.
 
-### Phase 1: Temporal V-JEPA Typed Support
+### Gate 1: Temporal V-JEPA Typed Support
 
 Implement:
 
@@ -2661,7 +2782,7 @@ debug records per-time support mass
 no future frame leakage
 ```
 
-### Phase 2: First-Class PaliGemma Image Support
+### Gate 2: First-Class PaliGemma Image Support
 
 Implement:
 
@@ -2688,7 +2809,7 @@ PaliGemma heatmap remains off by default
 PaliGemma image priors are visible in debug and losses
 ```
 
-### Phase 3: Posterior Address / Content Split
+### Gate 3: Posterior Address / Content Split
 
 Implement:
 
@@ -2705,6 +2826,8 @@ Tests:
 ```text
 shape/backward tests
 posterior carry compatibility test
+prompt-only change stability test
+recycle reset test
 identity switch metric on CALVIN debug rollouts
 ```
 
@@ -2716,7 +2839,7 @@ content updates with measurement
 recycle explicitly resets/changes address when needed
 ```
 
-### Phase 4: Posterior-Grounded Evidence Cache
+### Gate 4: Posterior-Grounded Evidence Cache
 
 Implement:
 
@@ -2743,7 +2866,7 @@ Acceptance:
 cache improves temporal continuity without stale hallucination lock-in
 ```
 
-### Phase 5: Slot-Level JEPA Prediction
+### Gate 5: Slot-Level JEPA Prediction
 
 Implement:
 
@@ -2751,7 +2874,7 @@ Implement:
 slot next-content predictor
 detached next-posterior target path
 matching pi(j) from posterior binding/address
-slot_jepa loss with small weight
+slot_jepa loss with disabled-or-small initial weight until identity diagnostics pass
 no future input leakage into action path
 ```
 
@@ -2761,6 +2884,7 @@ Tests:
 teacher target detached
 student path current/past only
 loss finite on short unroll
+slot matching mask rejects unstable/recycled identities
 ```
 
 Acceptance:
@@ -2771,7 +2895,7 @@ posterior correction remains active
 action loss does not destabilize
 ```
 
-### Phase 6: Support Prediction
+### Gate 6: Support Prediction
 
 Implement:
 
@@ -2788,7 +2912,7 @@ support predictions are better than uniform baseline
 do not force tactile contact point to match full visual object extent
 ```
 
-### Phase 7: Ordinal / Relation Head
+### Gate 7: Ordinal / Relation Head
 
 Implement:
 
@@ -2797,6 +2921,7 @@ language ordinal parser / detector
 relation axis head
 soft rank / pairwise relation logits
 high-confidence weak supervision only
+explicit camera/world/robot frame selection
 ```
 
 Acceptance:
@@ -2804,6 +2929,7 @@ Acceptance:
 ```text
 rank loss active only on explicit relation language
 no degradation on non-ordinal tasks
+relation head cannot overwrite posterior address/content identity
 ```
 
 ## 18. Current Training Profile To Preserve
@@ -2933,10 +3059,11 @@ PI0.5:
   action generator over current belief/context
 ```
 
-This is a complete final contract. It is not a minimal patch. The deployment is
-phase-gated only because posterior identity, temporal support, cache trust, and
-future prediction are tightly coupled; enabling all new losses without gates
-would be mathematically less coherent, not more complete.
+This is a complete final contract. It is not a minimal patch. The implementation
+should go directly to the full OWM target, while keeping training/runtime gates
+for posterior identity, temporal support, cache trust, and future prediction.
+Enabling every new loss at full strength without those guards would be
+mathematically less coherent, not more complete.
 
 ## References
 

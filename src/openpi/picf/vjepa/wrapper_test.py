@@ -48,6 +48,22 @@ def test_vjepa_base_defaults_to_ema_encoder() -> None:
     assert torch.equal(state_dict["weight"], torch.tensor([2.0]))
 
 
+def test_vjepa_feature_map_recent_maps_preserve_time_without_mean() -> None:
+    tokens = torch.arange(3 * 2 * 2 * 1, dtype=torch.float32).reshape(3, 2, 2, 1)
+    fmap = vjepa_wrapper.VjepaFeatureMap(
+        tokens_thwc=tokens,
+        source_hw=(8, 8),
+        resized_hw=(8, 8),
+        checkpoint_loaded=False,
+        model_name="stub",
+    )
+
+    recent = fmap.recent_maps(n=2)
+
+    torch.testing.assert_close(recent, tokens[-2:])
+    torch.testing.assert_close(fmap.current_map(use_last_two_mean=True), tokens[-2:].mean(dim=0))
+
+
 def test_rotate_queries_or_keys_preserves_input_dtype() -> None:
     pytest.importorskip("timm")
     from openpi.picf.vjepa.vendor.modules import rotate_queries_or_keys

@@ -99,8 +99,15 @@ graph consumer contract and the same PI0.5 action path.
   slot-level JEPA, support prediction, ordinal grounding, and diagnostics,
   resolves the proposal point-by-point as adopted/guarded/rejected, includes a
   file-by-file code audit/deployment map, and states the final Definition of
-  Done. It is not a conceptual appendix; it is the engineering deployment
-  blueprint for the final architecture.
+  Done. It records the direct-to-final OWM target with hard guards and now
+  requires `python scripts/verify_picf_owm_contract.py` plus the OWM evidence
+  bundle for strict README-to-code diagnosis. It is not a conceptual appendix;
+  it is the engineering deployment blueprint for the final architecture.
+- [`docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md)
+  Temporary live deployment ledger for the OWM implementation. Use this while
+  reviewing the current branch because it records which final README contract
+  items are already wired into code, which loss hooks remain guarded, and which
+  tests have passed.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
@@ -201,6 +208,10 @@ Latest fully local verification evidence:
   checks, targeted invariance regressions, core regression suite, and smoke
   training check all pass
   - latest remote verifier evidence: `231 passed` in the core regression suite
+- `python scripts/verify_picf_owm_contract.py` -> strict final OWM
+  README-to-code contract verifier for temporal V-JEPA, PG priors, posterior
+  address/content, evidence cache causality, no-leakage teacher targets, OWM
+  debug metrics, and evidence-bundle coverage.
 
 Latest 2x40GB frozen-perception burn-in smoke evidence:
 

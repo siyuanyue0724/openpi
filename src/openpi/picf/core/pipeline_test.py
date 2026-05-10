@@ -82,6 +82,27 @@ class _FeatureMapFromClip:
         return self._map
 
 
+class _TemporalModeFeatureMap:
+    def __init__(self) -> None:
+        self.requested: list[int] = []
+
+    def current_map(self, *, use_last_two_mean: bool = False) -> np.ndarray:
+        del use_last_two_mean
+        return np.zeros((4, 4, 8), dtype=np.float32)
+
+    def recent_maps(self, n: int = 2) -> np.ndarray:
+        self.requested.append(int(n))
+        return np.zeros((int(n), 4, 4, 8), dtype=np.float32)
+
+
+class _TemporalModeVisualEncoder:
+    def __init__(self) -> None:
+        self.feature_map = _TemporalModeFeatureMap()
+
+    def encode_clip(self, _clip: np.ndarray) -> _TemporalModeFeatureMap:
+        return self.feature_map
+
+
 def test_transformer_stack_uses_activation_checkpointing_during_training(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
 
@@ -873,6 +894,141 @@ def test_mapg_visual_grounding_survives_missing_pointcloud(tmp_path: Path) -> No
     assert output.state.task_readout.visual_weights is not None
     assert output.state.task_readout.geometry_valid is not None
     assert not bool(output.state.task_readout.geometry_valid.any().item())
+
+
+def test_aqr_owm_populates_temporal_pg_and_address_contracts(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_query_count_physical=4,
+        aqr_query_count_task=3,
+        aqr_query_rounds=1,
+        aqr_pg_image_support_weight=0.0,
+    )
+    frame = next(iter(replay))
+    temporal_visual = np.stack([_visual_override(1.0), _visual_override(2.0)], axis=0)
+
+    output = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=temporal_visual,
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+
+    graph = output.state.anchor_prior_graph
+    assert graph is not None
+    assert graph.pg_priors is not None
+    assert graph.pg_priors.shape[0] == 7
+    assert graph.pg_priors.shape[1] == 4
+    assert graph.vjepa_temporal_priors is not None
+    # Two recent maps plus the optional delta map, each with 4x4 visual cells.
+    assert graph.vjepa_temporal_priors.shape == (7, 3 * 16)
+    assert graph.slot_address is not None
+    assert graph.slot_address.shape == (4, core.config.hidden_dim)
+    assert graph.slot_content is not None
+    assert output.state.token_field.temporal_visual is not None
+    assert output.state.posterior.slot_address is not None
+    assert output.state.posterior.slot_content is not None
+    assert output.state.predictive.slot_prediction_tokens is not None
+    assert output.state.predictive.slot_prediction_supports is not None
+    assert output.state.predictive.slot_prediction_supports.shape == (core.config.persistent_anchors, 4)
+    assert output.debug["owm_pg_priors_available"] == 1.0
+    assert output.debug["owm_temporal_priors_available"] == 1.0
+    assert "aqr_temporal_support_entropy_mean" in output.debug
+    assert "aqr_temporal_support_time_mass_t0" in output.debug
+    assert "aqr_temporal_support_time_mass_t1" in output.debug
+    assert "aqr_pg_support_entropy_mean" in output.debug
+    assert "aqr_pg_support_max" in output.debug
+    assert "aqr_effective_anchor_count" in output.debug
+    assert "innovation_norm_visual" in output.debug
+
+
+def test_vjepa_temporal_mode_controls_recent_map_count(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        aqr_vjepa_temporal_mode="last4_tokens",
+        aqr_vjepa_temporal_tokens=2,
+    )
+    encoder = _TemporalModeVisualEncoder()
+    core.visual_encoder = encoder
+    frame = next(iter(replay))
+    meta = core._build_runtime_meta(frame, previous=None)
+
+    _, temporal = core._visual_maps(frame, override=None, meta=meta)
+
+    assert temporal is not None
+    assert temporal.shape == (4, 4, 4, 8)
+    assert encoder.feature_map.requested == [4]
+
+
+def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_query_count_physical=4,
+        aqr_query_count_task=3,
+        aqr_query_rounds=1,
+        evidence_cache_read_weight=0.25,
+    )
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=np.stack([_visual_override(1.0), _visual_override(1.5)], axis=0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+    assert first.state.anchor_prior_graph is not None
+    assert first.state.anchor_prior_graph.cache_priors is None
+    assert first.state.predictive.evidence_cache is not None
+    assert bool(first.state.predictive.evidence_cache.valid[0].all().item())
+
+    second = core.step(
+        frames[1],
+        previous=first.state,
+        point_features_override=_point_override(core, frames[1]),
+        visual_map_override=np.stack([_visual_override(2.0), _visual_override(2.5)], axis=0),
+        semantic_override=_semantic_features_with_spatial(2.0),
+    )
+
+    graph = second.state.anchor_prior_graph
+    assert graph is not None
+    assert graph.cache_priors is not None
+    assert graph.cache_priors.shape[1] == core.config.persistent_anchors
+    assert second.state.predictive.evidence_cache is not None
+    assert bool(second.state.predictive.evidence_cache.valid[0].all().item())
+    assert bool(second.state.predictive.evidence_cache.valid[1].all().item())
+    assert second.debug["owm_evidence_cache_valid_entries"] >= float(core.config.persistent_anchors)
+    assert "evidence_cache_trust_mean" in second.debug
+    assert "evidence_cache_age_mean" in second.debug
+    assert "posterior_address_drift_mean" in second.debug
+    assert "posterior_identity_switch_rate" in second.debug
+    assert "posterior_recycle_rate" in second.debug
+
+
+def test_ordinal_relation_state_is_prompt_gated_and_does_not_rewrite_posterior(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path, ordinal_relation_enabled=True)
+    frame = next(iter(replay))
+    base = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+    ordinal_frame = dataclasses.replace(frame, prompt="pick the fourth object from the left")
+    ordinal = core.step(
+        ordinal_frame,
+        point_features_override=_point_override(core, ordinal_frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+
+    assert base.state.task_readout.ordinal_active is not None
+    assert not bool(base.state.task_readout.ordinal_active.item())
+    assert ordinal.state.task_readout.ordinal_active is not None
+    assert bool(ordinal.state.task_readout.ordinal_active.item())
+    assert ordinal.debug["ordinal_loss_active"] == 1.0
+    torch.testing.assert_close(base.state.posterior.mu, ordinal.state.posterior.mu)
+    torch.testing.assert_close(base.state.posterior.Sigma, ordinal.state.posterior.Sigma)
 
 
 def test_vl_grounding_enabled_backward_does_not_mutate_query_views(tmp_path: Path) -> None:

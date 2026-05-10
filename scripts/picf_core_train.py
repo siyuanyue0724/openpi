@@ -1079,9 +1079,22 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_query_rounds",
         "aqr_sinkhorn_iters",
         "aqr_temporal_memory_tokens",
+        "aqr_vjepa_temporal_tokens",
+        "evidence_cache_len",
     ):
         if getattr(args, _name, None) is None:
             setattr(args, _name, int(getattr(_SPEC_DEFAULTS, _name)))
+    if getattr(args, "aqr_vjepa_temporal_mode", None) is None:
+        args.aqr_vjepa_temporal_mode = str(_SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
+    for _name in (
+        "aqr_vjepa_temporal_include_delta",
+        "evidence_cache_enabled",
+        "slot_jepa_enabled",
+        "support_prediction_enabled",
+        "ordinal_relation_enabled",
+    ):
+        if getattr(args, _name, None) is None:
+            setattr(args, _name, bool(getattr(_SPEC_DEFAULTS, _name)))
     for _name in (
         "aqr_sinkhorn_temperature",
         "aqr_pg_image_support_weight",
@@ -1089,6 +1102,9 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_pg_peak_threshold",
         "aqr_pg_bias_weight",
         "aqr_support_bias_clip",
+        "evidence_cache_read_weight",
+        "evidence_cache_innovation_downweight",
+        "ordinal_confidence_threshold",
         "aqr_obs_gate_init",
         "aqr_task_gate_init",
         "aqr_posterior_gate_init",
@@ -2307,6 +2323,7 @@ class _PendingTransitionLoss:
     candidate_density: torch.Tensor
     tactile_contact_prob_mean: torch.Tensor
     tactile_active_rate: torch.Tensor
+    owm_debug_metrics: dict[str, torch.Tensor]
     policy_forward_sec: float
 
 
@@ -2537,6 +2554,55 @@ class _CalvinTransitionSource:
             frames=frames,
         )
 
+def _loss_component_or_zero(losses: Any, name: str, reference: torch.Tensor | None = None) -> torch.Tensor:
+    value = getattr(losses, name, None)
+    if value is not None:
+        return value
+    if reference is None:
+        reference = getattr(losses, "pt", None)
+    if reference is None:
+        reference = getattr(losses, "total", None)
+    if reference is None:
+        raise AttributeError(f"loss object has no {name!r}, 'pt', or 'total' component")
+    return reference * 0.0
+
+
+OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
+    "aqr_temporal_support_entropy_mean",
+    "aqr_temporal_support_time_mass_t0",
+    "aqr_temporal_support_time_mass_t1",
+    "aqr_pg_support_entropy_mean",
+    "aqr_pg_support_max",
+    "aqr_pg_support_peak_mean",
+    "aqr_effective_anchor_count",
+    "aqr_same_role_support_overlap_max",
+    "posterior_address_drift_mean",
+    "posterior_identity_switch_rate",
+    "posterior_recycle_rate",
+    "evidence_cache_trust_mean",
+    "evidence_cache_age_mean",
+    "innovation_norm_visual",
+    "innovation_norm_point",
+    "innovation_norm_tactile",
+    "ordinal_loss_active",
+)
+
+
+def _owm_debug_metrics_from_output(output: Any, reference: torch.Tensor) -> dict[str, torch.Tensor]:
+    debug = getattr(output, "debug", {}) or {}
+    return {
+        key: torch.as_tensor(float(debug.get(key, 0.0)), device=reference.device, dtype=reference.dtype)
+        for key in OWM_DEBUG_METRIC_KEYS
+    }
+
+
+def _accumulate_owm_debug_metrics(
+    metrics: dict[str, torch.Tensor],
+    update: dict[str, torch.Tensor],
+) -> None:
+    for key, value in update.items():
+        metrics[key] = metrics.get(key, value * 0.0) + value
+
 
 @dataclasses.dataclass
 class _MetricAccumulator:
@@ -2578,12 +2644,19 @@ class _MetricAccumulator:
     loss_mapg_routing: float = 0.0
     loss_mapg_support_diversity: float = 0.0
     loss_mapg_geometry_diversity: float = 0.0
+    loss_slot_jepa: float = 0.0
+    loss_support_pred: float = 0.0
+    loss_binding_consistency: float = 0.0
+    loss_cross_modal_align: float = 0.0
+    loss_ordinal_relation: float = 0.0
+    loss_innovation_calib: float = 0.0
     physical_aux_budget_scale: float = 0.0
     semantic_aux_budget_scale: float = 0.0
     alignment_budget_scale: float = 0.0
     candidate_density: float = 0.0
     tactile_contact_prob_mean: float = 0.0
     tactile_active_rate: float = 0.0
+    owm_debug_metrics: dict[str, float] = dataclasses.field(default_factory=dict)
     num_windows: int = 0
 
     def update(
@@ -2632,6 +2705,12 @@ class _MetricAccumulator:
         self.loss_mapg_routing += float(losses.mapg_routing.item())
         self.loss_mapg_support_diversity += float(losses.mapg_support_diversity.item())
         self.loss_mapg_geometry_diversity += float(losses.mapg_geometry_diversity.item())
+        self.loss_slot_jepa += float(_loss_component_or_zero(losses, "slot_jepa").item())
+        self.loss_support_pred += float(_loss_component_or_zero(losses, "support_pred").item())
+        self.loss_binding_consistency += float(_loss_component_or_zero(losses, "binding_consistency").item())
+        self.loss_cross_modal_align += float(_loss_component_or_zero(losses, "cross_modal_align").item())
+        self.loss_ordinal_relation += float(_loss_component_or_zero(losses, "ordinal_relation").item())
+        self.loss_innovation_calib += float(_loss_component_or_zero(losses, "innovation_calib").item())
         self.physical_aux_budget_scale += float(losses.physical_aux_budget_scale.item())
         self.semantic_aux_budget_scale += float(losses.semantic_aux_budget_scale.item())
         self.alignment_budget_scale += float(losses.alignment_budget_scale.item())
@@ -2679,12 +2758,22 @@ class _MetricAccumulator:
         self.loss_mapg_routing += float(outputs.get("loss_mapg_routing", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_mapg_support_diversity += float(outputs.get("loss_mapg_support_diversity", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_mapg_geometry_diversity += float(outputs.get("loss_mapg_geometry_diversity", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_slot_jepa += float(outputs.get("loss_slot_jepa", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_support_pred += float(outputs.get("loss_support_pred", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_binding_consistency += float(outputs.get("loss_binding_consistency", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_cross_modal_align += float(outputs.get("loss_cross_modal_align", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_ordinal_relation += float(outputs.get("loss_ordinal_relation", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_innovation_calib += float(outputs.get("loss_innovation_calib", outputs["loss_pt"] * 0.0).detach().item())
         self.physical_aux_budget_scale += float(outputs["physical_aux_budget_scale"].detach().item())
         self.semantic_aux_budget_scale += float(outputs["semantic_aux_budget_scale"].detach().item())
         self.alignment_budget_scale += float(outputs["alignment_budget_scale"].detach().item())
         self.candidate_density += float(outputs["projective_candidate_density"].detach().item())
         self.tactile_contact_prob_mean += float(outputs.get("tactile_contact_prob_mean", 0.0).detach().item())
         self.tactile_active_rate += float(outputs.get("tactile_active_rate", 0.0).detach().item())
+        for key in OWM_DEBUG_METRIC_KEYS:
+            value = outputs.get(key)
+            if value is not None:
+                self.owm_debug_metrics[key] = self.owm_debug_metrics.get(key, 0.0) + float(value.detach().item())
         self.num_windows += 1
 
     def averages(self) -> dict[str, float]:
@@ -2728,12 +2817,19 @@ class _MetricAccumulator:
             "loss_mapg_routing": self.loss_mapg_routing / denom,
             "loss_mapg_support_diversity": self.loss_mapg_support_diversity / denom,
             "loss_mapg_geometry_diversity": self.loss_mapg_geometry_diversity / denom,
+            "loss_slot_jepa": self.loss_slot_jepa / denom,
+            "loss_support_pred": self.loss_support_pred / denom,
+            "loss_binding_consistency": self.loss_binding_consistency / denom,
+            "loss_cross_modal_align": self.loss_cross_modal_align / denom,
+            "loss_ordinal_relation": self.loss_ordinal_relation / denom,
+            "loss_innovation_calib": self.loss_innovation_calib / denom,
             "physical_aux_budget_scale": self.physical_aux_budget_scale / denom,
             "semantic_aux_budget_scale": self.semantic_aux_budget_scale / denom,
             "alignment_budget_scale": self.alignment_budget_scale / denom,
             "projective_candidate_density": self.candidate_density / denom,
             "tactile_contact_prob_mean": self.tactile_contact_prob_mean / denom,
             "tactile_active_rate": self.tactile_active_rate / denom,
+            **{key: self.owm_debug_metrics.get(key, 0.0) / denom for key in OWM_DEBUG_METRIC_KEYS},
         }
 
 
@@ -2770,9 +2866,10 @@ class _PicfWindowTrainer(torch.nn.Module):
             return None
         current_targets = getattr(observed, "current_targets", None)
         availability = getattr(observed, "availability", None)
+        posterior = getattr(observed, "posterior", None)
         if current_targets is None or availability is None:
             return None
-        return future_targets_from_current_targets(current_targets, availability)
+        return future_targets_from_current_targets(current_targets, availability, posterior=posterior)
 
     @staticmethod
     def _loss_metrics(
@@ -2820,6 +2917,12 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_mapg_routing": losses.mapg_routing,
             "loss_mapg_support_diversity": losses.mapg_support_diversity,
             "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
+            "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
+            "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
+            "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
+            "loss_cross_modal_align": _loss_component_or_zero(losses, "cross_modal_align"),
+            "loss_ordinal_relation": _loss_component_or_zero(losses, "ordinal_relation"),
+            "loss_innovation_calib": _loss_component_or_zero(losses, "innovation_calib"),
             "physical_aux_budget_scale": losses.physical_aux_budget_scale,
             "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
             "alignment_budget_scale": losses.alignment_budget_scale,
@@ -2918,6 +3021,26 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
             "loss_focus_pv": metrics["loss_focus_pv"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
+            "loss_vl_router": metrics["loss_vl_router"] / denom,
+            "loss_vl_heatmap_task": metrics["loss_vl_heatmap_task"] / denom,
+            "loss_vl_heatmap_effector": metrics["loss_vl_heatmap_effector"] / denom,
+            "loss_vl_heatmap_interaction": metrics["loss_vl_heatmap_interaction"] / denom,
+            "loss_vl_point_consistency": metrics["loss_vl_point_consistency"] / denom,
+            "loss_vl_anchor_diversity": metrics["loss_vl_anchor_diversity"] / denom,
+            "loss_mapg_graph": metrics["loss_mapg_graph"] / denom,
+            "loss_mapg_siglip": metrics["loss_mapg_siglip"] / denom,
+            "loss_mapg_vicreg": metrics["loss_mapg_vicreg"] / denom,
+            "loss_mapg_cycle": metrics["loss_mapg_cycle"] / denom,
+            "loss_mapg_masked_modality": metrics["loss_mapg_masked_modality"] / denom,
+            "loss_mapg_routing": metrics["loss_mapg_routing"] / denom,
+            "loss_mapg_support_diversity": metrics["loss_mapg_support_diversity"] / denom,
+            "loss_mapg_geometry_diversity": metrics["loss_mapg_geometry_diversity"] / denom,
+            "loss_slot_jepa": metrics["loss_slot_jepa"] / denom,
+            "loss_support_pred": metrics["loss_support_pred"] / denom,
+            "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
+            "loss_cross_modal_align": metrics["loss_cross_modal_align"] / denom,
+            "loss_ordinal_relation": metrics["loss_ordinal_relation"] / denom,
+            "loss_innovation_calib": metrics["loss_innovation_calib"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -2925,6 +3048,9 @@ class _PicfWindowTrainer(torch.nn.Module):
             "tactile_contact_prob_mean": metrics["tactile_contact_prob_mean"] / denom,
             "tactile_active_rate": metrics["tactile_active_rate"] / denom,
         }
+        zero_metric = result["loss_total"] * 0.0
+        for key in OWM_DEBUG_METRIC_KEYS:
+            result[key] = zero_metric
         if capture_visual_diagnostics:
             result["diagnostic_physical_visual_real_seq"] = []
             result["diagnostic_semantic_visual_real_seq"] = []
@@ -3074,11 +3200,13 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics_candidate_density = pending.candidate_density
                 metrics_tactile_contact_prob_mean = pending.tactile_contact_prob_mean
                 metrics_tactile_active_rate = pending.tactile_active_rate
+                metrics_owm_debug_metrics = pending.owm_debug_metrics
             else:
                 losses = None
                 metrics_candidate_density = None
                 metrics_tactile_contact_prob_mean = None
                 metrics_tactile_active_rate = None
+                metrics_owm_debug_metrics = None
             pending = _PendingTransitionLoss(
                 index=index,
                 output=output,
@@ -3089,6 +3217,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                 candidate_density=candidate_density,
                 tactile_contact_prob_mean=tactile_contact_prob_mean,
                 tactile_active_rate=tactile_active_rate,
+                owm_debug_metrics=_owm_debug_metrics_from_output(output, candidate_density),
                 policy_forward_sec=policy_forward_sec,
             )
             if metrics is None:
@@ -3133,6 +3262,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_mapg_routing": losses.mapg_routing,
                     "loss_mapg_support_diversity": losses.mapg_support_diversity,
                     "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
+                    "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
+                    "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
+                    "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
+                    "loss_cross_modal_align": _loss_component_or_zero(losses, "cross_modal_align"),
+                    "loss_ordinal_relation": _loss_component_or_zero(losses, "ordinal_relation"),
+                    "loss_innovation_calib": _loss_component_or_zero(losses, "innovation_calib"),
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3140,6 +3275,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "tactile_contact_prob_mean": metrics_tactile_contact_prob_mean,
                     "tactile_active_rate": metrics_tactile_active_rate,
                 }
+                _accumulate_owm_debug_metrics(metrics, metrics_owm_debug_metrics or {})
             else:
                 if losses is None:
                     previous = policy_forward.next_state
@@ -3181,12 +3317,27 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_mapg_routing"] = metrics["loss_mapg_routing"] + losses.mapg_routing
                 metrics["loss_mapg_support_diversity"] = metrics["loss_mapg_support_diversity"] + losses.mapg_support_diversity
                 metrics["loss_mapg_geometry_diversity"] = metrics["loss_mapg_geometry_diversity"] + losses.mapg_geometry_diversity
+                metrics["loss_slot_jepa"] = metrics["loss_slot_jepa"] + _loss_component_or_zero(losses, "slot_jepa")
+                metrics["loss_support_pred"] = metrics["loss_support_pred"] + _loss_component_or_zero(losses, "support_pred")
+                metrics["loss_binding_consistency"] = metrics["loss_binding_consistency"] + _loss_component_or_zero(
+                    losses, "binding_consistency"
+                )
+                metrics["loss_cross_modal_align"] = metrics["loss_cross_modal_align"] + _loss_component_or_zero(
+                    losses, "cross_modal_align"
+                )
+                metrics["loss_ordinal_relation"] = metrics["loss_ordinal_relation"] + _loss_component_or_zero(
+                    losses, "ordinal_relation"
+                )
+                metrics["loss_innovation_calib"] = metrics["loss_innovation_calib"] + _loss_component_or_zero(
+                    losses, "innovation_calib"
+                )
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
                 metrics["projective_candidate_density"] = metrics["projective_candidate_density"] + metrics_candidate_density
                 metrics["tactile_contact_prob_mean"] = metrics["tactile_contact_prob_mean"] + metrics_tactile_contact_prob_mean
                 metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + metrics_tactile_active_rate
+                _accumulate_owm_debug_metrics(metrics, metrics_owm_debug_metrics or {})
             previous = policy_forward.next_state
 
         if pending is not None:
@@ -3252,6 +3403,12 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_mapg_routing": losses.mapg_routing,
                     "loss_mapg_support_diversity": losses.mapg_support_diversity,
                     "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
+                    "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
+                    "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
+                    "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
+                    "loss_cross_modal_align": _loss_component_or_zero(losses, "cross_modal_align"),
+                    "loss_ordinal_relation": _loss_component_or_zero(losses, "ordinal_relation"),
+                    "loss_innovation_calib": _loss_component_or_zero(losses, "innovation_calib"),
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3259,6 +3416,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "tactile_contact_prob_mean": pending.tactile_contact_prob_mean,
                     "tactile_active_rate": pending.tactile_active_rate,
                 }
+                _accumulate_owm_debug_metrics(metrics, pending.owm_debug_metrics)
             else:
                 metrics["loss_action"] = metrics["loss_action"] + losses.action
                 metrics["loss_action_active7"] = metrics["loss_action_active7"] + losses.action_active7
@@ -3297,12 +3455,27 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_mapg_routing"] = metrics["loss_mapg_routing"] + losses.mapg_routing
                 metrics["loss_mapg_support_diversity"] = metrics["loss_mapg_support_diversity"] + losses.mapg_support_diversity
                 metrics["loss_mapg_geometry_diversity"] = metrics["loss_mapg_geometry_diversity"] + losses.mapg_geometry_diversity
+                metrics["loss_slot_jepa"] = metrics["loss_slot_jepa"] + _loss_component_or_zero(losses, "slot_jepa")
+                metrics["loss_support_pred"] = metrics["loss_support_pred"] + _loss_component_or_zero(losses, "support_pred")
+                metrics["loss_binding_consistency"] = metrics["loss_binding_consistency"] + _loss_component_or_zero(
+                    losses, "binding_consistency"
+                )
+                metrics["loss_cross_modal_align"] = metrics["loss_cross_modal_align"] + _loss_component_or_zero(
+                    losses, "cross_modal_align"
+                )
+                metrics["loss_ordinal_relation"] = metrics["loss_ordinal_relation"] + _loss_component_or_zero(
+                    losses, "ordinal_relation"
+                )
+                metrics["loss_innovation_calib"] = metrics["loss_innovation_calib"] + _loss_component_or_zero(
+                    losses, "innovation_calib"
+                )
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
                 metrics["alignment_budget_scale"] = metrics["alignment_budget_scale"] + losses.alignment_budget_scale
                 metrics["projective_candidate_density"] = metrics["projective_candidate_density"] + pending.candidate_density
                 metrics["tactile_contact_prob_mean"] = metrics["tactile_contact_prob_mean"] + pending.tactile_contact_prob_mean
                 metrics["tactile_active_rate"] = metrics["tactile_active_rate"] + pending.tactile_active_rate
+                _accumulate_owm_debug_metrics(metrics, pending.owm_debug_metrics)
 
         assert metrics is not None
         denom = float(len(totals))
@@ -3346,6 +3519,12 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_mapg_routing": metrics["loss_mapg_routing"] / denom,
             "loss_mapg_support_diversity": metrics["loss_mapg_support_diversity"] / denom,
             "loss_mapg_geometry_diversity": metrics["loss_mapg_geometry_diversity"] / denom,
+            "loss_slot_jepa": metrics["loss_slot_jepa"] / denom,
+            "loss_support_pred": metrics["loss_support_pred"] / denom,
+            "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
+            "loss_cross_modal_align": metrics["loss_cross_modal_align"] / denom,
+            "loss_ordinal_relation": metrics["loss_ordinal_relation"] / denom,
+            "loss_innovation_calib": metrics["loss_innovation_calib"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3353,6 +3532,8 @@ class _PicfWindowTrainer(torch.nn.Module):
             "tactile_contact_prob_mean": metrics["tactile_contact_prob_mean"] / denom,
             "tactile_active_rate": metrics["tactile_active_rate"] / denom,
         }
+        for key in OWM_DEBUG_METRIC_KEYS:
+            result[key] = metrics.get(key, result["loss_total"] * 0.0) / denom
         if capture_visual_diagnostics:
             result["diagnostic_physical_visual_real_seq"] = physical_visual_real_seq
             result["diagnostic_semantic_visual_real_seq"] = semantic_visual_real_seq
@@ -3398,12 +3579,19 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_mapg_routing",
     "loss_mapg_support_diversity",
     "loss_mapg_geometry_diversity",
+    "loss_slot_jepa",
+    "loss_support_pred",
+    "loss_binding_consistency",
+    "loss_cross_modal_align",
+    "loss_ordinal_relation",
+    "loss_innovation_calib",
     "physical_aux_budget_scale",
     "semantic_aux_budget_scale",
     "alignment_budget_scale",
     "projective_candidate_density",
     "tactile_contact_prob_mean",
     "tactile_active_rate",
+    *OWM_DEBUG_METRIC_KEYS,
 )
 
 
@@ -4291,6 +4479,18 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         aqr_temporal_memory_tokens=int(
             _arg_or_default("aqr_temporal_memory_tokens", _SPEC_DEFAULTS.aqr_temporal_memory_tokens)
         ),
+        aqr_vjepa_temporal_mode=str(
+            _arg_or_default("aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
+        ),
+        aqr_vjepa_temporal_tokens=int(
+            _arg_or_default("aqr_vjepa_temporal_tokens", _SPEC_DEFAULTS.aqr_vjepa_temporal_tokens)
+        ),
+        aqr_vjepa_temporal_include_delta=bool(
+            _arg_or_default(
+                "aqr_vjepa_temporal_include_delta",
+                _SPEC_DEFAULTS.aqr_vjepa_temporal_include_delta,
+            )
+        ),
         aqr_obs_gate_init=float(_arg_or_default("aqr_obs_gate_init", _SPEC_DEFAULTS.aqr_obs_gate_init)),
         aqr_task_gate_init=float(_arg_or_default("aqr_task_gate_init", _SPEC_DEFAULTS.aqr_task_gate_init)),
         aqr_posterior_gate_init=float(
@@ -4298,6 +4498,29 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         ),
         aqr_control_gate_init=float(
             _arg_or_default("aqr_control_gate_init", _SPEC_DEFAULTS.aqr_control_gate_init)
+        ),
+        evidence_cache_enabled=bool(
+            _arg_or_default("evidence_cache_enabled", _SPEC_DEFAULTS.evidence_cache_enabled)
+        ),
+        evidence_cache_len=int(_arg_or_default("evidence_cache_len", _SPEC_DEFAULTS.evidence_cache_len)),
+        evidence_cache_read_weight=float(
+            _arg_or_default("evidence_cache_read_weight", _SPEC_DEFAULTS.evidence_cache_read_weight)
+        ),
+        evidence_cache_innovation_downweight=float(
+            _arg_or_default(
+                "evidence_cache_innovation_downweight",
+                _SPEC_DEFAULTS.evidence_cache_innovation_downweight,
+            )
+        ),
+        slot_jepa_enabled=bool(_arg_or_default("slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
+        support_prediction_enabled=bool(
+            _arg_or_default("support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)
+        ),
+        ordinal_relation_enabled=bool(
+            _arg_or_default("ordinal_relation_enabled", _SPEC_DEFAULTS.ordinal_relation_enabled)
+        ),
+        ordinal_confidence_threshold=float(
+            _arg_or_default("ordinal_confidence_threshold", _SPEC_DEFAULTS.ordinal_confidence_threshold)
         ),
         lambda_vl_heatmap_task=float(_arg_or_default("lambda_vl_heatmap_task", _SPEC_DEFAULTS.lambda_vl_heatmap_task)),
         lambda_vl_heatmap_effector=float(
@@ -4472,6 +4695,12 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_mapg_routing=float(getattr(args, "lambda_mapg_routing", 0.0)),
         lambda_mapg_support_diversity=float(getattr(args, "lambda_mapg_support_diversity", 0.0)),
         lambda_mapg_geometry_diversity=float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
+        lambda_slot_jepa=float(getattr(args, "lambda_slot_jepa", 0.0)),
+        lambda_support_pred=float(getattr(args, "lambda_support_pred", 0.0)),
+        lambda_binding_consistency=float(getattr(args, "lambda_binding_consistency", 0.0)),
+        lambda_cross_modal_align=float(getattr(args, "lambda_cross_modal_align", 0.0)),
+        lambda_ordinal_relation=float(getattr(args, "lambda_ordinal_relation", 0.0)),
+        lambda_innovation_calib=float(getattr(args, "lambda_innovation_calib", 0.0)),
         mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", 0.07)),
         mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", 1.0)),
         mapg_vicreg_cov_weight=float(getattr(args, "mapg_vicreg_cov_weight", 0.04)),
@@ -5154,7 +5383,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
             )
             logging.info(
-                "AQR-MAPG direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s temporal_memory_tokens=%s obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s temporal_memory_tokens=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s ordinal_confidence_threshold=%s losses(slot_jepa=%s support_pred=%s bind=%s xmod=%s ordinal=%s innovation=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -5169,6 +5398,35 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "aqr_pg_bias_weight", _SPEC_DEFAULTS.aqr_pg_bias_weight)),
                 float(getattr(args, "aqr_support_bias_clip", _SPEC_DEFAULTS.aqr_support_bias_clip)),
                 int(getattr(args, "aqr_temporal_memory_tokens", _SPEC_DEFAULTS.aqr_temporal_memory_tokens)),
+                str(getattr(args, "aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)),
+                int(getattr(args, "aqr_vjepa_temporal_tokens", _SPEC_DEFAULTS.aqr_vjepa_temporal_tokens)),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_vjepa_temporal_include_delta",
+                        _SPEC_DEFAULTS.aqr_vjepa_temporal_include_delta,
+                    )
+                ),
+                bool(getattr(args, "evidence_cache_enabled", _SPEC_DEFAULTS.evidence_cache_enabled)),
+                int(getattr(args, "evidence_cache_len", _SPEC_DEFAULTS.evidence_cache_len)),
+                float(getattr(args, "evidence_cache_read_weight", _SPEC_DEFAULTS.evidence_cache_read_weight)),
+                float(
+                    getattr(
+                        args,
+                        "evidence_cache_innovation_downweight",
+                        _SPEC_DEFAULTS.evidence_cache_innovation_downweight,
+                    )
+                ),
+                bool(getattr(args, "slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
+                bool(getattr(args, "support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)),
+                bool(getattr(args, "ordinal_relation_enabled", _SPEC_DEFAULTS.ordinal_relation_enabled)),
+                float(getattr(args, "ordinal_confidence_threshold", _SPEC_DEFAULTS.ordinal_confidence_threshold)),
+                float(getattr(args, "lambda_slot_jepa", 0.0)),
+                float(getattr(args, "lambda_support_pred", 0.0)),
+                float(getattr(args, "lambda_binding_consistency", 0.0)),
+                float(getattr(args, "lambda_cross_modal_align", 0.0)),
+                float(getattr(args, "lambda_ordinal_relation", 0.0)),
+                float(getattr(args, "lambda_innovation_calib", 0.0)),
                 float(getattr(args, "aqr_obs_gate_init", _SPEC_DEFAULTS.aqr_obs_gate_init)),
                 float(getattr(args, "aqr_task_gate_init", _SPEC_DEFAULTS.aqr_task_gate_init)),
                 float(getattr(args, "aqr_posterior_gate_init", _SPEC_DEFAULTS.aqr_posterior_gate_init)),
@@ -5742,6 +6000,12 @@ def main() -> None:
     parser.add_argument("--lambda-mapg-routing", type=float, default=0.0)
     parser.add_argument("--lambda-mapg-support-diversity", type=float, default=0.0)
     parser.add_argument("--lambda-mapg-geometry-diversity", type=float, default=0.0)
+    parser.add_argument("--lambda-slot-jepa", type=float, default=0.0)
+    parser.add_argument("--lambda-support-pred", type=float, default=0.0)
+    parser.add_argument("--lambda-binding-consistency", type=float, default=0.0)
+    parser.add_argument("--lambda-cross-modal-align", type=float, default=0.0)
+    parser.add_argument("--lambda-ordinal-relation", type=float, default=0.0)
+    parser.add_argument("--lambda-innovation-calib", type=float, default=0.0)
     parser.add_argument("--mapg-siglip-tau", type=float, default=0.07)
     parser.add_argument("--mapg-vicreg-var-target", type=float, default=1.0)
     parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=0.04)
@@ -6004,6 +6268,49 @@ def main() -> None:
     parser.add_argument("--aqr-pg-bias-weight", type=float, default=_SPEC_DEFAULTS.aqr_pg_bias_weight)
     parser.add_argument("--aqr-support-bias-clip", type=float, default=_SPEC_DEFAULTS.aqr_support_bias_clip)
     parser.add_argument("--aqr-temporal-memory-tokens", type=int, default=_SPEC_DEFAULTS.aqr_temporal_memory_tokens)
+    parser.add_argument(
+        "--aqr-vjepa-temporal-mode",
+        default=_SPEC_DEFAULTS.aqr_vjepa_temporal_mode,
+        choices=["disabled", "last_only", "last_two_tokens", "last_mean_delta", "last4_tokens"],
+        help="Controls the typed V-JEPA temporal support path. last_two_tokens is the OWM default.",
+    )
+    parser.add_argument("--aqr-vjepa-temporal-tokens", type=int, default=_SPEC_DEFAULTS.aqr_vjepa_temporal_tokens)
+    parser.add_argument(
+        "--aqr-vjepa-temporal-include-delta",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_vjepa_temporal_include_delta,
+        help="Append a recent-frame delta token map to the explicit V-JEPA temporal support memory.",
+    )
+    parser.add_argument(
+        "--evidence-cache-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.evidence_cache_enabled,
+        help="Enable the posterior-grounded fixed-ring evidence cache. The cache is read only from previous carry.",
+    )
+    parser.add_argument("--evidence-cache-len", type=int, default=_SPEC_DEFAULTS.evidence_cache_len)
+    parser.add_argument("--evidence-cache-read-weight", type=float, default=_SPEC_DEFAULTS.evidence_cache_read_weight)
+    parser.add_argument(
+        "--evidence-cache-innovation-downweight",
+        type=float,
+        default=_SPEC_DEFAULTS.evidence_cache_innovation_downweight,
+    )
+    parser.add_argument(
+        "--slot-jepa-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.slot_jepa_enabled,
+        help="Materialize slot-level predictive states. Its auxiliary loss remains controlled by lambda-slot-jepa.",
+    )
+    parser.add_argument(
+        "--support-prediction-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.support_prediction_enabled,
+    )
+    parser.add_argument(
+        "--ordinal-relation-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.ordinal_relation_enabled,
+    )
+    parser.add_argument("--ordinal-confidence-threshold", type=float, default=_SPEC_DEFAULTS.ordinal_confidence_threshold)
     parser.add_argument("--aqr-obs-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_obs_gate_init)
     parser.add_argument("--aqr-task-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_task_gate_init)
     parser.add_argument("--aqr-posterior-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_posterior_gate_init)
