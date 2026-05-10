@@ -2,6 +2,15 @@
 
 Date: 2026-05-09
 
+Version:
+
+```text
+PICF-AQR-OWM v1.0
+This version is complete for the code-level deployment contract.
+The scripted verifier and regression set below are the required re-checks after
+any follow-up change.
+```
+
 Status:
 
 ```text
@@ -42,7 +51,7 @@ GO:
   implement the complete PICF-AQR-OWM architecture as the final target.
 
 NO-GO:
-  treat the current repo as already being final OWM.
+  treat a README-only or verifier-failing checkout as final OWM.
 
 GO WITH HARD GUARDS:
   run the final implementation only after the Definition of Done passes:
@@ -1569,6 +1578,14 @@ This section is the concrete audit bridge from `docs/temp_method.md` to the
 current repository. The source method is accepted as the architecture proposal,
 but this README is the implementation contract: every accepted idea must land in
 the files below with the stated invariants.
+
+Status note:
+
+```text
+The "Current facts" blocks below record the pre-deployment audit findings that
+motivated each change. The deployed branch is accepted only by the scripted
+contract verifier and the status ledger, not by these historical findings.
+```
 
 ### 3.10.1 `src/openpi/picf/core/contracts.py`
 

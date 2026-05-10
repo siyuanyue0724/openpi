@@ -53,9 +53,9 @@ Read in this order.
    acceptance criteria, a file-by-file code audit/deployment map, a final
    Definition of Done, and a point-by-point resolution of the proposed method as
    adopted, guarded, or rejected. It is the direct-to-final OWM target, with
-   hard guards and `scripts/verify_picf_owm_contract.py` preventing the current
-   code from being mislabeled as final OWM before the implementation,
-   diagnostics, and no-leakage checks pass.
+   hard guards and `scripts/verify_picf_owm_contract.py` preventing any
+   unchecked branch from being mislabeled as final OWM before the
+   implementation, diagnostics, and no-leakage checks pass.
 
 4. `/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md`
 

@@ -15,11 +15,20 @@ Target:
   implement the complete final PICF-AQR-OWM graph directly.
 
 Guard:
-  do not call the current code final until every contract object is present,
+  do not call a changed checkout final until every contract object is present,
   wired into forward paths, covered by tests, and visible in debug/status.
+  This branch satisfies that code-level guard for PICF-AQR-OWM v1.0 and must
+  be re-verified after any follow-up change.
 
 Non-negotiable:
   posterior remains authoritative; cache and future prediction stay auxiliary.
+```
+
+Version:
+
+```text
+PICF-AQR-OWM v1.0
+Status: complete for the code-level deployment contract.
 ```
 
 ## Contract Ledger
