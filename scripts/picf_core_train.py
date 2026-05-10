@@ -1383,6 +1383,10 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError("aqr_mapg_enabled is the direct-final graph path; do not enable legacy mapg_enabled at the same time.")
     if int(args.warmup_steps) < 0:
         raise ValueError(f"warmup_steps must be >= 0, got {args.warmup_steps}.")
+    if int(getattr(args, "keep_last_checkpoints", 0)) < 0:
+        raise ValueError(
+            f"keep_last_checkpoints must be >= 0, got {getattr(args, 'keep_last_checkpoints', None)}."
+        )
     if float(args.lr) <= 0.0:
         raise ValueError(f"lr must be > 0, got {args.lr}.")
     if float(args.min_lr) < 0.0:
@@ -3800,6 +3804,29 @@ def _checkpoint_dir_for_step(output_dir: Path, step: int) -> Path:
     return output_dir / f"{int(step)}"
 
 
+def _prune_old_checkpoints(output_dir: Path, *, keep_last: int) -> list[Path]:
+    """Remove old numeric step checkpoint directories after a successful save."""
+
+    keep_last = int(keep_last)
+    if keep_last <= 0 or not output_dir.exists():
+        return []
+    step_dirs: list[tuple[int, Path]] = []
+    for path in output_dir.iterdir():
+        if not path.is_dir() or path.name.startswith("tmp_"):
+            continue
+        try:
+            step = int(path.name)
+        except ValueError:
+            continue
+        step_dirs.append((step, path))
+    step_dirs.sort(key=lambda item: item[0])
+    removed: list[Path] = []
+    for _, path in step_dirs[:-keep_last]:
+        shutil.rmtree(path)
+        removed.append(path)
+    return removed
+
+
 def _latest_checkpoint_step(output_dir: Path) -> int | None:
     if not output_dir.exists():
         return None
@@ -6098,6 +6125,16 @@ def train(args: argparse.Namespace) -> None:
                         pbar.write(message)
                     else:
                         print(message, flush=True)
+                    pruned = _prune_old_checkpoints(
+                        output_dir,
+                        keep_last=int(getattr(args, "keep_last_checkpoints", 0)),
+                    )
+                    for path in pruned:
+                        prune_message = f"[picf_core_train] pruned old checkpoint -> {path}"
+                        if pbar is not None:
+                            pbar.write(prune_message)
+                        else:
+                            print(prune_message, flush=True)
                     if wandb_active:
                         wandb.log({"checkpoint_step": int(step + 1)}, step=int(step + 1))
                 _distributed_barrier(use_ddp=use_ddp, device=device)
@@ -6128,6 +6165,15 @@ def main() -> None:
     parser.add_argument("--num-train-steps", type=int, default=30000)
     parser.add_argument("--log-interval", type=int, default=100)
     parser.add_argument("--save-interval", type=int, default=5000)
+    parser.add_argument(
+        "--keep-last-checkpoints",
+        type=int,
+        default=0,
+        help=(
+            "Keep only the latest N numeric step checkpoint directories after each successful save. "
+            "0 disables pruning. Non-step diagnostics and metadata are never pruned."
+        ),
+    )
     parser.add_argument("--diagnostic-interval", type=int, default=500)
     parser.add_argument("--diagnostic-visual-upscale", type=int, default=64)
     parser.add_argument("--accum-steps", type=int, default=1)

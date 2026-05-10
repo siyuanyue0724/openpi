@@ -257,6 +257,18 @@ def run_checks() -> list[Check]:
             "Anchor-only FSDP must ignore frozen root-managed params so flat handles stay uniformly trainable.",
         ),
         Check(
+            "trainer_checkpoint_retention_prunes_numeric_steps_only",
+            _contains(
+                trainer,
+                "def _prune_old_checkpoints",
+                "--keep-last-checkpoints",
+                "keep_last_checkpoints",
+                "shutil.rmtree",
+                "path.name.startswith(\"tmp_\")",
+            ),
+            "Trainer must support bounded checkpoint retention without deleting non-step diagnostics.",
+        ),
+        Check(
             "trainer_logs_required_owm_metrics",
             _contains(trainer, "OWM_DEBUG_METRIC_KEYS", "aqr_temporal_support_entropy_mean", "evidence_cache_trust_mean", "_owm_debug_metrics_from_output"),
             "Training metrics must carry OWM debug keys into metrics.jsonl.",

@@ -376,6 +376,29 @@ Current training profiles:
 | 2x40GB selected state-only burn-in | Current sub-15s 30000-step full-PICF run | `unroll_steps=1`, `burnin_steps=4`, `burnin_mode=state_only`, `semantic_gradient_checkpointing=False`, `persistent_anchors=8`, `observation_anchors=16`, `visual_real_grid=64`, `save_interval=5000` | Four no-grad recurrent updates plus one trainable suffix transition; preserves PICF architecture while reducing runtime |
 | PI0.5-only ablation | Test the PI0.5 action path without PICF branches | `picf_mode=ablated`, `extra_prefix_tokens=None`, PICF core frozen | Maintained ablation profile, not full PICF |
 
+2026-05-10 remote anchor-only runtime audit:
+
+- Environment: 2x A100-PCIE-40GB, clean `Posterior_VLA` checkout synchronized
+  through the Mainland GitHub mirror and launched exclusively with `uv run
+  --no-sync`.
+- Code revision audited: `c7dc6c2`.
+- Smoke sweep: `accum_steps=1`, `4`, and `8` all reached checkpoint save under
+  `--picf-trainable-scope anchor_only`, `--perception-finetune-mode frozen`,
+  `--use-foundation-backbones`, FSDP full-shard, high-risk OWM losses at `0`.
+- Selected probe: `accum_steps=8`, effective global batch `16`, 500 optimizer
+  steps, `save_interval=100`, `log_interval=10`.
+- First logged optimizer step (`step=10`) confirms the real foundation path and
+  anchor-only contract are active: `visual=encoder(finetune_mode=frozen)`,
+  `semantic=paligemma(trainable=False)`, `trainable_numel=82410222`,
+  `total_numel=4088451325`, `windows_per_sec=0.1877`,
+  `aqr_effective_anchor_count=23.24`, `aqr_same_role_support_overlap_max=0.865`,
+  `posterior_identity_switch_rate=0.0`, `posterior_recycle_rate=0.995`.
+- Interpretation: this proves the diagnostic path runs through real
+  foundation-backbone AQR/MVTrack wiring with the intended frozen/trainable
+  partition. It is not a convergence claim. The high early recycle rate is
+  expected to be judged across the 100/500-step checkpoints together with
+  support overlap, support entropy, and anchor videos.
+
 Default recommendation:
 
 - use full-BPTT `unroll_steps=3` when the priority is strongest recurrent
@@ -2301,6 +2324,10 @@ Current standard long-run launch profile:
 - `--visual-activation-checkpointing`
 - `--semantic-gradient-checkpointing`
 - `--window-activation-checkpointing`
+- `--keep-last-checkpoints N` prunes old numeric step checkpoint directories
+  after each successful save while leaving non-step diagnostics and metadata
+  intact. Use `--save-interval 2500 --keep-last-checkpoints 3` for long
+  30000-step runs when disk pressure matters.
 - `--diagnostic-interval 0`
 - `--training-strategy fsdp_full_shard` for the current 4x40GB A100 FSDP investigation profile
 - `--optimizer-sharding none` on that FSDP path; `zero1` remains a DDP-only fallback and is not sufficient for all-backbone v2.2 finetuning
