@@ -57,11 +57,40 @@ Implemented in code:
   training-only support denoising auxiliary, default weight 0
   matched slot-JEPA/support prediction targets
   weak ordinal rank/selection diagnostics
+  anchor-only large-batch diagnostic trainability scope
 
 Still external-data dependent:
   tracklet tensors require an upstream offline/loader source.
   proposal tensors require an upstream detector/proposal source.
   CALVIN/video behavior acceptance requires a new run on this checkout.
+```
+
+Anchor-only probe contract:
+
+```text
+scripts/picf_core_train.py
+  --picf-trainable-scope all|anchor_only
+
+all:
+  normal maintained training profile.
+
+anchor_only:
+  diagnostic profile only. It freezes perception, semantic, PI0.5
+  action/control, and predictive heads after lazy parameter materialization.
+  It leaves typed-evidence token adapters, AQR/MVTrack readers,
+  observation-anchor adapters, posterior binding/address, and
+  support/cache/local evidence modules trainable.
+  It also forces semantic runtime to no-grad/inference mode and disables
+  window-level activation checkpointing so the large-batch probe spends memory
+  and time on anchor routing rather than policy-stack gradients/recompute.
+
+Purpose:
+  maximize safe batch/accumulation on 2x40GB and test whether anchors can
+  separate, specialize, and maintain identity under frozen evidence.
+
+Not a claim:
+  anchor_only is not final policy training and should not be judged by action
+  loss alone.
 ```
 
 ## 1. Current Code Audit

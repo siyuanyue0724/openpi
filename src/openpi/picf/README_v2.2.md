@@ -370,6 +370,7 @@ Current training profiles:
 | --- | --- | --- | --- |
 | 6x40GB full PICF | Full cotrain when enough GPUs are available | `picf_mode=enabled`, `nproc_per_node=6`, `accum_steps=1`, `unroll_steps=2`, `action_horizon=16`, `save_interval=2500` | Same v2.2 objective, larger global batch than 4x40GB |
 | 4x40GB full PICF | Standard all-backbone full-train reference | `picf_mode=enabled`, `fsdp_full_shard`, all foundation backbones trainable, `save_interval=2500` | Valid full-train profile, memory tight |
+| 2x40GB anchor-only large-batch probe | Isolate whether AQR/MVTrack anchors can converge under frozen evidence | `use_foundation_backbones`, `perception_finetune_mode=frozen`, `picf_trainable_scope=anchor_only`, `unroll_steps=1`, `burnin_steps=0`, high-risk OWM losses `0`, `accum_steps` swept upward | Diagnostic only; acceptance is anchor health (`same_role_overlap`, effective anchor count, support entropy, identity switch/recycle), not final action quality |
 | 2x40GB frozen-perception PICF | Cost-controlled full PICF without full perception cotrain | `perception_finetune_mode=frozen`, `unroll_steps=3`, `action_horizon=16`, `semantic_max_length=256` primary / `200` fallback, conservative photometric augmentation, `persistent_anchors=8`, `observation_anchors=16`, `visual_real_grid=64`, `save_interval=5000` | Full-BPTT quality reference; slower, about `24-27 s/step` in early 2x40GB probes before the 8/16 anchor + 64x64 visual-real update |
 | 2x40GB frozen-perception fast PICF | Throughput-first full-PICF probe | `perception_finetune_mode=frozen`, `unroll_steps=1`, `semantic_gradient_checkpointing=False`, `action_horizon=16`, `semantic_max_length=256` primary / `200` fallback, `persistent_anchors=8`, `observation_anchors=16`, `visual_real_grid=64` | Reached about `8.8-9.3 s/step` before the 64x64 visual-real update; weakest recurrent credit-assignment profile |
 | 2x40GB selected state-only burn-in | Current sub-15s 30000-step full-PICF run | `unroll_steps=1`, `burnin_steps=4`, `burnin_mode=state_only`, `semantic_gradient_checkpointing=False`, `persistent_anchors=8`, `observation_anchors=16`, `visual_real_grid=64`, `save_interval=5000` | Four no-grad recurrent updates plus one trainable suffix transition; preserves PICF architecture while reducing runtime |
@@ -2307,6 +2308,17 @@ Current standard long-run launch profile:
   operator-facing backbone trainability contract. `full` preserves the default
   all-backbone profile; `frozen` freezes Sonata, V-JEPA, and AnyTouch while
   leaving the PI0.5 semantic/action stack and PICF heads trainable.
+- `--picf-trainable-scope all|anchor_only` is the separate PICF trainability
+  contract. `all` is the maintained default. `anchor_only` is a diagnostic
+  large-batch probe: it freezes perception, semantic, PI0.5 action/control, and
+  predictive heads after lazy materialization, then leaves only typed-evidence
+  token adapters, AQR/MVTrack readers, observation-anchor adapters, posterior
+  binding/address, and support/cache/local evidence modules trainable. It also
+  forces semantic runtime into no-grad/inference mode and disables window-level
+  activation checkpointing, because the profile is meant to maximize safe
+  throughput for anchor diagnostics rather than train the policy stack. Use it
+  to test whether anchors can separate and stabilize; do not treat it as final
+  policy training.
 - `--visual-finetune-mode full|frozen` remains a lower-level visual-backbone
   compatibility knob; prefer the top-level perception switch for maintained
   launch profiles.

@@ -902,6 +902,12 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
 def _normalize_train_args(args: argparse.Namespace) -> None:
     args.training_strategy = str(getattr(args, "training_strategy", "ddp")).lower().replace("-", "_")
     args.picf_mode = str(getattr(args, "picf_mode", "enabled")).lower().replace("-", "_")
+    args.picf_trainable_scope = str(getattr(args, "picf_trainable_scope", "all")).lower().replace("-", "_")
+    if args.picf_trainable_scope not in {"all", "anchor_only"}:
+        raise ValueError(
+            "picf_trainable_scope must be one of {'all', 'anchor_only'}, "
+            f"got {getattr(args, 'picf_trainable_scope', None)!r}."
+        )
     args.burnin_mode = str(getattr(args, "burnin_mode", "full")).lower().replace("-", "_")
     args.burnin_steps = int(getattr(args, "burnin_steps", 0) or 0)
     args.effector_persistent_anchors = int(
@@ -966,6 +972,15 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         )
     args.visual_finetune_mode = visual_finetune_mode
     args.visual_trainable = bool(visual_finetune_mode == "full")
+    if args.picf_trainable_scope == "anchor_only":
+        args.perception_finetune_mode = "frozen"
+        args.point_backbone_trainable = False
+        args.tactile_trainable = False
+        args.visual_trainable = False
+        args.visual_finetune_mode = "frozen"
+        args.semantic_trainable = False
+        args.semantic_gradient_checkpointing = False
+        args.window_activation_checkpointing = False
     if not _picf_mode_enabled(args):
         args.point_backbone = "rgb"
         args.point_backbone_trainable = False
@@ -4966,6 +4981,139 @@ def _freeze_initialized_module_parameters(module: torch.nn.Module | None) -> Non
         param.requires_grad_(False)
 
 
+_ANCHOR_ONLY_TRAINABLE_PATTERNS: tuple[str, ...] = (
+    "core.modality_embedding.*",
+    "core.point_token_proj.*",
+    "core.visual_token_proj.*",
+    "core.tactile_token_proj.*",
+    "core.tracklet_token_proj.*",
+    "core.proposal_token_proj.*",
+    "core.point_align_proj.*",
+    "core.visual_align_proj.*",
+    "core.tactile_align_proj.*",
+    "core.temporal_visual_time_proj.*",
+    "core.temporal_visual_view_embedding.*",
+    "core.projective_bias_head.*",
+    "core.token_fusion.*",
+    "core.obs_reader.*",
+    "core.obs_self.*",
+    "core.activity_head.*",
+    "core.recycle_head.*",
+    "core.residual_mu_head.*",
+    "core.residual_logvar_head.*",
+    "core.residual_h_head.*",
+    "core.residual_c_head.*",
+    "core.posterior_slot_hidden",
+    "core.posterior_slot_token",
+    "core.anchor_seed_proj.*",
+    "core.anchor_reader.*",
+    "core.contact_head.*",
+    "core.prior_lstm.*",
+    "core.post_write_proj.*",
+    "core.post_lstm.*",
+    "core.posterior_token_proj.*",
+    "core.posterior_self.*",
+    "core.posterior_pool.*",
+    "core.aqr_*",
+    "core.mapg_obs_gate_logit",
+    "core.mapg_task_gate_logit",
+    "core.mapg_posterior_gate_logit",
+    "core.slot_support_pred_head.*",
+    "core.evidence_delta.*",
+    "core.evidence_gate.*",
+)
+
+
+def _safe_parameter_numel(param: torch.nn.Parameter) -> int:
+    if isinstance(param, UninitializedParameter):
+        return 0
+    return int(param.numel())
+
+
+def _set_parameter_trainable(param: torch.nn.Parameter, trainable: bool) -> None:
+    if isinstance(param, UninitializedParameter):
+        param.requires_grad = bool(trainable)
+        return
+    param.requires_grad_(bool(trainable))
+
+
+def _matches_any_pattern(name: str, patterns: tuple[str, ...]) -> bool:
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+def _apply_picf_trainable_scope(
+    model: torch.nn.Module,
+    *,
+    args: argparse.Namespace,
+    logger: logging.Logger | None = None,
+) -> dict[str, Any]:
+    """Apply high-level parameter trainability scopes after lazy materialization.
+
+    `anchor_only` is a diagnostic profile: it freezes perception, semantic,
+    PI0.5 action/control, and predictive heads while leaving the typed-evidence
+    anchor router, posterior binding, address/cache/local support path, and
+    observation-anchor adapters trainable. This keeps large-batch anchor
+    convergence probes isolated from policy-capacity changes.
+    """
+
+    scope = str(getattr(args, "picf_trainable_scope", "all")).lower().replace("-", "_")
+    if scope == "all":
+        trainable_names = [name for name, param in model.named_parameters() if getattr(param, "requires_grad", False)]
+        trainable_numel = sum(
+            _safe_parameter_numel(param) for _name, param in model.named_parameters() if getattr(param, "requires_grad", False)
+        )
+        total_numel = sum(_safe_parameter_numel(param) for _name, param in model.named_parameters())
+        return {
+            "scope": scope,
+            "trainable_param_tensors": len(trainable_names),
+            "trainable_numel": int(trainable_numel),
+            "total_numel": int(total_numel),
+            "matched_names_sample": trainable_names[:24],
+        }
+    if scope != "anchor_only":
+        raise ValueError(f"Unsupported picf_trainable_scope={scope!r}.")
+
+    matched_names: list[str] = []
+    for _name, param in model.named_parameters():
+        _set_parameter_trainable(param, False)
+    for name, param in model.named_parameters():
+        if _matches_any_pattern(name, _ANCHOR_ONLY_TRAINABLE_PATTERNS):
+            _set_parameter_trainable(param, True)
+            matched_names.append(name)
+
+    trainable_numel = sum(
+        _safe_parameter_numel(param) for _name, param in model.named_parameters() if getattr(param, "requires_grad", False)
+    )
+    total_numel = sum(_safe_parameter_numel(param) for _name, param in model.named_parameters())
+    if not matched_names:
+        raise RuntimeError("picf_trainable_scope=anchor_only matched no parameters; aborting to avoid a no-op run.")
+    if trainable_numel <= 0:
+        # Lazy params can report zero before materialization in some tests, but
+        # the real train path materializes first. Treat a fully zero set as a
+        # hard diagnostic failure in live training.
+        raise RuntimeError("picf_trainable_scope=anchor_only produced zero initialized trainable parameters.")
+    info = {
+        "scope": scope,
+        "trainable_param_tensors": len(matched_names),
+        "trainable_numel": int(trainable_numel),
+        "total_numel": int(total_numel),
+        "matched_names_sample": matched_names[:24],
+    }
+    if logger is not None:
+        frozen_numel = int(total_numel) - int(trainable_numel)
+        logger.info(
+            "Trainable scope: scope=%s trainable_tensors=%s trainable_numel=%s frozen_numel=%s total_numel=%s patterns=%s",
+            scope,
+            len(matched_names),
+            int(trainable_numel),
+            frozen_numel,
+            int(total_numel),
+            ",".join(_ANCHOR_ONLY_TRAINABLE_PATTERNS),
+        )
+        logger.info("Trainable scope sample: %s", ", ".join(matched_names[:24]))
+    return info
+
+
 def _split_optimizer_groups_by_dense_type(groups: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
     """Partition param groups by tensor type for ZeroRedundancyOptimizer.
 
@@ -5196,6 +5344,11 @@ def train(args: argparse.Namespace) -> None:
             burnin_mode=args.burnin_mode,
         ).to(device)
         _materialize_model_parameters(model, source=source, rank=rank)
+        trainable_scope_info = _apply_picf_trainable_scope(
+            model,
+            args=args,
+            logger=logging.getLogger() if is_main else None,
+        )
         model = _wrap_model_for_training_strategy(model, args=args, device=device)
         optimizer, optimizer_group_info = _build_optimizer(model, args=args)
         grad_clip_controller = _GradClipController.from_args(args)
@@ -5278,10 +5431,13 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s picf_mode=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s wandb=%s",
                 world_size,
                 args.training_strategy,
                 args.picf_mode,
+                trainable_scope_info["scope"],
+                trainable_scope_info["trainable_numel"],
+                trainable_scope_info["total_numel"],
                 args.accum_steps,
                 effective_global_batch,
                 args.num_train_steps,
@@ -5958,6 +6114,17 @@ def main() -> None:
         help=(
             "'enabled' runs the full PICF v2.2 control/future contract; "
             "'ablated' disables PICF recurrent/control/future branches and trains only the native PI0.5 semantic action path."
+        ),
+    )
+    parser.add_argument(
+        "--picf-trainable-scope",
+        choices=["all", "anchor_only"],
+        default="all",
+        help=(
+            "High-level parameter trainability scope. 'all' preserves normal training. "
+            "'anchor_only' is a diagnostic large-batch probe that freezes perception, semantic, "
+            "PI0.5 action/control, and predictive heads while training only the PICF anchor router, "
+            "observation-anchor adapters, posterior binding/address, and support/cache/local evidence path."
         ),
     )
     parser.add_argument("--lr", type=float, default=2e-4)

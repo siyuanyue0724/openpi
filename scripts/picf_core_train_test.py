@@ -266,6 +266,7 @@ def _base_args() -> argparse.Namespace:
         use_scene_obs=False,
         use_foundation_backbones=False,
         perception_finetune_mode="auto",
+        picf_trainable_scope="all",
         picf_augmentation_mode="off",
         picf_photometric_strength="conservative",
     )
@@ -819,6 +820,56 @@ def test_perception_finetune_mode_full_forces_foundation_backbone_trainability()
     assert args.visual_finetune_mode == "full"
     assert args.visual_trainable is True
     assert args.tactile_trainable is True
+
+
+def test_normalize_train_args_accepts_anchor_only_trainable_scope() -> None:
+    args = _base_args()
+    args.picf_trainable_scope = "anchor-only"
+    args.semantic_trainable = True
+    args.semantic_gradient_checkpointing = True
+    args.window_activation_checkpointing = True
+    args.visual_trainable = True
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.picf_trainable_scope == "anchor_only"
+    assert args.perception_finetune_mode == "frozen"
+    assert args.semantic_trainable is False
+    assert args.semantic_gradient_checkpointing is False
+    assert args.window_activation_checkpointing is False
+    assert args.visual_trainable is False
+    assert args.visual_finetune_mode == "frozen"
+
+
+def test_anchor_only_trainable_scope_freezes_policy_and_keeps_anchor_path() -> None:
+    class TinyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = torch.nn.Module()
+            self.core.aqr_visual_reader = torch.nn.Linear(2, 2)
+            self.core.anchor_reader = torch.nn.Linear(2, 2)
+            self.core.posterior_slot_token = torch.nn.Parameter(torch.ones(2, 2))
+            self.core.visual_token_proj = torch.nn.Linear(2, 2)
+            self.core.task_to_control_proj = torch.nn.Linear(2, 2)
+            self.core.predictive_world = torch.nn.Linear(2, 2)
+            self.semantic_encoder = torch.nn.Linear(2, 2)
+
+    args = _base_args()
+    args.picf_trainable_scope = "anchor_only"
+    model = TinyModel()
+
+    info = _MODULE._apply_picf_trainable_scope(model, args=args)
+    trainable = {name for name, param in model.named_parameters() if param.requires_grad}
+
+    assert "core.aqr_visual_reader.weight" in trainable
+    assert "core.anchor_reader.weight" in trainable
+    assert "core.posterior_slot_token" in trainable
+    assert "core.visual_token_proj.weight" in trainable
+    assert "core.task_to_control_proj.weight" not in trainable
+    assert "core.predictive_world.weight" not in trainable
+    assert "semantic_encoder.weight" not in trainable
+    assert info["scope"] == "anchor_only"
+    assert info["trainable_numel"] < info["total_numel"]
 
 
 def test_normalize_train_args_resolves_visual_finetune_mode() -> None:
