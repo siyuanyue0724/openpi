@@ -29,6 +29,13 @@ Version:
 ```text
 PICF-AQR-OWM v1.3
 Status: complete for the code-level deployment contract after the point/visual cleanup and default-profile cleanup pass.
+
+PICF-AQR-OWM-MVTrack v2.0-runtime-a
+Status: runtime wiring pass implemented for multiview temporal evidence,
+tracklet typed support, support-signature/address binding, address-aware cache
+bias, local refinement, matched predictive targets, and weak ordinal
+diagnostics. Behavior-level completion still requires current-checkout
+CALVIN/video/metrics evidence.
 ```
 
 Default-profile result:
@@ -77,6 +84,13 @@ zero-semantic checkpoints into a PaliGemma-required AQR path.
 | Debug/diagnostics | temporal, PG, cache trust, identity switch/recycle, support overlap, guarded prediction, relation diagnostics | deployed | debug emits OWM temporal/PG/cache/identity/ordinal metrics; training metrics expose deployed loss terms without false address-drift or ordinal-loss keys |
 | Strict scripted diagnosis | README-to-code verifier and evidence bundle verifier snapshot | deployed | `scripts/verify_picf_owm_contract.py` checks contracts, forward wiring, losses, metrics, and bundle coverage |
 | Tests | shape, no-leakage, cache causality, PG priors, temporal priors, script entry stability | deployed | Targeted and broad PICF/script suites pass locally; see verification block |
+| MVTrack multiview temporal support | static+wrist/gripper V-JEPA clip buffers, temporal `view_ids`, no wrist-to-static geometry projection without extrinsics | deployed, behavior pending | `_visual_maps` keeps per-view buffers; temporal support emits `view_ids`; formal training still needs foundation visual encoder and current run evidence |
+| MVTrack tracklet typed memory | optional tracklet tensors on `PicfObservation`, typed support state, AQR tracklet reader, tracklet debug metrics | deployed, data-source dependent | Forward path no-ops when tracklets are absent; nonempty behavior depends on upstream offline/loader tracklet tensors |
+| MVTrack identity binding | support-signature overlap, gated address compatibility, slow address update | deployed, guarded | Binding now combines hidden/geometry with support signatures and address gate; recycle/innovation downweights address inertia |
+| MVTrack address-aware cache | address/content/role/age/uncertainty/innovation cache bias with residual read scale | deployed, guarded | Cache read remains a small residual auxiliary context; newest posterior row is skipped because posterior has a dedicated reader |
+| MVTrack local refinement | top-k latent local reread over existing visual memory | deployed | Local priors are produced without high-res crop dependency or new geometry truth |
+| MVTrack matched predictive targets | permutation-tolerant matched slot-JEPA/support target hook | deployed, default zero | Future targets stay detached; loss weights remain 0 until identity diagnostics justify enabling |
+| MVTrack weak ordinal diagnostics | prompt-gated axis/rank/selected-slot diagnostics | deployed, no posterior rewrite | Weak target can be disabled separately; no ordinal loss is enabled by default |
 
 ## Running Audit Notes
 
@@ -171,8 +185,8 @@ python -m py_compile \
   scripts/picf_owm_evidence_bundle.py
   passed
 
-python scripts/verify_picf_owm_contract.py --json
-  passed 16/16
+python scripts/verify_picf_owm_contract.py
+  passed 22/22
 
 git diff --check
   passed
@@ -181,23 +195,30 @@ python scripts/picf_owm_strict_diagnose.py \
   --markdown-out docs/PICF_AQR_OWM_STRICT_DIAGNOSIS_TEMP.md \
   --json-out /tmp/picf_owm_strict_diagnosis.json \
   --fail-on-fail
-  0 FAIL, 2 WARN, 14 PASS/INFO
+  ok=true; warnings only for missing runtime metrics/CALVIN artifacts
 
 python scripts/picf_owm_dataflow_trace.py \
   --markdown-out docs/PICF_AQR_OWM_RECURSIVE_DATAFLOW_AUDIT_TEMP.md \
   --json-out /tmp/picf_owm_dataflow_trace.json \
   --fail-on-fail
-  passed 16/16 recursive dataflow nodes
+  passed 17 recursive dataflow nodes
 
-python -m pytest -q \
+pytest -q \
   src/openpi/picf/core/pipeline_test.py \
   src/openpi/picf/core/training_test.py \
   scripts/verify_picf_owm_contract_test.py \
-  scripts/picf_owm_evidence_bundle_test.py \
-  scripts/picf_core_train_test.py
-  219 passed, 26 warnings
+  scripts/picf_owm_evidence_bundle_test.py
+  97 passed, 1 warning
 
-python -m pytest -q \
+pytest -q \
+  scripts/picf_core_train_test.py \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py \
+  scripts/picf_loss_audit_test.py \
+  scripts/picf_replay_windows_test.py
+  143 passed, 26 warnings
+
+pytest -q \
   src/openpi/picf \
   scripts/picf_owm_evidence_bundle_test.py \
   scripts/verify_picf_owm_contract_test.py \
@@ -207,7 +228,7 @@ python -m pytest -q \
   scripts/picf_resume_train_test.py \
   scripts/picf_plot_metrics_test.py \
   scripts/serve_picf_policy_test.py
-  343 passed, 1 skipped, 28 warnings
+  346 passed, 1 skipped, 28 warnings
 ```
 
 ## Remaining Guarded Items

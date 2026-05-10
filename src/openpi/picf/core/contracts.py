@@ -70,9 +70,14 @@ class PicfAnchorPriorGraphState:
     valid: torch.Tensor
     vjepa_temporal_priors: torch.Tensor | None = None
     cache_priors: torch.Tensor | None = None
+    tracklet_priors: torch.Tensor | None = None
+    local_priors: torch.Tensor | None = None
     slot_address: torch.Tensor | None = None
     slot_content: torch.Tensor | None = None
     support_uncertainty: torch.Tensor | None = None
+    support_signature: torch.Tensor | None = None
+    binding_support_score: torch.Tensor | None = None
+    binding_address_score: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -83,6 +88,22 @@ class PicfTemporalVisualSupportState:
     grid_index: torch.Tensor
     grid_hw: torch.Tensor
     current_token_count: torch.Tensor
+    valid: torch.Tensor
+    view_names: tuple[str, ...] = ()
+    grid_hw_by_view: torch.Tensor | None = None
+    source_hw_by_view: torch.Tensor | None = None
+
+
+@dataclasses.dataclass
+class PicfTrackletSupportState:
+    tokens: torch.Tensor
+    xy_norm: torch.Tensor
+    velocity_norm: torch.Tensor
+    visibility: torch.Tensor
+    confidence: torch.Tensor
+    track_ids: torch.Tensor
+    view_ids: torch.Tensor
+    age: torch.Tensor
     valid: torch.Tensor
 
 
@@ -95,6 +116,19 @@ class PicfEvidenceCacheState:
     age: torch.Tensor
     uncertainty: torch.Tensor
     innovation_at_write: torch.Tensor
+    modality_validity: torch.Tensor
+    valid: torch.Tensor
+
+
+@dataclasses.dataclass
+class PicfCacheReadState:
+    tokens: torch.Tensor
+    slot_address: torch.Tensor
+    role_ids: torch.Tensor
+    source_ids: torch.Tensor
+    age: torch.Tensor
+    uncertainty: torch.Tensor
+    innovation: torch.Tensor
     modality_validity: torch.Tensor
     valid: torch.Tensor
 
@@ -127,6 +161,7 @@ class PicfTokenFieldState:
     point_positions_world: torch.Tensor | None = None
     point_projectable_mask: torch.Tensor | None = None
     temporal_visual: PicfTemporalVisualSupportState | None = None
+    tracklet: PicfTrackletSupportState | None = None
 
 
 @dataclasses.dataclass
@@ -157,6 +192,12 @@ class PicfObservationAnchorState:
     graph_assignment: torch.Tensor | None = None
     graph_point_weights: torch.Tensor | None = None
     graph_visual_weights: torch.Tensor | None = None
+    graph_pg_weights: torch.Tensor | None = None
+    graph_temporal_weights: torch.Tensor | None = None
+    graph_tactile_weights: torch.Tensor | None = None
+    graph_tracklet_weights: torch.Tensor | None = None
+    anchor_address: torch.Tensor | None = None
+    support_signature: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -197,6 +238,9 @@ class PicfTaskReadoutState:
     ordinal_scores: torch.Tensor | None = None
     ordinal_ranks: torch.Tensor | None = None
     ordinal_axis: torch.Tensor | None = None
+    ordinal_target_rank: torch.Tensor | None = None
+    ordinal_selected_slot: torch.Tensor | None = None
+    ordinal_confidence: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -230,6 +274,13 @@ class PicfPosteriorAnchorState:
     role_ids: torch.Tensor | None = None
     slot_address: torch.Tensor | None = None
     slot_content: torch.Tensor | None = None
+    visual_signature: torch.Tensor | None = None
+    temporal_signature: torch.Tensor | None = None
+    point_signature: torch.Tensor | None = None
+    pg_signature: torch.Tensor | None = None
+    tactile_signature: torch.Tensor | None = None
+    tracklet_signature: torch.Tensor | None = None
+    support_signature: torch.Tensor | None = None
 
 
 @dataclasses.dataclass

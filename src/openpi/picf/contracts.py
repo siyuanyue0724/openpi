@@ -128,6 +128,13 @@ class PicfObservation:
     indent_depth_m: float | None = None
     tactile_pressure: float | None = None
     tactile: PicfTactilePacket | None = None
+    tracklet_xy: np.ndarray | None = None
+    tracklet_velocity: np.ndarray | None = None
+    tracklet_visibility: np.ndarray | None = None
+    tracklet_confidence: np.ndarray | None = None
+    tracklet_ids: np.ndarray | None = None
+    tracklet_view_ids: np.ndarray | None = None
+    tracklet_age: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.rgb_static = np.asarray(self.rgb_static)
@@ -143,6 +150,20 @@ class PicfObservation:
             self.G_t = np.asarray(self.G_t, dtype=np.float32)
         if self.proprio is not None:
             self.proprio = np.asarray(self.proprio, dtype=np.float32).reshape(-1)
+        if self.tracklet_xy is not None:
+            self.tracklet_xy = np.asarray(self.tracklet_xy, dtype=np.float32)
+        if self.tracklet_velocity is not None:
+            self.tracklet_velocity = np.asarray(self.tracklet_velocity, dtype=np.float32)
+        if self.tracklet_visibility is not None:
+            self.tracklet_visibility = np.asarray(self.tracklet_visibility, dtype=np.float32).reshape(-1)
+        if self.tracklet_confidence is not None:
+            self.tracklet_confidence = np.asarray(self.tracklet_confidence, dtype=np.float32).reshape(-1)
+        if self.tracklet_ids is not None:
+            self.tracklet_ids = np.asarray(self.tracklet_ids, dtype=np.int64).reshape(-1)
+        if self.tracklet_view_ids is not None:
+            self.tracklet_view_ids = np.asarray(self.tracklet_view_ids, dtype=np.int64).reshape(-1)
+        if self.tracklet_age is not None:
+            self.tracklet_age = np.asarray(self.tracklet_age, dtype=np.float32).reshape(-1)
         if self.action is not None:
             self.action = np.asarray(self.action, dtype=np.float32).reshape(-1)
         if self.action_chunk is not None:

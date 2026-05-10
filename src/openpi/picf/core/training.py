@@ -335,6 +335,46 @@ def _binding_consistency_loss(
     return sum(terms) / float(len(terms))
 
 
+def _matched_prediction_loss(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+    temperature: float = 0.1,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Permutation-tolerant detached target matching for slot-level teachers.
+
+    The loss keeps future observations on the target side only, but avoids the
+    old index-aligned assumption by softly matching predicted slots to detached
+    future slots using cosine cost. This is a differentiable Sinkhorn-lite
+    assignment suitable for guarded low-weight OWM losses.
+    """
+
+    if pred.numel() == 0 or target.numel() == 0:
+        zero = _zero_weight_loss(pred, reference)
+        return zero, torch.zeros((0, 0), device=reference.device, dtype=reference.dtype)
+    slot_count = min(int(pred.shape[0]), int(target.shape[0]))
+    width = min(int(pred.shape[-1]), int(target.shape[-1]))
+    if slot_count == 0 or width == 0:
+        zero = _zero_weight_loss(pred, reference)
+        return zero, torch.zeros((0, 0), device=reference.device, dtype=reference.dtype)
+    pred_w = pred[:slot_count, :width]
+    target_w = target.detach().to(device=pred.device, dtype=pred.dtype)[:slot_count, :width]
+    pred_n = fn.normalize(pred_w, dim=-1)
+    target_n = fn.normalize(target_w, dim=-1)
+    cost = 1.0 - (pred_n @ target_n.T)
+    logits = -cost / max(float(temperature), eps)
+    assign_row = torch.softmax(logits, dim=-1)
+    assign_col = torch.softmax(logits.T, dim=-1).T
+    assign = 0.5 * (assign_row + assign_col)
+    matched_target = assign @ target_w
+    forward = fn.mse_loss(pred_w, matched_target)
+    matched_pred = assign.T @ pred_w
+    backward = fn.mse_loss(matched_pred, target_w)
+    return 0.5 * (forward + backward), assign.detach()
+
+
 def future_targets_from_current_targets(
     targets: dict[str, torch.Tensor | None],
     availability: torch.Tensor,
@@ -1798,16 +1838,17 @@ def compute_transition_loss(
         + (cfg.lambda_tactile_real * tactile_real)
         + (cfg.lambda_point_real * point_real)
     )
+    slot_assignment = None
     if predictive.slot_prediction_tokens is not None:
         slot_tokens = predictive.slot_prediction_tokens
         if future.posterior_tokens is not None and future.posterior_tokens.numel() > 0:
             target_slots = future.posterior_tokens.detach().to(device=slot_tokens.device, dtype=slot_tokens.dtype)
-            slot_count = min(int(slot_tokens.shape[0]), int(target_slots.shape[0]))
-            width = min(int(slot_tokens.shape[-1]), int(target_slots.shape[-1]))
-            if slot_count > 0 and width > 0:
-                slot_jepa = fn.mse_loss(slot_tokens[:slot_count, :width], target_slots[:slot_count, :width])
-            else:
-                slot_jepa = _zero_weight_loss(slot_tokens, predictive.action)
+            slot_jepa, slot_assignment = _matched_prediction_loss(
+                slot_tokens,
+                target_slots,
+                reference=predictive.action,
+                eps=float(core.config.epsilon_a),
+            )
         elif future.visual_latent is not None and bool(future.availability[0].item()):
             target_visual = future.visual_latent.detach().reshape(-1)
             hidden_dim = int(slot_tokens.shape[-1])
@@ -1830,7 +1871,22 @@ def compute_transition_loss(
             slot_count = min(int(support_target.shape[0]), int(predictive.slot_prediction_supports.shape[0]))
             width = min(int(support_target.shape[-1]), int(predictive.slot_prediction_supports.shape[-1]))
             support_target = support_target[:slot_count, :width]
-            support_pred = fn.mse_loss(predictive.slot_prediction_supports[:slot_count, :width], support_target.clamp(0.0, 1.0))
+            pred_support = predictive.slot_prediction_supports[:slot_count, :width]
+            if (
+                slot_assignment is not None
+                and slot_assignment.numel() > 0
+                and slot_assignment.shape[0] >= slot_count
+                and slot_assignment.shape[1] >= slot_count
+            ):
+                matched_support = slot_assignment[:slot_count, :slot_count].to(device=pred_support.device, dtype=pred_support.dtype) @ support_target.clamp(0.0, 1.0)
+                support_pred = fn.mse_loss(pred_support, matched_support)
+            else:
+                support_pred, _ = _matched_prediction_loss(
+                    pred_support,
+                    support_target.clamp(0.0, 1.0),
+                    reference=predictive.action,
+                    eps=float(core.config.epsilon_a),
+                )
         else:
             support_target = future.availability.detach().to(
                 device=predictive.slot_prediction_supports.device,

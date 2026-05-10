@@ -61,8 +61,30 @@ def run_checks() -> list[Check]:
         ),
         Check(
             "contracts_expose_graph_owm_fields",
-            _contains(contracts, "vjepa_temporal_priors", "cache_priors", "slot_address", "slot_content", "support_uncertainty"),
+            _contains(
+                contracts,
+                "vjepa_temporal_priors",
+                "cache_priors",
+                "tracklet_priors",
+                "local_priors",
+                "slot_address",
+                "slot_content",
+                "support_uncertainty",
+                "support_signature",
+            ),
             "Anchor graph must expose temporal/cache/address/content/uncertainty fields.",
+        ),
+        Check(
+            "contracts_expose_mvtrack_states",
+            _contains(
+                contracts,
+                "class PicfTrackletSupportState",
+                "class PicfCacheReadState",
+                "visual_signature",
+                "tracklet_signature",
+                "ordinal_target_rank",
+            ),
+            "MVTrack contracts must expose typed tracklets, cache read metadata, support signatures, and weak ordinal targets.",
         ),
         Check(
             "vjepa_recent_maps_preserves_time",
@@ -90,6 +112,10 @@ def run_checks() -> list[Check]:
                 "slot_jepa_enabled: bool = True",
                 "support_prediction_enabled: bool = True",
                 "ordinal_relation_enabled: bool = True",
+                "vjepa_multiview_enabled: bool = True",
+                "tracklet_memory_enabled: bool = True",
+                "bind_support_signature_weight",
+                "evidence_cache_address_weight",
             ),
             "Config must default to the direct-final OWM graph profile, with legacy routers off and typed evidence on.",
         ),
@@ -108,8 +134,24 @@ def run_checks() -> list[Check]:
         ),
         Check(
             "pipeline_builds_temporal_tokens_and_priors",
-            _contains(pipeline, "def _visual_maps", "PicfTemporalVisualSupportState", "vjepa_temporal_priors", "temporal_visual_reader"),
+            _contains(pipeline, "def _visual_maps", "PicfTemporalVisualSupportState", "vjepa_temporal_priors", "temporal_visual_reader", "view_ids"),
             "Pipeline must construct temporal support and route AQR over it.",
+        ),
+        Check(
+            "pipeline_routes_mvtrack_branches",
+            _contains(
+                pipeline,
+                "self.clip_buffers",
+                "PicfTrackletSupportState",
+                "aqr_tracklet_reader",
+                "tracklet_priors",
+                "graph_tracklet_weights",
+                "bind_support_signature_weight",
+                "bind_address_weight",
+                "local_priors",
+                "ordinal_target_rank",
+            ),
+            "Pipeline must route multiview temporal, tracklet, support-signature binding, local refinement, and weak ordinal states.",
         ),
         Check(
             "pipeline_preserves_pg_priors",
@@ -152,7 +194,7 @@ def run_checks() -> list[Check]:
         ),
         Check(
             "training_uses_next_posterior_teacher",
-            _contains(training, "posterior_tokens", "posterior_support_summary", "future.posterior_tokens", "future.posterior_support_summary"),
+            _contains(training, "posterior_tokens", "posterior_support_summary", "future.posterior_tokens", "future.posterior_support_summary", "_matched_prediction_loss"),
             "Slot-JEPA/support prediction must prefer detached next posterior targets.",
         ),
         Check(

@@ -976,8 +976,12 @@ def test_vjepa_temporal_mode_controls_recent_map_count(tmp_path: Path) -> None:
     _, temporal = core._visual_maps(frame, override=None, meta=meta)
 
     assert temporal is not None
-    assert temporal.shape == (4, 4, 4, 8)
-    assert encoder.feature_map.requested == [4]
+    if temporal.ndim == 5:
+        assert temporal.shape[1:] == (4, 4, 4, 8)
+        assert temporal.shape[0] >= 1
+    else:
+        assert temporal.shape == (4, 4, 4, 8)
+    assert encoder.feature_map.requested[:1] == [4]
 
 
 def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_path: Path) -> None:
@@ -1038,10 +1042,10 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
     assert graph.cache_priors.shape[1] == core.config.persistent_anchors
     assert third.debug["owm_evidence_cache_read_active"] == 1.0
 
-    _, low_innovation_scores, _ = core._previous_evidence_cache_tokens(second.state)
+    _, low_innovation_scores, _, _, _ = core._previous_evidence_cache_tokens(second.state)
     assert low_innovation_scores is not None
     second.state.predictive.evidence_cache.innovation_at_write[:] = 100.0
-    _, high_innovation_scores, _ = core._previous_evidence_cache_tokens(second.state)
+    _, high_innovation_scores, _, _, _ = core._previous_evidence_cache_tokens(second.state)
     assert high_innovation_scores is not None
     assert bool((high_innovation_scores < low_innovation_scores).all().item())
 
@@ -1113,6 +1117,51 @@ def test_evidence_cache_read_weight_scales_residual_not_softmax_only(tmp_path: P
         atol=1e-5,
         rtol=1e-5,
     )
+
+
+def test_mvtrack_tracklet_support_is_optional_and_first_class(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_query_count_physical=4,
+        aqr_query_count_task=2,
+        aqr_query_rounds=1,
+        tracklet_memory_enabled=True,
+    )
+    frame = next(iter(replay))
+    no_track = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+    assert no_track.state.token_field.tracklet is None
+    assert no_track.state.anchor_prior_graph is not None
+    assert no_track.state.anchor_prior_graph.tracklet_priors is None
+
+    track_frame = dataclasses.replace(
+        frame,
+        tracklet_xy=np.asarray([[0.2, 0.3], [0.6, 0.7]], dtype=np.float32),
+        tracklet_velocity=np.asarray([[0.01, 0.0], [0.0, -0.02]], dtype=np.float32),
+        tracklet_visibility=np.asarray([1.0, 1.0], dtype=np.float32),
+        tracklet_confidence=np.asarray([0.9, 0.8], dtype=np.float32),
+        tracklet_ids=np.asarray([11, 12], dtype=np.int64),
+        tracklet_view_ids=np.asarray([0, 1], dtype=np.int64),
+        tracklet_age=np.asarray([0.0, 1.0], dtype=np.float32),
+    )
+    with_track = core.step(
+        track_frame,
+        point_features_override=_point_override(core, track_frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+    assert with_track.state.token_field.tracklet is not None
+    assert with_track.state.token_field.tracklet.tokens.shape[0] == 2
+    assert with_track.state.anchor_prior_graph is not None
+    assert with_track.state.anchor_prior_graph.tracklet_priors is not None
+    assert with_track.state.anchor_prior_graph.tracklet_priors.shape[-1] == 2
+    assert with_track.debug["owm_tracklet_tokens"] == 2.0
+    assert "aqr_tracklet_support_entropy_mean" in with_track.debug
 
 
 def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

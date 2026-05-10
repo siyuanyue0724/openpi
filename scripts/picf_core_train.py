@@ -1081,6 +1081,9 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_sinkhorn_iters",
         "aqr_vjepa_temporal_tokens",
         "evidence_cache_len",
+        "vjepa_max_views",
+        "tracklet_max_tokens",
+        "local_refinement_topk",
     ):
         if getattr(args, _name, None) is None:
             setattr(args, _name, int(getattr(_SPEC_DEFAULTS, _name)))
@@ -1088,10 +1091,14 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.aqr_vjepa_temporal_mode = str(_SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
     for _name in (
         "aqr_vjepa_temporal_include_delta",
+        "vjepa_multiview_enabled",
         "evidence_cache_enabled",
+        "tracklet_memory_enabled",
+        "local_refinement_enabled",
         "slot_jepa_enabled",
         "support_prediction_enabled",
         "ordinal_relation_enabled",
+        "ordinal_weak_target_enabled",
     ):
         if getattr(args, _name, None) is None:
             setattr(args, _name, bool(getattr(_SPEC_DEFAULTS, _name)))
@@ -1104,6 +1111,17 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_support_bias_clip",
         "evidence_cache_read_weight",
         "evidence_cache_innovation_downweight",
+        "evidence_cache_address_weight",
+        "evidence_cache_content_weight",
+        "evidence_cache_role_weight",
+        "tracklet_confidence_floor",
+        "tracklet_read_weight",
+        "bind_support_signature_weight",
+        "bind_address_weight",
+        "bind_address_innovation_downweight",
+        "address_update_rate",
+        "address_update_max_rate",
+        "local_refinement_weight",
         "aqr_obs_gate_init",
         "aqr_task_gate_init",
         "aqr_posterior_gate_init",
@@ -2569,19 +2587,29 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_temporal_support_entropy_mean",
     "aqr_temporal_support_time_mass_t0",
     "aqr_temporal_support_time_mass_t1",
+    "aqr_temporal_view_mass_0",
+    "aqr_temporal_view_mass_1",
     "aqr_pg_support_entropy_mean",
     "aqr_pg_support_max",
     "aqr_pg_support_peak_mean",
+    "aqr_tracklet_support_entropy_mean",
+    "aqr_tracklet_support_max",
+    "aqr_local_support_entropy_mean",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
     "posterior_identity_switch_rate",
     "posterior_recycle_rate",
+    "owm_tracklet_tokens",
+    "owm_tracklet_valid_fraction",
+    "owm_posterior_support_signature_mean",
     "evidence_cache_trust_mean",
     "evidence_cache_age_mean",
     "innovation_norm_visual",
     "innovation_norm_point",
     "innovation_norm_tactile",
     "owm_ordinal_active",
+    "owm_ordinal_target_rank",
+    "owm_ordinal_confidence",
 )
 
 
@@ -4425,6 +4453,11 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 _SPEC_DEFAULTS.aqr_vjepa_temporal_include_delta,
             )
         ),
+        vjepa_multiview_enabled=bool(
+            _arg_or_default("vjepa_multiview_enabled", _SPEC_DEFAULTS.vjepa_multiview_enabled)
+        ),
+        vjepa_views=tuple(_SPEC_DEFAULTS.vjepa_views),
+        vjepa_max_views=int(_arg_or_default("vjepa_max_views", _SPEC_DEFAULTS.vjepa_max_views)),
         aqr_obs_gate_init=float(_arg_or_default("aqr_obs_gate_init", _SPEC_DEFAULTS.aqr_obs_gate_init)),
         aqr_task_gate_init=float(_arg_or_default("aqr_task_gate_init", _SPEC_DEFAULTS.aqr_task_gate_init)),
         aqr_posterior_gate_init=float(
@@ -4446,12 +4479,50 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 _SPEC_DEFAULTS.evidence_cache_innovation_downweight,
             )
         ),
+        evidence_cache_address_weight=float(
+            _arg_or_default("evidence_cache_address_weight", _SPEC_DEFAULTS.evidence_cache_address_weight)
+        ),
+        evidence_cache_content_weight=float(
+            _arg_or_default("evidence_cache_content_weight", _SPEC_DEFAULTS.evidence_cache_content_weight)
+        ),
+        evidence_cache_role_weight=float(
+            _arg_or_default("evidence_cache_role_weight", _SPEC_DEFAULTS.evidence_cache_role_weight)
+        ),
+        tracklet_memory_enabled=bool(
+            _arg_or_default("tracklet_memory_enabled", _SPEC_DEFAULTS.tracklet_memory_enabled)
+        ),
+        tracklet_max_tokens=int(_arg_or_default("tracklet_max_tokens", _SPEC_DEFAULTS.tracklet_max_tokens)),
+        tracklet_confidence_floor=float(
+            _arg_or_default("tracklet_confidence_floor", _SPEC_DEFAULTS.tracklet_confidence_floor)
+        ),
+        tracklet_read_weight=float(_arg_or_default("tracklet_read_weight", _SPEC_DEFAULTS.tracklet_read_weight)),
+        bind_support_signature_weight=float(
+            _arg_or_default("bind_support_signature_weight", _SPEC_DEFAULTS.bind_support_signature_weight)
+        ),
+        bind_address_weight=float(_arg_or_default("bind_address_weight", _SPEC_DEFAULTS.bind_address_weight)),
+        bind_address_innovation_downweight=float(
+            _arg_or_default("bind_address_innovation_downweight", _SPEC_DEFAULTS.bind_address_innovation_downweight)
+        ),
+        address_update_rate=float(_arg_or_default("address_update_rate", _SPEC_DEFAULTS.address_update_rate)),
+        address_update_max_rate=float(
+            _arg_or_default("address_update_max_rate", _SPEC_DEFAULTS.address_update_max_rate)
+        ),
+        local_refinement_enabled=bool(
+            _arg_or_default("local_refinement_enabled", _SPEC_DEFAULTS.local_refinement_enabled)
+        ),
+        local_refinement_topk=int(_arg_or_default("local_refinement_topk", _SPEC_DEFAULTS.local_refinement_topk)),
+        local_refinement_weight=float(
+            _arg_or_default("local_refinement_weight", _SPEC_DEFAULTS.local_refinement_weight)
+        ),
         slot_jepa_enabled=bool(_arg_or_default("slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
         support_prediction_enabled=bool(
             _arg_or_default("support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)
         ),
         ordinal_relation_enabled=bool(
             _arg_or_default("ordinal_relation_enabled", _SPEC_DEFAULTS.ordinal_relation_enabled)
+        ),
+        ordinal_weak_target_enabled=bool(
+            _arg_or_default("ordinal_weak_target_enabled", _SPEC_DEFAULTS.ordinal_weak_target_enabled)
         ),
         lambda_vl_heatmap_task=float(_arg_or_default("lambda_vl_heatmap_task", _SPEC_DEFAULTS.lambda_vl_heatmap_task)),
         lambda_vl_heatmap_effector=float(
@@ -6206,6 +6277,13 @@ def main() -> None:
         help="Append a recent-frame delta token map to the explicit V-JEPA temporal support memory.",
     )
     parser.add_argument(
+        "--vjepa-multiview-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.vjepa_multiview_enabled,
+        help="Encode static and wrist/gripper V-JEPA clip buffers as typed temporal views.",
+    )
+    parser.add_argument("--vjepa-max-views", type=int, default=_SPEC_DEFAULTS.vjepa_max_views)
+    parser.add_argument(
         "--evidence-cache-enabled",
         action=argparse.BooleanOptionalAction,
         default=_SPEC_DEFAULTS.evidence_cache_enabled,
@@ -6218,6 +6296,33 @@ def main() -> None:
         type=float,
         default=_SPEC_DEFAULTS.evidence_cache_innovation_downweight,
     )
+    parser.add_argument("--evidence-cache-address-weight", type=float, default=_SPEC_DEFAULTS.evidence_cache_address_weight)
+    parser.add_argument("--evidence-cache-content-weight", type=float, default=_SPEC_DEFAULTS.evidence_cache_content_weight)
+    parser.add_argument("--evidence-cache-role-weight", type=float, default=_SPEC_DEFAULTS.evidence_cache_role_weight)
+    parser.add_argument(
+        "--tracklet-memory-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.tracklet_memory_enabled,
+    )
+    parser.add_argument("--tracklet-max-tokens", type=int, default=_SPEC_DEFAULTS.tracklet_max_tokens)
+    parser.add_argument("--tracklet-confidence-floor", type=float, default=_SPEC_DEFAULTS.tracklet_confidence_floor)
+    parser.add_argument("--tracklet-read-weight", type=float, default=_SPEC_DEFAULTS.tracklet_read_weight)
+    parser.add_argument("--bind-support-signature-weight", type=float, default=_SPEC_DEFAULTS.bind_support_signature_weight)
+    parser.add_argument("--bind-address-weight", type=float, default=_SPEC_DEFAULTS.bind_address_weight)
+    parser.add_argument(
+        "--bind-address-innovation-downweight",
+        type=float,
+        default=_SPEC_DEFAULTS.bind_address_innovation_downweight,
+    )
+    parser.add_argument("--address-update-rate", type=float, default=_SPEC_DEFAULTS.address_update_rate)
+    parser.add_argument("--address-update-max-rate", type=float, default=_SPEC_DEFAULTS.address_update_max_rate)
+    parser.add_argument(
+        "--local-refinement-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.local_refinement_enabled,
+    )
+    parser.add_argument("--local-refinement-topk", type=int, default=_SPEC_DEFAULTS.local_refinement_topk)
+    parser.add_argument("--local-refinement-weight", type=float, default=_SPEC_DEFAULTS.local_refinement_weight)
     parser.add_argument(
         "--slot-jepa-enabled",
         action=argparse.BooleanOptionalAction,
@@ -6233,6 +6338,11 @@ def main() -> None:
         "--ordinal-relation-enabled",
         action=argparse.BooleanOptionalAction,
         default=_SPEC_DEFAULTS.ordinal_relation_enabled,
+    )
+    parser.add_argument(
+        "--ordinal-weak-target-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.ordinal_weak_target_enabled,
     )
     parser.add_argument("--aqr-obs-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_obs_gate_init)
     parser.add_argument("--aqr-task-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_task_gate_init)

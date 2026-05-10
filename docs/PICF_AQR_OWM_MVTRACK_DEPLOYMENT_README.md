@@ -1,8 +1,8 @@
 # PICF-AQR-OWM-MVTrack Deployment Contract
 
-Version: `v2.0-contract`
+Version: `v2.0-runtime-a`
 Date: 2026-05-10
-Status: complete architecture contract for the next PICF-AQR-OWM upgrade.
+Status: architecture contract with first runtime wiring pass implemented.
 
 This document is linked from `src/openpi/picf/README_v2.2.md`. It is the
 canonical design contract for the next version after the current maintained
@@ -40,8 +40,26 @@ PI0.5 remains the final action generator.
 future latents are detached targets only.
 ```
 
-This document is not allowed to claim runtime completion until the code,
+This document is not allowed to claim behavior-level completion until the code,
 verification scripts, metrics, and CALVIN/video evidence satisfy Section 16.
+
+2026-05-10 runtime pass:
+
+```text
+Implemented in code:
+  static+wrist V-JEPA typed temporal views
+  tracklet typed support state and AQR reader
+  support-signature identity binding
+  gated slot_address update
+  address-aware cache attention bias with residual scaling retained
+  top-k latent local refinement over existing visual memory
+  matched slot-JEPA/support prediction targets
+  weak ordinal rank/selection diagnostics
+
+Still external-data dependent:
+  tracklet tensors require an upstream offline/loader source.
+  CALVIN/video behavior acceptance requires a new run on this checkout.
+```
 
 ## 1. Current Code Audit
 
@@ -88,13 +106,15 @@ src/openpi/picf/core/pipeline.py
     writes graph.vjepa_temporal_priors.
 ```
 
-Remaining limitation:
+Updated MVTrack code facts:
 
 ```text
-Current temporal V-JEPA path uses observation.rgb_static only.
-temporal_visual.view_ids are zero.
-Wrist RGB enters PaliGemma image support and point cloud construction when
-available, but not the V-JEPA temporal visual memory.
+src/openpi/picf/core/pipeline.py
+  keeps per-view V-JEPA clip buffers.
+  encodes static and gripper/wrist RGB when available.
+  emits temporal_visual.view_ids.
+  does not project wrist evidence into static-camera geometry without
+  calibrated wrist extrinsics.
 ```
 
 ### 1.3 PaliGemma image support is first-class
@@ -405,9 +425,12 @@ Add:
 vjepa_multiview_enabled: bool = True
 vjepa_views: tuple[str, ...] = ("static", "gripper")
 vjepa_share_encoder_across_views: bool = True
-vjepa_wrist_gate_by_contact: bool = True
-vjepa_wrist_default_weight: float = 1.0
 ```
+
+The runtime-a implementation intentionally does not expose a contact-gated
+wrist switch. Wrist evidence is a typed visual view whenever it is present;
+contact-dependent use is learned by AQR support mass rather than a hard input
+gate.
 
 ### 7.3 Contracts
 
@@ -998,7 +1021,12 @@ direct action truth
 
 ## 16. Required Verification
 
-MVTrack cannot be marked runtime-deployed until all checks below pass.
+MVTrack cannot be marked behavior-complete until all checks below pass on the
+current code and fresh training/evaluation artifacts. The `v2.0-runtime-a`
+implementation has passed the static/verifier subset for multiview, tracklet,
+support-signature binding, address-aware cache, local refinement, matched
+prediction hooks, and weak ordinal diagnostics; DN/proposal phases remain
+guarded contract items until their dedicated runtime paths are added.
 
 ### 16.1 Static/verifier checks
 
@@ -1034,7 +1062,7 @@ local_refinement_no_highres_dependency:
   local refiner uses only existing typed memory top-k.
 
 denoising_train_only:
-  eval/serve do not construct DN queries.
+  when DN is implemented, eval/serve do not construct DN queries.
 
 ordinal_noop_without_prompt:
   no ordinal prompt gives zero ordinal loss and no posterior change.
@@ -1250,7 +1278,7 @@ tracklet branch:
   safe to add as typed evidence, but train/eval must no-op when missing.
 
 denoising queries:
-  train-only from the start; no inference effect.
+  keep as a training-only future phase; no inference effect when implemented.
 
 matched predictive losses:
   default zero until identity switch/recycle metrics are stable.
