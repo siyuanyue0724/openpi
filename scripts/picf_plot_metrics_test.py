@@ -26,7 +26,6 @@ def test_plot_metrics_writes_png(tmp_path: Path) -> None:
                     "loss_tactile_real": 0.2,
                     "loss_point_real": 0.4,
                     "loss_anchor_pv": 1.3,
-                    "loss_focus_pv": 2.0,
                     "loss_pv_weak": 3.1,
                     "loss_semantic_future_aux": 0.0,
                     "tactile_active_rate": 0.1,

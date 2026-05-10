@@ -135,7 +135,6 @@ def main() -> None:
             "loss_tactile_real",
             "loss_point_real",
             "loss_anchor_pv",
-            "loss_focus_pv",
             "loss_pv_weak",
             "loss_semantic_future_aux",
         ],

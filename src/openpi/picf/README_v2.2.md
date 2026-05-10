@@ -13,6 +13,27 @@ candidate-prior graph construction with learned task/role anchor queries over
 typed support memory, while reusing the same observation/task/posterior/control
 graph consumer contract and the same PI0.5 action path.
 
+2026-05-10 OWM audit update: use
+[`docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md)
+as the canonical deployment contract for the object-addressable predictive
+belief-state router. The legacy `focus_pv` loss has been removed because its
+attention source did not contain real visual-token rows. The active
+geometry-consistent repair is `lambda_mapg_cycle=0.02`, which directly aligns
+`graph.visual_priors` and `graph.point_priors` through
+`projective_compatibility`, plus the low-weight anti-collapse guard
+`lambda_mapg_support_diversity=0.01`.
+
+2026-05-10 strict cleanup update: AQR state-only burn-in now uses the AQR
+measurement graph when `aqr_mapg_enabled=True`, so burn-in and suffix posterior
+updates no longer use different graph builders. The stale
+`aqr_temporal_memory_tokens` knob and the misleading
+`posterior_address_drift_mean` acceptance metric have been removed. The unused
+`ordinal_confidence_threshold` knob was also removed; ordinal/relation remains
+a prompt-gated diagnostic until a real rank target is implemented. Placeholder
+losses for cross-modal confidence balancing, ordinal score spread, and
+innovation-to-one calibration were removed; only `slot_jepa`, `support_pred`,
+and `binding_consistency` remain as guarded OWM training losses.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)
@@ -108,6 +129,14 @@ graph consumer contract and the same PI0.5 action path.
   reviewing the current branch because it records which final README contract
   items are already wired into code, which loss hooks remain guarded, and which
   tests have passed.
+- [`docs/PICF_AQR_OWM_RECURSIVE_DATAFLOW_AUDIT_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_RECURSIVE_DATAFLOW_AUDIT_TEMP.md)
+  Script-generated recursive dataflow audit. Use this to verify the exact
+  observation/carry -> typed evidence -> AQR -> posterior -> prediction/cache
+  -> action formulas and code evidence.
+- [`docs/PICF_AQR_OWM_REMOTE_CALVIN_AUDIT_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_REMOTE_CALVIN_AUDIT_TEMP.md)
+  Remote audit of the older `8fdb16f` CALVIN run. It records why that checkpoint
+  remains a failing anchor-quality baseline and why it cannot be used as proof
+  that the current checkout is empirically fixed.
 - [`src/openpi/picf/README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
   Historical pre-v2.2 record.
 - [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)

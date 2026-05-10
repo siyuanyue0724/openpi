@@ -148,7 +148,6 @@ def _base_args() -> argparse.Namespace:
         lambda_semantic_future_aux=0.25,
         lambda_anchor_pv=0.1,
         lambda_pv_weak=0.02,
-        lambda_focus_pv=0.0,
         lambda_pt=1.0,
         lambda_vl_heatmap_task=0.0,
         lambda_vl_heatmap_effector=0.0,
@@ -1947,13 +1946,9 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     args.slot_jepa_enabled = True
     args.support_prediction_enabled = True
     args.ordinal_relation_enabled = True
-    args.ordinal_confidence_threshold = 0.82
     args.lambda_slot_jepa = 0.011
     args.lambda_support_pred = 0.012
     args.lambda_binding_consistency = 0.013
-    args.lambda_cross_modal_align = 0.014
-    args.lambda_ordinal_relation = 0.015
-    args.lambda_innovation_calib = 0.016
     args.mapg_siglip_tau = 0.09
     args.mapg_vicreg_var_target = 0.8
     args.mapg_vicreg_cov_weight = 0.06
@@ -2006,13 +2001,9 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     assert core.config.slot_jepa_enabled is True
     assert core.config.support_prediction_enabled is True
     assert core.config.ordinal_relation_enabled is True
-    assert core.config.ordinal_confidence_threshold == pytest.approx(0.82)
     assert loss_config.lambda_slot_jepa == pytest.approx(0.011)
     assert loss_config.lambda_support_pred == pytest.approx(0.012)
     assert loss_config.lambda_binding_consistency == pytest.approx(0.013)
-    assert loss_config.lambda_cross_modal_align == pytest.approx(0.014)
-    assert loss_config.lambda_ordinal_relation == pytest.approx(0.015)
-    assert loss_config.lambda_innovation_calib == pytest.approx(0.016)
     assert loss_config.mapg_siglip_tau == pytest.approx(0.09)
     assert loss_config.mapg_vicreg_var_target == pytest.approx(0.8)
     assert loss_config.mapg_vicreg_cov_weight == pytest.approx(0.06)
@@ -2190,7 +2181,6 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
         "loss_total_minus_action": torch.tensor(0.8),
         "loss_anchor_pv": torch.tensor(0.06),
         "loss_pv_weak": torch.tensor(0.07),
-        "loss_focus_pv": torch.tensor(0.08),
         "loss_pt": torch.tensor(0.09),
         "loss_mapg_graph": torch.tensor(0.021),
         "loss_mapg_siglip": torch.tensor(0.022),
@@ -2276,7 +2266,6 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
         total_minus_action=torch.tensor(0.9),
         anchor_pv=torch.tensor(0.1),
         pv_weak=torch.tensor(0.1),
-        focus_pv=torch.tensor(0.1),
         pt=torch.tensor(0.1),
         vl_router=torch.tensor(0.0),
         vl_heatmap_task=torch.tensor(0.0),
@@ -2400,7 +2389,6 @@ def test_picf_window_trainer_reuses_middle_frame_targets_with_detached_override(
         total_minus_action=torch.tensor(0.9),
         anchor_pv=torch.tensor(0.1),
         pv_weak=torch.tensor(0.1),
-        focus_pv=torch.tensor(0.1),
         pt=torch.tensor(0.1),
         vl_router=torch.tensor(0.0),
         vl_heatmap_task=torch.tensor(0.0),
@@ -2539,7 +2527,6 @@ def test_picf_window_trainer_state_only_burnin_skips_policy_flow_until_suffix() 
         total_minus_action=torch.tensor(0.9),
         anchor_pv=torch.tensor(0.1),
         pv_weak=torch.tensor(0.1),
-        focus_pv=torch.tensor(0.1),
         pt=torch.tensor(0.1),
         vl_router=torch.tensor(0.0),
         vl_heatmap_task=torch.tensor(0.0),

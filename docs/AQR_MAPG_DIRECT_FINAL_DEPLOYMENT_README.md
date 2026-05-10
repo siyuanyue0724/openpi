@@ -644,7 +644,7 @@ aqr_pg_image_support_weight: float = 0.35
 aqr_pg_entropy_threshold: float = 0.90
 aqr_pg_peak_threshold: float = 1.50
 aqr_pg_bias_weight: float = 0.0
-aqr_temporal_memory_tokens: int = 32
+aqr_temporal_memory_tokens: int = 32  # historical; removed in PICF-AQR-OWM v1.2 in favor of aqr_vjepa_temporal_* controls
 aqr_consumer_mode: Literal["full"] = "full"
 ```
 

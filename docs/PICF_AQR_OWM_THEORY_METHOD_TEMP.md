@@ -507,3 +507,202 @@ belief prior
 ```
 
 The architecture remains PICF-native because posterior is never demoted. AQR, V-JEPA, PaliGemma, cache, slot-JEPA, and ordinal relation all serve posterior-centered control.
+
+## 16. Strict Theory Audit 2026-05-10
+
+The stricter audit clarifies what the method can and cannot claim.
+
+### 16.1 PV Projection Is Necessary But Not Sufficient
+
+The original design contains a projected point/visual alignment mechanism:
+
+```text
+point geometry
+  -> camera projection
+  -> visual-token compatibility
+  -> projective bias / candidate mask
+  -> PV auxiliary losses
+```
+
+This is necessary for metric grounding, but it does not solve task-object
+binding by itself.
+
+Mathematically:
+
+```text
+PV projection constrains:
+  p(point_i | visual_h,w, geometry)
+
+Task anchor binding requires:
+  p(object_j is task target | language, posterior history, geometry, contact)
+```
+
+The first distribution can improve while the second remains wrong. This is why
+`loss_pv_weak` can decrease while `loss_anchor_pv`, support diversity, or
+same-role overlap worsens. The model then learns local modality agreement
+without learning which same-role instance should own the task slot.
+
+Accepted theory condition:
+
+```text
+PV projection must feed AQR routing and posterior correction.
+It must be evaluated with anchor-level and identity-level metrics,
+not only with embedding-level PV loss.
+```
+
+Deployed mathematical form:
+
+```text
+C[p, v] =
+  projective compatibility from camera/world geometry.
+
+A[p | v] =
+  C[p, v] / sum_p C[p, v]
+
+B[v | p] =
+  C[p, v] / sum_v C[p, v]
+
+For graph slot j:
+  v_j = graph.visual_priors[j]
+  p_j = graph.point_priors[j]
+
+Projection:
+  p_tilde_j = v_j A^T
+  v_tilde_j = p_j B
+
+Direct consistency:
+  JS(p_j, p_tilde_j) + JS(v_j, v_tilde_j)
+
+Cycle guard:
+  0.5 JS(v_j, p_tilde_j B)
+  + 0.5 JS(p_j, v_tilde_j A^T)
+```
+
+This is the correct place to put PV pressure. The legacy `focus_pv` objective is
+removed because it depended on a token-fusion attention matrix that does not
+contain real visual-token rows in the maintained architecture. Reintroducing an
+attention-focused PV loss would require a new typed visual-token fusion path and
+should not reuse the old name or semantics.
+
+### 16.2 Cache Must Be Innovation-Gated
+
+The cache is valid only as auxiliary evidence:
+
+```text
+cache != posterior
+cache != current truth
+cache != direct action source
+```
+
+The method requires this trust equation:
+
+```text
+trust_i =
+  source_factor_i
+  / (1 + uncertainty_i + age_i + lambda_innov * innovation_i)
+```
+
+where:
+
+```text
+source_factor:
+  real/posterior-grounded evidence > predicted-only evidence
+
+age:
+  older entries are less trusted
+
+uncertainty:
+  uncertain entries are less trusted
+
+innovation:
+  entries written when the model was surprised are less trusted later
+```
+
+Without the innovation term, stale evidence can remain strong exactly when the
+posterior most needs to correct itself. The strict audit found this gap in the
+read path and the debug trust metric; the implementation now uses the full
+source/age/uncertainty/innovation score.
+
+### 16.3 Address Is A Carrier, Not Proof Of Identity
+
+The theoretical slot state is:
+
+```text
+S_{t,j} = (address_j, content_{t,j}, geometry_{t,j}, uncertainty_{t,j}, role_j)
+```
+
+But identity is not proven by a stable address vector alone.
+
+The actual identity condition is recursive:
+
+```text
+identity_j stable iff
+  address compatibility remains high
+  predicted geometry matches current measurement
+  support overlap is neither collapsed nor switched
+  role compatibility is stable
+  innovation is low or correction rapidly rebinds
+  recycle/birth explicitly resets invalid identities
+```
+
+Therefore, address drift can be low while object binding is wrong. The required
+acceptance metrics are:
+
+```text
+posterior_identity_switch_rate
+same-role support overlap
+task-selected slot stability
+posterior pixel/world jump
+innovation-correction latency
+```
+
+### 16.4 Slot-JEPA Must Not Learn Slot Swaps
+
+Slot-level prediction is coherent only after matching is reliable:
+
+```text
+hat{S}_{t+1,j} = F(S_{t,j}, a_t, proprio_t, language)
+
+L_slot =
+  d(hat{c}_{t+1,j}, stopgrad(c_{t+1, pi(j)}))
+```
+
+The matching `pi(j)` cannot be assumed to be slot index equality. It must be
+supported by address, geometry, support overlap, role, and posterior binding.
+
+If matching is unstable, slot-JEPA can reinforce identity swaps. This does not
+invalidate slot-JEPA; it means the loss must remain detached, weighted, and
+diagnosed through identity metrics.
+
+### 16.5 Runtime Acceptance Is Stricter Than Code Deployment
+
+The final graph can be fully deployed while a checkpoint is not accepted.
+
+Acceptance requires:
+
+```text
+action loss:
+  must not regress, but is not sufficient.
+
+anchor_pv:
+  should not worsen.
+
+same-role overlap:
+  should not stay near 1.0.
+
+temporal V-JEPA support:
+  should be time-selective under motion/contact.
+
+PG priors:
+  should be non-empty and task-sensitive when PG image support is available.
+
+cache trust:
+  should drop after high innovation.
+
+posterior:
+  should correct quickly after surprise rather than locking into stale cache.
+```
+
+This is the method's critical self-check: PICF-AQR-OWM reduces architecture
+error, but cannot be called empirically solved until these runtime diagnostics
+move in the right direction.

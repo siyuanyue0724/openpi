@@ -17,7 +17,7 @@ Target:
 Guard:
   do not call a changed checkout final until every contract object is present,
   wired into forward paths, covered by tests, and visible in debug/status.
-  This branch satisfies that code-level guard for PICF-AQR-OWM v1.0 and must
+  This branch satisfies that code-level guard for PICF-AQR-OWM v1.2 and must
   be re-verified after any follow-up change.
 
 Non-negotiable:
@@ -27,8 +27,8 @@ Non-negotiable:
 Version:
 
 ```text
-PICF-AQR-OWM v1.0
-Status: complete for the code-level deployment contract.
+PICF-AQR-OWM v1.2
+Status: complete for the code-level deployment contract after the point/visual cleanup pass.
 ```
 
 ## Contract Ledger
@@ -42,10 +42,11 @@ Status: complete for the code-level deployment contract.
 | Slot-level JEPA prediction | slot prediction tensors and next-posterior target loss | deployed, guarded | `slot_prediction_tokens` exist; window training passes detached next posterior slots as teacher; `lambda_slot_jepa` defaults to 0 |
 | Support prediction | support-prediction fields and next-posterior support summary target | deployed, guarded | `slot_prediction_supports` predicts detached `[alpha, support_mass, contact_prob, binding_confidence]`; `lambda_support_pred` defaults to 0 |
 | Ordinal/relation grounding | gated relation state/debug, no posterior identity rewrite | deployed, guarded | prompt-gated ordinal state exists; test confirms posterior is unchanged |
+| Graph point/visual projection consistency | bidirectional `graph.visual_priors` / `graph.point_priors` consistency through `projective_compatibility`; legacy `focus_pv` removed | deployed | `_mapg_cycle_loss` directly compares point-from-visual and visual-from-point supports; defaults `lambda_mapg_cycle=0.02`, `lambda_mapg_support_diversity=0.01` |
 | Training CLI/config entry | `scripts/picf_core_train.py` maps OWM config and guarded losses | deployed | CLI, defaults, `PicfCoreConfig`, `PicfTransitionLossConfig`, and log contract include OWM fields |
-| Debug/diagnostics | temporal, PG, address drift, cache trust, slot-JEPA, relation diagnostics | deployed | debug emits OWM temporal/PG/cache/address/ordinal metrics; training metrics expose all OWM loss terms |
+| Debug/diagnostics | temporal, PG, cache trust, identity switch/recycle, support overlap, guarded prediction, relation diagnostics | deployed | debug emits OWM temporal/PG/cache/identity/ordinal metrics; training metrics expose deployed loss terms without false address-drift or ordinal-loss keys |
 | Strict scripted diagnosis | README-to-code verifier and evidence bundle verifier snapshot | deployed | `scripts/verify_picf_owm_contract.py` checks contracts, forward wiring, losses, metrics, and bundle coverage |
-| Tests | shape, no-leakage, cache causality, PG priors, temporal priors, script entry stability | deployed | PICF and script test suites pass; full repo collection blocked by external dependency imports |
+| Tests | shape, no-leakage, cache causality, PG priors, temporal priors, script entry stability | deployed | Targeted and broad PICF/script suites pass locally; see verification block |
 
 ## Running Audit Notes
 
@@ -75,10 +76,10 @@ Status: complete for the code-level deployment contract.
    - Added prompt-gated ordinal relation state without posterior identity rewrite.
 
 4. `src/openpi/picf/core/training.py`
-   - Added guarded OWM losses: `slot_jepa`, `support_pred`, `binding_consistency`, `cross_modal_align`, `ordinal_relation`, and `innovation_calib`.
+   - Added guarded OWM losses: `slot_jepa`, `support_pred`, and `binding_consistency`.
    - `slot_jepa` uses detached next posterior slot tokens when available; detached future visual latent summary is only a compatibility fallback.
    - `support_pred` uses detached next posterior support summary `[alpha, support_mass, contact_prob, binding_confidence]` when available; availability summary is only a compatibility fallback.
-   - All high-risk OWM loss weights default to zero, matching the README guard policy while keeping the full graph deployed.
+   - Removed placeholder cross-modal/ordinal/innovation losses because they lacked real support/rank/calibration targets.
 
 5. `scripts/picf_core_train.py`
    - Added OWM CLI/default/config mapping for temporal V-JEPA tokens, evidence cache, slot-JEPA, support prediction, ordinal relation, and guarded OWM loss weights.
@@ -114,6 +115,15 @@ docs/PICF_AQR_OWM_DATAFLOW_FOLLOWTHROUGH_TEMP.md
 docs/PICF_AQR_OWM_THEORY_METHOD_TEMP.md
   Theory/method document explaining why temporal V-JEPA, PG image support, posterior,
   cache, slot-JEPA, support prediction, and ordinal relation form one belief-state system.
+
+docs/PICF_AQR_OWM_RECURSIVE_DATAFLOW_AUDIT_TEMP.md
+  Script-generated recursive dataflow audit. Each node records formula, invariant,
+  and source evidence from observation/carry through AQR, posterior correction,
+  prediction/cache, and action.
+
+docs/PICF_AQR_OWM_REMOTE_CALVIN_AUDIT_TEMP.md
+  Remote CALVIN audit of the older 8fdb16f run. This is an old failing baseline,
+  not proof that the current checkout fails.
 ```
 
 ## Verification
@@ -127,64 +137,47 @@ python -m py_compile \
   src/openpi/picf/core/training.py \
   scripts/picf_core_train.py \
   scripts/verify_picf_owm_contract.py \
+  scripts/picf_owm_strict_diagnose.py \
   scripts/picf_owm_evidence_bundle.py
+  passed
 
-python scripts/verify_picf_owm_contract.py
-  15/15 contract checks passed:
-    README definition/posterior authority
-    temporal V-JEPA support contracts
-    fixed evidence cache contracts
-    graph OWM fields
-    recent_maps time preservation
-    OWM config defaults
-    AQR temporal tokens/priors
-    first-class PG priors
-    cache causal order
-    required OWM debug keys
-    next-posterior teacher targets
-    OWM loss family
-    trainer next-posterior teacher threading
-    trainer OWM metrics
-    evidence-bundle OWM coverage
+python scripts/verify_picf_owm_contract.py --json
+  passed 16/16
 
 git diff --check
   passed
 
-pytest -q src/openpi/picf/core/pipeline_test.py src/openpi/picf/core/training_test.py src/openpi/picf/vjepa/wrapper_test.py
-  98 passed, 3 warnings
+python scripts/picf_owm_strict_diagnose.py \
+  --markdown-out docs/PICF_AQR_OWM_STRICT_DIAGNOSIS_TEMP.md \
+  --json-out /tmp/picf_owm_strict_diagnosis.json \
+  --fail-on-fail
+  0 FAIL, 2 WARN, 14 PASS/INFO
 
-pytest -q src/openpi/picf
-  184 passed, 1 skipped, 3 warnings
+python scripts/picf_owm_dataflow_trace.py \
+  --markdown-out docs/PICF_AQR_OWM_RECURSIVE_DATAFLOW_AUDIT_TEMP.md \
+  --json-out /tmp/picf_owm_dataflow_trace.json \
+  --fail-on-fail
+  passed 16/16 recursive dataflow nodes
 
-pytest -q scripts/picf_core_train_test.py scripts/picf_loss_audit_test.py scripts/picf_replay_windows_test.py scripts/picf_resume_train_test.py
-  140 passed, 26 warnings
+python -m pytest -q \
+  src/openpi/picf/core/pipeline_test.py \
+  src/openpi/picf/core/training_test.py \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py \
+  scripts/picf_core_train_test.py
+  219 passed, 26 warnings
 
-pytest -q scripts/picf_owm_evidence_bundle_test.py scripts/picf_core_train_test.py scripts/picf_loss_audit_test.py scripts/picf_replay_windows_test.py scripts/picf_resume_train_test.py
-  142 passed, 26 warnings
-
-pytest -q src/openpi/picf/core/training_test.py scripts/picf_core_train_test.py
-  145 passed, 26 warnings
-
-pytest -q src/openpi/picf/core/training_test.py
-  23 passed, 1 warning
-
-pytest -q src/openpi/picf scripts/picf_owm_evidence_bundle_test.py scripts/picf_core_train_test.py scripts/picf_loss_audit_test.py scripts/picf_replay_windows_test.py scripts/picf_resume_train_test.py
-  326 passed, 1 skipped, 28 warnings
-
-pytest -q scripts/verify_picf_owm_contract_test.py scripts/picf_owm_evidence_bundle_test.py
-  4 passed
-
-pytest -q scripts/verify_picf_owm_contract_test.py src/openpi/picf/core/pipeline_test.py scripts/picf_core_train_test.py scripts/picf_owm_evidence_bundle_test.py
-  194 passed, 26 warnings
-
-pytest -q src/openpi/picf scripts/picf_owm_evidence_bundle_test.py scripts/verify_picf_owm_contract_test.py scripts/picf_core_train_test.py scripts/picf_loss_audit_test.py scripts/picf_replay_windows_test.py scripts/picf_resume_train_test.py
-  328 passed, 1 skipped, 28 warnings
-
-pytest -q
-  blocked during collection by environment dependency issues outside PICF:
-    - src/openpi/policies/policy_test.py imports lerobot/datasets/pandas and cannot resolve pandas.core.arrays.sparse.SparseArray
-    - src/openpi/training/data_loader_test.py imports lerobot/datasets/pandas and cannot resolve pandas.core.arrays.sparse.SparseArray
-    - scripts/train_test.py imports wandb and cannot resolve wandb_watchdog.observers.polling
+python -m pytest -q \
+  src/openpi/picf \
+  scripts/picf_owm_evidence_bundle_test.py \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_core_train_test.py \
+  scripts/picf_loss_audit_test.py \
+  scripts/picf_replay_windows_test.py \
+  scripts/picf_resume_train_test.py \
+  scripts/picf_plot_metrics_test.py \
+  scripts/serve_picf_policy_test.py
+  343 passed, 1 skipped, 28 warnings
 ```
 
 ## Remaining Guarded Items
@@ -194,8 +187,222 @@ The final graph objects and forward paths are present. The following remain guar
 1. `lambda_slot_jepa`
 2. `lambda_support_pred`
 3. `lambda_binding_consistency`
-4. `lambda_cross_modal_align`
-5. `lambda_ordinal_relation`
-6. `lambda_innovation_calib`
 
 This is not a reduced deployment. It is the full graph with guarded optimization pressure.
+
+## 2026-05-10 Strict Audit Update
+
+This update records the post-deployment strict diagnosis pass.
+
+### Code Fixes Applied
+
+```text
+evidence cache read:
+  before:
+    score = 1 / (1 + uncertainty + age)
+
+  after:
+    score = source_factor / (1 + uncertainty + age + lambda_innov * innovation)
+```
+
+The prior implementation wrote `innovation_at_write` into the cache but did not
+use it when reading previous cache entries. That violated the README rule that
+high-innovation cache must be downweighted. The read path and debug trust metric
+now use source, age, uncertainty, and innovation consistently.
+
+```text
+default evidence_cache_read_weight:
+  before: 0.0
+  after:  0.05
+```
+
+The final graph now reads the previous evidence cache by default with a small
+weight. This keeps the deployment complete while preserving posterior authority.
+
+### New Strict Diagnosis Script
+
+Added:
+
+```text
+scripts/picf_owm_strict_diagnose.py
+docs/PICF_AQR_OWM_STRICT_DIAGNOSIS_TEMP.md
+```
+
+The script checks:
+
+```text
+temporal V-JEPA path
+first-class PG image support
+projective point/visual path
+posterior precision update
+previous-cache-only read and innovation gating
+cache read weight
+detached next-posterior slot-JEPA target
+binding-consistency limitations
+address-metric limitations
+trainer OWM diagnostics
+runtime metrics when supplied
+CALVIN drift artifacts when supplied
+state-only burn-in graph consistency
+placeholder-loss cleanup
+```
+
+### Local Verification
+
+```text
+python scripts/verify_picf_owm_contract.py --json
+  passed 16/16
+
+python scripts/picf_owm_strict_diagnose.py \
+  --markdown-out docs/PICF_AQR_OWM_STRICT_DIAGNOSIS_TEMP.md \
+  --json-out /tmp/picf_owm_strict_diagnosis.json \
+  --fail-on-fail
+  0 FAIL, 2 WARN, 14 PASS/INFO
+
+python scripts/picf_owm_dataflow_trace.py \
+  --markdown-out docs/PICF_AQR_OWM_RECURSIVE_DATAFLOW_AUDIT_TEMP.md \
+  --json-out /tmp/picf_owm_dataflow_trace.json \
+  --fail-on-fail
+  16/16 recursive dataflow nodes passed
+
+python scripts/picf_owm_strict_diagnose.py \
+  --metrics-jsonl /tmp/picf_remote_audit_8fdb16f/metrics.jsonl \
+  --eval-dir /tmp/picf_remote_audit_8fdb16f \
+  --markdown-out /tmp/picf_owm_strict_diagnosis_old_calvin.md \
+  --json-out /tmp/picf_owm_strict_diagnosis_old_calvin.json
+  old 8fdb16f CALVIN baseline: 3 FAIL, 2 WARN, 18 PASS/INFO
+
+python -m pytest -q \
+  src/openpi/picf/core/pipeline_test.py \
+  src/openpi/picf/core/training_test.py \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py \
+  scripts/picf_core_train_test.py
+  219 passed, 26 warnings
+
+python -m pytest -q \
+  src/openpi/picf \
+  scripts/picf_owm_evidence_bundle_test.py \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_core_train_test.py \
+  scripts/picf_loss_audit_test.py \
+  scripts/picf_replay_windows_test.py \
+  scripts/picf_resume_train_test.py \
+  scripts/picf_plot_metrics_test.py \
+  scripts/serve_picf_policy_test.py
+  343 passed, 1 skipped, 28 warnings
+```
+
+The strict audit originally found that `binding_consistency` was only a
+current-step binding entropy term. It has been upgraded to a detached temporal
+identity-contrast loss and is now covered by test:
+
+```text
+test_binding_consistency_uses_detached_temporal_identity_target
+```
+
+The address-drift false-positive metric has been removed. Runtime acceptance
+must use `posterior_identity_switch_rate`, `posterior_recycle_rate`,
+same-role support overlap, effective anchor count, and task visualizations.
+
+The state-only burn-in path now calls `_build_aqr_anchor_graph(...)` whenever
+`aqr_mapg_enabled=True`, so burn-in and suffix posterior updates share the same
+measurement model. This closes the main recurrent distribution-mismatch risk
+identified in the external review.
+
+The stale `aqr_temporal_memory_tokens` knob was removed. The only active V-JEPA
+temporal controls are `aqr_vjepa_temporal_mode`,
+`aqr_vjepa_temporal_tokens`, and `aqr_vjepa_temporal_include_delta`.
+
+The unused `ordinal_confidence_threshold` knob was removed. Ordinal/relation is
+kept as prompt-gated diagnostic state only; it must not be treated as a trained
+rank selector until a real ordinal target and confidence definition are added.
+
+Placeholder losses were removed rather than kept at zero:
+
+```text
+removed:
+  lambda_cross_modal_align
+  lambda_ordinal_relation
+  lambda_innovation_calib
+
+reason:
+  the implemented versions were confidence-balancing / score-spread /
+  innovation-to-one surrogates, not real support/rank/calibration objectives.
+```
+
+### Remote Old-Run Diagnosis
+
+The inspected remote training/CALVIN artifacts were produced by an older
+checkpoint/code revision and cannot validate the final OWM graph.
+
+Observed training state through step 4300:
+
+```text
+loss_total:
+  decreased from about 0.167 to 0.142.
+
+loss_action:
+  decreased from about 0.079 to 0.054.
+
+loss_pv_weak:
+  decreased from about 4.58 to 2.96.
+
+loss_anchor_pv:
+  worsened from about 3.85 to 4.75.
+
+legacy focus_pv:
+  was not a valid maintained PV repair because its attention matrix lacked real
+  visual-token rows. It is removed from the current code path.
+
+loss_mapg_cycle:
+  must be inspected on new runs because it now carries direct graph
+  point/visual projection consistency.
+
+loss_mapg_support_diversity:
+  worsened from about 0.40 to 0.60.
+
+loss_mapg_geometry_diversity:
+  worsened from about 0.48 to 0.76.
+
+OWM debug keys:
+  absent.
+```
+
+CALVIN checkpoint-2500 debug artifacts showed:
+
+```text
+posterior pixel jump:
+  mean about 12-15 px on sampled episodes.
+
+same-role visual/point overlap:
+  max overlap mean about 1.00.
+
+anchor jump trend:
+  no clear convergence across episode quartiles.
+```
+
+Strict interpretation:
+
+```text
+The old run shows action learning but poor anchor convergence.
+PV weak alignment alone is insufficient.
+Anchor-level PV, diversity, same-role overlap, and identity metrics must improve
+before claiming anchor quality.
+```
+
+### Current Deployment Status
+
+```text
+static graph deployment:
+  pass after the cache innovation-gating fix.
+
+mathematical causality:
+  pass for posterior-centered cache read/write and detached future targets.
+
+old-run empirical anchor acceptance:
+  fail / not accepted.
+
+final OWM empirical acceptance:
+  pending a fresh run from the current code with OWM debug metrics enabled.
+```

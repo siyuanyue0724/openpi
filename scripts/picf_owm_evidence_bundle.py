@@ -13,9 +13,6 @@ OWM_KEYS: tuple[str, ...] = (
     "loss_slot_jepa",
     "loss_support_pred",
     "loss_binding_consistency",
-    "loss_cross_modal_align",
-    "loss_ordinal_relation",
-    "loss_innovation_calib",
     "aqr_temporal_support_entropy_mean",
     "aqr_temporal_support_time_mass_t0",
     "aqr_temporal_support_time_mass_t1",
@@ -24,7 +21,6 @@ OWM_KEYS: tuple[str, ...] = (
     "aqr_pg_support_peak_mean",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
-    "posterior_address_drift_mean",
     "posterior_identity_switch_rate",
     "posterior_recycle_rate",
     "evidence_cache_trust_mean",
@@ -32,7 +28,7 @@ OWM_KEYS: tuple[str, ...] = (
     "innovation_norm_visual",
     "innovation_norm_point",
     "innovation_norm_tactile",
-    "ordinal_loss_active",
+    "owm_ordinal_active",
 )
 
 OWM_ARG_KEYS: tuple[str, ...] = (
@@ -46,13 +42,9 @@ OWM_ARG_KEYS: tuple[str, ...] = (
     "slot_jepa_enabled",
     "support_prediction_enabled",
     "ordinal_relation_enabled",
-    "ordinal_confidence_threshold",
     "lambda_slot_jepa",
     "lambda_support_pred",
     "lambda_binding_consistency",
-    "lambda_cross_modal_align",
-    "lambda_ordinal_relation",
-    "lambda_innovation_calib",
 )
 
 

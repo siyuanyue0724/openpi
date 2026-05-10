@@ -1078,7 +1078,6 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_query_count_task",
         "aqr_query_rounds",
         "aqr_sinkhorn_iters",
-        "aqr_temporal_memory_tokens",
         "aqr_vjepa_temporal_tokens",
         "evidence_cache_len",
     ):
@@ -1104,7 +1103,6 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_support_bias_clip",
         "evidence_cache_read_weight",
         "evidence_cache_innovation_downweight",
-        "ordinal_confidence_threshold",
         "aqr_obs_gate_init",
         "aqr_task_gate_init",
         "aqr_posterior_gate_init",
@@ -1454,7 +1452,6 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "lambda_semantic_future_aux",
         "lambda_anchor_pv",
         "lambda_pv_weak",
-        "lambda_focus_pv",
         "lambda_pt",
     ):
         value = float(getattr(args, name))
@@ -2576,7 +2573,6 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_pg_support_peak_mean",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
-    "posterior_address_drift_mean",
     "posterior_identity_switch_rate",
     "posterior_recycle_rate",
     "evidence_cache_trust_mean",
@@ -2584,7 +2580,7 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "innovation_norm_visual",
     "innovation_norm_point",
     "innovation_norm_tactile",
-    "ordinal_loss_active",
+    "owm_ordinal_active",
 )
 
 
@@ -2628,7 +2624,6 @@ class _MetricAccumulator:
     loss_total_minus_action: float = 0.0
     loss_anchor_pv: float = 0.0
     loss_pv_weak: float = 0.0
-    loss_focus_pv: float = 0.0
     loss_pt: float = 0.0
     loss_vl_router: float = 0.0
     loss_vl_heatmap_task: float = 0.0
@@ -2647,9 +2642,6 @@ class _MetricAccumulator:
     loss_slot_jepa: float = 0.0
     loss_support_pred: float = 0.0
     loss_binding_consistency: float = 0.0
-    loss_cross_modal_align: float = 0.0
-    loss_ordinal_relation: float = 0.0
-    loss_innovation_calib: float = 0.0
     physical_aux_budget_scale: float = 0.0
     semantic_aux_budget_scale: float = 0.0
     alignment_budget_scale: float = 0.0
@@ -2689,7 +2681,6 @@ class _MetricAccumulator:
         self.loss_total_minus_action += float(losses.total_minus_action.item())
         self.loss_anchor_pv += float(losses.anchor_pv.item())
         self.loss_pv_weak += float(losses.pv_weak.item())
-        self.loss_focus_pv += float(losses.focus_pv.item())
         self.loss_pt += float(losses.pt.item())
         self.loss_vl_router += float(losses.vl_router.item())
         self.loss_vl_heatmap_task += float(losses.vl_heatmap_task.item())
@@ -2708,9 +2699,6 @@ class _MetricAccumulator:
         self.loss_slot_jepa += float(_loss_component_or_zero(losses, "slot_jepa").item())
         self.loss_support_pred += float(_loss_component_or_zero(losses, "support_pred").item())
         self.loss_binding_consistency += float(_loss_component_or_zero(losses, "binding_consistency").item())
-        self.loss_cross_modal_align += float(_loss_component_or_zero(losses, "cross_modal_align").item())
-        self.loss_ordinal_relation += float(_loss_component_or_zero(losses, "ordinal_relation").item())
-        self.loss_innovation_calib += float(_loss_component_or_zero(losses, "innovation_calib").item())
         self.physical_aux_budget_scale += float(losses.physical_aux_budget_scale.item())
         self.semantic_aux_budget_scale += float(losses.semantic_aux_budget_scale.item())
         self.alignment_budget_scale += float(losses.alignment_budget_scale.item())
@@ -2742,7 +2730,6 @@ class _MetricAccumulator:
         self.loss_total_minus_action += float(outputs["loss_total_minus_action"].detach().item())
         self.loss_anchor_pv += float(outputs["loss_anchor_pv"].detach().item())
         self.loss_pv_weak += float(outputs["loss_pv_weak"].detach().item())
-        self.loss_focus_pv += float(outputs["loss_focus_pv"].detach().item())
         self.loss_pt += float(outputs["loss_pt"].detach().item())
         self.loss_vl_router += float(outputs.get("loss_vl_router", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_vl_heatmap_task += float(outputs.get("loss_vl_heatmap_task", outputs["loss_pt"] * 0.0).detach().item())
@@ -2761,9 +2748,6 @@ class _MetricAccumulator:
         self.loss_slot_jepa += float(outputs.get("loss_slot_jepa", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_support_pred += float(outputs.get("loss_support_pred", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_binding_consistency += float(outputs.get("loss_binding_consistency", outputs["loss_pt"] * 0.0).detach().item())
-        self.loss_cross_modal_align += float(outputs.get("loss_cross_modal_align", outputs["loss_pt"] * 0.0).detach().item())
-        self.loss_ordinal_relation += float(outputs.get("loss_ordinal_relation", outputs["loss_pt"] * 0.0).detach().item())
-        self.loss_innovation_calib += float(outputs.get("loss_innovation_calib", outputs["loss_pt"] * 0.0).detach().item())
         self.physical_aux_budget_scale += float(outputs["physical_aux_budget_scale"].detach().item())
         self.semantic_aux_budget_scale += float(outputs["semantic_aux_budget_scale"].detach().item())
         self.alignment_budget_scale += float(outputs["alignment_budget_scale"].detach().item())
@@ -2801,7 +2785,6 @@ class _MetricAccumulator:
             "loss_total_minus_action": self.loss_total_minus_action / denom,
             "loss_anchor_pv": self.loss_anchor_pv / denom,
             "loss_pv_weak": self.loss_pv_weak / denom,
-            "loss_focus_pv": self.loss_focus_pv / denom,
             "loss_pt": self.loss_pt / denom,
             "loss_vl_router": self.loss_vl_router / denom,
             "loss_vl_heatmap_task": self.loss_vl_heatmap_task / denom,
@@ -2820,9 +2803,6 @@ class _MetricAccumulator:
             "loss_slot_jepa": self.loss_slot_jepa / denom,
             "loss_support_pred": self.loss_support_pred / denom,
             "loss_binding_consistency": self.loss_binding_consistency / denom,
-            "loss_cross_modal_align": self.loss_cross_modal_align / denom,
-            "loss_ordinal_relation": self.loss_ordinal_relation / denom,
-            "loss_innovation_calib": self.loss_innovation_calib / denom,
             "physical_aux_budget_scale": self.physical_aux_budget_scale / denom,
             "semantic_aux_budget_scale": self.semantic_aux_budget_scale / denom,
             "alignment_budget_scale": self.alignment_budget_scale / denom,
@@ -2901,7 +2881,6 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_total_minus_action": losses.total_minus_action,
             "loss_anchor_pv": losses.anchor_pv,
             "loss_pv_weak": losses.pv_weak,
-            "loss_focus_pv": losses.focus_pv,
             "loss_pt": losses.pt,
             "loss_vl_router": losses.vl_router,
             "loss_vl_heatmap_task": losses.vl_heatmap_task,
@@ -2920,9 +2899,6 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
             "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
             "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
-            "loss_cross_modal_align": _loss_component_or_zero(losses, "cross_modal_align"),
-            "loss_ordinal_relation": _loss_component_or_zero(losses, "ordinal_relation"),
-            "loss_innovation_calib": _loss_component_or_zero(losses, "innovation_calib"),
             "physical_aux_budget_scale": losses.physical_aux_budget_scale,
             "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
             "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3019,7 +2995,6 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_total_minus_action": metrics["loss_total_minus_action"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
-            "loss_focus_pv": metrics["loss_focus_pv"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
             "loss_vl_router": metrics["loss_vl_router"] / denom,
             "loss_vl_heatmap_task": metrics["loss_vl_heatmap_task"] / denom,
@@ -3038,9 +3013,6 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_slot_jepa": metrics["loss_slot_jepa"] / denom,
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
-            "loss_cross_modal_align": metrics["loss_cross_modal_align"] / denom,
-            "loss_ordinal_relation": metrics["loss_ordinal_relation"] / denom,
-            "loss_innovation_calib": metrics["loss_innovation_calib"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3246,7 +3218,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_total_minus_action": losses.total_minus_action,
                     "loss_anchor_pv": losses.anchor_pv,
                     "loss_pv_weak": losses.pv_weak,
-                    "loss_focus_pv": losses.focus_pv,
                     "loss_pt": losses.pt,
                     "loss_vl_router": losses.vl_router,
                     "loss_vl_heatmap_task": losses.vl_heatmap_task,
@@ -3265,9 +3236,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
-                    "loss_cross_modal_align": _loss_component_or_zero(losses, "cross_modal_align"),
-                    "loss_ordinal_relation": _loss_component_or_zero(losses, "ordinal_relation"),
-                    "loss_innovation_calib": _loss_component_or_zero(losses, "innovation_calib"),
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3301,7 +3269,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_total_minus_action"] = metrics["loss_total_minus_action"] + losses.total_minus_action
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
-                metrics["loss_focus_pv"] = metrics["loss_focus_pv"] + losses.focus_pv
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
                 metrics["loss_vl_router"] = metrics["loss_vl_router"] + losses.vl_router
                 metrics["loss_vl_heatmap_task"] = metrics["loss_vl_heatmap_task"] + losses.vl_heatmap_task
@@ -3321,15 +3288,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_support_pred"] = metrics["loss_support_pred"] + _loss_component_or_zero(losses, "support_pred")
                 metrics["loss_binding_consistency"] = metrics["loss_binding_consistency"] + _loss_component_or_zero(
                     losses, "binding_consistency"
-                )
-                metrics["loss_cross_modal_align"] = metrics["loss_cross_modal_align"] + _loss_component_or_zero(
-                    losses, "cross_modal_align"
-                )
-                metrics["loss_ordinal_relation"] = metrics["loss_ordinal_relation"] + _loss_component_or_zero(
-                    losses, "ordinal_relation"
-                )
-                metrics["loss_innovation_calib"] = metrics["loss_innovation_calib"] + _loss_component_or_zero(
-                    losses, "innovation_calib"
                 )
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
@@ -3387,7 +3345,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_total_minus_action": losses.total_minus_action,
                     "loss_anchor_pv": losses.anchor_pv,
                     "loss_pv_weak": losses.pv_weak,
-                    "loss_focus_pv": losses.focus_pv,
                     "loss_pt": losses.pt,
                     "loss_vl_router": losses.vl_router,
                     "loss_vl_heatmap_task": losses.vl_heatmap_task,
@@ -3406,9 +3363,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
-                    "loss_cross_modal_align": _loss_component_or_zero(losses, "cross_modal_align"),
-                    "loss_ordinal_relation": _loss_component_or_zero(losses, "ordinal_relation"),
-                    "loss_innovation_calib": _loss_component_or_zero(losses, "innovation_calib"),
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3439,7 +3393,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_total_minus_action"] = metrics["loss_total_minus_action"] + losses.total_minus_action
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
-                metrics["loss_focus_pv"] = metrics["loss_focus_pv"] + losses.focus_pv
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
                 metrics["loss_vl_router"] = metrics["loss_vl_router"] + losses.vl_router
                 metrics["loss_vl_heatmap_task"] = metrics["loss_vl_heatmap_task"] + losses.vl_heatmap_task
@@ -3459,15 +3412,6 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_support_pred"] = metrics["loss_support_pred"] + _loss_component_or_zero(losses, "support_pred")
                 metrics["loss_binding_consistency"] = metrics["loss_binding_consistency"] + _loss_component_or_zero(
                     losses, "binding_consistency"
-                )
-                metrics["loss_cross_modal_align"] = metrics["loss_cross_modal_align"] + _loss_component_or_zero(
-                    losses, "cross_modal_align"
-                )
-                metrics["loss_ordinal_relation"] = metrics["loss_ordinal_relation"] + _loss_component_or_zero(
-                    losses, "ordinal_relation"
-                )
-                metrics["loss_innovation_calib"] = metrics["loss_innovation_calib"] + _loss_component_or_zero(
-                    losses, "innovation_calib"
                 )
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
@@ -3503,7 +3447,6 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_total_minus_action": metrics["loss_total_minus_action"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
-            "loss_focus_pv": metrics["loss_focus_pv"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
             "loss_vl_router": metrics["loss_vl_router"] / denom,
             "loss_vl_heatmap_task": metrics["loss_vl_heatmap_task"] / denom,
@@ -3522,9 +3465,6 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_slot_jepa": metrics["loss_slot_jepa"] / denom,
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
-            "loss_cross_modal_align": metrics["loss_cross_modal_align"] / denom,
-            "loss_ordinal_relation": metrics["loss_ordinal_relation"] / denom,
-            "loss_innovation_calib": metrics["loss_innovation_calib"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3563,7 +3503,6 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_total_minus_action",
     "loss_anchor_pv",
     "loss_pv_weak",
-    "loss_focus_pv",
     "loss_pt",
     "loss_vl_router",
     "loss_vl_heatmap_task",
@@ -3582,9 +3521,6 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_slot_jepa",
     "loss_support_pred",
     "loss_binding_consistency",
-    "loss_cross_modal_align",
-    "loss_ordinal_relation",
-    "loss_innovation_calib",
     "physical_aux_budget_scale",
     "semantic_aux_budget_scale",
     "alignment_budget_scale",
@@ -4476,9 +4412,6 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         aqr_support_bias_clip=float(
             _arg_or_default("aqr_support_bias_clip", _SPEC_DEFAULTS.aqr_support_bias_clip)
         ),
-        aqr_temporal_memory_tokens=int(
-            _arg_or_default("aqr_temporal_memory_tokens", _SPEC_DEFAULTS.aqr_temporal_memory_tokens)
-        ),
         aqr_vjepa_temporal_mode=str(
             _arg_or_default("aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
         ),
@@ -4518,9 +4451,6 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         ),
         ordinal_relation_enabled=bool(
             _arg_or_default("ordinal_relation_enabled", _SPEC_DEFAULTS.ordinal_relation_enabled)
-        ),
-        ordinal_confidence_threshold=float(
-            _arg_or_default("ordinal_confidence_threshold", _SPEC_DEFAULTS.ordinal_confidence_threshold)
         ),
         lambda_vl_heatmap_task=float(_arg_or_default("lambda_vl_heatmap_task", _SPEC_DEFAULTS.lambda_vl_heatmap_task)),
         lambda_vl_heatmap_effector=float(
@@ -4658,7 +4588,6 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_semantic_future_aux=float(getattr(args, "lambda_semantic_future_aux", 0.25)),
         lambda_anchor_pv=float(getattr(args, "lambda_anchor_pv", 0.1)),
         lambda_pv_weak=float(getattr(args, "lambda_pv_weak", 0.02)),
-        lambda_focus_pv=float(getattr(args, "lambda_focus_pv", 0.0)),
         lambda_pt=float(getattr(args, "lambda_pt", 1.0)),
         tau_pv=float(getattr(args, "tau_pv", 0.07)),
         tau_pt=float(getattr(args, "tau_pt", 0.07)),
@@ -4698,9 +4627,6 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_slot_jepa=float(getattr(args, "lambda_slot_jepa", 0.0)),
         lambda_support_pred=float(getattr(args, "lambda_support_pred", 0.0)),
         lambda_binding_consistency=float(getattr(args, "lambda_binding_consistency", 0.0)),
-        lambda_cross_modal_align=float(getattr(args, "lambda_cross_modal_align", 0.0)),
-        lambda_ordinal_relation=float(getattr(args, "lambda_ordinal_relation", 0.0)),
-        lambda_innovation_calib=float(getattr(args, "lambda_innovation_calib", 0.0)),
         mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", 0.07)),
         mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", 1.0)),
         mapg_vicreg_cov_weight=float(getattr(args, "mapg_vicreg_cov_weight", 0.04)),
@@ -5383,7 +5309,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s temporal_memory_tokens=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s ordinal_confidence_threshold=%s losses(slot_jepa=%s support_pred=%s bind=%s xmod=%s ordinal=%s innovation=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -5397,7 +5323,6 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "aqr_pg_peak_threshold", _SPEC_DEFAULTS.aqr_pg_peak_threshold)),
                 float(getattr(args, "aqr_pg_bias_weight", _SPEC_DEFAULTS.aqr_pg_bias_weight)),
                 float(getattr(args, "aqr_support_bias_clip", _SPEC_DEFAULTS.aqr_support_bias_clip)),
-                int(getattr(args, "aqr_temporal_memory_tokens", _SPEC_DEFAULTS.aqr_temporal_memory_tokens)),
                 str(getattr(args, "aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)),
                 int(getattr(args, "aqr_vjepa_temporal_tokens", _SPEC_DEFAULTS.aqr_vjepa_temporal_tokens)),
                 bool(
@@ -5420,13 +5345,9 @@ def train(args: argparse.Namespace) -> None:
                 bool(getattr(args, "slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
                 bool(getattr(args, "support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)),
                 bool(getattr(args, "ordinal_relation_enabled", _SPEC_DEFAULTS.ordinal_relation_enabled)),
-                float(getattr(args, "ordinal_confidence_threshold", _SPEC_DEFAULTS.ordinal_confidence_threshold)),
                 float(getattr(args, "lambda_slot_jepa", 0.0)),
                 float(getattr(args, "lambda_support_pred", 0.0)),
                 float(getattr(args, "lambda_binding_consistency", 0.0)),
-                float(getattr(args, "lambda_cross_modal_align", 0.0)),
-                float(getattr(args, "lambda_ordinal_relation", 0.0)),
-                float(getattr(args, "lambda_innovation_calib", 0.0)),
                 float(getattr(args, "aqr_obs_gate_init", _SPEC_DEFAULTS.aqr_obs_gate_init)),
                 float(getattr(args, "aqr_task_gate_init", _SPEC_DEFAULTS.aqr_task_gate_init)),
                 float(getattr(args, "aqr_posterior_gate_init", _SPEC_DEFAULTS.aqr_posterior_gate_init)),
@@ -5983,7 +5904,6 @@ def main() -> None:
     parser.add_argument("--lambda-semantic-future-aux", type=float, default=0.25)
     parser.add_argument("--lambda-anchor-pv", type=float, default=0.1)
     parser.add_argument("--lambda-pv-weak", type=float, default=0.02)
-    parser.add_argument("--lambda-focus-pv", type=float, default=0.0)
     parser.add_argument("--lambda-pt", type=float, default=1.0)
     parser.add_argument("--lambda-vl-heatmap-task", type=float, default=_SPEC_DEFAULTS.lambda_vl_heatmap_task)
     parser.add_argument("--lambda-vl-heatmap-effector", type=float, default=_SPEC_DEFAULTS.lambda_vl_heatmap_effector)
@@ -5995,17 +5915,14 @@ def main() -> None:
     parser.add_argument("--vl-anchor-diversity-radius-m", type=float, default=_SPEC_DEFAULTS.vl_anchor_local_sigma_m)
     parser.add_argument("--lambda-mapg-siglip", type=float, default=0.0)
     parser.add_argument("--lambda-mapg-vicreg", type=float, default=0.0)
-    parser.add_argument("--lambda-mapg-cycle", type=float, default=0.0)
+    parser.add_argument("--lambda-mapg-cycle", type=float, default=0.02)
     parser.add_argument("--lambda-mapg-masked-modality", type=float, default=0.0)
     parser.add_argument("--lambda-mapg-routing", type=float, default=0.0)
-    parser.add_argument("--lambda-mapg-support-diversity", type=float, default=0.0)
+    parser.add_argument("--lambda-mapg-support-diversity", type=float, default=0.01)
     parser.add_argument("--lambda-mapg-geometry-diversity", type=float, default=0.0)
     parser.add_argument("--lambda-slot-jepa", type=float, default=0.0)
     parser.add_argument("--lambda-support-pred", type=float, default=0.0)
     parser.add_argument("--lambda-binding-consistency", type=float, default=0.0)
-    parser.add_argument("--lambda-cross-modal-align", type=float, default=0.0)
-    parser.add_argument("--lambda-ordinal-relation", type=float, default=0.0)
-    parser.add_argument("--lambda-innovation-calib", type=float, default=0.0)
     parser.add_argument("--mapg-siglip-tau", type=float, default=0.07)
     parser.add_argument("--mapg-vicreg-var-target", type=float, default=1.0)
     parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=0.04)
@@ -6267,7 +6184,6 @@ def main() -> None:
     parser.add_argument("--aqr-pg-peak-threshold", type=float, default=_SPEC_DEFAULTS.aqr_pg_peak_threshold)
     parser.add_argument("--aqr-pg-bias-weight", type=float, default=_SPEC_DEFAULTS.aqr_pg_bias_weight)
     parser.add_argument("--aqr-support-bias-clip", type=float, default=_SPEC_DEFAULTS.aqr_support_bias_clip)
-    parser.add_argument("--aqr-temporal-memory-tokens", type=int, default=_SPEC_DEFAULTS.aqr_temporal_memory_tokens)
     parser.add_argument(
         "--aqr-vjepa-temporal-mode",
         default=_SPEC_DEFAULTS.aqr_vjepa_temporal_mode,
@@ -6310,7 +6226,6 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=_SPEC_DEFAULTS.ordinal_relation_enabled,
     )
-    parser.add_argument("--ordinal-confidence-threshold", type=float, default=_SPEC_DEFAULTS.ordinal_confidence_threshold)
     parser.add_argument("--aqr-obs-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_obs_gate_init)
     parser.add_argument("--aqr-task-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_task_gate_init)
     parser.add_argument("--aqr-posterior-gate-init", type=float, default=_SPEC_DEFAULTS.aqr_posterior_gate_init)

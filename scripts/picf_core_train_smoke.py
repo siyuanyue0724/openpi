@@ -451,7 +451,6 @@ def run_smoke(
         "loss_alignment": float(losses.alignment.item()),
         "loss_anchor_pv": float(losses.anchor_pv.item()),
         "loss_pv_weak": float(losses.pv_weak.item()),
-        "loss_focus_pv": float(losses.focus_pv.item()),
         "loss_pt": float(losses.pt.item()),
         "policy_path_used": True,
         "flow_override_used": bool(flow_override is not None),

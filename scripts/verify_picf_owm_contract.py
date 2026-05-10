@@ -34,6 +34,7 @@ def run_checks() -> list[Check]:
     wrapper = _read("src/openpi/picf/vjepa/wrapper.py")
     evidence = _read("scripts/picf_owm_evidence_bundle.py")
     readme = _read("docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md")
+    burnin_body = pipeline.split("def recurrent_burnin_step", 1)[1].split("def _predictive_state", 1)[0]
 
     checks = [
         Check(
@@ -88,16 +89,20 @@ def run_checks() -> list[Check]:
             "Cache must be read from previous carry and written after posterior correction.",
         ),
         Check(
+            "pipeline_recurrent_burnin_uses_aqr_graph",
+            _contains(burnin_body, "if bool(self.config.aqr_mapg_enabled):", "anchor_prior_graph = self._build_aqr_anchor_graph("),
+            "State-only burn-in must use the same AQR measurement graph as the suffix path when AQR is enabled.",
+        ),
+        Check(
             "pipeline_outputs_required_owm_debug_keys",
             _contains(
                 pipeline,
                 "aqr_temporal_support_entropy_mean",
                 "aqr_pg_support_entropy_mean",
-                "posterior_address_drift_mean",
                 "posterior_identity_switch_rate",
                 "evidence_cache_trust_mean",
                 "innovation_norm_visual",
-                "ordinal_loss_active",
+                "owm_ordinal_active",
             ),
             "Pipeline debug output must expose every OWM branch required for diagnosis.",
         ),
@@ -108,8 +113,15 @@ def run_checks() -> list[Check]:
         ),
         Check(
             "training_loss_family_exposed",
-            _contains(training, "lambda_slot_jepa", "lambda_support_pred", "lambda_binding_consistency", "lambda_cross_modal_align", "lambda_ordinal_relation", "lambda_innovation_calib"),
-            "All final OWM loss knobs must be available.",
+            _contains(training, "lambda_slot_jepa", "lambda_support_pred", "lambda_binding_consistency")
+            and not _contains(
+                training,
+                "lambda_cross_modal_align",
+                "lambda_ordinal_relation",
+                "lambda_innovation_calib",
+                "ordinal_confidence_threshold",
+            ),
+            "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",
         ),
         Check(
             "trainer_threads_next_posterior_teacher",

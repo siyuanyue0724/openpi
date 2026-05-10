@@ -5,8 +5,9 @@ Date: 2026-05-09
 Version:
 
 ```text
-PICF-AQR-OWM v1.0
-This version is complete for the code-level deployment contract.
+PICF-AQR-OWM v1.2
+This version is complete for the code-level deployment contract after the
+point/visual cleanup pass.
 The scripted verifier and regression set below are the required re-checks after
 any follow-up change.
 ```
@@ -262,9 +263,9 @@ Posterior must remain authoritative. Evidence cache/KV cache may assist it but
 must never replace it or bypass its correction/innovation path.
 ```
 
-### 3.3 AQR Exists But Is Not Yet Full OWM
+### 3.3 Resolved Pre-v1.2 AQR Gaps
 
-Current AQR core:
+The direct-final AQR core is:
 
 ```text
 aqr_physical_query_tokens
@@ -274,28 +275,29 @@ _aqr_competitive_support
 _build_aqr_anchor_graph
 ```
 
-Current strengths:
+Current deployed strengths:
 
 ```text
 learned physical/task queries
 PaliGemma semantic conditioning for task queries
-PaliGemma image-token support remapped onto V-JEPA grid
+PaliGemma image-token support preserved as first-class `pg_priors`
+V-JEPA recent temporal tokens routed as first-class temporal support
 V-JEPA/point/tactile/posterior readers
+posterior-grounded evidence cache with age/source/uncertainty/innovation gates
 Sinkhorn-like competitive support normalization
 PI0.5 path preserved
 ```
 
-Current gaps:
+Historical gaps that are now resolved in v1.2:
 
 ```text
-1. pg_priors is returned as None in AQR even though the contract supports it.
-2. PaliGemma image support is mostly converted into V-JEPA visual bias.
-3. V-JEPA temporal tokens are collapsed to one 2D map through current_map(...).
-4. aqr_temporal_memory_tokens exists in config but is not used in pipeline.
-5. posterior slots do not explicitly split address from content.
-6. evidence cache is not a full object-addressable typed cache.
-7. world prediction is global/posterior-token level, not slot-level JEPA yet.
-8. ordinal/relation grounding is not an explicit head yet.
+1. AQR now returns `pg_priors`; PaliGemma image support is not only a V-JEPA bias.
+2. V-JEPA support now uses typed recent temporal tokens, not only a collapsed 2D map.
+3. The misleading `aqr_temporal_memory_tokens` knob has been removed.
+4. posterior and graph contracts expose `slot_address` and `slot_content`.
+5. evidence cache is fixed-size and posterior-grounded.
+6. slot-level prediction/support heads are wired, with high-risk losses guarded.
+7. ordinal/relation state is prompt-gated and cannot rewrite posterior identity.
 ```
 
 Decision:
@@ -317,7 +319,7 @@ This section maps the proposed method item by item to the current codebase.
 | AQR should read typed memory | Current AQR separately reads visual, point, tactile, posterior; PaliGemma semantic conditions task queries | Keep AQR as the routing skeleton and extend typed memory rather than reverting to MAPG-v0 |
 | PaliGemma image tokens should be first-class | `_aqr_pg_image_support_read(...)` reads image tokens but remaps support into V-JEPA bias; AQR returns `pg_priors=None` | Fill `graph.pg_priors`; preserve per-view PaliGemma image support as a typed branch |
 | PaliGemma heatmap should not dominate | `aqr_pg_grounding_enabled=False`, `aqr_pg_bias_weight=0.0` defaults already encode this | Keep heatmap off by default; use only explicit ablation/diagnostic flags |
-| V-JEPA temporal support should be first-class | Config has `aqr_temporal_memory_tokens`, but it is not consumed in `pipeline.py` | Implement temporal support fields and route AQR over `[time, h, w]` tokens |
+| V-JEPA temporal support should be first-class | `VjepaFeatureMap.recent_maps(n)` and `PicfTemporalVisualSupportState` preserve recent temporal maps | Route AQR over `[time, h, w]` tokens through `aqr_vjepa_temporal_mode/tokens/include_delta` |
 | Physical slots and task anchors should be separated | Code already has `aqr_physical_query_tokens` and `aqr_task_query_tokens`; only task queries read semantic conditioner | Freeze this as a core invariant |
 | Address/content split should exist | Current posterior has latent/content-like fields, binding, recycle, and roles, but no explicit address vector | Add address vectors after verifying current binding stability |
 | Cache must be subordinate to posterior | Current recurrent carry stores `physical_prediction_cache`, not a long causal evidence cache | Add bounded evidence cache with age/source/uncertainty metadata; never bypass posterior |
@@ -664,6 +666,66 @@ The main axes are:
 Geometry diversity remains low-weight and confidence-gated.
 ```
 
+Point/visual graph consistency:
+
+```text
+The legacy focus_pv objective is removed from the maintained implementation.
+
+Reason:
+  it read token-fusion attention between public visual and point tokens, but the
+  maintained fusion stack does not contain real visual tokens in that attention
+  matrix. Keeping an exposed knob would create a cosmetic objective, not a valid
+  geometry constraint.
+
+The valid graph-level PV repair is lambda_mapg_cycle:
+  it operates on graph.visual_priors, graph.point_priors, and
+  projective_compatibility.
+```
+
+Let:
+
+```text
+C[p, v] >= 0:
+  projective compatibility between point p and visual token v.
+
+A[p | v] = C[p, v] / sum_p C[p, v]:
+  point distribution induced by a visual token.
+
+B[v | p] = C[p, v] / sum_v C[p, v]:
+  visual distribution induced by a point.
+
+v_j:
+  graph.visual_priors[j]
+
+p_j:
+  graph.point_priors[j]
+```
+
+The deployed graph PV loss is:
+
+```text
+p_tilde_j = v_j A^T
+v_tilde_j = p_j B
+
+L_graph_pv_direct =
+  JS(p_j, p_tilde_j)
+  + JS(v_j, v_tilde_j)
+
+v_cycle_j = p_tilde_j B
+p_cycle_j = v_tilde_j A^T
+
+L_graph_pv_cycle =
+  0.5 JS(v_j, v_cycle_j)
+  + 0.5 JS(p_j, p_cycle_j)
+
+L_mapg_cycle =
+  mean_j(L_graph_pv_direct + L_graph_pv_cycle)
+```
+
+This is deliberately not RoPE. The constraint is metric/projective geometry,
+not relative sequence position. RoPE remains reserved for time/grid/view
+coordinates; it cannot replace point-to-visual camera projection.
+
 Required tests:
 
 ```text
@@ -813,7 +875,6 @@ Required implementation:
    lambda_slot_jepa
    lambda_support_pred
    lambda_binding_consistency
-   lambda_innovation_calibration
 ```
 
 No-leakage invariant:
@@ -893,7 +954,6 @@ aqr_pg_support_entropy_mean
 aqr_pg_support_max
 aqr_effective_anchor_count
 aqr_same_role_support_overlap_max
-posterior_address_drift_mean
 posterior_identity_switch_rate
 posterior_recycle_rate
 evidence_cache_trust_mean
@@ -903,7 +963,7 @@ innovation_norm_point
 innovation_norm_tactile
 slot_jepa_loss
 support_pred_loss
-ordinal_loss_active
+owm_ordinal_active
 ```
 
 Required visual exports:
@@ -1716,8 +1776,8 @@ training config cannot silently use last_two_mean as the OWM production path
 Current facts:
 
 ```text
-aqr_temporal_memory_tokens exists
-the current pipeline does not actually consume it as temporal V-JEPA support
+the obsolete aqr_temporal_memory_tokens knob has been removed
+the active temporal V-JEPA controls are explicit and consumed by pipeline.py
 ```
 
 Final deployment changes:
@@ -1725,7 +1785,8 @@ Final deployment changes:
 ```text
 1. Add explicit flags for temporal V-JEPA support:
    aqr_vjepa_temporal_mode
-   aqr_vjepa_recent_frames
+   aqr_vjepa_temporal_tokens
+   aqr_vjepa_temporal_include_delta
    lambda_slot_jepa
    lambda_support_pred
 
@@ -1737,8 +1798,10 @@ Final deployment changes:
 
 3. Add explicit flags for ordinal/relation:
    ordinal_relation_enabled
-   lambda_ordinal_relation
-   ordinal_confidence_threshold
+
+   This is a diagnostic/prompt-gated structure only. The previous
+   ordinal_confidence_threshold knob was removed because it was not consumed by
+   the runtime graph or a mathematically grounded rank loss.
 
 4. Keep legacy MAPG and PG heatmap flags separate:
    mapg_enabled must stay off for OWM
@@ -1758,7 +1821,7 @@ turn a non-OWM path into the main run
 Current facts:
 
 ```text
-The script exposes AQR/MAPG knobs including aqr_temporal_memory_tokens.
+The script exposes AQR/MAPG knobs without stale temporal-memory aliases.
 It validates that aqr_mapg_enabled requires PICF and PaliGemma semantic mode.
 It rejects enabling legacy mapg_enabled and aqr_mapg_enabled together.
 It has tqdm/progress infrastructure and save_interval plumbing.
@@ -1781,8 +1844,6 @@ Final deployment changes:
    slot_jepa_loss
    support_pred_loss
    binding_consistency_loss
-   innovation_calibration_loss
-   ordinal_relation_loss
    temporal support entropy/mass
    cache trust/age
 
@@ -2016,8 +2077,8 @@ The training loss already includes action, VL losses, MAPG/AQR graph loss,
 SigLIP, VICReg, cycle, masked-modality, routing, support diversity, geometry
 diversity, and alignment budget scaling.
 
-There is no explicit slot JEPA loss, support prediction loss,
-binding-consistency loss, innovation-calibration loss, or ordinal relation loss.
+There is no explicit slot JEPA loss, support prediction loss, or
+binding-consistency loss.
 ```
 
 Final deployment changes:
@@ -2027,12 +2088,10 @@ Final deployment changes:
    slot_jepa
    support_pred
    binding_consistency
-   innovation_calibration
-   ordinal_relation
 
 2. Use validity masks for every new loss.
-3. Cross-modal alignment must use modality-specific pooled summaries, not raw
-   support distributions forced to match.
+3. Do not expose placeholder losses for cross-modal alignment, ordinal rank, or
+   innovation calibration until they have real support/rank/calibration targets.
 4. Budget auxiliary losses against action loss to prevent router objectives from
    overwhelming behavior learning.
 ```
@@ -2717,24 +2776,80 @@ L =
   + lambda_support_pred    L_support_pred
   + lambda_bind            L_binding_consistency
   + lambda_div             L_slot_diversity
-  + lambda_xmod            L_cross_modal_align
-  + lambda_rank            L_ordinal_relation
-  + lambda_innov           L_innovation_calibration
   + lambda_mask            L_masked_modality
 ```
 
-Current active/available family:
+Available auxiliary family:
 
 ```text
 L_action
 MAPG/AQR SigLIP-style cross-modal matching
 VICReg
-cycle consistency
+bidirectional graph point/visual projection consistency
 masked modality
 routing
 support overlap diversity
 geometry diversity
 alignment budget scaling
+```
+
+Nonzero default auxiliary weights for the current OWM graph path:
+
+```text
+lambda_anchor_pv = 0.1
+lambda_pv_weak = 0.02
+lambda_mapg_cycle = 0.02
+lambda_mapg_support_diversity = 0.01
+```
+
+Interpretation:
+
+```text
+lambda_anchor_pv:
+  observation-anchor point/visual routing must agree with projection.
+
+lambda_pv_weak:
+  point/visual projected embedding bags should be locally compatible.
+
+lambda_mapg_cycle:
+  direct graph.visual_priors <-> graph.point_priors projection consistency.
+
+lambda_mapg_support_diversity:
+  low-weight anti-collapse pressure across same-role graph supports.
+```
+
+Weight rationale:
+
+```text
+These constants are not claimed as paper-derived optima. They are conservative
+engineering scales for losses whose math is already tied to observed geometry:
+
+  anchor_pv:
+    local observation-anchor point/visual consistency. It is larger because it
+    supervises the legacy observation-anchor bridge used by posterior update.
+
+  pv_weak:
+    projected embedding-bag compatibility. It is smaller because it is weaker
+    than support-level geometric consistency and should not dominate action.
+
+  mapg_cycle:
+    bidirectional graph visual<->point support consistency through calibrated
+    projective_compatibility. It is the production replacement for removed
+    focus_pv and is kept low to prevent over-constraining noisy geometry.
+
+  mapg_support_diversity:
+    anti-collapse regularizer only. It must remain weaker than consistency and
+    action losses because Sinkhorn/routing already provides the primary
+    competition pressure.
+
+All OWM predictive/identity losses default to zero:
+
+  lambda_slot_jepa = 0.0
+  lambda_support_pred = 0.0
+  lambda_binding_consistency = 0.0
+
+They are mathematically valid hooks, but they should not add optimization
+pressure until posterior identity and support diagnostics are stable.
 ```
 
 Guarded activation policy for the direct final implementation:
@@ -2744,16 +2859,17 @@ Core path:
   current AQR losses + first-class PG/V-JEPA temporal support diagnostics
 
 Identity path:
-  binding consistency + address/content diagnostics
+  binding consistency, disabled by default until identity diagnostics are stable
 
 Prediction path:
-  slot JEPA next-token/content prediction
+  slot JEPA next-token/content prediction, disabled by default
 
 Support prediction path:
-  support prediction
+  support prediction, disabled by default
 
 Relation path:
-  ordinal/relation loss for high-confidence language only
+  prompt-gated ordinal/relation diagnostics only; no rank loss is exposed
+  without a real rank target
 ```
 
 The final architecture is implemented as one complete target. The gates above
@@ -3081,6 +3197,68 @@ should go directly to the full OWM target, while keeping training/runtime gates
 for posterior identity, temporal support, cache trust, and future prediction.
 Enabling every new loss at full strength without those guards would be
 mathematically less coherent, not more complete.
+
+## 23. Strict Diagnosis Gate
+
+The final contract is not accepted by code presence alone. Every deployment
+must pass a recursive dataflow diagnosis:
+
+```text
+README invariant
+-> dataclass/state contract
+-> V-JEPA temporal token path
+-> PaliGemma image support path
+-> point/visual/tactile/posterior/cache routing
+-> posterior precision correction
+-> post-correction cache write
+-> previous-cache-only read with innovation gating
+-> detached future posterior targets
+-> trainer metrics and CALVIN debug artifacts
+```
+
+Run:
+
+```bash
+python scripts/verify_picf_owm_contract.py
+python scripts/picf_owm_strict_diagnose.py \
+  --markdown-out docs/PICF_AQR_OWM_STRICT_DIAGNOSIS_TEMP.md \
+  --json-out /tmp/picf_owm_strict_diagnosis.json
+```
+
+For a real training/eval decision, also pass the runtime files:
+
+```bash
+python scripts/picf_owm_strict_diagnose.py \
+  --metrics-jsonl /path/to/metrics.jsonl \
+  --eval-dir /path/to/calvin_eval_dir \
+  --markdown-out docs/PICF_AQR_OWM_STRICT_DIAGNOSIS_TEMP.md \
+  --json-out /tmp/picf_owm_strict_diagnosis.json
+```
+
+Hard interpretation:
+
+```text
+static FAIL:
+  final OWM is not deployed, regardless of unit tests.
+
+runtime anchor_pv worsening:
+  point/visual embedding alignment may exist, but task-object anchor routing is
+  not yet accepted.
+
+same-role overlap near 1.0:
+  anchors are collapsing or not separating candidates, regardless of action loss.
+
+missing OWM debug keys:
+  the checkpoint was not produced by the final OWM graph and cannot validate it.
+
+cache read without innovation/source/age/uncertainty gating:
+  cache can bypass posterior and is invalid.
+```
+
+This gate is deliberately stricter than a smoke test. The architecture is only
+accepted when the posterior-centered dataflow exists and rollout diagnostics
+show that anchor identity, typed support, innovation, and cache trust behave
+coherently.
 
 ## References
 

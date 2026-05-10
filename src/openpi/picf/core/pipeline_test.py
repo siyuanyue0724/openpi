@@ -1000,9 +1000,47 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
     assert second.debug["owm_evidence_cache_valid_entries"] >= float(core.config.persistent_anchors)
     assert "evidence_cache_trust_mean" in second.debug
     assert "evidence_cache_age_mean" in second.debug
-    assert "posterior_address_drift_mean" in second.debug
+    assert "owm_evidence_cache_innovation_mean" in second.debug
+    assert second.debug["owm_evidence_cache_read_active"] == 1.0
     assert "posterior_identity_switch_rate" in second.debug
     assert "posterior_recycle_rate" in second.debug
+
+    _, low_innovation_scores = core._previous_evidence_cache_tokens(second.state)
+    assert low_innovation_scores is not None
+    second.state.predictive.evidence_cache.innovation_at_write[:] = 100.0
+    _, high_innovation_scores = core._previous_evidence_cache_tokens(second.state)
+    assert high_innovation_scores is not None
+    assert bool((high_innovation_scores < low_innovation_scores).all().item())
+
+
+def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_query_count_physical=4,
+        aqr_query_count_task=3,
+        aqr_query_rounds=1,
+    )
+    frame = next(iter(replay))
+    calls: list[dict[str, object]] = []
+    original = core._build_aqr_anchor_graph
+
+    def _wrapped(**kwargs):
+        calls.append(kwargs)
+        return original(**kwargs)
+
+    monkeypatch.setattr(core, "_build_aqr_anchor_graph", _wrapped)
+
+    carry = core.recurrent_burnin_step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=np.stack([_visual_override(1.0), _visual_override(1.5)], axis=0),
+    )
+
+    assert calls
+    assert carry.posterior.tokens.shape[0] == core.config.persistent_anchors
+    assert "proprio_token" in calls[0]
+    assert calls[0]["vl_grounding"] is None
 
 
 def test_ordinal_relation_state_is_prompt_gated_and_does_not_rewrite_posterior(tmp_path: Path) -> None:
@@ -1026,7 +1064,7 @@ def test_ordinal_relation_state_is_prompt_gated_and_does_not_rewrite_posterior(t
     assert not bool(base.state.task_readout.ordinal_active.item())
     assert ordinal.state.task_readout.ordinal_active is not None
     assert bool(ordinal.state.task_readout.ordinal_active.item())
-    assert ordinal.debug["ordinal_loss_active"] == 1.0
+    assert ordinal.debug["owm_ordinal_active"] == 1.0
     torch.testing.assert_close(base.state.posterior.mu, ordinal.state.posterior.mu)
     torch.testing.assert_close(base.state.posterior.Sigma, ordinal.state.posterior.Sigma)
 

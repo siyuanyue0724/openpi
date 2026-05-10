@@ -238,7 +238,6 @@ def _scalar_loss_snapshot(outputs: dict[str, torch.Tensor]) -> dict[str, float]:
         "loss_alignment",
         "loss_anchor_pv",
         "loss_pv_weak",
-        "loss_focus_pv",
         "loss_pt",
         "projective_candidate_density",
     ]

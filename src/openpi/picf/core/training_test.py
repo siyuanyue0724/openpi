@@ -13,11 +13,13 @@ from openpi.picf.contracts import PicfObservation
 from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
+from openpi.picf.core.contracts import PicfAnchorPriorGraphState
 from openpi.picf.core.contracts import PicfObservationAnchorState
 from openpi.picf.core.contracts import PicfProjectiveGeometryState
 from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.pipeline import PicfFullCore
 from openpi.picf.core.training import PicfAlignmentLossConfig
+from openpi.picf.core.training import _mapg_cycle_loss
 from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.core.training import compute_transition_loss
 from openpi.picf.core.training import PicfTransitionLossConfig
@@ -386,18 +388,15 @@ def test_transition_loss_computes_guarded_owm_objectives_when_weighted(tmp_path:
             lambda_slot_jepa=0.1,
             lambda_support_pred=0.1,
             lambda_binding_consistency=0.1,
-            lambda_innovation_calib=0.1,
         ),
     )
 
     assert torch.isfinite(losses.slot_jepa)
     assert torch.isfinite(losses.support_pred)
     assert torch.isfinite(losses.binding_consistency)
-    assert torch.isfinite(losses.innovation_calib)
     assert losses.slot_jepa.item() >= 0.0
     assert losses.support_pred.item() >= 0.0
     assert losses.binding_consistency.item() >= 0.0
-    assert losses.innovation_calib.item() >= 0.0
 
 
 def test_slot_jepa_prefers_next_posterior_teacher_over_visual_fallback(tmp_path: Path) -> None:
@@ -431,6 +430,49 @@ def test_slot_jepa_prefers_next_posterior_teacher_over_visual_fallback(tmp_path:
     )
 
     assert torch.allclose(losses.slot_jepa, torch.ones_like(losses.slot_jepa), atol=1e-5)
+
+
+def test_binding_consistency_uses_detached_temporal_identity_target(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    tokens = first.state.posterior.tokens.detach()
+    availability = torch.ones((4,), dtype=tokens.dtype)
+    matched_future = PicfFutureTargets(
+        visual_latent=None,
+        visual_real=None,
+        tactile_real=None,
+        point_real=None,
+        availability=availability,
+        posterior_tokens=tokens,
+        posterior_support_summary=None,
+    )
+    permuted_future = dataclasses.replace(matched_future, posterior_tokens=torch.flip(tokens, dims=(0,)))
+
+    matched = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        config=PicfTransitionLossConfig(lambda_binding_consistency=1.0),
+        future_targets_override=matched_future,
+    )
+    permuted = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        config=PicfTransitionLossConfig(lambda_binding_consistency=1.0),
+        future_targets_override=permuted_future,
+    )
+
+    assert matched.binding_consistency < permuted.binding_consistency
 
 
 def test_transition_loss_can_enable_vl_router_supervision_terms(tmp_path: Path) -> None:
@@ -508,6 +550,61 @@ def test_transition_loss_can_enable_mapg_graph_terms(tmp_path: Path) -> None:
     assert torch.isfinite(losses.mapg_support_diversity)
     assert torch.isfinite(losses.mapg_geometry_diversity)
     assert losses.mapg_graph.item() >= 0.0
+
+
+def test_mapg_cycle_loss_penalizes_graph_point_visual_projection_mismatch() -> None:
+    dtype = torch.float32
+    geometry = PicfProjectiveGeometryState(
+        point_proj_grid_norm=torch.zeros((2, 2), dtype=dtype),
+        point_proj_grid_index=torch.zeros((2, 2), dtype=dtype),
+        point_visibility=torch.ones((2,), dtype=dtype),
+        point_depth=torch.ones((2,), dtype=dtype),
+        point_depth_sample=torch.ones((2,), dtype=dtype),
+        point_depth_valid=torch.ones((2,), dtype=torch.bool),
+        visual_grid_norm=torch.zeros((2, 2), dtype=dtype),
+        visual_grid_index=torch.zeros((2, 2), dtype=dtype),
+        visual_pixel_centers=torch.zeros((2, 2), dtype=dtype),
+        visual_ray_world=torch.zeros((2, 3), dtype=dtype),
+        camera_origin_world=torch.zeros((3,), dtype=dtype),
+        projective_compatibility=torch.eye(2, dtype=dtype),
+        projective_candidate_mask=torch.eye(2, dtype=torch.bool),
+        projective_attention_bias=torch.zeros((2, 2), dtype=dtype),
+    )
+    visual_priors = torch.tensor([[0.98, 0.02], [0.02, 0.98]], dtype=dtype)
+    aligned_point_priors = visual_priors.clone()
+    flipped_point_priors = torch.flip(visual_priors, dims=(1,))
+
+    def make_state(point_priors: torch.Tensor) -> SimpleNamespace:
+        graph = PicfAnchorPriorGraphState(
+            pg_priors=None,
+            visual_priors=visual_priors,
+            point_priors=point_priors,
+            tactile_priors=None,
+            posterior_priors=None,
+            anchor_tokens=torch.zeros((2, 4), dtype=dtype),
+            anchor_roles=torch.zeros((2,), dtype=torch.long),
+            anchor_scores=torch.ones((2,), dtype=dtype),
+            anchor_confidence=torch.ones((2,), dtype=dtype),
+            anchor_x=torch.zeros((2, 3), dtype=dtype),
+            anchor_S=torch.eye(3, dtype=dtype).repeat(2, 1, 1),
+            geometry_valid=torch.ones((2,), dtype=torch.bool),
+            obs_slot_assignment=None,
+            task_assignment=None,
+            modality_confidence=torch.ones((2, 5), dtype=dtype),
+            valid=torch.ones((2,), dtype=torch.bool),
+        )
+        token_field = SimpleNamespace(
+            projective_geometry=geometry,
+            point_projectable_mask=torch.ones((2,), dtype=torch.bool),
+        )
+        return SimpleNamespace(anchor_prior_graph=graph, token_field=token_field)
+
+    reference = torch.zeros((), dtype=dtype)
+    aligned = _mapg_cycle_loss(make_state(aligned_point_priors), reference=reference, eps=1e-6)
+    mismatched = _mapg_cycle_loss(make_state(flipped_point_priors), reference=reference, eps=1e-6)
+    assert torch.isfinite(aligned)
+    assert torch.isfinite(mismatched)
+    assert mismatched > aligned + 0.05
 
 
 def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_unavailable(tmp_path: Path) -> None:
@@ -606,7 +703,6 @@ def test_alignment_loss_uses_projective_candidates_and_is_finite(tmp_path: Path)
     assert torch.isfinite(alignment.total)
     assert torch.isfinite(alignment.anchor_pv)
     assert torch.isfinite(alignment.pv_weak)
-    assert torch.isfinite(alignment.focus_pv)
     assert alignment.candidate_edges > 0
     assert 0.0 < alignment.candidate_density < 1.0
 
@@ -759,20 +855,6 @@ def test_alignment_loss_tau_pv_changes_bag_contrastive_temperature(tmp_path: Pat
     assert torch.isfinite(warm.pv_weak)
     assert torch.isfinite(cold.pv_weak)
     assert not torch.allclose(warm.pv_weak, cold.pv_weak)
-
-
-def test_alignment_loss_emits_focus_loss_from_fusion_attention(tmp_path: Path) -> None:
-    core, replay = _make_core(tmp_path)
-    frame = next(iter(replay))
-    output = core.step(
-        frame,
-        point_features_override=_point_override(core, frame),
-        visual_map_override=_visual_override(1.0),
-        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
-    )
-    alignment = compute_alignment_loss(output.state, config=PicfAlignmentLossConfig(lambda_focus_pv=1.0))
-    assert torch.isfinite(alignment.focus_pv)
-    assert alignment.focus_pv.item() >= 0.0
 
 
 def test_alignment_loss_suppresses_low_support_false_positive_routing() -> None:

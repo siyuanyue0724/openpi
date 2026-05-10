@@ -640,7 +640,7 @@ consistency through:
 ```text
 anchor_pv
 pv_weak
-focus_pv
+mapg_cycle for graph-level point/visual projection consistency
 pt
 ```
 

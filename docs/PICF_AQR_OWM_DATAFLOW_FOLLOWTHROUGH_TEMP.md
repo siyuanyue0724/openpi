@@ -798,3 +798,223 @@ If the verifier fails, the branch is not final OWM even if unit tests pass.
 If the verifier passes but rollout diagnostics fail, the code path exists but
 the trained system is not empirically accepted.
 ```
+
+## 14. Strict Recursive Audit 2026-05-10
+
+This section records the stricter professor-level audit performed after the
+initial deployment. The audit separates three claims that must not be conflated:
+
+```text
+code-path deployment:
+  Are all OWM graph objects present and causally wired?
+
+mathematical consistency:
+  Does every object serve the posterior-centered belief update without bypasses?
+
+runtime acceptance:
+  Do real training/CALVIN diagnostics show anchors becoming stable,
+  task-relevant, and non-collapsed?
+```
+
+### 14.1 Full Recursive Equation
+
+At step `t`, the final graph follows this recurrence:
+
+```text
+raw observation:
+  o_t = (rgb_t, language, point_t, tactile_t, proprio_t, a_{t-1})
+
+typed tokenization:
+  M_text      = E_pg_text(language)
+  M_pg        = E_pg_img(rgb_t, view)
+  M_vjepa     = E_vjepa(rgb_{t-T:t})[tau, h, w]
+  M_point     = E_point(point_t)
+  M_tactile   = E_tactile(tactile_t)
+  M_proprio   = E_proprio(proprio_t)
+  M_action    = E_action(a_{t-1})
+  M_post^-    = posterior_{t-1}
+  M_cache^-   = cache_{t-1}
+
+prior:
+  S_t^- = F_prior(posterior_{t-1}, proprio_t, a_{t-1})
+
+measurement routing:
+  p_{j,i}^{(m)} = softmax_i(logit(q_j(S_t^-), M_t^{(m)}_i))
+
+posterior correction:
+  Lambda_t^+ = Lambda_t^- + Lambda_t^{meas}
+  eta_t^+    = Lambda_t^- mu_t^- + Lambda_t^{meas} mu_t^{meas}
+  mu_t^+     = (Lambda_t^+)^{-1} eta_t^+
+  c_t^+      = c_t^- + K_t * (c_t^{meas} - c_t^-)
+
+prediction:
+  hat{S}_{t+1} = F_slot(S_t^+, a_t, proprio_t, language)
+
+innovation:
+  nu_t = Sigma_pred^{-1/2} (y_t - hat{y}_t)
+
+cache write:
+  cache_t = write_after_correction(S_t^+, topk evidence_t, nu_t)
+
+action:
+  a_t = PI0.5(posterior_t^+, task anchors, innovation_t, typed summaries)
+```
+
+The cache read score must be:
+
+```text
+score_i =
+  source_factor_i
+  / (1 + uncertainty_i + age_i + lambda_innov * max(innovation_i, 0))
+
+source_factor_i =
+  1.0  for real/posterior-grounded entries
+  0.5  for non-real or predicted entries
+```
+
+This formula is now enforced in the cache read path and debug trust metric. A
+cache entry written under high surprise can no longer have the same trust as a
+low-innovation posterior-grounded entry.
+
+### 14.2 Point/Visual Projection Follow-Through
+
+The point/visual path is:
+
+```text
+camera/world geometry
+  -> projective_compatibility
+  -> projective_candidate_mask
+  -> projective_attention_bias
+  -> point/visual support routing
+  -> training losses
+```
+
+The losses are not equivalent:
+
+```text
+loss_pv_weak:
+  weak projected embedding alignment. It can decrease while anchors remain bad.
+
+loss_anchor_pv:
+  observation-anchor point/visual routing-vs-projection constraint.
+  If this worsens, anchors are not learning the projected geometry.
+
+loss_mapg_cycle:
+  AQR graph point/visual projection consistency. The current deployed version
+  is bidirectional:
+    p_tilde_j = graph.visual_priors[j] @ A[p|v]^T
+    v_tilde_j = graph.point_priors[j] @ B[v|p]
+    L = JS(graph.point_priors[j], p_tilde_j)
+      + JS(graph.visual_priors[j], v_tilde_j)
+      + 0.5 JS(graph.visual_priors[j], p_tilde_j @ B[v|p])
+      + 0.5 JS(graph.point_priors[j], v_tilde_j @ A[p|v]^T)
+  This fixes the old failure mode where a visual->point->visual cycle could be
+  self-consistent while graph.point_priors drifted away from projection.
+
+legacy focus_pv:
+  removed. It read an attention matrix that does not contain real visual-token
+  rows in the maintained fusion stack, so it was a dead/cosmetic objective.
+```
+
+Therefore, "PV-related loss decreases" is not sufficient. The strict condition
+is:
+
+```text
+loss_anchor_pv should not worsen
+loss_mapg_cycle should be active when MAPG/AQR graph alignment is required
+same-role support overlap should move below collapse levels
+posterior identity switch rate should not spike
+```
+
+### 14.3 Old CALVIN/Training Run Diagnosis
+
+The inspected remote training/eval run was produced by an old code revision:
+
+```text
+checkpoint code:
+  8fdb16f
+
+latest deployed local code:
+  ff76682 plus current strict-audit fixes
+```
+
+It cannot validate the final OWM graph because the metrics contain no final OWM
+debug keys. It is still useful as a diagnosis of the older anchor behavior.
+
+Runtime metrics through step 4300 showed:
+
+```text
+loss_action:
+  decreases, so imitation learning is progressing.
+
+loss_pv_weak:
+  decreases, so weak projected embedding alignment exists.
+
+loss_anchor_pv:
+  worsens, so anchor-level point/visual routing is not improving.
+
+legacy focus_pv:
+  was absent from the old run's effective training signal and is now removed
+  from the maintained code path.
+
+loss_mapg_cycle:
+  must be inspected on new runs because it is now the graph-level projected
+  point/visual consistency loss.
+
+loss_mapg_support_diversity and loss_mapg_geometry_diversity:
+  worsen, indicating same-role anchor collapse pressure remains.
+
+OWM debug keys:
+  absent, so this run is not a final OWM validation run.
+```
+
+CALVIN anchor diagnostics at checkpoint 2500 showed:
+
+```text
+posterior pixel jump:
+  mean about 12-15 px on sampled episodes.
+
+same-role visual/point overlap:
+  max overlap mean about 1.00.
+
+trend:
+  no clear convergence of anchor jumps across episode quartiles.
+```
+
+Strict interpretation:
+
+```text
+The old run does not prove the final OWM code is wrong.
+It does prove that the older training recipe did not make anchors converge.
+PV projection alone did not produce task-object binding.
+Action-loss reduction alone is not an anchor-quality acceptance criterion.
+```
+
+### 14.4 Remaining Warnings After Static Diagnosis
+
+The strict audit originally found that `binding_consistency` was only a
+current-step entropy/sharpness term. That is now corrected:
+
+```text
+binding_consistency =
+  current binding entropy/sharpness
+  + detached next-posterior slot contrast
+```
+
+The temporal contrast uses current posterior tokens against detached
+`future.posterior_tokens` and therefore does not leak future observations into
+the current action path.
+
+The strict static script intentionally keeps one conceptual warning:
+
+```text
+slot_address:
+  currently uses the learned slot token as the address carrier in the posterior.
+  This is a valid address carrier, but low address drift is not proof of stable
+  object identity; identity must be judged by binding switch, support overlap,
+  posterior motion, and task relevance.
+```
+
+This is not a missing forward path. It is an acceptance constraint: future
+rollouts must be judged with identity-switch and support-overlap metrics, not
+with address-drift alone.

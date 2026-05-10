@@ -37,7 +37,6 @@ class PicfTransitionLossConfig:
     lambda_semantic_future_aux: float = 0.25
     lambda_anchor_pv: float = 0.1
     lambda_pv_weak: float = 0.02
-    lambda_focus_pv: float = 0.0
     lambda_pt: float = 1.0
     tau_pv: float = 0.07
     tau_pt: float = 0.07
@@ -69,17 +68,14 @@ class PicfTransitionLossConfig:
     vl_anchor_diversity_radius_m: float = 0.04
     lambda_mapg_siglip: float = 0.0
     lambda_mapg_vicreg: float = 0.0
-    lambda_mapg_cycle: float = 0.0
+    lambda_mapg_cycle: float = 0.02
     lambda_mapg_masked_modality: float = 0.0
     lambda_mapg_routing: float = 0.0
-    lambda_mapg_support_diversity: float = 0.0
+    lambda_mapg_support_diversity: float = 0.01
     lambda_mapg_geometry_diversity: float = 0.0
     lambda_slot_jepa: float = 0.0
     lambda_support_pred: float = 0.0
     lambda_binding_consistency: float = 0.0
-    lambda_cross_modal_align: float = 0.0
-    lambda_ordinal_relation: float = 0.0
-    lambda_innovation_calib: float = 0.0
     mapg_siglip_tau: float = 0.07
     mapg_vicreg_var_target: float = 1.0
     mapg_vicreg_cov_weight: float = 0.04
@@ -97,7 +93,6 @@ class PicfTransitionLossConfig:
 class PicfAlignmentLossConfig:
     lambda_anchor_pv: float = 1.0
     lambda_pv_weak: float = 0.2
-    lambda_focus_pv: float = 0.0
     lambda_pt: float = 1.0
     tau_pv: float = 0.07
     tau_pt: float = 0.07
@@ -135,7 +130,6 @@ class PicfTransitionLossBreakdown:
     total_minus_action: torch.Tensor
     anchor_pv: torch.Tensor
     pv_weak: torch.Tensor
-    focus_pv: torch.Tensor
     pt: torch.Tensor
     availability: torch.Tensor
     physical_aux_budget_scale: torch.Tensor
@@ -158,9 +152,6 @@ class PicfTransitionLossBreakdown:
     slot_jepa: torch.Tensor
     support_pred: torch.Tensor
     binding_consistency: torch.Tensor
-    cross_modal_align: torch.Tensor
-    ordinal_relation: torch.Tensor
-    innovation_calib: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -186,7 +177,6 @@ class PicfTransitionLossBreakdown:
             "total_minus_action": float(self.total_minus_action.item()),
             "anchor_pv": float(self.anchor_pv.item()),
             "pv_weak": float(self.pv_weak.item()),
-            "focus_pv": float(self.focus_pv.item()),
             "pt": float(self.pt.item()),
             "physical_aux_budget_scale": float(self.physical_aux_budget_scale.item()),
             "semantic_aux_budget_scale": float(self.semantic_aux_budget_scale.item()),
@@ -208,9 +198,6 @@ class PicfTransitionLossBreakdown:
             "slot_jepa": float(self.slot_jepa.item()),
             "support_pred": float(self.support_pred.item()),
             "binding_consistency": float(self.binding_consistency.item()),
-            "cross_modal_align": float(self.cross_modal_align.item()),
-            "ordinal_relation": float(self.ordinal_relation.item()),
-            "innovation_calib": float(self.innovation_calib.item()),
         }
 
 
@@ -219,7 +206,6 @@ class PicfAlignmentLossBreakdown:
     total: torch.Tensor
     anchor_pv: torch.Tensor
     pv_weak: torch.Tensor
-    focus_pv: torch.Tensor
     pt: torch.Tensor
     candidate_edges: int
     candidate_density: float
@@ -229,7 +215,6 @@ class PicfAlignmentLossBreakdown:
             "total": float(self.total.item()),
             "anchor_pv": float(self.anchor_pv.item()),
             "pv_weak": float(self.pv_weak.item()),
-            "focus_pv": float(self.focus_pv.item()),
             "pt": float(self.pt.item()),
             "candidate_edges": float(self.candidate_edges),
             "candidate_density": float(self.candidate_density),
@@ -284,6 +269,70 @@ def _posterior_support_summary(posterior: Any | None) -> torch.Tensor | None:
     else:
         bind_conf = torch.zeros((slot_count,), device=device, dtype=dtype)
     return torch.stack([alpha, support_mass, contact_prob, bind_conf], dim=-1).detach()
+
+
+def _binding_consistency_loss(
+    posterior: Any | None,
+    future: PicfFutureTargets,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Bind sharply now and keep persistent slots aligned to the next posterior.
+
+    The first term discourages diffuse current bindings. The second term is a
+    leakage-free temporal identity term: current posterior slots must identify
+    their detached next-posterior counterpart better than other slots. It uses
+    posterior targets only as stop-gradient teachers and therefore does not feed
+    future observations into the action path.
+    """
+
+    if posterior is None:
+        return _zero_weight_loss(None, reference)
+
+    terms: list[torch.Tensor] = []
+    binding = getattr(posterior, "binding", None)
+    if binding is not None and binding.numel() > 0 and binding.shape[-1] > 1:
+        prob = binding.to(device=reference.device, dtype=reference.dtype).clamp_min(eps)
+        prob = prob / torch.clamp(prob.sum(dim=-1, keepdim=True), min=eps)
+        entropy = -(prob * torch.log(prob)).sum(dim=-1) / math.log(float(prob.shape[-1]))
+        terms.append(entropy.mean())
+
+    current_tokens = getattr(posterior, "tokens", None)
+    future_tokens = future.posterior_tokens
+    if current_tokens is not None and future_tokens is not None and current_tokens.numel() > 0 and future_tokens.numel() > 0:
+        current = current_tokens.to(device=reference.device, dtype=reference.dtype)
+        target = future_tokens.detach().to(device=reference.device, dtype=reference.dtype)
+        slot_count = min(int(current.shape[0]), int(target.shape[0]))
+        width = min(int(current.shape[-1]), int(target.shape[-1]))
+        if slot_count > 1 and width > 0:
+            current = fn.normalize(current[:slot_count, :width], dim=-1)
+            target = fn.normalize(target[:slot_count, :width], dim=-1)
+            logits = (current @ target.t()) / 0.1
+            labels = torch.arange(slot_count, device=reference.device)
+            forward = fn.cross_entropy(logits, labels, reduction="none")
+            backward = fn.cross_entropy(logits.t(), labels, reduction="none")
+            weight = torch.ones((slot_count,), device=reference.device, dtype=reference.dtype)
+            alpha = getattr(posterior, "alpha", None)
+            if alpha is not None:
+                current_alpha = alpha.to(device=reference.device, dtype=reference.dtype).reshape(-1)[:slot_count].clamp(0.0, 1.0)
+                weight = weight * current_alpha
+            if future.posterior_support_summary is not None and future.posterior_support_summary.numel() > 0:
+                future_alpha = future.posterior_support_summary.detach().to(device=reference.device, dtype=reference.dtype)
+                if future_alpha.ndim >= 2 and future_alpha.shape[1] > 0:
+                    weight = weight * future_alpha.reshape(future_alpha.shape[0], -1)[:slot_count, 0].clamp(0.0, 1.0)
+            if bool((weight.sum() > eps).item()):
+                temporal = 0.5 * (
+                    (forward * weight).sum() / torch.clamp(weight.sum(), min=eps)
+                    + (backward * weight).sum() / torch.clamp(weight.sum(), min=eps)
+                )
+            else:
+                temporal = 0.5 * (forward.mean() + backward.mean())
+            terms.append(temporal)
+
+    if not terms:
+        return _zero_weight_loss(binding, reference)
+    return sum(terms) / float(len(terms))
 
 
 def future_targets_from_current_targets(
@@ -389,7 +438,6 @@ def make_action_only_transition_loss(
         total_minus_action=zero,
         anchor_pv=zero,
         pv_weak=zero,
-        focus_pv=zero,
         pt=zero,
         availability=availability,
         physical_aux_budget_scale=zero,
@@ -412,9 +460,6 @@ def make_action_only_transition_loss(
         slot_jepa=zero,
         support_pred=zero,
         binding_consistency=zero,
-        cross_modal_align=zero,
-        ordinal_relation=zero,
-        innovation_calib=zero,
     )
 
 
@@ -895,15 +940,48 @@ def _mapg_cycle_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: floa
         compat = compat * projectable.to(device=reference.device, dtype=reference.dtype)[:, None]
     if not bool((compat.sum() > eps).item()):
         return _zero_weight_sum(reference, graph.visual_priors, graph.point_priors)
-    col = compat / torch.clamp(compat.sum(dim=0, keepdim=True), min=eps)
-    row = compat / torch.clamp(compat.sum(dim=1, keepdim=True), min=eps)
-    v_to_p = graph.visual_priors.to(device=reference.device, dtype=reference.dtype) @ col.T
-    p_to_v = v_to_p @ row
-    p_to_v = p_to_v / torch.clamp(p_to_v.sum(dim=-1, keepdim=True), min=eps)
-    valid = (graph.visual_priors.to(device=reference.device, dtype=reference.dtype).sum(dim=-1) > eps) & (p_to_v.sum(dim=-1) > eps)
-    if not bool(valid.any().item()):
+    visual = torch.clamp(
+        torch.nan_to_num(graph.visual_priors.to(device=reference.device, dtype=reference.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+        min=0.0,
+    )
+    point = torch.clamp(
+        torch.nan_to_num(graph.point_priors.to(device=reference.device, dtype=reference.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+        min=0.0,
+    )
+    if visual.shape[0] != point.shape[0] or visual.shape[-1] != compat.shape[1] or point.shape[-1] != compat.shape[0]:
         return _zero_weight_sum(reference, graph.visual_priors, graph.point_priors)
-    return _js_distribution_loss(graph.visual_priors.to(device=reference.device, dtype=reference.dtype)[valid], p_to_v[valid], eps=eps).mean()
+
+    point_given_visual = compat / torch.clamp(compat.sum(dim=0, keepdim=True), min=eps)
+    visual_given_point = compat / torch.clamp(compat.sum(dim=1, keepdim=True), min=eps)
+    point_from_visual = visual @ point_given_visual.T
+    visual_from_point = point @ visual_given_point
+
+    visual = visual / torch.clamp(visual.sum(dim=-1, keepdim=True), min=eps)
+    point = point / torch.clamp(point.sum(dim=-1, keepdim=True), min=eps)
+    point_from_visual = point_from_visual / torch.clamp(point_from_visual.sum(dim=-1, keepdim=True), min=eps)
+    visual_from_point = visual_from_point / torch.clamp(visual_from_point.sum(dim=-1, keepdim=True), min=eps)
+
+    losses = []
+    point_valid = (point.sum(dim=-1) > eps) & (point_from_visual.sum(dim=-1) > eps)
+    if bool(point_valid.any().item()):
+        losses.append(_js_distribution_loss(point[point_valid], point_from_visual[point_valid], eps=eps).mean())
+    visual_valid = (visual.sum(dim=-1) > eps) & (visual_from_point.sum(dim=-1) > eps)
+    if bool(visual_valid.any().item()):
+        losses.append(_js_distribution_loss(visual[visual_valid], visual_from_point[visual_valid], eps=eps).mean())
+
+    visual_cycle = point_from_visual @ visual_given_point
+    point_cycle = visual_from_point @ point_given_visual.T
+    visual_cycle = visual_cycle / torch.clamp(visual_cycle.sum(dim=-1, keepdim=True), min=eps)
+    point_cycle = point_cycle / torch.clamp(point_cycle.sum(dim=-1, keepdim=True), min=eps)
+    cycle_visual_valid = (visual.sum(dim=-1) > eps) & (visual_cycle.sum(dim=-1) > eps)
+    if bool(cycle_visual_valid.any().item()):
+        losses.append(0.5 * _js_distribution_loss(visual[cycle_visual_valid], visual_cycle[cycle_visual_valid], eps=eps).mean())
+    cycle_point_valid = (point.sum(dim=-1) > eps) & (point_cycle.sum(dim=-1) > eps)
+    if bool(cycle_point_valid.any().item()):
+        losses.append(0.5 * _js_distribution_loss(point[cycle_point_valid], point_cycle[cycle_point_valid], eps=eps).mean())
+    if not losses:
+        return _zero_weight_sum(reference, graph.visual_priors, graph.point_priors)
+    return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
 
 
 def _mapg_masked_modality_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: float) -> torch.Tensor:
@@ -1437,10 +1515,9 @@ def compute_alignment_loss(
             zero,
             token_field.point_align_embeddings,
             token_field.visual_align_embeddings,
-            token_field.fusion_attention_mean,
         )
         total = zero_align + (cfg.lambda_pt * pt)
-        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero_align, pv_weak=zero_align, focus_pv=zero_align, pt=pt, candidate_edges=0, candidate_density=0.0)
+        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero_align, pv_weak=zero_align, pt=pt, candidate_edges=0, candidate_density=0.0)
 
     candidate_mask = geometry.projective_candidate_mask
     projective = _sanitize_probability_tensor(geometry.projective_compatibility, eps=1e-6, interior=False)
@@ -1451,10 +1528,9 @@ def compute_alignment_loss(
             zero,
             token_field.point_align_embeddings,
             token_field.visual_align_embeddings,
-            token_field.fusion_attention_mean,
         )
         total = zero_align + (cfg.lambda_pt * pt)
-        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero_align, pv_weak=zero_align, focus_pv=zero_align, pt=pt, candidate_edges=0, candidate_density=candidate_density)
+        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero_align, pv_weak=zero_align, pt=pt, candidate_edges=0, candidate_density=candidate_density)
 
     routing, _, _, _, _ = _routing_consistency(state, config=cfg, eps=1e-6)
     routing = _sanitize_probability_tensor(routing, eps=1e-6, interior=True)
@@ -1498,46 +1574,15 @@ def compute_alignment_loss(
     else:
         pv_weak = _zero_weight_sum(zero, point_embed, visual_embed)
 
-    focus_pv = zero
-    fusion_attention = token_field.fusion_attention_mean
-    point_count = token_field.point_tokens.shape[0]
-    visual_count = token_field.visual_tokens.shape[0]
-    public_visual_indices = torch.nonzero(token_field.modality_ids == 1, as_tuple=False).squeeze(-1)
-    public_point_indices = torch.nonzero(token_field.modality_ids == 0, as_tuple=False).squeeze(-1)
-    if (
-        fusion_attention is not None
-        and point_count > 0
-        and visual_count > 0
-        and public_visual_indices.numel() > 0
-        and public_point_indices.numel() > 0
-    ):
-        pv_attention = fusion_attention.index_select(0, public_visual_indices).index_select(1, public_point_indices)
-        focus_losses = []
-        for u in range(min(int(visual_count), int(pv_attention.shape[0]))):
-            focus_weight = candidate_weight[:, u]
-            if float(focus_weight.sum().item()) <= 0.0:
-                continue
-            numerator = torch.sum(pv_attention[u] * projective[:, u] * focus_weight) + 1e-6
-            denominator = torch.sum(pv_attention[u]) + 1e-6
-            focus_losses.append(-torch.log(torch.clamp(numerator / denominator, min=1e-6)))
-        if focus_losses:
-            focus_pv = torch.stack(focus_losses).mean()
-        else:
-            focus_pv = _zero_weight_sum(zero, fusion_attention)
-    else:
-        focus_pv = _zero_weight_sum(zero, fusion_attention)
-
     total = (
         (cfg.lambda_anchor_pv * anchor_pv)
         + (cfg.lambda_pv_weak * pv_weak)
-        + (cfg.lambda_focus_pv * focus_pv)
         + (cfg.lambda_pt * pt)
     )
     return PicfAlignmentLossBreakdown(
         total=total,
         anchor_pv=anchor_pv,
         pv_weak=pv_weak,
-        focus_pv=focus_pv,
         pt=pt,
         candidate_edges=candidate_edges,
         candidate_density=candidate_density,
@@ -1573,7 +1618,6 @@ def compute_transition_loss(
         config=PicfAlignmentLossConfig(
             lambda_anchor_pv=cfg.lambda_anchor_pv,
             lambda_pv_weak=cfg.lambda_pv_weak,
-            lambda_focus_pv=cfg.lambda_focus_pv,
             lambda_pt=cfg.lambda_pt,
             tau_pv=cfg.tau_pv,
             tau_pt=cfg.tau_pt,
@@ -1754,9 +1798,7 @@ def compute_transition_loss(
         + (cfg.lambda_tactile_real * tactile_real)
         + (cfg.lambda_point_real * point_real)
     )
-    if (
-        predictive.slot_prediction_tokens is not None
-    ):
+    if predictive.slot_prediction_tokens is not None:
         slot_tokens = predictive.slot_prediction_tokens
         if future.posterior_tokens is not None and future.posterior_tokens.numel() > 0:
             target_slots = future.posterior_tokens.detach().to(device=slot_tokens.device, dtype=slot_tokens.dtype)
@@ -1799,61 +1841,17 @@ def compute_transition_loss(
     else:
         support_pred = _zero_weight_loss(None, predictive.action)
 
-    binding = output_t.state.posterior.binding
-    if binding is not None and binding.numel() > 0 and binding.shape[-1] > 1:
-        eps = float(core.config.epsilon_a)
-        binding_prob = binding.to(device=predictive.action.device, dtype=predictive.action.dtype).clamp_min(eps)
-        binding_prob = binding_prob / torch.clamp(binding_prob.sum(dim=-1, keepdim=True), min=eps)
-        binding_entropy = -(binding_prob * torch.log(binding_prob)).sum(dim=-1) / math.log(float(binding_prob.shape[-1]))
-        binding_consistency = binding_entropy.mean()
-    else:
-        binding_consistency = _zero_weight_loss(binding, predictive.action)
+    binding_consistency = _binding_consistency_loss(
+        output_t.state.posterior,
+        future,
+        reference=predictive.action,
+        eps=float(core.config.epsilon_a),
+    )
 
-    graph = output_t.state.anchor_prior_graph
-    if graph is not None and graph.modality_confidence is not None and graph.modality_confidence.numel() > 0:
-        confidence = graph.modality_confidence.to(device=predictive.action.device, dtype=predictive.action.dtype)
-        align_terms = []
-        if confidence.shape[-1] > 2 and graph.vjepa_temporal_priors is not None:
-            align_terms.append(fn.l1_loss(confidence[:, 2], confidence[:, 1]))
-        if confidence.shape[-1] > 3 and graph.pg_priors is not None:
-            align_terms.append(fn.l1_loss(confidence[:, 3], confidence[:, 1]))
-        if confidence.shape[-1] > 4 and graph.point_priors is not None:
-            align_terms.append(fn.l1_loss(confidence[:, 4], confidence[:, 1]))
-        if confidence.shape[-1] > 5 and graph.tactile_priors is not None:
-            align_terms.append(fn.l1_loss(confidence[:, 5], confidence[:, 1]))
-        cross_modal_align = sum(align_terms) / float(len(align_terms)) if align_terms else _zero_weight_loss(confidence, predictive.action)
-    else:
-        cross_modal_align = _zero_weight_loss(None, predictive.action)
-
-    ordinal_scores = output_t.state.task_readout.ordinal_scores
-    if (
-        bool(output_t.state.task_readout.ordinal_active.item())
-        and ordinal_scores is not None
-        and ordinal_scores.numel() > 1
-    ):
-        # Without external rank labels, keep this weak objective geometric:
-        # relation prompts should induce separable candidate scores, not rewrite
-        # posterior identity or force a pseudo target into non-relation data.
-        score_spread = ordinal_scores.to(device=predictive.action.device, dtype=predictive.action.dtype).std(unbiased=False)
-        ordinal_relation = torch.exp(-score_spread)
-    else:
-        ordinal_relation = _zero_weight_loss(ordinal_scores, predictive.action)
-
-    if predictive.innovation_norm is not None and predictive.innovation_norm.numel() > 0:
-        innov = predictive.innovation_norm.to(device=predictive.action.device, dtype=predictive.action.dtype)
-        target_innov = torch.ones_like(innov)
-        availability_mask = future.availability.to(device=innov.device, dtype=innov.dtype).clamp(0.0, 1.0)
-        denom = torch.clamp(availability_mask.sum(), min=1.0)
-        innovation_calib = (((innov - target_innov) ** 2) * availability_mask).sum() / denom
-    else:
-        innovation_calib = _zero_weight_loss(predictive.innovation_norm, predictive.action)
     guarded_owm_aux = (
         (cfg.lambda_slot_jepa * slot_jepa)
         + (cfg.lambda_support_pred * support_pred)
         + (cfg.lambda_binding_consistency * binding_consistency)
-        + (cfg.lambda_cross_modal_align * cross_modal_align)
-        + (cfg.lambda_ordinal_relation * ordinal_relation)
-        + (cfg.lambda_innovation_calib * innovation_calib)
     )
     semantic_group = cfg.lambda_semantic_future_aux * semantic_future_aux
     alignment_group = alignment.total + vl_router_raw + mapg_graph_raw + guarded_owm_aux
@@ -1908,7 +1906,6 @@ def compute_transition_loss(
         total_minus_action=total - action_loss,
         anchor_pv=alignment.anchor_pv,
         pv_weak=alignment.pv_weak,
-        focus_pv=alignment.focus_pv,
         pt=alignment.pt,
         availability=future.availability,
         physical_aux_budget_scale=physical_scale,
@@ -1931,9 +1928,6 @@ def compute_transition_loss(
         slot_jepa=slot_jepa,
         support_pred=support_pred,
         binding_consistency=binding_consistency,
-        cross_modal_align=cross_modal_align,
-        ordinal_relation=ordinal_relation,
-        innovation_calib=innovation_calib,
     )
 
 

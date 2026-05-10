@@ -103,7 +103,6 @@ def test_load_runtime_args_coerces_sequence_fields(tmp_path, monkeypatch) -> Non
                 "lambda_semantic_future_aux": 0.25,
                 "lambda_anchor_pv": 0.1,
                 "lambda_pv_weak": 0.02,
-                "lambda_focus_pv": 0.0,
                 "lambda_pt": 1.0,
                 "pt_bag_radius_m": 0.04,
                 "pt_bag_sigma_m": 0.013,

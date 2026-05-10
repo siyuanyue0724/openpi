@@ -2285,7 +2285,15 @@ class PicfFullCore(nn.Module):
         tokens = cache.tokens.to(device=self.device, dtype=self.dtype)[valid]
         uncertainty = cache.uncertainty.to(device=self.device, dtype=self.dtype)[valid]
         age = cache.age.to(device=self.device, dtype=self.dtype)[valid]
-        score = 1.0 / torch.clamp(1.0 + uncertainty + age, min=self.config.epsilon_a)
+        innovation = cache.innovation_at_write.to(device=self.device, dtype=self.dtype)[valid]
+        source_ids = cache.source_ids.to(device=self.device, dtype=torch.long)[valid]
+        innovation_cost = float(self.config.evidence_cache_innovation_downweight) * torch.clamp(innovation, min=0.0)
+        source_factor = torch.where(
+            source_ids == 1,
+            torch.ones_like(uncertainty),
+            torch.full_like(uncertainty, 0.5),
+        )
+        score = source_factor / torch.clamp(1.0 + uncertainty + age + innovation_cost, min=self.config.epsilon_a)
         return tokens.reshape(-1, tokens.shape[-1]), score.reshape(-1)
 
     def _aqr_competitive_support(self, weights: torch.Tensor, *, eps: float) -> torch.Tensor:
@@ -5686,21 +5694,31 @@ class PicfFullCore(nn.Module):
             previous,
         )
         empty_semantic = self._project_semantic_context(tokens_raw=torch.zeros((0, self.config.semantic_dim), device=self.device, dtype=self.dtype))
-        anchor_prior_graph = self._build_anchor_prior_graph(
-            semantic=empty_semantic,
-            token_field=token_field,
-            dense_memory=dense_memory,
-            previous=previous,
-            vl_grounding=None,
-        )
-        observation_anchors = self._build_observation_anchors(token_field, dense_memory, anchor_graph=anchor_prior_graph)
-        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory, anchor_graph=anchor_prior_graph)
         proprio = _to_tensor(
             np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
             device=self.device,
             dtype=self.dtype,
         )
         proprio_token = self.proprio_proj(proprio[None, :])[0]
+        # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.
+        if bool(self.config.aqr_mapg_enabled):
+            anchor_prior_graph = self._build_aqr_anchor_graph(
+                semantic=empty_semantic,
+                token_field=token_field,
+                previous=previous,
+                vl_grounding=None,
+                proprio_token=proprio_token,
+            )
+        else:
+            anchor_prior_graph = self._build_anchor_prior_graph(
+                semantic=empty_semantic,
+                token_field=token_field,
+                dense_memory=dense_memory,
+                previous=previous,
+                vl_grounding=None,
+            )
+        observation_anchors = self._build_observation_anchors(token_field, dense_memory, anchor_graph=anchor_prior_graph)
+        posterior = self._posterior_update(previous, observation, observation_anchors, dense_memory, anchor_graph=anchor_prior_graph)
         action_source = (
             action_future
             if action_future is not None
@@ -5934,16 +5952,6 @@ class PicfFullCore(nn.Module):
             debug["owm_temporal_visual_tokens"] = float(observed.token_field.temporal_visual.tokens.shape[0])
         if observed.posterior.slot_address is not None:
             debug["owm_slot_address_norm_mean"] = float(torch.linalg.norm(observed.posterior.slot_address, dim=-1).mean().item())
-            previous_posterior = None if observed.previous is None else getattr(observed.previous, "posterior", None)
-            previous_address = None if previous_posterior is None else getattr(previous_posterior, "slot_address", None)
-            if previous_address is not None and previous_address.numel() > 0:
-                current_address = observed.posterior.slot_address.to(device=self.device, dtype=self.dtype)
-                previous_address = previous_address.to(device=self.device, dtype=self.dtype)
-                slot_count = min(int(current_address.shape[0]), int(previous_address.shape[0]))
-                width = min(int(current_address.shape[-1]), int(previous_address.shape[-1]))
-                if slot_count > 0 and width > 0:
-                    drift = torch.linalg.norm(current_address[:slot_count, :width] - previous_address[:slot_count, :width], dim=-1)
-                    debug["posterior_address_drift_mean"] = float(drift.mean().item())
         if observed.posterior.binding is not None and observed.posterior.binding.numel() > 0:
             previous_posterior = None if observed.previous is None else getattr(observed.previous, "posterior", None)
             previous_binding = None if previous_posterior is None else getattr(previous_posterior, "binding", None)
@@ -5959,19 +5967,28 @@ class PicfFullCore(nn.Module):
             debug["posterior_recycle_rate"] = float(observed.posterior.recycle_gate.to(dtype=self.dtype).mean().item())
         if observed.task_readout.ordinal_active is not None:
             debug["owm_ordinal_active"] = 1.0 if bool(observed.task_readout.ordinal_active.item()) else 0.0
-            debug["ordinal_loss_active"] = debug["owm_ordinal_active"]
         if predictive.evidence_cache is not None:
             cache = predictive.evidence_cache
             valid = cache.valid.to(dtype=self.dtype)
             debug["owm_evidence_cache_valid_entries"] = float(valid.sum().item())
+            debug["owm_evidence_cache_read_weight"] = float(self.config.evidence_cache_read_weight)
+            debug["owm_evidence_cache_read_active"] = 1.0 if float(self.config.evidence_cache_read_weight) > 0.0 else 0.0
             if bool(cache.valid.any().item()):
                 debug["owm_evidence_cache_age_mean"] = float(cache.age[cache.valid].mean().item())
                 debug["owm_evidence_cache_uncertainty_mean"] = float(cache.uncertainty[cache.valid].mean().item())
+                debug["owm_evidence_cache_innovation_mean"] = float(cache.innovation_at_write[cache.valid].mean().item())
                 debug["evidence_cache_age_mean"] = debug["owm_evidence_cache_age_mean"]
                 valid_uncertainty = cache.uncertainty[cache.valid].to(device=self.device, dtype=self.dtype).clamp(0.0, 1.0)
                 valid_age = cache.age[cache.valid].to(device=self.device, dtype=self.dtype)
-                decay = torch.exp(-valid_age / float(max(int(self.config.evidence_cache_len), 1)))
-                trust = (1.0 - valid_uncertainty) * decay
+                valid_innovation = torch.clamp(cache.innovation_at_write[cache.valid].to(device=self.device, dtype=self.dtype), min=0.0)
+                valid_source = cache.source_ids[cache.valid].to(device=self.device, dtype=torch.long)
+                source_factor = torch.where(
+                    valid_source == 1,
+                    torch.ones_like(valid_uncertainty),
+                    torch.full_like(valid_uncertainty, 0.5),
+                )
+                innovation_cost = float(self.config.evidence_cache_innovation_downweight) * valid_innovation
+                trust = source_factor / torch.clamp(1.0 + valid_uncertainty + valid_age + innovation_cost, min=self.config.epsilon_a)
                 debug["evidence_cache_trust_mean"] = float(trust.mean().item())
         return PicfCoreOutput(state=state, debug=debug)
 

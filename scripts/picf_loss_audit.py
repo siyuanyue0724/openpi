@@ -21,7 +21,6 @@ _LOSS_KEYS = (
     "loss_pt",
     "loss_anchor_pv",
     "loss_pv_weak",
-    "loss_focus_pv",
 )
 
 
