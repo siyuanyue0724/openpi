@@ -2320,9 +2320,10 @@ Current standard long-run launch profile:
   MVTrack adapters such as tracklet/proposal token projectors are explicitly
   materialized during trainer warmup even when the current dataset lacks those
   modalities, so FSDP/DDP still audits a stable trainable parameter contract.
-  On FSDP full-shard, frozen root-managed states are passed as `ignored_states`
-  for this scope; this keeps `use_orig_params=False` flat-parameter handles
-  uniform in `requires_grad` while preserving the strict anchor allowlist.
+  On FSDP full-shard, fully frozen root modules and frozen root-managed
+  parameters are passed through the single `ignored_states` API for this scope;
+  this keeps `use_orig_params=False` flat-parameter handles uniform in
+  `requires_grad` while preserving the strict anchor allowlist.
   Use it to test whether anchors can separate and stabilize; do not treat it as
   final policy training.
 - `--visual-finetune-mode full|frozen` remains a lower-level visual-backbone

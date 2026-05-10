@@ -2076,12 +2076,15 @@ def _wrap_model_for_training_strategy(
         _assign_fsdp_wrapped_child_module(model, original=child, wrapped=wrapped)
     ignored_modules = _fsdp_root_ignored_modules(model)
     root_wrap_kwargs = _fsdp_wrap_kwargs(device=device)
-    if ignored_modules:
-        root_wrap_kwargs["ignored_modules"] = ignored_modules
     if str(getattr(args, "picf_trainable_scope", "all")).lower().replace("-", "_") == "anchor_only":
         ignored_frozen_states = _fsdp_frozen_states_excluding_modules(model, ignored_modules=ignored_modules)
-        if ignored_frozen_states:
-            root_wrap_kwargs["ignored_states"] = ignored_frozen_states
+        ignored_states: list[torch.nn.Module | torch.nn.Parameter] = list(ignored_modules) + ignored_frozen_states
+        if ignored_states:
+            # PyTorch FSDP accepts modules or parameters through ignored_states
+            # but rejects passing ignored_modules and ignored_states together.
+            root_wrap_kwargs["ignored_states"] = ignored_states
+    elif ignored_modules:
+        root_wrap_kwargs["ignored_modules"] = ignored_modules
     return FullyShardedDataParallel(model, **root_wrap_kwargs)
 
 
