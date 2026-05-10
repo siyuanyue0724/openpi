@@ -229,6 +229,19 @@ def run_checks() -> list[Check]:
             "Window trainer must pass the next observed posterior as detached teacher target.",
         ),
         Check(
+            "trainer_materializes_optional_mvtrack_adapters",
+            _contains(
+                trainer,
+                "tracklet_token_proj.weight",
+                "tracklet_in = torch.zeros",
+                "(1, 23)",
+                "proposal_token_proj.weight",
+                "proposal_in = torch.zeros",
+                "(1, 26)",
+            ),
+            "Trainer warmup must materialize optional tracklet/proposal adapters even when a dataset lacks those modalities.",
+        ),
+        Check(
             "trainer_logs_required_owm_metrics",
             _contains(trainer, "OWM_DEBUG_METRIC_KEYS", "aqr_temporal_support_entropy_mean", "evidence_cache_trust_mean", "_owm_debug_metrics_from_output"),
             "Training metrics must carry OWM debug keys into metrics.jsonl.",

@@ -83,6 +83,11 @@ anchor_only:
   It also forces semantic runtime to no-grad/inference mode and disables
   window-level activation checkpointing so the large-batch probe spends memory
   and time on anchor routing rather than policy-stack gradients/recompute.
+  Optional MVTrack typed-memory adapters, including tracklet and proposal token
+  projectors, are still materialized during warmup even when the dataset does
+  not provide those modalities. This keeps FSDP/DDP strict lazy-parameter
+  checks aligned with the maintained v2 contract instead of silently depending
+  on modality presence.
 
 Purpose:
   maximize safe batch/accumulation on 2x40GB and test whether anchors can

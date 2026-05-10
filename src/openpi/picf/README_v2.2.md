@@ -2316,9 +2316,12 @@ Current standard long-run launch profile:
   binding/address, and support/cache/local evidence modules trainable. It also
   forces semantic runtime into no-grad/inference mode and disables window-level
   activation checkpointing, because the profile is meant to maximize safe
-  throughput for anchor diagnostics rather than train the policy stack. Use it
-  to test whether anchors can separate and stabilize; do not treat it as final
-  policy training.
+  throughput for anchor diagnostics rather than train the policy stack. Optional
+  MVTrack adapters such as tracklet/proposal token projectors are explicitly
+  materialized during trainer warmup even when the current dataset lacks those
+  modalities, so FSDP/DDP still audits a stable trainable parameter contract.
+  Use it to test whether anchors can separate and stabilize; do not treat it as
+  final policy training.
 - `--visual-finetune-mode full|frozen` remains a lower-level visual-backbone
   compatibility knob; prefer the top-level perception switch for maintained
   launch profiles.
