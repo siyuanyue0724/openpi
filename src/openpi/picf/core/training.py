@@ -692,6 +692,39 @@ def _action_active7_loss(
     return ((3.0 * action_pos) + (3.0 * action_rot) + action_gripper) / 7.0
 
 
+def _weighted_action_override_loss(
+    action_loss_override: torch.Tensor,
+    action_pos: torch.Tensor,
+    action_rot: torch.Tensor,
+    action_gripper: torch.Tensor,
+    *,
+    config: PicfTransitionLossConfig,
+) -> torch.Tensor:
+    """Scale PI0.5 flow loss when action lambda weights are overridden.
+
+    The PI0.5 action expert returns a canonical full-chunk flow loss plus
+    first-action component diagnostics. The canonical loss is the parity path
+    for default training, but anchor-only probes need the action lambdas to
+    remain authoritative. We therefore preserve exact default behavior and use
+    the component diagnostics only to compute a detached scale factor for
+    non-default lambda settings.
+    """
+
+    default = PicfTransitionLossConfig()
+    default_weighted = (
+        (float(default.lambda_action_pos) * action_pos)
+        + (float(default.lambda_action_rot) * action_rot)
+        + (float(default.lambda_action_gripper) * action_gripper)
+    )
+    requested_weighted = (
+        (float(config.lambda_action_pos) * action_pos)
+        + (float(config.lambda_action_rot) * action_rot)
+        + (float(config.lambda_action_gripper) * action_gripper)
+    )
+    scale = requested_weighted.detach() / torch.clamp(default_weighted.detach(), min=1e-6)
+    return action_loss_override * torch.clamp(scale, min=0.0)
+
+
 def _world_translation_from_transform(
     transform: torch.Tensor | np.ndarray | None,
     *,
@@ -1726,7 +1759,13 @@ def compute_transition_loss(
         action_pos = action_pos_override if action_pos_override is not None else action_loss_override
         action_rot = action_rot_override if action_rot_override is not None else action_loss_override
         action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_override
-        action_loss = action_loss_override
+        action_loss = _weighted_action_override_loss(
+            action_loss_override,
+            action_pos,
+            action_rot,
+            action_gripper,
+            config=cfg,
+        )
     else:
         action_target_t = _action_target_tensor(
             action_target,

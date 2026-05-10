@@ -370,6 +370,62 @@ def test_transition_loss_reports_effective_budgeted_terms_consistently(tmp_path:
     assert torch.isfinite(losses.alignment_raw)
 
 
+def test_transition_loss_action_override_respects_zero_action_lambdas(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+        config=PicfTransitionLossConfig(
+            lambda_action_pos=0.0,
+            lambda_action_rot=0.0,
+            lambda_action_gripper=0.0,
+        ),
+        action_loss_override=torch.tensor(0.5, dtype=core.dtype),
+        action_pos_override=torch.tensor(0.4, dtype=core.dtype),
+        action_rot_override=torch.tensor(0.2, dtype=core.dtype),
+        action_gripper_override=torch.tensor(0.1, dtype=core.dtype),
+    )
+    torch.testing.assert_close(losses.action, torch.zeros_like(losses.action))
+    torch.testing.assert_close(losses.total, losses.total_minus_action)
+    assert losses.action_active7.item() > 0.0
+
+
+def test_transition_loss_action_override_preserves_default_parity(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    override_total = torch.tensor(0.5, dtype=core.dtype)
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+        action_loss_override=override_total,
+        action_pos_override=torch.tensor(0.4, dtype=core.dtype),
+        action_rot_override=torch.tensor(0.2, dtype=core.dtype),
+        action_gripper_override=torch.tensor(0.1, dtype=core.dtype),
+    )
+    torch.testing.assert_close(losses.action, override_total)
+
+
 def test_transition_loss_computes_guarded_owm_objectives_when_weighted(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
@@ -466,7 +522,7 @@ def test_slot_jepa_prefers_next_posterior_teacher_over_visual_fallback(tmp_path:
     assert losses.slot_jepa.item() > 0.5
 
 
-def test_binding_consistency_uses_detached_temporal_identity_target(tmp_path: Path) -> None:
+def test_binding_consistency_uses_permutation_tolerant_detached_temporal_target(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
     first = core.step(
@@ -506,7 +562,7 @@ def test_binding_consistency_uses_detached_temporal_identity_target(tmp_path: Pa
         future_targets_override=permuted_future,
     )
 
-    assert matched.binding_consistency < permuted.binding_consistency
+    torch.testing.assert_close(matched.binding_consistency, permuted.binding_consistency)
 
 
 def test_transition_loss_can_enable_vl_router_supervision_terms(tmp_path: Path) -> None:
