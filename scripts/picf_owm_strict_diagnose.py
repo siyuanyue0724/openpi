@@ -336,6 +336,19 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
+            "cache_read_weight_scales_residual",
+            pipeline.contains("q_before_cache", "cache_read - q_before_cache", "evidence_cache_read_weight")
+            and "cache_bias = cache_bias + math.log(max(float(self.config.evidence_cache_read_weight)" not in pipeline.text,
+            severity="fail",
+            detail=(
+                "evidence_cache_read_weight must scale the cache residual. Adding log(weight) as a constant "
+                "attention bias is a softmax-invariant no-op once weight is positive."
+            ),
+            evidence=pipeline.refs("q_before_cache", "cache_read - q_before_cache", "evidence_cache_read_weight"),
+        )
+    )
+    checks.append(
+        _finding(
             "state_only_burnin_uses_aqr_graph_when_enabled",
             "if bool(self.config.aqr_mapg_enabled):" in burnin_body
             and "anchor_prior_graph = self._build_aqr_anchor_graph(" in burnin_body,

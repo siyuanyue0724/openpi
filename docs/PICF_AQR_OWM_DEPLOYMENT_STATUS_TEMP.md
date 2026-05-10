@@ -247,7 +247,16 @@ default evidence_cache_read_weight:
 ```
 
 The final graph now reads the previous evidence cache by default with a small
-weight. This keeps the deployment complete while preserving posterior authority.
+weight. The weight is a real residual scale:
+
+```text
+q <- q + evidence_cache_read_weight * (ReadCache(q) - q)
+```
+
+It is not implemented as `log(weight)` added uniformly to the cache attention
+logits, because that would disappear under softmax normalization and behave
+like a binary reader switch. This keeps the deployment complete while preserving
+posterior authority.
 
 ### New Strict Diagnosis Script
 

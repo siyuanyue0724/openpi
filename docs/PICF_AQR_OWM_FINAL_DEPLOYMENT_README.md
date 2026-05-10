@@ -45,6 +45,28 @@ evidence_cache_enabled = True
 evidence_cache_read_weight = 0.05
 ```
 
+`evidence_cache_read_weight` is a residual scale, not an attention-prior
+constant. The cache reader applies:
+
+```text
+q <- q + evidence_cache_read_weight * (ReadCache(q) - q)
+```
+
+The cache attention itself is biased only by source, age, uncertainty, and
+innovation trust. This avoids the softmax-invariant failure mode where
+`log(weight)` is added to every cache key and therefore acts only as an on/off
+switch once the weight is positive.
+
+Full temporal OWM training also requires a real visual encoder path:
+
+```text
+--use-foundation-backbones
+```
+
+or an equivalent `visual_mode=encoder` configuration. Stub visual mode remains
+valid for regression tests and ablations, but it does not produce V-JEPA recent
+temporal priors.
+
 Default loss state:
 
 ```text

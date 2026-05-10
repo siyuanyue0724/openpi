@@ -103,6 +103,24 @@ class _TemporalModeVisualEncoder:
         return self.feature_map
 
 
+class _UnitCacheReader(torch.nn.Module):
+    def forward(
+        self,
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        *,
+        attn_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        del attn_bias
+        weights = torch.full(
+            (queries.shape[1], keys.shape[1]),
+            1.0 / max(int(keys.shape[1]), 1),
+            device=queries.device,
+            dtype=queries.dtype,
+        )
+        return queries + torch.ones_like(queries), weights
+
+
 def test_transformer_stack_uses_activation_checkpointing_during_training(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[int] = []
 
@@ -1012,6 +1030,67 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
     _, high_innovation_scores = core._previous_evidence_cache_tokens(second.state)
     assert high_innovation_scores is not None
     assert bool((high_innovation_scores < low_innovation_scores).all().item())
+
+
+def test_evidence_cache_read_weight_scales_residual_not_softmax_only(tmp_path: Path) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_query_count_physical=4,
+        aqr_query_count_task=3,
+        aqr_query_rounds=1,
+        evidence_cache_read_weight=0.0,
+    )
+    frame = next(iter(replay))
+    first = core.step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=np.stack([_visual_override(1.0), _visual_override(1.5)], axis=0),
+        semantic_override=_semantic_features_with_spatial(1.0),
+    )
+    assert first.state.predictive.evidence_cache is not None
+    assert bool(first.state.predictive.evidence_cache.valid.any().item())
+
+    core.aqr_cache_reader = _UnitCacheReader()
+    core.aqr_query_self = None
+    features = _semantic_features_with_spatial(2.0)
+    semantic = core._project_semantic_context(tokens_raw=features.tokens, features=features)
+
+    core.config = dataclasses.replace(core.config, evidence_cache_read_weight=0.0)
+    graph_zero = core._build_aqr_anchor_graph(
+        semantic=semantic,
+        token_field=first.state.token_field,
+        previous=first.state,
+        vl_grounding=None,
+    )
+    core.config = dataclasses.replace(core.config, evidence_cache_read_weight=0.25)
+    graph_quarter = core._build_aqr_anchor_graph(
+        semantic=semantic,
+        token_field=first.state.token_field,
+        previous=first.state,
+        vl_grounding=None,
+    )
+    core.config = dataclasses.replace(core.config, evidence_cache_read_weight=0.50)
+    graph_half = core._build_aqr_anchor_graph(
+        semantic=semantic,
+        token_field=first.state.token_field,
+        previous=first.state,
+        vl_grounding=None,
+    )
+
+    assert graph_zero is not None and graph_quarter is not None and graph_half is not None
+    torch.testing.assert_close(
+        graph_quarter.anchor_tokens - graph_zero.anchor_tokens,
+        torch.full_like(graph_quarter.anchor_tokens, 0.25),
+        atol=1e-5,
+        rtol=1e-5,
+    )
+    torch.testing.assert_close(
+        graph_half.anchor_tokens - graph_zero.anchor_tokens,
+        torch.full_like(graph_half.anchor_tokens, 0.50),
+        atol=1e-5,
+        rtol=1e-5,
+    )
 
 
 def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -115,6 +115,12 @@ def run_checks() -> list[Check]:
             "Cache must be read from previous carry and written after posterior correction.",
         ),
         Check(
+            "pipeline_cache_read_weight_scales_residual",
+            _contains(pipeline, "q_before_cache", "cache_read - q_before_cache", "evidence_cache_read_weight")
+            and "cache_bias = cache_bias + math.log(max(float(self.config.evidence_cache_read_weight)" not in pipeline,
+            "Cache read weight must scale the cache residual, not disappear as a constant softmax bias.",
+        ),
+        Check(
             "pipeline_recurrent_burnin_uses_aqr_graph",
             _contains(burnin_body, "if bool(self.config.aqr_mapg_enabled):", "anchor_prior_graph = self._build_aqr_anchor_graph("),
             "State-only burn-in must use the same AQR measurement graph as the suffix path when AQR is enabled.",

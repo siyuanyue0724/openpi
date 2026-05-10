@@ -2730,7 +2730,6 @@ class PicfFullCore(nn.Module):
         cache_bias = None
         if cache_scores is not None and cache_count > 0:
             cache_bias = torch.log(torch.clamp(cache_scores, min=self.config.epsilon_a))[None, :].expand(anchor_count, -1)
-            cache_bias = cache_bias + math.log(max(float(self.config.evidence_cache_read_weight), self.config.epsilon_a))
         tactile_bias = None
         if tactile_count > 0:
             tactile_bias = torch.zeros((anchor_count, tactile_count), device=self.device, dtype=self.dtype)
@@ -2794,11 +2793,14 @@ class PicfFullCore(nn.Module):
                 )
                 posterior_priors = self._aqr_competitive_support(posterior_weights, eps=self.config.epsilon_a)
             if self.aqr_cache_reader is not None and cache_count > 0 and float(self.config.evidence_cache_read_weight) > 0.0:
-                q, cache_weights = self.aqr_cache_reader(
+                q_before_cache = q
+                cache_read, cache_weights = self.aqr_cache_reader(
                     q,
                     cache_tokens.to(device=self.device, dtype=self.dtype)[None, :],
                     attn_bias=cache_bias,
                 )
+                cache_scale = max(float(self.config.evidence_cache_read_weight), 0.0)
+                q = q_before_cache + (cache_scale * (cache_read - q_before_cache))
                 cache_priors = self._aqr_competitive_support(cache_weights, eps=self.config.epsilon_a)
             if self.aqr_query_self is not None:
                 q = self.aqr_query_self(q)

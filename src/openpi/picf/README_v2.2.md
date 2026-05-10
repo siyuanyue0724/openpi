@@ -223,11 +223,17 @@ As of the latest local audit pass:
   - `semantic_mode=paligemma`
   - `aqr_vjepa_temporal_mode=last_two_tokens`
   - `evidence_cache_read_weight=0.05`
+    - this is a true cache residual scale:
+      `q <- q + 0.05 * (ReadCache(q) - q)`, not a softmax-bias-only
+      switch
   - guarded OWM losses remain `lambda_slot_jepa=0`,
     `lambda_support_pred=0`, and `lambda_binding_consistency=0`
 - equivalent CLI flags still exist for explicit overrides and ablations, but
   they are no longer required for the latest OWM default profile
 - recommended large-run perception profile remains explicit:
+  - formal V-JEPA temporal OWM training requires `--use-foundation-backbones`
+    or an equivalent `visual_mode=encoder` launch; stub visual mode is only a
+    light regression/ablation path and will not produce temporal V-JEPA priors
   - `--perception-finetune-mode frozen`
   - current cloud run cadence: `--num-train-steps 30000`,
     `--save-interval 2500`, `--unroll-steps 2`
