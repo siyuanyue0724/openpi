@@ -27,9 +27,39 @@ Non-negotiable:
 Version:
 
 ```text
-PICF-AQR-OWM v1.2
-Status: complete for the code-level deployment contract after the point/visual cleanup pass.
+PICF-AQR-OWM v1.3
+Status: complete for the code-level deployment contract after the point/visual cleanup and default-profile cleanup pass.
 ```
+
+Default-profile result:
+
+```text
+aqr_mapg_enabled=True
+semantic_mode=paligemma
+mapg_enabled=False
+vl_anchor_router_enabled=False
+aqr_pg_grounding_enabled=False
+aqr_pg_image_support_enabled=True
+aqr_vjepa_temporal_mode=last_two_tokens
+evidence_cache_read_weight=0.05
+lambda_mapg_cycle=0.02
+lambda_mapg_support_diversity=0.01
+lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=0.0
+```
+
+This means the latest OWM wiring is the default training profile. Explicit CLI
+overrides still exist for ablations, but are not required to avoid a legacy
+MAPG-v0 path.
+
+Serve-time compatibility:
+
+```text
+If old checkpoint metadata has semantic_mode=zero and lacks an explicit
+aqr_mapg_enabled field, serve_picf_policy keeps aqr_mapg_enabled=False.
+```
+
+This prevents new production defaults from silently promoting legacy
+zero-semantic checkpoints into a PaliGemma-required AQR path.
 
 ## Contract Ledger
 

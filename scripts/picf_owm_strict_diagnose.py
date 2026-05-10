@@ -243,6 +243,36 @@ def run_static_checks() -> list[Finding]:
     checks: list[Finding] = []
     checks.append(
         _finding(
+            "production_defaults_use_direct_owm_profile",
+            config.contains(
+                "aqr_mapg_enabled: bool = True",
+                "mapg_enabled: bool = False",
+                "vl_anchor_router_enabled: bool = False",
+                "aqr_pg_grounding_enabled: bool = False",
+                "aqr_pg_image_support_enabled: bool = True",
+                'aqr_vjepa_temporal_mode: str = "last_two_tokens"',
+                "evidence_cache_read_weight: float = 0.05",
+            )
+            and trainer.contains(
+                "_LOSS_DEFAULTS = PicfTransitionLossConfig()",
+                'default="paligemma"',
+                "default=_SPEC_DEFAULTS.aqr_mapg_enabled",
+                "default=_LOSS_DEFAULTS.lambda_mapg_cycle",
+                "default=_LOSS_DEFAULTS.lambda_mapg_support_diversity",
+                "default=_LOSS_DEFAULTS.lambda_slot_jepa",
+            ),
+            severity="fail",
+            detail=(
+                "No separate flags should be required for the latest OWM training profile: "
+                "AQR is on, legacy routers are off, PaliGemma semantic mode is the CLI default, "
+                "and loss defaults come from PicfTransitionLossConfig."
+            ),
+            evidence=config.refs("aqr_mapg_enabled", "mapg_enabled", "aqr_vjepa_temporal_mode", "evidence_cache_read_weight")
+            + trainer.refs('default="paligemma"', "_LOSS_DEFAULTS", "default=_LOSS_DEFAULTS.lambda_mapg_cycle"),
+        )
+    )
+    checks.append(
+        _finding(
             "temporal_vjepa_preserves_time",
             wrapper.contains("def recent_maps") and pipeline.contains("fmap.recent_maps", "PicfTemporalVisualSupportState", "vjepa_temporal_priors"),
             severity="fail",

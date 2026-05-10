@@ -203,6 +203,7 @@ def _make_core(tmp_path: Path, **overrides) -> tuple[PicfFullCore, CalvinSequent
         attention_heads=4,
         query_rounds=2,
         visual_real_grid=4,
+        aqr_mapg_enabled=False,
     )
     config_kwargs.update(overrides)
     config = PicfCoreConfig(**config_kwargs)
@@ -1807,6 +1808,7 @@ def test_extract_targets_does_not_mutate_visual_history_when_using_real_visual_p
             predictive_semantic_dropout_prob=0.0,
             attention_heads=4,
             query_rounds=2,
+            aqr_mapg_enabled=False,
             device="cpu",
         ),
         visual_config=VjepaVisualConfig(camera_json_path=calvin_root, arch_name_override="vit_tiny", img_size=64, num_frames=4, device="cpu", dtype="float32"),
@@ -1991,6 +1993,7 @@ def test_visual_override_without_camera_model_uses_stable_null_projective_branch
             predictive_semantic_dropout_prob=0.0,
             attention_heads=4,
             query_rounds=2,
+            aqr_mapg_enabled=False,
         ),
         visual_config=None,
         visual_encoder=_UnusedVisualEncoder(),

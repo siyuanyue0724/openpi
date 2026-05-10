@@ -47,6 +47,13 @@ NODES: tuple[TraceNode, ...] = (
         needles=("def observe_step", "previous: PicfPreviousState | None"),
     ),
     TraceNode(
+        name="Production default profile",
+        formula="default train profile = AQR(on) + PG semantic/image support + temporal V-JEPA + posterior cache scaffold + guarded OWM losses",
+        invariant="The latest OWM profile must be the default path; legacy routers and risky auxiliary losses are explicit ablations.",
+        sources=("src/openpi/picf/core/config.py", "scripts/picf_core_train.py", "src/openpi/picf/core/training.py"),
+        needles=("aqr_mapg_enabled: bool = True", 'default="paligemma"', "lambda_mapg_cycle: float = 0.02", "lambda_slot_jepa: float = 0.0"),
+    ),
+    TraceNode(
         name="V-JEPA temporal evidence",
         formula="M_vjepa={z_{tau,h,w}: tau in T_recent}; p_j(tau,h,w)=softmax(q_j^T k_{tau,h,w})",
         invariant="Production support preserves temporal slices; last_two_mean is only an ablation.",

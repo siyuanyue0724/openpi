@@ -89,6 +89,10 @@ def _load_runtime_args(checkpoint_dir: Path) -> argparse.Namespace:
         args_dict["tactile_sensor_names"] = _as_sensor_names_arg(args_dict["tactile_sensor_names"])
     if "tactile_sensor_offsets_m" in args_dict:
         args_dict["tactile_sensor_offsets_m"] = _as_sensor_offsets_arg(args_dict["tactile_sensor_offsets_m"])
+    if "aqr_mapg_enabled" not in args_dict and str(args_dict.get("semantic_mode", "zero")) != "paligemma":
+        # Old checkpoints predate the AQR-OWM default profile. Do not promote
+        # a zero-semantic runtime into the PaliGemma-required AQR path at serve time.
+        args_dict["aqr_mapg_enabled"] = False
     args = argparse.Namespace(**args_dict)
     _trainer._normalize_train_args(args)
     _trainer._validate_train_args(args)

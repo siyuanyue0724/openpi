@@ -136,10 +136,11 @@ class PicfCoreConfig:
     mapg_control_gate_init: float = -2.0
     mapg_obs_point_mix_floor: float = 0.25
     mapg_prior_bias_clip: float = 4.0
-    # Direct-final AQR-MAPG path. This replaces MAPG-v0 candidate priors with
-    # task/role-conditioned anchor queries over typed support memory while
-    # reusing the existing PICF graph-consumer interfaces.
-    aqr_mapg_enabled: bool = False
+    # Direct-final AQR-MAPG path. This is the production PICF-AQR-OWM default:
+    # learned physical/task anchor queries read typed support memory, while
+    # posterior correction remains the authoritative belief update. Disable
+    # only for explicit ablations or legacy compatibility tests.
+    aqr_mapg_enabled: bool = True
     aqr_query_count_physical: int = 16
     aqr_query_count_task: int = 8
     aqr_query_rounds: int = 2

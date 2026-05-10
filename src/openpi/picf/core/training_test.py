@@ -83,6 +83,7 @@ def _make_core(
     *,
     vl_anchor_router_enabled: bool = False,
     mapg_enabled: bool = False,
+    aqr_mapg_enabled: bool = False,
 ) -> tuple[PicfFullCore, CalvinSequentialReplay]:
     calvin_root = build_mini_calvin_dataset(tmp_path, make_zip=False)
     replay = CalvinSequentialReplay(calvin_root, backend="dir", segment_indices=[0])
@@ -111,6 +112,7 @@ def _make_core(
         vl_anchor_router_enabled=vl_anchor_router_enabled,
         vl_anchor_modes=3,
         mapg_enabled=mapg_enabled,
+        aqr_mapg_enabled=aqr_mapg_enabled,
         mapg_anchor_count=6,
         mapg_message_rounds=2,
         device="cpu",

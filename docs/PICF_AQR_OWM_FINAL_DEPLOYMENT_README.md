@@ -5,9 +5,9 @@ Date: 2026-05-09
 Version:
 
 ```text
-PICF-AQR-OWM v1.2
+PICF-AQR-OWM v1.3
 This version is complete for the code-level deployment contract after the
-point/visual cleanup pass.
+point/visual cleanup pass and default-profile cleanup.
 The scripted verifier and regression set below are the required re-checks after
 any follow-up change.
 ```
@@ -20,6 +20,56 @@ This document supersedes MAPG-v0 as the long-term graph/router direction.
 It does not delete current AQR; it upgrades AQR into an object-addressable,
 predictive, posterior-centered belief-state architecture.
 ```
+
+## 0. Default Profile
+
+The latest OWM profile is now the normal PICF training default. A standard
+training command no longer needs a separate AQR flag bundle to avoid falling
+back to legacy MAPG-v0.
+
+Default graph state:
+
+```text
+aqr_mapg_enabled = True
+mapg_enabled = False
+vl_anchor_router_enabled = False
+aqr_pg_grounding_enabled = False
+aqr_pg_image_support_enabled = True
+aqr_pg_image_support_weight = 0.35
+aqr_pg_bias_weight = 0.0
+semantic_mode = paligemma
+aqr_vjepa_temporal_mode = last_two_tokens
+aqr_vjepa_temporal_tokens = 2
+aqr_vjepa_temporal_include_delta = True
+evidence_cache_enabled = True
+evidence_cache_read_weight = 0.05
+```
+
+Default loss state:
+
+```text
+lambda_anchor_pv = 0.1
+lambda_pv_weak = 0.02
+lambda_mapg_cycle = 0.02
+lambda_mapg_support_diversity = 0.01
+
+lambda_slot_jepa = 0.0
+lambda_support_pred = 0.0
+lambda_binding_consistency = 0.0
+```
+
+The nonzero losses are geometrically grounded and low-weight relative to the
+action objective. The zero-weight losses are valid graph hooks but are not
+mature production optimization pressure: slot-JEPA assumes stable slot
+matching, support prediction assumes reliable support targets, and binding
+consistency can over-sharpen ambiguous assignments. They remain explicit
+knobs for controlled ablations after diagnostics justify activation.
+
+Serve-time compatibility is not allowed to rewrite old checkpoints into this
+default profile. If checkpoint metadata predates OWM defaults and records
+`semantic_mode=zero` without an explicit `aqr_mapg_enabled`, serving keeps
+`aqr_mapg_enabled=False` for that checkpoint. New training defaults to OWM;
+old checkpoints preserve their recorded semantics.
 
 Source:
 

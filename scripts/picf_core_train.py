@@ -81,6 +81,7 @@ from openpi.training.calvin_dataset import CalvinLangSegmentDataset
 _DEFAULT_TACTILE_SENSOR_NAMES = ("digit", "gelsight_mini")
 _DEFAULT_TACTILE_SENSOR_OFFSETS_M = ((0.01, 0.0, 0.0), (-0.01, 0.0, 0.0))
 _SPEC_DEFAULTS = PicfCoreConfig()
+_LOSS_DEFAULTS = PicfTransitionLossConfig()
 _RETRYABLE_FIRST_STEP_ERRORS = (
     "PICF core requires a valid xyzrgb point cloud on the first control step.",
     "PICF core requires non-empty local xyzrgb support on the first control step.",
@@ -4577,67 +4578,68 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
 
 
 def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
+    defaults = _LOSS_DEFAULTS
     return PicfTransitionLossConfig(
-        lambda_action_pos=float(getattr(args, "lambda_action_pos", 2.0)),
-        lambda_action_rot=float(getattr(args, "lambda_action_rot", 2.0)),
-        lambda_action_gripper=float(getattr(args, "lambda_action_gripper", 2.0)),
-        lambda_visual_latent=float(getattr(args, "lambda_visual_latent", 0.2)),
-        lambda_visual_real=float(getattr(args, "lambda_visual_real", 0.1)),
-        lambda_tactile_real=float(getattr(args, "lambda_tactile_real", 0.3)),
-        lambda_point_real=float(getattr(args, "lambda_point_real", 0.3)),
-        lambda_semantic_future_aux=float(getattr(args, "lambda_semantic_future_aux", 0.25)),
-        lambda_anchor_pv=float(getattr(args, "lambda_anchor_pv", 0.1)),
-        lambda_pv_weak=float(getattr(args, "lambda_pv_weak", 0.02)),
-        lambda_pt=float(getattr(args, "lambda_pt", 1.0)),
-        tau_pv=float(getattr(args, "tau_pv", 0.07)),
-        tau_pt=float(getattr(args, "tau_pt", 0.07)),
-        tau_route_p=float(getattr(args, "tau_route_p", 0.1)),
-        tau_route_v=float(getattr(args, "tau_route_v", 0.1)),
-        pt_bag_radius_m=float(getattr(args, "pt_bag_radius_m", 0.045)),
-        pt_bag_sigma_m=float(getattr(args, "pt_bag_sigma_m", 0.015)),
-        pt_bag_kmin=int(getattr(args, "pt_bag_kmin", 32)),
-        pt_back_slack_m=float(getattr(args, "pt_back_slack_m", 0.008)),
-        p_align_on=float(getattr(args, "p_align_on", 0.55)),
-        p_align_off=float(getattr(args, "p_align_off", 0.35)),
-        tactile_aux_force_scale=float(getattr(args, "tactile_aux_force_scale", 1.0)),
-        tactile_aux_indent_scale=float(getattr(args, "tactile_aux_indent_scale", 5e-4)),
-        tactile_aux_pressure_scale=float(getattr(args, "tactile_aux_pressure_scale", 0.1)),
+        lambda_action_pos=float(getattr(args, "lambda_action_pos", defaults.lambda_action_pos)),
+        lambda_action_rot=float(getattr(args, "lambda_action_rot", defaults.lambda_action_rot)),
+        lambda_action_gripper=float(getattr(args, "lambda_action_gripper", defaults.lambda_action_gripper)),
+        lambda_visual_latent=float(getattr(args, "lambda_visual_latent", defaults.lambda_visual_latent)),
+        lambda_visual_real=float(getattr(args, "lambda_visual_real", defaults.lambda_visual_real)),
+        lambda_tactile_real=float(getattr(args, "lambda_tactile_real", defaults.lambda_tactile_real)),
+        lambda_point_real=float(getattr(args, "lambda_point_real", defaults.lambda_point_real)),
+        lambda_semantic_future_aux=float(getattr(args, "lambda_semantic_future_aux", defaults.lambda_semantic_future_aux)),
+        lambda_anchor_pv=float(getattr(args, "lambda_anchor_pv", defaults.lambda_anchor_pv)),
+        lambda_pv_weak=float(getattr(args, "lambda_pv_weak", defaults.lambda_pv_weak)),
+        lambda_pt=float(getattr(args, "lambda_pt", defaults.lambda_pt)),
+        tau_pv=float(getattr(args, "tau_pv", defaults.tau_pv)),
+        tau_pt=float(getattr(args, "tau_pt", defaults.tau_pt)),
+        tau_route_p=float(getattr(args, "tau_route_p", defaults.tau_route_p)),
+        tau_route_v=float(getattr(args, "tau_route_v", defaults.tau_route_v)),
+        pt_bag_radius_m=float(getattr(args, "pt_bag_radius_m", defaults.pt_bag_radius_m)),
+        pt_bag_sigma_m=float(getattr(args, "pt_bag_sigma_m", defaults.pt_bag_sigma_m)),
+        pt_bag_kmin=int(getattr(args, "pt_bag_kmin", defaults.pt_bag_kmin)),
+        pt_back_slack_m=float(getattr(args, "pt_back_slack_m", defaults.pt_back_slack_m)),
+        p_align_on=float(getattr(args, "p_align_on", defaults.p_align_on)),
+        p_align_off=float(getattr(args, "p_align_off", defaults.p_align_off)),
+        tactile_aux_force_scale=float(getattr(args, "tactile_aux_force_scale", defaults.tactile_aux_force_scale)),
+        tactile_aux_indent_scale=float(getattr(args, "tactile_aux_indent_scale", defaults.tactile_aux_indent_scale)),
+        tactile_aux_pressure_scale=float(getattr(args, "tactile_aux_pressure_scale", defaults.tactile_aux_pressure_scale)),
         tactile_aux_pose_scale=float(getattr(args, "tactile_aux_pose_scale", getattr(args, "crop_radius_m", 0.10))),
-        tactile_aux_huber_delta=float(getattr(args, "tactile_aux_huber_delta", 1.0)),
-        enable_aux_budgeting=bool(getattr(args, "enable_aux_budgeting", True)),
-        aux_budget_physical_ratio=float(getattr(args, "aux_budget_physical_ratio", 0.20)),
-        aux_budget_semantic_ratio=float(getattr(args, "aux_budget_semantic_ratio", 0.10)),
-        aux_budget_alignment_ratio=float(getattr(args, "aux_budget_alignment_ratio", 0.05)),
-        aux_budget_floor=float(getattr(args, "aux_budget_floor", 0.25)),
-        lambda_vl_heatmap_task=float(getattr(args, "lambda_vl_heatmap_task", 0.0)),
-        lambda_vl_heatmap_effector=float(getattr(args, "lambda_vl_heatmap_effector", 0.0)),
-        lambda_vl_heatmap_interaction=float(getattr(args, "lambda_vl_heatmap_interaction", 0.0)),
-        lambda_vl_point_consistency=float(getattr(args, "lambda_vl_point_consistency", 0.0)),
-        lambda_vl_anchor_diversity=float(getattr(args, "lambda_vl_anchor_diversity", 0.0)),
-        vl_heatmap_sigma_patches=float(getattr(args, "vl_heatmap_sigma_patches", 1.5)),
-        vl_point_consistency_eps=float(getattr(args, "vl_point_consistency_eps", 1e-6)),
-        vl_anchor_diversity_radius_m=float(getattr(args, "vl_anchor_diversity_radius_m", 0.04)),
-        lambda_mapg_siglip=float(getattr(args, "lambda_mapg_siglip", 0.0)),
-        lambda_mapg_vicreg=float(getattr(args, "lambda_mapg_vicreg", 0.0)),
-        lambda_mapg_cycle=float(getattr(args, "lambda_mapg_cycle", 0.0)),
-        lambda_mapg_masked_modality=float(getattr(args, "lambda_mapg_masked_modality", 0.0)),
-        lambda_mapg_routing=float(getattr(args, "lambda_mapg_routing", 0.0)),
-        lambda_mapg_support_diversity=float(getattr(args, "lambda_mapg_support_diversity", 0.0)),
-        lambda_mapg_geometry_diversity=float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
-        lambda_slot_jepa=float(getattr(args, "lambda_slot_jepa", 0.0)),
-        lambda_support_pred=float(getattr(args, "lambda_support_pred", 0.0)),
-        lambda_binding_consistency=float(getattr(args, "lambda_binding_consistency", 0.0)),
-        mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", 0.07)),
-        mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", 1.0)),
-        mapg_vicreg_cov_weight=float(getattr(args, "mapg_vicreg_cov_weight", 0.04)),
-        mapg_support_div_margin_visual=float(getattr(args, "mapg_support_div_margin_visual", 0.15)),
-        mapg_support_div_margin_point=float(getattr(args, "mapg_support_div_margin_point", 0.15)),
-        mapg_support_div_margin_tactile=float(getattr(args, "mapg_support_div_margin_tactile", 0.25)),
-        mapg_support_div_margin_posterior=float(getattr(args, "mapg_support_div_margin_posterior", 0.10)),
-        mapg_support_div_sigma_visual_patches=float(getattr(args, "mapg_support_div_sigma_visual_patches", 1.0)),
-        mapg_support_div_sigma_point_m=float(getattr(args, "mapg_support_div_sigma_point_m", 0.04)),
-        mapg_geometry_diversity_margin=float(getattr(args, "mapg_geometry_diversity_margin", 1.0)),
-        mapg_geometry_diversity_jitter_m=float(getattr(args, "mapg_geometry_diversity_jitter_m", 0.005)),
+        tactile_aux_huber_delta=float(getattr(args, "tactile_aux_huber_delta", defaults.tactile_aux_huber_delta)),
+        enable_aux_budgeting=bool(getattr(args, "enable_aux_budgeting", defaults.enable_aux_budgeting)),
+        aux_budget_physical_ratio=float(getattr(args, "aux_budget_physical_ratio", defaults.aux_budget_physical_ratio)),
+        aux_budget_semantic_ratio=float(getattr(args, "aux_budget_semantic_ratio", defaults.aux_budget_semantic_ratio)),
+        aux_budget_alignment_ratio=float(getattr(args, "aux_budget_alignment_ratio", defaults.aux_budget_alignment_ratio)),
+        aux_budget_floor=float(getattr(args, "aux_budget_floor", defaults.aux_budget_floor)),
+        lambda_vl_heatmap_task=float(getattr(args, "lambda_vl_heatmap_task", defaults.lambda_vl_heatmap_task)),
+        lambda_vl_heatmap_effector=float(getattr(args, "lambda_vl_heatmap_effector", defaults.lambda_vl_heatmap_effector)),
+        lambda_vl_heatmap_interaction=float(getattr(args, "lambda_vl_heatmap_interaction", defaults.lambda_vl_heatmap_interaction)),
+        lambda_vl_point_consistency=float(getattr(args, "lambda_vl_point_consistency", defaults.lambda_vl_point_consistency)),
+        lambda_vl_anchor_diversity=float(getattr(args, "lambda_vl_anchor_diversity", defaults.lambda_vl_anchor_diversity)),
+        vl_heatmap_sigma_patches=float(getattr(args, "vl_heatmap_sigma_patches", defaults.vl_heatmap_sigma_patches)),
+        vl_point_consistency_eps=float(getattr(args, "vl_point_consistency_eps", defaults.vl_point_consistency_eps)),
+        vl_anchor_diversity_radius_m=float(getattr(args, "vl_anchor_diversity_radius_m", defaults.vl_anchor_diversity_radius_m)),
+        lambda_mapg_siglip=float(getattr(args, "lambda_mapg_siglip", defaults.lambda_mapg_siglip)),
+        lambda_mapg_vicreg=float(getattr(args, "lambda_mapg_vicreg", defaults.lambda_mapg_vicreg)),
+        lambda_mapg_cycle=float(getattr(args, "lambda_mapg_cycle", defaults.lambda_mapg_cycle)),
+        lambda_mapg_masked_modality=float(getattr(args, "lambda_mapg_masked_modality", defaults.lambda_mapg_masked_modality)),
+        lambda_mapg_routing=float(getattr(args, "lambda_mapg_routing", defaults.lambda_mapg_routing)),
+        lambda_mapg_support_diversity=float(getattr(args, "lambda_mapg_support_diversity", defaults.lambda_mapg_support_diversity)),
+        lambda_mapg_geometry_diversity=float(getattr(args, "lambda_mapg_geometry_diversity", defaults.lambda_mapg_geometry_diversity)),
+        lambda_slot_jepa=float(getattr(args, "lambda_slot_jepa", defaults.lambda_slot_jepa)),
+        lambda_support_pred=float(getattr(args, "lambda_support_pred", defaults.lambda_support_pred)),
+        lambda_binding_consistency=float(getattr(args, "lambda_binding_consistency", defaults.lambda_binding_consistency)),
+        mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", defaults.mapg_siglip_tau)),
+        mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", defaults.mapg_vicreg_var_target)),
+        mapg_vicreg_cov_weight=float(getattr(args, "mapg_vicreg_cov_weight", defaults.mapg_vicreg_cov_weight)),
+        mapg_support_div_margin_visual=float(getattr(args, "mapg_support_div_margin_visual", defaults.mapg_support_div_margin_visual)),
+        mapg_support_div_margin_point=float(getattr(args, "mapg_support_div_margin_point", defaults.mapg_support_div_margin_point)),
+        mapg_support_div_margin_tactile=float(getattr(args, "mapg_support_div_margin_tactile", defaults.mapg_support_div_margin_tactile)),
+        mapg_support_div_margin_posterior=float(getattr(args, "mapg_support_div_margin_posterior", defaults.mapg_support_div_margin_posterior)),
+        mapg_support_div_sigma_visual_patches=float(getattr(args, "mapg_support_div_sigma_visual_patches", defaults.mapg_support_div_sigma_visual_patches)),
+        mapg_support_div_sigma_point_m=float(getattr(args, "mapg_support_div_sigma_point_m", defaults.mapg_support_div_sigma_point_m)),
+        mapg_geometry_diversity_margin=float(getattr(args, "mapg_geometry_diversity_margin", defaults.mapg_geometry_diversity_margin)),
+        mapg_geometry_diversity_jitter_m=float(getattr(args, "mapg_geometry_diversity_jitter_m", defaults.mapg_geometry_diversity_jitter_m)),
     )
 
 
@@ -5300,13 +5302,13 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "mapg_control_gate_init", _SPEC_DEFAULTS.mapg_control_gate_init)),
                 float(getattr(args, "mapg_obs_point_mix_floor", _SPEC_DEFAULTS.mapg_obs_point_mix_floor)),
                 float(getattr(args, "mapg_prior_bias_clip", _SPEC_DEFAULTS.mapg_prior_bias_clip)),
-                float(getattr(args, "lambda_mapg_siglip", 0.0)),
-                float(getattr(args, "lambda_mapg_vicreg", 0.0)),
-                float(getattr(args, "lambda_mapg_cycle", 0.0)),
-                float(getattr(args, "lambda_mapg_masked_modality", 0.0)),
-                float(getattr(args, "lambda_mapg_routing", 0.0)),
-                float(getattr(args, "lambda_mapg_support_diversity", 0.0)),
-                float(getattr(args, "lambda_mapg_geometry_diversity", 0.0)),
+                float(getattr(args, "lambda_mapg_siglip", _LOSS_DEFAULTS.lambda_mapg_siglip)),
+                float(getattr(args, "lambda_mapg_vicreg", _LOSS_DEFAULTS.lambda_mapg_vicreg)),
+                float(getattr(args, "lambda_mapg_cycle", _LOSS_DEFAULTS.lambda_mapg_cycle)),
+                float(getattr(args, "lambda_mapg_masked_modality", _LOSS_DEFAULTS.lambda_mapg_masked_modality)),
+                float(getattr(args, "lambda_mapg_routing", _LOSS_DEFAULTS.lambda_mapg_routing)),
+                float(getattr(args, "lambda_mapg_support_diversity", _LOSS_DEFAULTS.lambda_mapg_support_diversity)),
+                float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
                 "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
@@ -5345,9 +5347,9 @@ def train(args: argparse.Namespace) -> None:
                 bool(getattr(args, "slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
                 bool(getattr(args, "support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)),
                 bool(getattr(args, "ordinal_relation_enabled", _SPEC_DEFAULTS.ordinal_relation_enabled)),
-                float(getattr(args, "lambda_slot_jepa", 0.0)),
-                float(getattr(args, "lambda_support_pred", 0.0)),
-                float(getattr(args, "lambda_binding_consistency", 0.0)),
+                float(getattr(args, "lambda_slot_jepa", _LOSS_DEFAULTS.lambda_slot_jepa)),
+                float(getattr(args, "lambda_support_pred", _LOSS_DEFAULTS.lambda_support_pred)),
+                float(getattr(args, "lambda_binding_consistency", _LOSS_DEFAULTS.lambda_binding_consistency)),
                 float(getattr(args, "aqr_obs_gate_init", _SPEC_DEFAULTS.aqr_obs_gate_init)),
                 float(getattr(args, "aqr_task_gate_init", _SPEC_DEFAULTS.aqr_task_gate_init)),
                 float(getattr(args, "aqr_posterior_gate_init", _SPEC_DEFAULTS.aqr_posterior_gate_init)),
@@ -5894,67 +5896,67 @@ def main() -> None:
         default="inherit",
     )
     parser.add_argument("--prompt-state-norm-stats-path", default=None)
-    parser.add_argument("--lambda-action-pos", type=float, default=2.0)
-    parser.add_argument("--lambda-action-rot", type=float, default=2.0)
-    parser.add_argument("--lambda-action-gripper", type=float, default=2.0)
-    parser.add_argument("--lambda-visual-latent", type=float, default=0.2)
-    parser.add_argument("--lambda-visual-real", type=float, default=0.1)
-    parser.add_argument("--lambda-tactile-real", type=float, default=0.3)
-    parser.add_argument("--lambda-point-real", type=float, default=0.3)
-    parser.add_argument("--lambda-semantic-future-aux", type=float, default=0.25)
-    parser.add_argument("--lambda-anchor-pv", type=float, default=0.1)
-    parser.add_argument("--lambda-pv-weak", type=float, default=0.02)
-    parser.add_argument("--lambda-pt", type=float, default=1.0)
-    parser.add_argument("--lambda-vl-heatmap-task", type=float, default=_SPEC_DEFAULTS.lambda_vl_heatmap_task)
-    parser.add_argument("--lambda-vl-heatmap-effector", type=float, default=_SPEC_DEFAULTS.lambda_vl_heatmap_effector)
-    parser.add_argument("--lambda-vl-heatmap-interaction", type=float, default=_SPEC_DEFAULTS.lambda_vl_heatmap_interaction)
-    parser.add_argument("--lambda-vl-point-consistency", type=float, default=_SPEC_DEFAULTS.lambda_vl_point_consistency)
-    parser.add_argument("--lambda-vl-anchor-diversity", type=float, default=_SPEC_DEFAULTS.lambda_vl_anchor_diversity)
-    parser.add_argument("--vl-heatmap-sigma-patches", type=float, default=1.5)
-    parser.add_argument("--vl-point-consistency-eps", type=float, default=1e-6)
+    parser.add_argument("--lambda-action-pos", type=float, default=_LOSS_DEFAULTS.lambda_action_pos)
+    parser.add_argument("--lambda-action-rot", type=float, default=_LOSS_DEFAULTS.lambda_action_rot)
+    parser.add_argument("--lambda-action-gripper", type=float, default=_LOSS_DEFAULTS.lambda_action_gripper)
+    parser.add_argument("--lambda-visual-latent", type=float, default=_LOSS_DEFAULTS.lambda_visual_latent)
+    parser.add_argument("--lambda-visual-real", type=float, default=_LOSS_DEFAULTS.lambda_visual_real)
+    parser.add_argument("--lambda-tactile-real", type=float, default=_LOSS_DEFAULTS.lambda_tactile_real)
+    parser.add_argument("--lambda-point-real", type=float, default=_LOSS_DEFAULTS.lambda_point_real)
+    parser.add_argument("--lambda-semantic-future-aux", type=float, default=_LOSS_DEFAULTS.lambda_semantic_future_aux)
+    parser.add_argument("--lambda-anchor-pv", type=float, default=_LOSS_DEFAULTS.lambda_anchor_pv)
+    parser.add_argument("--lambda-pv-weak", type=float, default=_LOSS_DEFAULTS.lambda_pv_weak)
+    parser.add_argument("--lambda-pt", type=float, default=_LOSS_DEFAULTS.lambda_pt)
+    parser.add_argument("--lambda-vl-heatmap-task", type=float, default=_LOSS_DEFAULTS.lambda_vl_heatmap_task)
+    parser.add_argument("--lambda-vl-heatmap-effector", type=float, default=_LOSS_DEFAULTS.lambda_vl_heatmap_effector)
+    parser.add_argument("--lambda-vl-heatmap-interaction", type=float, default=_LOSS_DEFAULTS.lambda_vl_heatmap_interaction)
+    parser.add_argument("--lambda-vl-point-consistency", type=float, default=_LOSS_DEFAULTS.lambda_vl_point_consistency)
+    parser.add_argument("--lambda-vl-anchor-diversity", type=float, default=_LOSS_DEFAULTS.lambda_vl_anchor_diversity)
+    parser.add_argument("--vl-heatmap-sigma-patches", type=float, default=_LOSS_DEFAULTS.vl_heatmap_sigma_patches)
+    parser.add_argument("--vl-point-consistency-eps", type=float, default=_LOSS_DEFAULTS.vl_point_consistency_eps)
     parser.add_argument("--vl-anchor-diversity-radius-m", type=float, default=_SPEC_DEFAULTS.vl_anchor_local_sigma_m)
-    parser.add_argument("--lambda-mapg-siglip", type=float, default=0.0)
-    parser.add_argument("--lambda-mapg-vicreg", type=float, default=0.0)
-    parser.add_argument("--lambda-mapg-cycle", type=float, default=0.02)
-    parser.add_argument("--lambda-mapg-masked-modality", type=float, default=0.0)
-    parser.add_argument("--lambda-mapg-routing", type=float, default=0.0)
-    parser.add_argument("--lambda-mapg-support-diversity", type=float, default=0.01)
-    parser.add_argument("--lambda-mapg-geometry-diversity", type=float, default=0.0)
-    parser.add_argument("--lambda-slot-jepa", type=float, default=0.0)
-    parser.add_argument("--lambda-support-pred", type=float, default=0.0)
-    parser.add_argument("--lambda-binding-consistency", type=float, default=0.0)
-    parser.add_argument("--mapg-siglip-tau", type=float, default=0.07)
-    parser.add_argument("--mapg-vicreg-var-target", type=float, default=1.0)
-    parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=0.04)
-    parser.add_argument("--mapg-support-div-margin-visual", type=float, default=0.15)
-    parser.add_argument("--mapg-support-div-margin-point", type=float, default=0.15)
-    parser.add_argument("--mapg-support-div-margin-tactile", type=float, default=0.25)
-    parser.add_argument("--mapg-support-div-margin-posterior", type=float, default=0.10)
-    parser.add_argument("--mapg-support-div-sigma-visual-patches", type=float, default=1.0)
-    parser.add_argument("--mapg-support-div-sigma-point-m", type=float, default=0.04)
-    parser.add_argument("--mapg-geometry-diversity-margin", type=float, default=1.0)
-    parser.add_argument("--mapg-geometry-diversity-jitter-m", type=float, default=0.005)
+    parser.add_argument("--lambda-mapg-siglip", type=float, default=_LOSS_DEFAULTS.lambda_mapg_siglip)
+    parser.add_argument("--lambda-mapg-vicreg", type=float, default=_LOSS_DEFAULTS.lambda_mapg_vicreg)
+    parser.add_argument("--lambda-mapg-cycle", type=float, default=_LOSS_DEFAULTS.lambda_mapg_cycle)
+    parser.add_argument("--lambda-mapg-masked-modality", type=float, default=_LOSS_DEFAULTS.lambda_mapg_masked_modality)
+    parser.add_argument("--lambda-mapg-routing", type=float, default=_LOSS_DEFAULTS.lambda_mapg_routing)
+    parser.add_argument("--lambda-mapg-support-diversity", type=float, default=_LOSS_DEFAULTS.lambda_mapg_support_diversity)
+    parser.add_argument("--lambda-mapg-geometry-diversity", type=float, default=_LOSS_DEFAULTS.lambda_mapg_geometry_diversity)
+    parser.add_argument("--lambda-slot-jepa", type=float, default=_LOSS_DEFAULTS.lambda_slot_jepa)
+    parser.add_argument("--lambda-support-pred", type=float, default=_LOSS_DEFAULTS.lambda_support_pred)
+    parser.add_argument("--lambda-binding-consistency", type=float, default=_LOSS_DEFAULTS.lambda_binding_consistency)
+    parser.add_argument("--mapg-siglip-tau", type=float, default=_LOSS_DEFAULTS.mapg_siglip_tau)
+    parser.add_argument("--mapg-vicreg-var-target", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_var_target)
+    parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_cov_weight)
+    parser.add_argument("--mapg-support-div-margin-visual", type=float, default=_LOSS_DEFAULTS.mapg_support_div_margin_visual)
+    parser.add_argument("--mapg-support-div-margin-point", type=float, default=_LOSS_DEFAULTS.mapg_support_div_margin_point)
+    parser.add_argument("--mapg-support-div-margin-tactile", type=float, default=_LOSS_DEFAULTS.mapg_support_div_margin_tactile)
+    parser.add_argument("--mapg-support-div-margin-posterior", type=float, default=_LOSS_DEFAULTS.mapg_support_div_margin_posterior)
+    parser.add_argument("--mapg-support-div-sigma-visual-patches", type=float, default=_LOSS_DEFAULTS.mapg_support_div_sigma_visual_patches)
+    parser.add_argument("--mapg-support-div-sigma-point-m", type=float, default=_LOSS_DEFAULTS.mapg_support_div_sigma_point_m)
+    parser.add_argument("--mapg-geometry-diversity-margin", type=float, default=_LOSS_DEFAULTS.mapg_geometry_diversity_margin)
+    parser.add_argument("--mapg-geometry-diversity-jitter-m", type=float, default=_LOSS_DEFAULTS.mapg_geometry_diversity_jitter_m)
     parser.add_argument("--enable-aux-budgeting", dest="enable_aux_budgeting", action="store_true")
     parser.add_argument("--disable-aux-budgeting", dest="enable_aux_budgeting", action="store_false")
-    parser.add_argument("--aux-budget-physical-ratio", type=float, default=0.20)
-    parser.add_argument("--aux-budget-semantic-ratio", type=float, default=0.10)
-    parser.add_argument("--aux-budget-alignment-ratio", type=float, default=0.05)
-    parser.add_argument("--aux-budget-floor", type=float, default=0.25)
-    parser.add_argument("--tau-pv", type=float, default=0.07)
-    parser.add_argument("--tau-pt", type=float, default=0.07)
-    parser.add_argument("--tau-route-p", type=float, default=0.1)
-    parser.add_argument("--tau-route-v", type=float, default=0.1)
+    parser.add_argument("--aux-budget-physical-ratio", type=float, default=_LOSS_DEFAULTS.aux_budget_physical_ratio)
+    parser.add_argument("--aux-budget-semantic-ratio", type=float, default=_LOSS_DEFAULTS.aux_budget_semantic_ratio)
+    parser.add_argument("--aux-budget-alignment-ratio", type=float, default=_LOSS_DEFAULTS.aux_budget_alignment_ratio)
+    parser.add_argument("--aux-budget-floor", type=float, default=_LOSS_DEFAULTS.aux_budget_floor)
+    parser.add_argument("--tau-pv", type=float, default=_LOSS_DEFAULTS.tau_pv)
+    parser.add_argument("--tau-pt", type=float, default=_LOSS_DEFAULTS.tau_pt)
+    parser.add_argument("--tau-route-p", type=float, default=_LOSS_DEFAULTS.tau_route_p)
+    parser.add_argument("--tau-route-v", type=float, default=_LOSS_DEFAULTS.tau_route_v)
     parser.add_argument("--pt-bag-radius-m", type=float, default=None)
     parser.add_argument("--pt-bag-sigma-m", type=float, default=None)
-    parser.add_argument("--pt-bag-kmin", type=int, default=32)
-    parser.add_argument("--pt-back-slack-m", type=float, default=0.008)
-    parser.add_argument("--p-align-on", type=float, default=0.55)
-    parser.add_argument("--p-align-off", type=float, default=0.35)
-    parser.add_argument("--tactile-aux-force-scale", type=float, default=1.0)
-    parser.add_argument("--tactile-aux-indent-scale", type=float, default=_SPEC_DEFAULTS.tau_indent_m)
-    parser.add_argument("--tactile-aux-pressure-scale", type=float, default=_SPEC_DEFAULTS.tau_tactile_pressure)
+    parser.add_argument("--pt-bag-kmin", type=int, default=_LOSS_DEFAULTS.pt_bag_kmin)
+    parser.add_argument("--pt-back-slack-m", type=float, default=_LOSS_DEFAULTS.pt_back_slack_m)
+    parser.add_argument("--p-align-on", type=float, default=_LOSS_DEFAULTS.p_align_on)
+    parser.add_argument("--p-align-off", type=float, default=_LOSS_DEFAULTS.p_align_off)
+    parser.add_argument("--tactile-aux-force-scale", type=float, default=_LOSS_DEFAULTS.tactile_aux_force_scale)
+    parser.add_argument("--tactile-aux-indent-scale", type=float, default=_LOSS_DEFAULTS.tactile_aux_indent_scale)
+    parser.add_argument("--tactile-aux-pressure-scale", type=float, default=_LOSS_DEFAULTS.tactile_aux_pressure_scale)
     parser.add_argument("--tactile-aux-pose-scale", type=float, default=None)
-    parser.add_argument("--tactile-aux-huber-delta", type=float, default=1.0)
+    parser.add_argument("--tactile-aux-huber-delta", type=float, default=_LOSS_DEFAULTS.tactile_aux_huber_delta)
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--project-name", default="openpi")
     parser.add_argument("--wandb-run-name", default=None)
@@ -6052,7 +6054,12 @@ def main() -> None:
     parser.add_argument("--tactile-contact-ema-beta", type=float, default=_SPEC_DEFAULTS.tactile_contact_ema_beta)
     parser.add_argument("--tactile-anchor-prob-on", type=float, default=_SPEC_DEFAULTS.tactile_anchor_prob_on)
     parser.add_argument("--use-scene-obs", action="store_true")
-    parser.add_argument("--semantic-mode", choices=["zero", "paligemma"], default="zero")
+    parser.add_argument(
+        "--semantic-mode",
+        choices=["zero", "paligemma"],
+        default="paligemma",
+        help="Semantic encoder mode. The PICF-AQR-OWM production default is paligemma; use zero only with --no-aqr-mapg-enabled ablations.",
+    )
     parser.add_argument("--semantic-source", choices=["auto", "hf", "pi0_pytorch"], default="auto")
     parser.add_argument("--semantic-model-name", default=_default_paligemma_model_name())
     parser.add_argument("--semantic-checkpoint-path", default=None)
@@ -6152,8 +6159,9 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=_SPEC_DEFAULTS.aqr_mapg_enabled,
         help=(
-            "Enable direct-final AQR-MAPG: learned task/role anchor queries over typed "
-            "visual/point/tactile/posterior support memory. Mutually exclusive with legacy mapg_enabled."
+            "Enable direct-final AQR-MAPG: learned physical/task anchor queries over typed "
+            "visual/point/tactile/posterior support memory. This is the production default "
+            "and is mutually exclusive with legacy mapg_enabled."
         ),
     )
     parser.add_argument("--aqr-query-count-physical", type=int, default=_SPEC_DEFAULTS.aqr_query_count_physical)

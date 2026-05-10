@@ -632,7 +632,7 @@ This is the direct final implementation list. Do not deploy MAPG-v0 as an interm
 Add:
 
 ```python
-aqr_mapg_enabled: bool = False
+aqr_mapg_enabled: bool = True
 aqr_query_count_physical: int = 16
 aqr_query_count_task: int = 8
 aqr_query_rounds: int = 2

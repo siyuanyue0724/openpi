@@ -8,10 +8,13 @@ VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
 AQR-MAPG direct-final graph replacement.
 
 2026-05-09 update: the maintained direct-final graph path is now **AQR-MAPG**
-(`--aqr-mapg-enabled`, `--mapg-enabled false`). AQR-MAPG replaces MAPG-v0
-candidate-prior graph construction with learned task/role anchor queries over
-typed support memory, while reusing the same observation/task/posterior/control
-graph consumer contract and the same PI0.5 action path.
+and is the default PICF graph path (`aqr_mapg_enabled=True`,
+`mapg_enabled=False`, `vl_anchor_router_enabled=False`). AQR-MAPG replaces
+MAPG-v0 candidate-prior graph construction with learned physical/task anchor
+queries over typed support memory, while reusing the same
+observation/task/posterior/control graph consumer contract and the same PI0.5
+action path. Use `--no-aqr-mapg-enabled` only for explicit ablations or legacy
+compatibility tests.
 
 2026-05-10 OWM audit update: use
 [`docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md)
@@ -33,6 +36,21 @@ a prompt-gated diagnostic until a real rank target is implemented. Placeholder
 losses for cross-modal confidence balancing, ordinal score spread, and
 innovation-to-one calibration were removed; only `slot_jepa`, `support_pred`,
 and `binding_consistency` remain as guarded OWM training losses.
+
+2026-05-10 default-profile update: the CLI now defaults to the latest
+PICF-AQR-OWM profile, so a normal PICF training command no longer needs a
+separate AQR flag bundle. The default semantic mode is `paligemma`; the
+PaliGemma heatmap head remains disabled; PaliGemma image support and explicit
+V-JEPA temporal tokens are enabled; evidence cache read uses a small
+posterior-grounded weight (`0.05`); and high-risk predictive/identity losses
+stay zero-weight until their diagnostics justify activation. All train-time
+loss defaults are sourced from `PicfTransitionLossConfig`, not duplicated in
+the CLI parser.
+
+Serving compatibility is intentionally conservative: checkpoints whose
+metadata predates the OWM default and records `semantic_mode=zero` are not
+silently promoted into `aqr_mapg_enabled=True` at serve time. New training uses
+the OWM default; old zero-semantic checkpoints keep their recorded graph path.
 
 ## Quick Navigation
 
@@ -167,9 +185,10 @@ As of the latest local audit pass:
 - the v2.2 physical / task-readout / conditioned-control / PI0 action contract
   is internally consistent
 - the current final graph path is AQR-MAPG, not MAPG-v0:
-  - `aqr_mapg_enabled=True` builds graph anchors from learned physical/task
-    queries over typed support memory
-  - `mapg_enabled=False` disables legacy candidate-prior graph construction
+  - `aqr_mapg_enabled=True` is the default and builds graph anchors from
+    learned physical/task queries over typed support memory
+  - `mapg_enabled=False` and `vl_anchor_router_enabled=False` are the default
+    legacy-router state
   - PaliGemma semantic tokens still condition task queries
   - PaliGemma image tokens help task queries localize by cross-attention and
     resize-with-pad projection onto the V-JEPA visual grid
@@ -193,14 +212,22 @@ As of the latest local audit pass:
 
 2026-05-09 AQR deployment audit:
 
-- the direct-final training mode is:
-  - `--aqr-mapg-enabled true`
-  - `--mapg-enabled false`
-  - `--vl-anchor-router-enabled false`
-  - `--no-aqr-pg-grounding-enabled`
-  - `--aqr-pg-image-support-enabled true`
-  - `--aqr-pg-image-support-weight 0.35`
-  - `--aqr-pg-bias-weight 0.0`
+- the direct-final training mode is now the default PICF profile:
+  - `aqr_mapg_enabled=True`
+  - `mapg_enabled=False`
+  - `vl_anchor_router_enabled=False`
+  - `aqr_pg_grounding_enabled=False`
+  - `aqr_pg_image_support_enabled=True`
+  - `aqr_pg_image_support_weight=0.35`
+  - `aqr_pg_bias_weight=0.0`
+  - `semantic_mode=paligemma`
+  - `aqr_vjepa_temporal_mode=last_two_tokens`
+  - `evidence_cache_read_weight=0.05`
+  - guarded OWM losses remain `lambda_slot_jepa=0`,
+    `lambda_support_pred=0`, and `lambda_binding_consistency=0`
+- equivalent CLI flags still exist for explicit overrides and ablations, but
+  they are no longer required for the latest OWM default profile
+- recommended large-run perception profile remains explicit:
   - `--perception-finetune-mode frozen`
   - current cloud run cadence: `--num-train-steps 30000`,
     `--save-interval 2500`, `--unroll-steps 2`

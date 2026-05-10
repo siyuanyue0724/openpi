@@ -127,6 +127,7 @@ def test_load_runtime_args_coerces_sequence_fields(tmp_path, monkeypatch) -> Non
     assert isinstance(args, argparse.Namespace)
     assert args.tactile_sensor_names == "digit,gelsight_mini"
     assert args.tactile_sensor_offsets_m == "0.01,0.0,0.0;-0.01,0.0,0.0"
+    assert args.aqr_mapg_enabled is False
 
 
 def test_load_model_state_only_uses_compat_loader_on_shape_mismatch(tmp_path, monkeypatch) -> None:

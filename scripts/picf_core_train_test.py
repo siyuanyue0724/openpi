@@ -119,6 +119,33 @@ def _base_args() -> argparse.Namespace:
         mapg_posterior_gate_init=-6.0,
         mapg_control_gate_init=-4.0,
         mapg_prior_bias_clip=4.0,
+        aqr_mapg_enabled=False,
+        aqr_query_count_physical=16,
+        aqr_query_count_task=8,
+        aqr_query_rounds=2,
+        aqr_sinkhorn_iters=6,
+        aqr_sinkhorn_temperature=0.2,
+        aqr_pg_grounding_enabled=False,
+        aqr_pg_image_support_enabled=True,
+        aqr_pg_image_support_weight=0.35,
+        aqr_pg_entropy_threshold=0.90,
+        aqr_pg_peak_threshold=1.50,
+        aqr_pg_bias_weight=0.0,
+        aqr_support_bias_clip=4.0,
+        aqr_vjepa_temporal_mode="last_two_tokens",
+        aqr_vjepa_temporal_tokens=2,
+        aqr_vjepa_temporal_include_delta=True,
+        aqr_obs_gate_init=0.0,
+        aqr_task_gate_init=0.0,
+        aqr_posterior_gate_init=-2.0,
+        aqr_control_gate_init=0.0,
+        evidence_cache_enabled=True,
+        evidence_cache_len=4,
+        evidence_cache_read_weight=0.05,
+        evidence_cache_innovation_downweight=1.0,
+        slot_jepa_enabled=True,
+        support_prediction_enabled=True,
+        ordinal_relation_enabled=True,
         global_scene_point_cap=1024,
         require_pi0_action_generator=True,
         attention_heads=8,
@@ -159,11 +186,14 @@ def _base_args() -> argparse.Namespace:
         vl_anchor_diversity_radius_m=0.04,
         lambda_mapg_siglip=0.0,
         lambda_mapg_vicreg=0.0,
-        lambda_mapg_cycle=0.0,
+        lambda_mapg_cycle=0.02,
         lambda_mapg_masked_modality=0.0,
         lambda_mapg_routing=0.0,
-        lambda_mapg_support_diversity=0.0,
+        lambda_mapg_support_diversity=0.01,
         lambda_mapg_geometry_diversity=0.0,
+        lambda_slot_jepa=0.0,
+        lambda_support_pred=0.0,
+        lambda_binding_consistency=0.0,
         mapg_siglip_tau=0.07,
         mapg_vicreg_var_target=1.0,
         mapg_vicreg_cov_weight=0.04,
@@ -248,6 +278,28 @@ def test_retryable_first_step_error_detection() -> None:
     assert _MODULE._is_retryable_first_step_error(later) is True
     other = RuntimeError("some other training failure")
     assert _MODULE._is_retryable_first_step_error(other) is False
+
+
+def test_production_defaults_are_direct_owm_profile() -> None:
+    spec = _MODULE._SPEC_DEFAULTS
+    loss = _MODULE._LOSS_DEFAULTS
+
+    assert spec.aqr_mapg_enabled is True
+    assert spec.mapg_enabled is False
+    assert spec.vl_anchor_router_enabled is False
+    assert spec.aqr_pg_grounding_enabled is False
+    assert spec.aqr_pg_image_support_enabled is True
+    assert spec.aqr_pg_bias_weight == pytest.approx(0.0)
+    assert spec.aqr_vjepa_temporal_mode == "last_two_tokens"
+    assert spec.aqr_vjepa_temporal_tokens == 2
+    assert spec.aqr_vjepa_temporal_include_delta is True
+    assert spec.evidence_cache_enabled is True
+    assert spec.evidence_cache_read_weight == pytest.approx(0.05)
+    assert loss.lambda_mapg_cycle == pytest.approx(0.02)
+    assert loss.lambda_mapg_support_diversity == pytest.approx(0.01)
+    assert loss.lambda_slot_jepa == pytest.approx(0.0)
+    assert loss.lambda_support_pred == pytest.approx(0.0)
+    assert loss.lambda_binding_consistency == pytest.approx(0.0)
 
 
 def test_normalize_train_args_sets_default_warmup_fraction() -> None:
