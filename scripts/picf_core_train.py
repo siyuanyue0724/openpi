@@ -18,6 +18,7 @@ import time
 import traceback
 from collections import deque
 from collections.abc import Iterator
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
 from typing import TextIO
@@ -1821,6 +1822,36 @@ def _fsdp_root_ignored_modules(model: "_PicfWindowTrainer") -> list[torch.nn.Mod
     return ignored
 
 
+def _fsdp_frozen_states_excluding_modules(
+    module: torch.nn.Module,
+    *,
+    ignored_modules: Sequence[torch.nn.Module],
+) -> list[torch.nn.Parameter]:
+    """Collect frozen root-managed params that must be excluded from flat FSDP.
+
+    `picf_trainable_scope=anchor_only` intentionally leaves a sparse set of
+    anchor/router parameters trainable inside otherwise frozen PICF modules.
+    FSDP with `use_orig_params=False` requires every flattened handle to have
+    uniform `requires_grad`; ignoring frozen root-managed states preserves that
+    diagnostic contract without relaxing the trainable allowlist.
+    """
+
+    ignored_ids = {id(mod) for mod in ignored_modules}
+    frozen: list[torch.nn.Parameter] = []
+
+    def _visit(current: torch.nn.Module) -> None:
+        if id(current) in ignored_ids or _is_fsdp_model(current):
+            return
+        for param in current.parameters(recurse=False):
+            if not bool(getattr(param, "requires_grad", False)):
+                frozen.append(param)
+        for child in current.children():
+            _visit(child)
+
+    _visit(module)
+    return frozen
+
+
 def _assign_fsdp_wrapped_child_module(
     model: "_PicfWindowTrainer",
     *,
@@ -2047,6 +2078,10 @@ def _wrap_model_for_training_strategy(
     root_wrap_kwargs = _fsdp_wrap_kwargs(device=device)
     if ignored_modules:
         root_wrap_kwargs["ignored_modules"] = ignored_modules
+    if str(getattr(args, "picf_trainable_scope", "all")).lower().replace("-", "_") == "anchor_only":
+        ignored_frozen_states = _fsdp_frozen_states_excluding_modules(model, ignored_modules=ignored_modules)
+        if ignored_frozen_states:
+            root_wrap_kwargs["ignored_states"] = ignored_frozen_states
     return FullyShardedDataParallel(model, **root_wrap_kwargs)
 
 

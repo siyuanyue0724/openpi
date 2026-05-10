@@ -242,6 +242,18 @@ def run_checks() -> list[Check]:
             "Trainer warmup must materialize optional tracklet/proposal adapters even when a dataset lacks those modalities.",
         ),
         Check(
+            "trainer_anchor_only_fsdp_ignores_frozen_root_states",
+            _contains(
+                trainer,
+                "def _fsdp_frozen_states_excluding_modules",
+                "picf_trainable_scope",
+                "anchor_only",
+                'root_wrap_kwargs["ignored_states"] = ignored_frozen_states',
+                "uniform `requires_grad`",
+            ),
+            "Anchor-only FSDP must ignore frozen root-managed params so flat handles stay uniformly trainable.",
+        ),
+        Check(
             "trainer_logs_required_owm_metrics",
             _contains(trainer, "OWM_DEBUG_METRIC_KEYS", "aqr_temporal_support_entropy_mean", "evidence_cache_trust_mean", "_owm_debug_metrics_from_output"),
             "Training metrics must carry OWM debug keys into metrics.jsonl.",
