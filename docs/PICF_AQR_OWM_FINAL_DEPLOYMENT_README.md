@@ -1793,22 +1793,24 @@ back into a candidate-prior patch rather than becoming OWM.
 Current facts:
 
 ```text
-VjepaFeatureMap.current_map(use_last_two_mean=False):
-  returns one [H, W, C] latent map
+VjepaFeatureMap.current_map(...):
+  remains available for current-map and last-two-mean ablations.
 
-VjepaFeatureMap.current_map(use_last_two_mean=True):
-  averages the last two latent temporal slices
+VjepaFeatureMap.recent_maps(n):
+  returns the most recent temporal latent slices as separate [T, H, W, C]
+  support maps without averaging time.
 
-No method returns recent temporal slices as separate support tokens.
+The production AQR-OWM path consumes recent_maps through
+PicfTemporalVisualSupportState and graph.vjepa_temporal_priors.
 ```
 
-Final deployment changes:
+Implemented deployment contract:
 
 ```text
-1. Add VjepaFeatureMap.recent_maps(n=2) -> [T_recent, H, W, C].
-2. Preserve temporal order from older to newer or explicitly document the order.
-3. Never average inside recent_maps.
-4. Keep current_map as a legacy/ablation API only.
+1. recent_maps(n=2) exposes [T_recent, H, W, C] temporal support.
+2. Temporal order is preserved from older to newer.
+3. recent_maps never averages temporal slices.
+4. current_map remains a legacy/ablation API only.
 ```
 
 Correctness checks:
