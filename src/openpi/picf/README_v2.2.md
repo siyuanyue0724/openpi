@@ -567,6 +567,10 @@ When verifying the local v2.2 codebase, use this navigation split:
 - historical pre-v2.2 reference only:
   - [`README_v2.1.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.1.md)
 - temporary deep audits for this local rollout:
+  - [`docs/PICF_AQR_OWM_MVTRACK_DEEP_AUDIT_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MVTRACK_DEEP_AUDIT_TEMP.md)
+    Generated strict MVTrack runtime-b audit covering cache dataclass flow,
+    residual cache math, typed local refinement, guarded predictive losses,
+    weak ordinal no-posterior-rewrite, and documentation overclaim boundaries.
   - [`/tmp/picf_v22_temp_current_dataflow.md`](/tmp/picf_v22_temp_current_dataflow.md)
   - [`/tmp/picf_v22_temp_theory_reconciliation.md`](/tmp/picf_v22_temp_theory_reconciliation.md)
   - [`/tmp/picf_v22_bug_optimization_register_20260421.md`](/tmp/picf_v22_bug_optimization_register_20260421.md)

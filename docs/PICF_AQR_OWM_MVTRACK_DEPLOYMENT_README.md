@@ -52,7 +52,7 @@ Implemented in code:
   support-signature identity binding
   gated slot_address update
   address-aware cache attention bias with residual scaling retained
-  top-k latent local refinement over existing visual memory
+  top-k latent local refinement over existing typed visual/temporal/point/tracklet/proposal memory
   optional pseudo-proposal typed memory and AQR proposal reader
   training-only support denoising auxiliary, default weight 0
   matched slot-JEPA/support prediction targets

@@ -27,7 +27,7 @@ Evidence:
 - `src/openpi/picf/vjepa/wrapper.py:62: def recent_maps(self, n: int = 2) -> torch.Tensor | np.ndarray:`
 - `src/openpi/picf/core/pipeline.py:1648: recent = _to_tensor(fmap.recent_maps(n=recent_count), device=self.device, dtype=self.dtype)`
 - `src/openpi/picf/core/pipeline.py:38: from openpi.picf.core.contracts import PicfTemporalVisualSupportState`
-- `src/openpi/picf/core/pipeline.py:2868: vjepa_temporal_priors = torch.zeros((anchor_count, temporal_count), device=self.device, dtype=self.dtype) if temporal_count > 0 else None`
+- `src/openpi/picf/core/pipeline.py:2896: vjepa_temporal_priors = torch.zeros((anchor_count, temporal_count), device=self.device, dtype=self.dtype) if temporal_count > 0 else None`
 
 ### PASS: pg_image_support_first_class
 
@@ -36,7 +36,7 @@ PG image support must consume all image ranges/views and survive as graph.pg_pri
 Evidence:
 - `src/openpi/picf/core/pipeline.py:2263: for index, (start, end) in enumerate(semantic.image_token_ranges):`
 - `src/openpi/picf/core/pipeline.py:2290: pg_priors[rows] = self._aqr_competitive_support(pg_weights, eps=self.config.epsilon_a)`
-- `src/openpi/picf/core/pipeline.py:3014: pg_priors=pg_priors,`
+- `src/openpi/picf/core/pipeline.py:3067: pg_priors=pg_priors,`
 
 ### PASS: mvtrack_proposal_memory_is_optional_typed_evidence
 
@@ -44,13 +44,13 @@ Optional proposal memory must be typed evidence only: no proposal data is a no-o
 
 Evidence:
 - `src/openpi/picf/core/contracts.py:112: class PicfPseudoProposalState:`
-- `src/openpi/picf/core/contracts.py:177: proposal: PicfPseudoProposalState | None = None`
+- `src/openpi/picf/core/contracts.py:179: proposal: PicfPseudoProposalState | None = None`
 - `src/openpi/picf/core/config.py:184: proposal_memory_enabled: bool = True`
 - `src/openpi/picf/core/config.py:187: proposal_read_weight: float = 0.15`
 - `src/openpi/picf/core/pipeline.py:1291: self.aqr_proposal_reader = CrossAttentionRead(`
-- `src/openpi/picf/core/pipeline.py:2875: proposal_priors = torch.zeros((anchor_count, proposal_count), device=self.device, dtype=self.dtype) if proposal_count > 0 else None`
-- `src/openpi/picf/core/pipeline.py:4936: graph_proposal_weights = None`
-- `src/openpi/picf/core/pipeline.py:5306: ("proposal_signature", obs.graph_proposal_weights),`
+- `src/openpi/picf/core/pipeline.py:2903: proposal_priors = torch.zeros((anchor_count, proposal_count), device=self.device, dtype=self.dtype) if proposal_count > 0 else None`
+- `src/openpi/picf/core/pipeline.py:4989: graph_proposal_weights = None`
+- `src/openpi/picf/core/pipeline.py:5359: ("proposal_signature", obs.graph_proposal_weights),`
 
 ### PASS: projective_geometry_reaches_alignment_losses
 
@@ -58,8 +58,8 @@ Projection creates point-visual compatibility. anchor_pv constrains observation-
 
 Evidence:
 - `src/openpi/picf/core/pipeline.py:463: projective_compatibility: torch.Tensor,`
-- `src/openpi/picf/core/pipeline.py:4110: projective_candidate_mask=torch.zeros((0, 0), device=self.device, dtype=torch.bool),`
-- `src/openpi/picf/core/pipeline.py:4111: projective_attention_bias=torch.zeros((0, 0), device=self.device, dtype=self.dtype),`
+- `src/openpi/picf/core/pipeline.py:4163: projective_candidate_mask=torch.zeros((0, 0), device=self.device, dtype=torch.bool),`
+- `src/openpi/picf/core/pipeline.py:4164: projective_attention_bias=torch.zeros((0, 0), device=self.device, dtype=self.dtype),`
 - `src/openpi/picf/core/training.py:1433: def _routing_consistency(`
 - `src/openpi/picf/core/training.py:1016: def _mapg_cycle_loss(state: PicfCoreState, *, reference: torch.Tensor, eps: float) -> torch.Tensor:`
 
@@ -79,39 +79,39 @@ Evidence:
 Posterior correction must retain precision-form prior+measurement fusion.
 
 Evidence:
-- `src/openpi/picf/core/pipeline.py:5683: lambda_prior = 1.0 / torch.clamp(bar_var, min=self.config.sigma_min2)`
-- `src/openpi/picf/core/pipeline.py:5684: eta_prior = lambda_prior * bar_mu`
-- `src/openpi/picf/core/pipeline.py:5685: lambda_meas = torch.sum(beta[:, :, None] / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
-- `src/openpi/picf/core/pipeline.py:5686: eta_meas = torch.sum(beta[:, :, None] * vote_mu_t / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
-- `src/openpi/picf/core/pipeline.py:5688: mu_post = var_post * (eta_prior + eta_meas)`
+- `src/openpi/picf/core/pipeline.py:5736: lambda_prior = 1.0 / torch.clamp(bar_var, min=self.config.sigma_min2)`
+- `src/openpi/picf/core/pipeline.py:5737: eta_prior = lambda_prior * bar_mu`
+- `src/openpi/picf/core/pipeline.py:5738: lambda_meas = torch.sum(beta[:, :, None] / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
+- `src/openpi/picf/core/pipeline.py:5739: eta_meas = torch.sum(beta[:, :, None] * vote_mu_t / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
+- `src/openpi/picf/core/pipeline.py:5741: mu_post = var_post * (eta_prior + eta_meas)`
 
 ### PASS: cache_read_is_previous_only_and_innovation_gated
 
 Evidence cache must read previous carry only and downweight stale/high-innovation entries.
 
 Evidence:
-- `src/openpi/picf/core/pipeline.py:2361: cache = getattr(previous.predictive, "evidence_cache", None)`
-- `src/openpi/picf/core/pipeline.py:2379: innovation = cache.innovation_at_write.to(device=self.device, dtype=self.dtype)[valid]`
-- `src/openpi/picf/core/pipeline.py:2382: innovation_cost = float(self.config.evidence_cache_innovation_downweight) * torch.clamp(innovation, min=0.0)`
-- `src/openpi/picf/core/pipeline.py:2383: source_factor = torch.where(`
+- `src/openpi/picf/core/pipeline.py:2377: cache = getattr(previous.predictive, "evidence_cache", None)`
+- `src/openpi/picf/core/pipeline.py:2395: innovation = cache.innovation_at_write.to(device=self.device, dtype=self.dtype)[valid]`
+- `src/openpi/picf/core/pipeline.py:2399: innovation_cost = float(self.config.evidence_cache_innovation_downweight) * torch.clamp(innovation, min=0.0)`
+- `src/openpi/picf/core/pipeline.py:2400: source_factor = torch.where(`
 
 ### PASS: cache_read_weight_scales_residual
 
 evidence_cache_read_weight must scale the cache residual. Adding log(weight) as a constant attention bias is a softmax-invariant no-op once weight is positive.
 
 Evidence:
-- `src/openpi/picf/core/pipeline.py:2935: q_before_cache = q`
-- `src/openpi/picf/core/pipeline.py:2942: q = q_before_cache + (cache_scale * (cache_read - q_before_cache))`
-- `src/openpi/picf/core/pipeline.py:2934: if self.aqr_cache_reader is not None and cache_count > 0 and float(self.config.evidence_cache_read_weight) > 0.0:`
+- `src/openpi/picf/core/pipeline.py:2955: q_before_cache = q`
+- `src/openpi/picf/core/pipeline.py:2962: q = q_before_cache + (cache_scale * (cache_read - q_before_cache))`
+- `src/openpi/picf/core/pipeline.py:2954: if self.aqr_cache_reader is not None and cache_count > 0 and float(self.config.evidence_cache_read_weight) > 0.0:`
 
 ### PASS: cache_skips_immediate_previous_posterior_duplicate
 
 The cache must not re-read the newest posterior cache row, because previous.posterior.tokens already has a dedicated AQR posterior branch. Cache read should provide older episodic context and apply role-aware filtering before attention.
 
 Evidence:
-- `src/openpi/picf/core/pipeline.py:2371: immediate_posterior = (source_all == 1) & (age_all <= self.config.epsilon_a)`
-- `src/openpi/picf/core/pipeline.py:2372: valid = valid & ~immediate_posterior`
-- `src/openpi/picf/core/pipeline.py:2755: cache_tokens, cache_scores, cache_roles, cache_address, cache_sources = self._previous_evidence_cache_tokens(previous)`
+- `src/openpi/picf/core/pipeline.py:2387: immediate_posterior = (source_all == 1) & (age_all <= self.config.epsilon_a)`
+- `src/openpi/picf/core/pipeline.py:2388: valid = valid & ~immediate_posterior`
+- `src/openpi/picf/core/pipeline.py:2782: cache_roles = cache_read_state.role_ids if cache_read_state.role_ids.numel() > 0 else None`
 - `src/openpi/picf/core/pipeline.py:2122: role_mask = anchor_roles == 0`
 - `src/openpi/picf/core/pipeline.py:1276: self.aqr_posterior_reader = CrossAttentionRead(`
 
@@ -120,8 +120,8 @@ Evidence:
 State-only burn-in must not use the legacy MAPG builder when AQR is enabled; otherwise burn-in and suffix posterior updates use different measurement models.
 
 Evidence:
-- `src/openpi/picf/core/pipeline.py:6173: def recurrent_burnin_step(`
-- `src/openpi/picf/core/pipeline.py:6248: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
+- `src/openpi/picf/core/pipeline.py:6226: def recurrent_burnin_step(`
+- `src/openpi/picf/core/pipeline.py:6301: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
 
 ### PASS: cache_read_weight_nonzero_by_default
 
@@ -187,8 +187,8 @@ Evidence:
 - `src/openpi/picf/core/contracts.py:85: class PicfTemporalVisualSupportState:`
 - `src/openpi/picf/core/contracts.py:123: class PicfEvidenceCacheState:`
 - `src/openpi/picf/core/contracts.py:71: vjepa_temporal_priors: torch.Tensor | None = None`
-- `src/openpi/picf/core/contracts.py:320: slot_prediction_tokens: torch.Tensor | None = None`
-- `src/openpi/picf/core/contracts.py:252: ordinal_scores: torch.Tensor | None = None`
+- `src/openpi/picf/core/contracts.py:322: slot_prediction_tokens: torch.Tensor | None = None`
+- `src/openpi/picf/core/contracts.py:254: ordinal_scores: torch.Tensor | None = None`
 
 ### WARN: runtime_metrics_available
 

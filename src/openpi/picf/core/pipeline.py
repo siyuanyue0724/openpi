@@ -2352,15 +2352,31 @@ class PicfFullCore(nn.Module):
             bias[row] = torch.where(mask, bias[row], neg[row])
         return bias
 
+    def _empty_cache_read_state(self, *, hidden_dim: int | None = None) -> PicfCacheReadState:
+        width = int(hidden_dim or self.config.hidden_dim)
+        return PicfCacheReadState(
+            tokens=torch.zeros((0, width), device=self.device, dtype=self.dtype),
+            slot_address=torch.zeros((0, width), device=self.device, dtype=self.dtype),
+            slot_content=torch.zeros((0, width), device=self.device, dtype=self.dtype),
+            role_ids=torch.zeros((0,), device=self.device, dtype=torch.long),
+            source_ids=torch.zeros((0,), device=self.device, dtype=torch.long),
+            score=torch.zeros((0,), device=self.device, dtype=self.dtype),
+            age=torch.zeros((0,), device=self.device, dtype=self.dtype),
+            uncertainty=torch.zeros((0,), device=self.device, dtype=self.dtype),
+            innovation=torch.zeros((0,), device=self.device, dtype=self.dtype),
+            modality_validity=torch.zeros((0, 0), device=self.device, dtype=self.dtype),
+            valid=torch.zeros((0,), device=self.device, dtype=torch.bool),
+        )
+
     def _previous_evidence_cache_tokens(
         self,
         previous: PicfPreviousState | None,
-    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+    ) -> PicfCacheReadState:
         if previous is None or not bool(self.config.evidence_cache_enabled):
-            return torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype), None, None, None, None
+            return self._empty_cache_read_state()
         cache = getattr(previous.predictive, "evidence_cache", None)
         if cache is None or cache.tokens.numel() == 0:
-            return torch.zeros((0, self.config.hidden_dim), device=self.device, dtype=self.dtype), None, None, None, None
+            return self._empty_cache_read_state()
         valid = cache.valid.to(device=self.device, dtype=torch.bool)
         age_all = cache.age.to(device=self.device, dtype=self.dtype)
         source_all = cache.source_ids.to(device=self.device, dtype=torch.long)
@@ -2371,7 +2387,7 @@ class PicfFullCore(nn.Module):
         immediate_posterior = (source_all == 1) & (age_all <= self.config.epsilon_a)
         valid = valid & ~immediate_posterior
         if valid.numel() == 0 or not bool(valid.any().item()):
-            return torch.zeros((0, cache.tokens.shape[-1]), device=self.device, dtype=self.dtype), None, None, None, None
+            return self._empty_cache_read_state(hidden_dim=int(cache.tokens.shape[-1]))
         tokens = cache.tokens.to(device=self.device, dtype=self.dtype)[valid]
         slot_address = cache.slot_address.to(device=self.device, dtype=self.dtype)[valid]
         uncertainty = cache.uncertainty.to(device=self.device, dtype=self.dtype)[valid]
@@ -2379,6 +2395,7 @@ class PicfFullCore(nn.Module):
         innovation = cache.innovation_at_write.to(device=self.device, dtype=self.dtype)[valid]
         source_ids = source_all[valid]
         role_ids = cache.role_ids.to(device=self.device, dtype=torch.long)[valid]
+        modality_validity = cache.modality_validity.to(device=self.device, dtype=self.dtype)[valid]
         innovation_cost = float(self.config.evidence_cache_innovation_downweight) * torch.clamp(innovation, min=0.0)
         source_factor = torch.where(
             source_ids == 1,
@@ -2386,12 +2403,19 @@ class PicfFullCore(nn.Module):
             torch.full_like(uncertainty, 0.5),
         )
         score = source_factor / torch.clamp(1.0 + uncertainty + age + innovation_cost, min=self.config.epsilon_a)
-        return (
-            tokens.reshape(-1, tokens.shape[-1]),
-            score.reshape(-1),
-            role_ids.reshape(-1),
-            slot_address.reshape(-1, slot_address.shape[-1]),
-            source_ids.reshape(-1),
+        flat_tokens = tokens.reshape(-1, tokens.shape[-1])
+        return PicfCacheReadState(
+            tokens=flat_tokens,
+            slot_address=slot_address.reshape(-1, slot_address.shape[-1]),
+            slot_content=flat_tokens,
+            role_ids=role_ids.reshape(-1),
+            source_ids=source_ids.reshape(-1),
+            score=score.reshape(-1),
+            age=age.reshape(-1),
+            uncertainty=uncertainty.reshape(-1),
+            innovation=innovation.reshape(-1),
+            modality_validity=modality_validity.reshape(-1, modality_validity.shape[-1]),
+            valid=torch.ones((int(flat_tokens.shape[0]),), device=self.device, dtype=torch.bool),
         )
 
     def _aqr_competitive_support(self, weights: torch.Tensor, *, eps: float) -> torch.Tensor:
@@ -2752,7 +2776,11 @@ class PicfFullCore(nn.Module):
         point_count = int(token_field.point_tokens.shape[0])
         tactile_count = int(token_field.tactile_tokens.shape[0])
         post_count = 0 if previous is None else int(previous.posterior.tokens.shape[0])
-        cache_tokens, cache_scores, cache_roles, cache_address, cache_sources = self._previous_evidence_cache_tokens(previous)
+        cache_read_state = self._previous_evidence_cache_tokens(previous)
+        cache_tokens = cache_read_state.tokens
+        cache_scores = cache_read_state.score if cache_read_state.score.numel() > 0 else None
+        cache_roles = cache_read_state.role_ids if cache_read_state.role_ids.numel() > 0 else None
+        cache_address = cache_read_state.slot_address if cache_read_state.slot_address.numel() > 0 else None
         cache_count = int(cache_tokens.shape[0])
         physical_count = max(int(self.config.aqr_query_count_physical), 0)
         task_count = max(int(self.config.aqr_query_count_task), 0)
@@ -2896,14 +2924,6 @@ class PicfFullCore(nn.Module):
                     attn_bias=round_visual_bias,
                 )
                 visual_priors = self._aqr_competitive_support(visual_weights, eps=self.config.epsilon_a)
-                if bool(self.config.local_refinement_enabled) and token_field.visual_tokens.numel() > 0:
-                    topk = min(max(int(self.config.local_refinement_topk), 1), int(visual_priors.shape[-1]))
-                    top_values, top_indices = torch.topk(visual_priors, k=topk, dim=-1)
-                    local_priors = torch.zeros_like(visual_priors)
-                    local_priors.scatter_(1, top_indices, top_values)
-                    local_priors = _normalize_rows(local_priors, eps=self.config.epsilon_a)
-                    local_read = local_priors @ token_field.visual_tokens.to(device=self.device, dtype=self.dtype)
-                    q = q + (float(self.config.local_refinement_weight) * (local_read[None, :, :] - q))
             if self.aqr_temporal_visual_reader is not None and token_field.temporal_visual is not None and temporal_count > 0:
                 q, temporal_weights = self.aqr_temporal_visual_reader(
                     q,
@@ -2965,6 +2985,39 @@ class PicfFullCore(nn.Module):
                 )
                 q = q_before_prop + (float(self.config.proposal_read_weight) * (prop_read - q_before_prop))
                 proposal_priors = self._aqr_competitive_support(prop_weights, eps=self.config.epsilon_a)
+            if bool(self.config.local_refinement_enabled):
+                local_vectors: list[torch.Tensor] = []
+                local_masses: list[torch.Tensor] = []
+                local_weight_rows: list[torch.Tensor] = []
+
+                def _add_local_component(priors: torch.Tensor | None, tokens: torch.Tensor | None) -> None:
+                    if priors is None or tokens is None or priors.numel() == 0 or tokens.numel() == 0:
+                        return
+                    if priors.shape[-1] != tokens.shape[0]:
+                        return
+                    weights = _normalize_rows(torch.clamp(priors.to(device=self.device, dtype=self.dtype), min=0.0), eps=self.config.epsilon_a)
+                    topk = min(max(int(self.config.local_refinement_topk), 1), int(weights.shape[-1]))
+                    top_values, top_indices = torch.topk(weights, k=topk, dim=-1)
+                    gathered = tokens.to(device=self.device, dtype=self.dtype).index_select(0, top_indices.reshape(-1))
+                    gathered = gathered.reshape(int(weights.shape[0]), topk, -1)
+                    local_vectors.append((top_values[..., None] * gathered).sum(dim=1))
+                    local_masses.append(top_values.sum(dim=-1))
+                    local_weight_rows.append(top_values)
+
+                _add_local_component(visual_priors, token_field.visual_tokens)
+                _add_local_component(
+                    vjepa_temporal_priors,
+                    None if token_field.temporal_visual is None else token_field.temporal_visual.tokens,
+                )
+                _add_local_component(point_priors, token_field.point_tokens)
+                _add_local_component(tracklet_priors, None if token_field.tracklet is None else token_field.tracklet.tokens)
+                _add_local_component(proposal_priors, None if token_field.proposal is None else token_field.proposal.tokens)
+                if local_vectors:
+                    local_read = torch.stack(local_vectors, dim=0).sum(dim=0)
+                    local_mass = torch.stack(local_masses, dim=0).sum(dim=0)
+                    local_read = local_read / torch.clamp(local_mass[:, None], min=self.config.epsilon_a)
+                    q = q + (float(self.config.local_refinement_weight) * (local_read[None, :, :] - q))
+                    local_priors = _normalize_rows(torch.cat(local_weight_rows, dim=-1), eps=self.config.epsilon_a)
             if self.aqr_query_self is not None:
                 q = self.aqr_query_self(q)
 

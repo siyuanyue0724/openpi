@@ -33,7 +33,7 @@ Status: complete for the code-level deployment contract after the point/visual c
 PICF-AQR-OWM-MVTrack v2.0-runtime-b
 Status: code-level runtime complete for multiview temporal evidence,
 tracklet typed support, optional proposal typed support,
-support-signature/address binding, address-aware cache bias, local refinement,
+support-signature/address binding, address-aware cache bias, typed local refinement,
 training-only support denoising, matched predictive targets, and weak ordinal
 diagnostics. Behavior-level completion still requires current-checkout
 CALVIN/video/metrics evidence.
@@ -90,7 +90,7 @@ zero-semantic checkpoints into a PaliGemma-required AQR path.
 | MVTrack proposal typed memory | optional proposal boxes/centers/objectness on `PicfObservation`, typed support state, AQR proposal reader, proposal debug metrics | deployed, data-source dependent | Forward path no-ops when proposals are absent; proposal evidence is weak typed support and never posterior truth |
 | MVTrack identity binding | support-signature overlap, gated address compatibility, slow address update | deployed, guarded | Binding now combines hidden/geometry with support signatures and address gate; recycle/innovation downweights address inertia |
 | MVTrack address-aware cache | address/content/role/age/uncertainty/innovation cache bias with residual read scale | deployed, guarded | Cache read remains a small residual auxiliary context; newest posterior row is skipped because posterior has a dedicated reader |
-| MVTrack local refinement | top-k latent local reread over existing visual memory | deployed | Local priors are produced without high-res crop dependency or new geometry truth |
+| MVTrack local refinement | top-k latent reread over existing typed visual/temporal/point/tracklet/proposal memory | deployed | Local priors are produced without high-res crop dependency or new geometry truth |
 | MVTrack support denoising | training-only support denoising auxiliary over confident typed supports | deployed, default zero | `lambda_aqr_denoising=0`; no inference-time query/path changes |
 | MVTrack matched predictive targets | permutation-tolerant matched slot-JEPA/support target hook | deployed, default zero | Future targets stay detached; loss weights remain 0 until identity diagnostics justify enabling |
 | MVTrack weak ordinal diagnostics | prompt-gated axis/rank/selected-slot diagnostics | deployed, no posterior rewrite | Weak target can be disabled separately; no ordinal loss is enabled by default |
@@ -206,6 +206,12 @@ python scripts/picf_owm_dataflow_trace.py \
   --json-out /tmp/picf_owm_dataflow_trace.json \
   --fail-on-fail
   passed 19 recursive dataflow nodes
+
+python scripts/picf_owm_mvtrack_deep_audit.py \
+  --markdown-out docs/PICF_AQR_OWM_MVTRACK_DEEP_AUDIT_TEMP.md \
+  --json-out /tmp/mvtrack_deep_audit.json \
+  --fail-on-fail
+  passed 28/28 strict MVTrack code/math/documentation invariants
 
 pytest -q \
   src/openpi/picf/core/pipeline_test.py \

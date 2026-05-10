@@ -1042,11 +1042,13 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
     assert graph.cache_priors.shape[1] == core.config.persistent_anchors
     assert third.debug["owm_evidence_cache_read_active"] == 1.0
 
-    _, low_innovation_scores, _, _, _ = core._previous_evidence_cache_tokens(second.state)
-    assert low_innovation_scores is not None
+    low_cache_read = core._previous_evidence_cache_tokens(second.state)
+    low_innovation_scores = low_cache_read.score
+    assert low_innovation_scores.numel() > 0
     second.state.predictive.evidence_cache.innovation_at_write[:] = 100.0
-    _, high_innovation_scores, _, _, _ = core._previous_evidence_cache_tokens(second.state)
-    assert high_innovation_scores is not None
+    high_cache_read = core._previous_evidence_cache_tokens(second.state)
+    high_innovation_scores = high_cache_read.score
+    assert high_innovation_scores.numel() > 0
     assert bool((high_innovation_scores < low_innovation_scores).all().item())
 
 
@@ -1058,6 +1060,7 @@ def test_evidence_cache_read_weight_scales_residual_not_softmax_only(tmp_path: P
         aqr_query_count_task=3,
         aqr_query_rounds=1,
         evidence_cache_read_weight=0.0,
+        local_refinement_enabled=False,
     )
     frames = list(replay)[:2]
     first = core.step(

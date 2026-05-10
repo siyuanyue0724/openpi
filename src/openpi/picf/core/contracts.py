@@ -136,8 +136,10 @@ class PicfEvidenceCacheState:
 class PicfCacheReadState:
     tokens: torch.Tensor
     slot_address: torch.Tensor
+    slot_content: torch.Tensor
     role_ids: torch.Tensor
     source_ids: torch.Tensor
+    score: torch.Tensor
     age: torch.Tensor
     uncertainty: torch.Tensor
     innovation: torch.Tensor
