@@ -2077,11 +2077,15 @@ def _wrap_model_for_training_strategy(
     ignored_modules = _fsdp_root_ignored_modules(model)
     root_wrap_kwargs = _fsdp_wrap_kwargs(device=device)
     if str(getattr(args, "picf_trainable_scope", "all")).lower().replace("-", "_") == "anchor_only":
+        ignored_module_states = [param for module in ignored_modules for param in module.parameters()]
         ignored_frozen_states = _fsdp_frozen_states_excluding_modules(model, ignored_modules=ignored_modules)
-        ignored_states: list[torch.nn.Module | torch.nn.Parameter] = list(ignored_modules) + ignored_frozen_states
+        ignored_states_by_id: dict[int, torch.nn.Parameter] = {}
+        for param in [*ignored_module_states, *ignored_frozen_states]:
+            ignored_states_by_id[id(param)] = param
+        ignored_states = list(ignored_states_by_id.values())
         if ignored_states:
-            # PyTorch FSDP accepts modules or parameters through ignored_states
-            # but rejects passing ignored_modules and ignored_states together.
+            # PyTorch FSDP rejects mixing modules and parameters inside
+            # ignored_states, so expand ignored modules to their parameters.
             root_wrap_kwargs["ignored_states"] = ignored_states
     elif ignored_modules:
         root_wrap_kwargs["ignored_modules"] = ignored_modules

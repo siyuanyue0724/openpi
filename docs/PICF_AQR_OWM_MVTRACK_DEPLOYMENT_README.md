@@ -88,10 +88,11 @@ anchor_only:
   not provide those modalities. This keeps FSDP/DDP strict lazy-parameter
   checks aligned with the maintained v2 contract instead of silently depending
   on modality presence.
-  Under FSDP full-shard, fully frozen root modules and frozen root-managed
-  parameters are passed through the single `ignored_states` API for this scope.
-  That preserves `use_orig_params=False` flat-parameter uniformity without
-  broadening the trainable anchor allowlist.
+  Under FSDP full-shard, fully frozen root modules are expanded to their
+  parameters and combined with frozen root-managed parameters through the
+  single `ignored_states` API for this scope. That preserves
+  `use_orig_params=False` flat-parameter uniformity without broadening the
+  trainable anchor allowlist.
 
 Purpose:
   maximize safe batch/accumulation on 2x40GB and test whether anchors can
