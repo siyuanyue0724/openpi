@@ -645,10 +645,66 @@ M4 stable while E1 failed:
 Tail commands:
 
 ```bash
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1c_unroll2_semlr1e6_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1d_unroll2_semlr1e6_aux0_500new_20260512_95ea69b.train_tmux.log
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m2b_burnin4_semtrain_aux0_500new_20260512_95ea69b.train_tmux.log
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m3b_burnin4_semtrain_tinyaux_500new_20260512_95ea69b.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4b_unroll2_semtrain_semlr1e61_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4b_unroll2_semtrain_semlr01_aux0_500new_20260512_95ea69b.train_tmux.log
+```
+
+### A7 follow-up allocation
+
+The previous A7 direct `unroll_steps=2` 30k run is no longer the best use of
+2xA100 time. By step 860 it still had:
+
+```text
+tail_mean loss_action_default_equiv ~= 0.061
+tail_mean posterior_recycle_rate ~= 0.0017
+tail_mean posterior_address_update_rate_mean ~= 0.0207
+tail_mean aqr_same_role_support_overlap_max ~= 0.957
+tail_mean aqr_same_role_local_true_overlap_max ~= 0.052
+```
+
+Interpretation:
+
+```text
+Action can train, and recycle is mostly suppressed, but same-role global support
+overlap remains too high. This profile is not a clean acceptance run.
+```
+
+Therefore A7 was repurposed to a complementary stress test of the strongest
+theoretical candidate:
+
+```text
+run: picf_a7_burnin4_semtrain_aux0_1000new_20260512_95ea69b
+session: tmux attach -t a7_burnin4_semtrain_1000new_95ea69b
+resume: model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b
+num_train_steps: 1450, about 1000 new optimizer steps from the resume point
+profile:
+  PaliGemma trainable
+  Sonata/V-JEPA/AnyTouch frozen
+  picf_action_prefix_stopgrad enabled
+  burnin_steps=4
+  burnin_mode=state_only
+  unroll_steps=1
+  lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=0
+  evidence_cache_read_weight=0.05
+  bind_embedding_signature_weight=0.25
+```
+
+Rationale:
+
+```text
+A5 is used for causal short-run isolation. A7 is used for longer stress on the
+candidate that best matches the theory: preserve PaliGemma cotrain for action
+adaptation, but provide posterior identity inertia through state-only burn-in.
+If A7 burnin4 stays healthy while direct unroll=2 does not, the production
+recipe should move to burnin4/state_only before any predictive aux warmup.
+```
+
+Tail command:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_burnin4_semtrain_aux0_1000new_20260512_95ea69b.train_tmux.log
 ```
 
 Scope boundary:
@@ -688,6 +744,7 @@ longer cotrain.
 3. The paper-derived binding-subspace term is conceptually aligned with
    IsSameObject/quadratic probe evidence and is not a random patch.
 4. Short-run evidence supports the repair, especially A5 prefix-stopgrad.
-5. The A7 long run is the current acceptance run; only its future checkpoints
-   can decide behavior-level readiness.
+5. The old A7 direct-unroll2 long run is not an acceptance run because global
+   same-role support overlap remained high. The new A7 burnin4/state_only run is
+   the current medium-horizon candidate stress test.
 ```

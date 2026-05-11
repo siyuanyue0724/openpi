@@ -533,11 +533,25 @@ Current training profiles:
   `semantic_lr_scale=0.0` are not used for conclusions. The first would only add
   about 50 steps after resume; the second did not isolate PaliGemma update
   pressure because the foundation profile defaults semantic parameters to
-  trainable; the third failed argument validation because LR scales must be > 0. PaliGemma cotrain remains a likely requirement for final
-  action adaptation; freezing it is a diagnostic isolation, not the preferred
+  trainable; the third failed argument validation because LR scales must be > 0.
+  PaliGemma cotrain remains a likely requirement for final action adaptation;
+  freezing or near-freezing it is a diagnostic isolation, not the preferred
   production recipe unless the cotrain paths fail. These runs are diagnostic;
   they do not resolve tracklet/proposal, ordinal, or the offline IsSameObject
   audit by themselves.
+- 2026-05-12 A7 reallocation:
+  the old A7 direct `unroll_steps=2` long run is no longer treated as an
+  acceptance run because the latest inspected tail still had high global
+  same-role support overlap (`aqr_same_role_support_overlap_max` tail mean
+  about `0.957`) despite action loss decreasing and recycle mostly suppressed.
+  A7 now runs
+  `picf_a7_burnin4_semtrain_aux0_1000new_20260512_95ea69b`, a medium-horizon
+  stress test of the strongest current candidate: PaliGemma cotrain remains
+  enabled, OWM predictive aux losses remain `0`, and identity inertia is
+  provided by `burnin_steps=4`, `burnin_mode=state_only`, `unroll_steps=1`.
+  The purpose is to decide whether the production long run should move from
+  direct `unroll_steps=2` to burnin4/state-only before any predictive aux
+  warmup.
 
 Default recommendation:
 
