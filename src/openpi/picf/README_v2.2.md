@@ -453,6 +453,12 @@ Current training profiles:
   through `PicfPosteriorAnchorState`, pipeline debug, trainer metrics, evidence
   bundle, strict diagnose, and MVTrack deep audit. These are observability-only
   fields; they do not change posterior update math or training losses.
+- Action-loss logging now carries both the optimized weighted term and the
+  4-22-comparable default-weight term: `loss_action` is still the actual
+  objective contribution, while `loss_action_default_equiv` maps the action
+  loss back to default `lambda_action_pos/rot/gripper=2.0` scale. Use
+  `loss_action_default_equiv` and `loss_action_active7` when comparing staged
+  low-action probes against the 2026-04-22 ablation baseline.
 
 Default recommendation:
 

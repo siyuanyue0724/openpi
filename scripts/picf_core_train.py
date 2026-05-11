@@ -2793,6 +2793,8 @@ def _accumulate_owm_debug_metrics(
 class _MetricAccumulator:
     loss_total: float = 0.0
     loss_action: float = 0.0
+    loss_action_default_equiv: float = 0.0
+    loss_action_weight_scale: float = 0.0
     loss_action_active7: float = 0.0
     loss_action_pos: float = 0.0
     loss_action_rot: float = 0.0
@@ -2851,6 +2853,8 @@ class _MetricAccumulator:
     ) -> None:
         self.loss_total += float(losses.total.item())
         self.loss_action += float(losses.action.item())
+        self.loss_action_default_equiv += float(losses.action_default_equiv.item())
+        self.loss_action_weight_scale += float(losses.action_weight_scale.item())
         self.loss_action_active7 += float(losses.action_active7.item())
         self.loss_action_pos += float(losses.action_pos.item())
         self.loss_action_rot += float(losses.action_rot.item())
@@ -2901,6 +2905,8 @@ class _MetricAccumulator:
     def update_from_outputs(self, outputs: dict[str, torch.Tensor]) -> None:
         self.loss_total += float(outputs["loss_total"].detach().item())
         self.loss_action += float(outputs["loss_action"].detach().item())
+        self.loss_action_default_equiv += float(outputs.get("loss_action_default_equiv", outputs["loss_action"]).detach().item())
+        self.loss_action_weight_scale += float(outputs.get("loss_action_weight_scale", outputs["loss_action"] * 0.0 + 1.0).detach().item())
         self.loss_action_active7 += float(outputs["loss_action_active7"].detach().item())
         self.loss_action_pos += float(outputs["loss_action_pos"].detach().item())
         self.loss_action_rot += float(outputs["loss_action_rot"].detach().item())
@@ -2957,6 +2963,8 @@ class _MetricAccumulator:
         return {
             "loss_total": self.loss_total / denom,
             "loss_action": self.loss_action / denom,
+            "loss_action_default_equiv": self.loss_action_default_equiv / denom,
+            "loss_action_weight_scale": self.loss_action_weight_scale / denom,
             "loss_action_active7": self.loss_action_active7 / denom,
             "loss_action_pos": self.loss_action_pos / denom,
             "loss_action_rot": self.loss_action_rot / denom,
@@ -3054,6 +3062,8 @@ class _PicfWindowTrainer(torch.nn.Module):
     ) -> dict[str, torch.Tensor]:
         return {
             "loss_action": losses.action,
+            "loss_action_default_equiv": losses.action_default_equiv,
+            "loss_action_weight_scale": losses.action_weight_scale,
             "loss_action_active7": losses.action_active7,
             "loss_action_pos": losses.action_pos,
             "loss_action_rot": losses.action_rot,
@@ -3169,6 +3179,8 @@ class _PicfWindowTrainer(torch.nn.Module):
         result: dict[str, Any] = {
             "loss_total": torch.stack(totals).mean(),
             "loss_action": metrics["loss_action"] / denom,
+            "loss_action_default_equiv": metrics["loss_action_default_equiv"] / denom,
+            "loss_action_weight_scale": metrics["loss_action_weight_scale"] / denom,
             "loss_action_active7": metrics["loss_action_active7"] / denom,
             "loss_action_pos": metrics["loss_action_pos"] / denom,
             "loss_action_rot": metrics["loss_action_rot"] / denom,
@@ -3393,6 +3405,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                     continue
                 metrics = {
                     "loss_action": losses.action,
+                    "loss_action_default_equiv": losses.action_default_equiv,
+                    "loss_action_weight_scale": losses.action_weight_scale,
                     "loss_action_active7": losses.action_active7,
                     "loss_action_pos": losses.action_pos,
                     "loss_action_rot": losses.action_rot,
@@ -3445,6 +3459,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                     previous = policy_forward.next_state
                     continue
                 metrics["loss_action"] = metrics["loss_action"] + losses.action
+                metrics["loss_action_default_equiv"] = metrics["loss_action_default_equiv"] + losses.action_default_equiv
+                metrics["loss_action_weight_scale"] = metrics["loss_action_weight_scale"] + losses.action_weight_scale
                 metrics["loss_action_active7"] = metrics["loss_action_active7"] + losses.action_active7
                 metrics["loss_action_pos"] = metrics["loss_action_pos"] + losses.action_pos
                 metrics["loss_action_rot"] = metrics["loss_action_rot"] + losses.action_rot
@@ -3524,6 +3540,8 @@ class _PicfWindowTrainer(torch.nn.Module):
             if metrics is None:
                 metrics = {
                     "loss_action": losses.action,
+                    "loss_action_default_equiv": losses.action_default_equiv,
+                    "loss_action_weight_scale": losses.action_weight_scale,
                     "loss_action_active7": losses.action_active7,
                     "loss_action_pos": losses.action_pos,
                     "loss_action_rot": losses.action_rot,
@@ -3573,6 +3591,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                 _accumulate_owm_debug_metrics(metrics, pending.owm_debug_metrics)
             else:
                 metrics["loss_action"] = metrics["loss_action"] + losses.action
+                metrics["loss_action_default_equiv"] = metrics["loss_action_default_equiv"] + losses.action_default_equiv
+                metrics["loss_action_weight_scale"] = metrics["loss_action_weight_scale"] + losses.action_weight_scale
                 metrics["loss_action_active7"] = metrics["loss_action_active7"] + losses.action_active7
                 metrics["loss_action_pos"] = metrics["loss_action_pos"] + losses.action_pos
                 metrics["loss_action_rot"] = metrics["loss_action_rot"] + losses.action_rot
@@ -3630,6 +3650,8 @@ class _PicfWindowTrainer(torch.nn.Module):
         result: dict[str, Any] = {
             "loss_total": mean_total,
             "loss_action": metrics["loss_action"] / denom,
+            "loss_action_default_equiv": metrics["loss_action_default_equiv"] / denom,
+            "loss_action_weight_scale": metrics["loss_action_weight_scale"] / denom,
             "loss_action_active7": metrics["loss_action_active7"] / denom,
             "loss_action_pos": metrics["loss_action_pos"] / denom,
             "loss_action_rot": metrics["loss_action_rot"] / denom,
@@ -3687,6 +3709,8 @@ class _PicfWindowTrainer(torch.nn.Module):
 _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_total",
     "loss_action",
+    "loss_action_default_equiv",
+    "loss_action_weight_scale",
     "loss_action_active7",
     "loss_action_pos",
     "loss_action_rot",

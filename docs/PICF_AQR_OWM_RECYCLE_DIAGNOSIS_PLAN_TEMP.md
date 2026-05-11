@@ -605,6 +605,9 @@ posterior_identity_innovation_risk
 posterior_address_update_rate_mean
 posterior_address_update_rate_max
 loss_action_active7
+loss_action
+loss_action_default_equiv
+loss_action_weight_scale
 default-weight-equivalent loss_action
 ```
 
@@ -630,6 +633,12 @@ effector recycle != scene recycle:
 local overlap high while visual overlap is moderate:
   local refinement is sharpening multiple same-role anchors onto the same local
   evidence set.
+
+loss_action_default_equiv:
+  compare this value against the 2026-04-22 ablation baseline. `loss_action`
+  remains the actual optimized weighted action term, so runs with
+  `lambda_action_*=0.5` will log a much smaller raw `loss_action`; the
+  default-equivalent field maps it back to the default action-lambda-2.0 scale.
 ```
 
 The secondary metrics are:

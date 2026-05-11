@@ -111,6 +111,8 @@ class PicfAlignmentLossConfig:
 class PicfTransitionLossBreakdown:
     total: torch.Tensor
     action: torch.Tensor
+    action_default_equiv: torch.Tensor
+    action_weight_scale: torch.Tensor
     action_active7: torch.Tensor
     action_pos: torch.Tensor
     action_rot: torch.Tensor
@@ -159,6 +161,8 @@ class PicfTransitionLossBreakdown:
         return {
             "total": float(self.total.item()),
             "action": float(self.action.item()),
+            "action_default_equiv": float(self.action_default_equiv.item()),
+            "action_weight_scale": float(self.action_weight_scale.item()),
             "action_active7": float(self.action_active7.item()),
             "action_pos": float(self.action_pos.item()),
             "action_rot": float(self.action_rot.item()),
@@ -509,10 +513,13 @@ def make_action_only_transition_loss(
     action_rot = action_rot_override if action_rot_override is not None else action_loss_override
     action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_override
     action_active7 = _action_active7_loss(action_pos, action_rot, action_gripper)
+    action_weight_scale = torch.ones((), device=reference.device, dtype=reference.dtype)
     availability = torch.zeros((int(availability_dim),), device=reference.device, dtype=reference.dtype)
     return PicfTransitionLossBreakdown(
         total=action_loss_override,
         action=action_loss_override,
+        action_default_equiv=action_loss_override,
+        action_weight_scale=action_weight_scale,
         action_active7=action_active7,
         action_pos=action_pos,
         action_rot=action_rot,
@@ -692,6 +699,19 @@ def _action_active7_loss(
     return ((3.0 * action_pos) + (3.0 * action_rot) + action_gripper) / 7.0
 
 
+def _default_weighted_action_components(
+    action_pos: torch.Tensor,
+    action_rot: torch.Tensor,
+    action_gripper: torch.Tensor,
+) -> torch.Tensor:
+    default = PicfTransitionLossConfig()
+    return (
+        (float(default.lambda_action_pos) * action_pos)
+        + (float(default.lambda_action_rot) * action_rot)
+        + (float(default.lambda_action_gripper) * action_gripper)
+    )
+
+
 def _weighted_action_override_loss(
     action_loss_override: torch.Tensor,
     action_pos: torch.Tensor,
@@ -710,12 +730,7 @@ def _weighted_action_override_loss(
     non-default lambda settings.
     """
 
-    default = PicfTransitionLossConfig()
-    default_weighted = (
-        (float(default.lambda_action_pos) * action_pos)
-        + (float(default.lambda_action_rot) * action_rot)
-        + (float(default.lambda_action_gripper) * action_gripper)
-    )
+    default_weighted = _default_weighted_action_components(action_pos, action_rot, action_gripper)
     requested_weighted = (
         (float(config.lambda_action_pos) * action_pos)
         + (float(config.lambda_action_rot) * action_rot)
@@ -1776,6 +1791,7 @@ def compute_transition_loss(
         action_pos = action_pos_override if action_pos_override is not None else action_loss_override
         action_rot = action_rot_override if action_rot_override is not None else action_loss_override
         action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_override
+        action_default_equiv = action_loss_override
         action_loss = _weighted_action_override_loss(
             action_loss_override,
             action_pos,
@@ -1802,6 +1818,8 @@ def compute_transition_loss(
             + (cfg.lambda_action_rot * action_rot)
             + (cfg.lambda_action_gripper * action_gripper)
         )
+        action_default_equiv = _default_weighted_action_components(action_pos, action_rot, action_gripper)
+    action_weight_scale = action_loss.detach() / torch.clamp(action_default_equiv.detach(), min=1e-6)
     action_active7 = _action_active7_loss(action_pos, action_rot, action_gripper)
 
     if _branch_is_usable(
@@ -2060,6 +2078,8 @@ def compute_transition_loss(
     return PicfTransitionLossBreakdown(
         total=total,
         action=action_loss,
+        action_default_equiv=action_default_equiv,
+        action_weight_scale=action_weight_scale,
         action_active7=action_active7,
         action_pos=action_pos,
         action_rot=action_rot,
