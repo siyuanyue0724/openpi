@@ -477,6 +477,116 @@ Do not claim full behavior-level completion until these pass:
    in training.
 ```
 
+## A5 10-hour follow-up plan
+
+Purpose:
+
+```text
+Use the idle A5 2xA100 machine to test whether the A7 step-520 recycle spike is
+reproducible under the same unroll=2 launch, whether PaliGemma training pressure
+is the trigger, and whether tiny guarded predictive/binding losses immediately
+conflict with the repaired action-prefix-stopgrad path.
+```
+
+Machine and tmux:
+
+```text
+ssh -p 29776 root@36.139.225.68
+tmux attach -t a5_owm_10h_unroll2_diagnosis_95ea69b
+```
+
+Common contract:
+
+```text
+runtime: 95ea69b
+resume: /mnt/checkpoints/picf_core/picf_core/model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b
+training_strategy: fsdp_full_shard
+unroll_steps: 2
+accum_steps: 1
+num_train_steps: 900
+perception_finetune_mode: frozen
+Sonata/V-JEPA/AnyTouch: frozen
+PICF trainable_scope: all
+picf_action_prefix_stopgrad: enabled
+cache_read_weight: 0.05
+binding_signature_weight: 0.25
+```
+
+Runs:
+
+```text
+E1 picf_a5_e1_unroll2_semtrain_repro900_20260511_95ea69b
+  PaliGemma trainable, guarded OWM losses 0.
+  Question: does A7's recycle spike reproduce under the same unroll=2 profile?
+
+E2 picf_a5_e2_unroll2_frozenpg_repro900_20260511_95ea69b
+  PaliGemma frozen, guarded OWM losses 0.
+  Question: if E1 spikes but E2 does not, semantic/PaliGemma trainable pressure
+  is a likely contributor.
+
+E3 picf_a5_e3_unroll2_semtrain_tinyaux900_20260511_95ea69b
+  PaliGemma trainable, lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=1e-4.
+  Question: do tiny guarded predictive/binding losses immediately reintroduce
+  recycle/support-overlap conflict?
+```
+
+Tail commands:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_e1_unroll2_semtrain_repro900_20260511_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_e2_unroll2_frozenpg_repro900_20260511_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_e3_unroll2_semtrain_tinyaux900_20260511_95ea69b.train_tmux.log
+```
+
+Acceptance metrics:
+
+```text
+Primary:
+  posterior_recycle_rate
+  posterior_recycle_logit_mean
+  posterior_address_update_rate_mean
+  aqr_same_role_support_overlap_max
+  aqr_same_role_local_true_overlap_max
+  loss_action_default_equiv
+
+Secondary:
+  loss_slot_jepa
+  loss_support_pred
+  loss_binding_consistency
+  loss_anchor_pv
+  loss_pv_weak
+  loss_mapg_cycle
+  grad_norm
+```
+
+Interpretation rules:
+
+```text
+E1 spike and E2 stable:
+  PaliGemma trainable pressure is the likely long-run destabilizer.
+
+E1 stable and A7 spike remains isolated:
+  A7 spike may be transient/batch-specific; wait for A7 2500-step checkpoint.
+
+E3 worse than E1:
+  predictive/binding losses must remain guarded at 0 for the next long run.
+
+E3 similar to E1:
+  tiny aux losses are not immediately conflicting, but still not mature enough
+  to enable by default without longer evidence.
+```
+
+Scope boundary:
+
+```text
+Tracklet/proposal and ordinal are not resolved by these three CALVIN runs.
+Current CALVIN tensors still show owm_tracklet_tokens=0 and owm_proposal_tokens=0.
+Those paths require either optional episode fields or a dedicated synthetic/
+offline dataflow test. The IsSameObject paper-derived audit is also offline:
+it needs weak same/different pairs and should not be inferred from scalar
+training loss alone.
+```
+
 Guarded losses remain guarded:
 
 ```text

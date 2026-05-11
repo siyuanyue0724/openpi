@@ -516,6 +516,14 @@ Current training profiles:
   FSDP, PaliGemma trainable, Sonata/V-JEPA/AnyTouch frozen, and
   `--picf-action-prefix-stopgrad`. That smoke proves the runtime entry and
   metrics execute on GPU; it is not convergence or behavior acceptance.
+- 2026-05-11 A5 follow-up diagnosis:
+  [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md)
+  now defines a 10-hour A5 tmux plan with three sequential unroll=2 probes:
+  E1 reproduces the A7 PaliGemma-trainable profile, E2 freezes PaliGemma to
+  isolate semantic pressure, and E3 enables tiny `1e-4` guarded
+  slot-JEPA/support/binding losses to test immediate aux-loss conflict. These
+  runs are diagnostic; they do not resolve tracklet/proposal, ordinal, or the
+  offline IsSameObject audit by themselves.
 
 Default recommendation:
 
