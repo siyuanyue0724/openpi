@@ -556,38 +556,49 @@ Common runtime:
   evidence_cache_read_weight=0.05
   bind_embedding_signature_weight=0.25
   progress enabled
-  num_train_steps=500
+  resume starts near trainer step 450
+  num_train_steps=950, i.e. about 500 new optimizer steps
   log_interval=20
-  save_interval=500
+  save_interval=950
 ```
 
 Runs:
 
 ```text
-M1 picf_a5_m1_unroll2_frozenpg_aux0_500_20260512_95ea69b
+M1 picf_a5_m1b_unroll2_frozenpg_aux0_500new_20260512_95ea69b
   PaliGemma frozen, unroll_steps=2, accum_steps=1, OWM aux losses 0.
   Question: does full all-scope unroll=2 collapse even without semantic cotrain?
   If M1 collapses, the problem is not PG cotrain; it is all-scope/action-window
   pressure on identity.
 
-M2 picf_a5_m2_burnin4_semtrain_aux0_500_20260512_95ea69b
+M2 picf_a5_m2b_burnin4_semtrain_aux0_500new_20260512_95ea69b
   PaliGemma trainable, burnin_steps=4, burnin_mode=state_only, unroll_steps=1,
   accum_steps=1, OWM aux losses 0.
   Question: can we keep the action-useful PG cotrain while restoring posterior
   identity inertia through state-only burn-in?
   This is the most important candidate for the next production recipe.
 
-M3 picf_a5_m3_burnin4_semtrain_tinyaux_500_20260512_95ea69b
+M3 picf_a5_m3b_burnin4_semtrain_tinyaux_500new_20260512_95ea69b
   Same as M2, but lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=1e-4.
   Question: after the identity path is protected by burn-in, do tiny predictive
   hooks immediately conflict, or can they be considered for later warmup?
 
-M4 picf_a5_m4_unroll2_semtrain_semlr01_aux0_500_20260512_95ea69b
+M4 picf_a5_m4b_unroll2_semtrain_semlr01_aux0_500new_20260512_95ea69b
   PaliGemma trainable, unroll_steps=2, accum_steps=1, semantic_lr_scale=0.1,
   OWM aux losses 0.
   Question: if M2 succeeds but direct unroll=2 fails, can reduced semantic LR
   make PG cotrain compatible with short unroll? This is a fallback, not the
   preferred recipe unless it beats M2 on identity metrics.
+```
+
+
+Aborted launch note:
+
+```text
+The first revised M1 launch used num_train_steps=500. Since the checkpoint
+resume carries trainer step ~=450, that would only run about 50 new steps. It
+was stopped and replaced by the `500new` matrix with num_train_steps=950.
+Do not use the non-`500new` M1 directory for convergence conclusions.
 ```
 
 Primary acceptance criteria for each 500-step run:
@@ -633,10 +644,10 @@ M4 stable while E1 failed:
 Tail commands:
 
 ```bash
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1_unroll2_frozenpg_aux0_500_20260512_95ea69b.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m2_burnin4_semtrain_aux0_500_20260512_95ea69b.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m3_burnin4_semtrain_tinyaux_500_20260512_95ea69b.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4_unroll2_semtrain_semlr01_aux0_500_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1b_unroll2_frozenpg_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m2b_burnin4_semtrain_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m3b_burnin4_semtrain_tinyaux_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4b_unroll2_semtrain_semlr01_aux0_500new_20260512_95ea69b.train_tmux.log
 ```
 
 Scope boundary:
