@@ -2734,6 +2734,15 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_proposal_support_max",
     "aqr_local_support_entropy_mean",
     "aqr_same_role_local_overlap_max",
+    "aqr_same_role_local_true_overlap_max",
+    "aqr_same_role_local_true_overlap_mean",
+    "aqr_same_role_local_jaccard_max",
+    "aqr_same_role_local_jaccard_mean",
+    "aqr_local_source_mass_visual",
+    "aqr_local_source_mass_temporal",
+    "aqr_local_source_mass_point",
+    "aqr_local_source_mass_tracklet",
+    "aqr_local_source_mass_proposal",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
     "posterior_identity_switch_rate",
@@ -4738,6 +4747,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         address_update_max_rate=float(
             _arg_or_default("address_update_max_rate", _SPEC_DEFAULTS.address_update_max_rate)
         ),
+        recycle_logit_clamp=float(_arg_or_default("recycle_logit_clamp", _SPEC_DEFAULTS.recycle_logit_clamp)),
         local_refinement_enabled=bool(
             _arg_or_default("local_refinement_enabled", _SPEC_DEFAULTS.local_refinement_enabled)
         ),
@@ -4932,6 +4942,7 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_support_pred=float(getattr(args, "lambda_support_pred", defaults.lambda_support_pred)),
         lambda_binding_consistency=float(getattr(args, "lambda_binding_consistency", defaults.lambda_binding_consistency)),
         lambda_aqr_denoising=float(getattr(args, "lambda_aqr_denoising", defaults.lambda_aqr_denoising)),
+        detach_action_loss_from_picf=bool(getattr(args, "detach_action_loss_from_picf", defaults.detach_action_loss_from_picf)),
         mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", defaults.mapg_siglip_tau)),
         mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", defaults.mapg_vicreg_var_target)),
         mapg_vicreg_cov_weight=float(getattr(args, "mapg_vicreg_cov_weight", defaults.mapg_vicreg_cov_weight)),
@@ -5228,6 +5239,14 @@ _ANCHOR_ONLY_TRAINABLE_PATTERNS: tuple[str, ...] = (
     "core.evidence_gate.*",
 )
 
+_RECYCLE_PATH_TRAINABLE_PATTERNS: tuple[str, ...] = (
+    "core.recycle_head.*",
+    "core.residual_mu_head.*",
+    "core.residual_logvar_head.*",
+    "core.residual_h_head.*",
+    "core.residual_c_head.*",
+)
+
 
 def _safe_parameter_numel(param: torch.nn.Parameter) -> int:
     if isinstance(param, UninitializedParameter):
@@ -5317,6 +5336,18 @@ def _apply_picf_trainable_scope(
         )
         logger.info("Trainable scope sample: %s", ", ".join(matched_names[:24]))
     return info
+
+
+def _freeze_recycle_path_parameters(model: torch.nn.Module) -> dict[str, Any]:
+    matched_names: list[str] = []
+    for name, param in model.named_parameters():
+        if _matches_any_pattern(name, _RECYCLE_PATH_TRAINABLE_PATTERNS):
+            _set_parameter_trainable(param, False)
+            matched_names.append(name)
+    return {
+        "frozen_recycle_param_tensors": len(matched_names),
+        "frozen_recycle_names_sample": matched_names[:24],
+    }
 
 
 def _split_optimizer_groups_by_dense_type(groups: list[dict[str, Any]]) -> list[tuple[str, list[dict[str, Any]]]]:
@@ -5556,6 +5587,15 @@ def train(args: argparse.Namespace) -> None:
             args=args,
             logger=logging.getLogger() if is_main else None,
         )
+        if bool(getattr(args, "freeze_recycle_path", False)):
+            recycle_freeze_info = _freeze_recycle_path_parameters(model)
+            trainable_scope_info.update(recycle_freeze_info)
+            if is_main:
+                logging.getLogger().info(
+                    "Recycle path frozen: tensors=%s sample=%s",
+                    recycle_freeze_info["frozen_recycle_param_tensors"],
+                    ", ".join(recycle_freeze_info["frozen_recycle_names_sample"]),
+                )
         model = _wrap_model_for_training_strategy(model, args=args, device=device)
         optimizer, optimizer_group_info = _build_optimizer(model, args=args)
         grad_clip_controller = _GradClipController.from_args(args)
@@ -6353,6 +6393,14 @@ def main() -> None:
             "observation-anchor adapters, posterior binding/address, and support/cache/local evidence path."
         ),
     )
+    parser.add_argument(
+        "--freeze-recycle-path",
+        action="store_true",
+        help=(
+            "Diagnostic only: freeze recycle_head and residual reset heads after applying the trainable scope, "
+            "so action loss cannot use posterior recycle/reset as a shortcut."
+        ),
+    )
     parser.add_argument("--lr", type=float, default=2e-4)
     parser.add_argument("--min-lr", type=float, default=2e-5)
     parser.add_argument("--warmup-steps", type=int, default=None)
@@ -6427,6 +6475,17 @@ def main() -> None:
     parser.add_argument("--lambda-support-pred", type=float, default=_LOSS_DEFAULTS.lambda_support_pred)
     parser.add_argument("--lambda-binding-consistency", type=float, default=_LOSS_DEFAULTS.lambda_binding_consistency)
     parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)
+    parser.add_argument(
+        "--picf-action-detach-from-anchor",
+        dest="detach_action_loss_from_picf",
+        action="store_true",
+        help=(
+            "Diagnostic only: report action loss normally but stop its gradient before it reaches "
+            "PICF anchor/posterior parameters. Use to isolate action-gradient effects on recycle/binding."
+        ),
+    )
+    parser.add_argument("--no-picf-action-detach-from-anchor", dest="detach_action_loss_from_picf", action="store_false")
+    parser.set_defaults(detach_action_loss_from_picf=_LOSS_DEFAULTS.detach_action_loss_from_picf)
     parser.add_argument("--mapg-siglip-tau", type=float, default=_LOSS_DEFAULTS.mapg_siglip_tau)
     parser.add_argument("--mapg-vicreg-var-target", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_var_target)
     parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_cov_weight)
@@ -6756,6 +6815,7 @@ def main() -> None:
     )
     parser.add_argument("--address-update-rate", type=float, default=_SPEC_DEFAULTS.address_update_rate)
     parser.add_argument("--address-update-max-rate", type=float, default=_SPEC_DEFAULTS.address_update_max_rate)
+    parser.add_argument("--recycle-logit-clamp", type=float, default=_SPEC_DEFAULTS.recycle_logit_clamp)
     parser.add_argument(
         "--local-refinement-enabled",
         action=argparse.BooleanOptionalAction,

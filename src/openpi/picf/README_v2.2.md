@@ -459,6 +459,13 @@ Current training profiles:
   loss back to default `lambda_action_pos/rot/gripper=2.0` scale. Use
   `loss_action_default_equiv` and `loss_action_active7` when comparing staged
   low-action probes against the 2026-04-22 ablation baseline.
+- 2026-05-11 follow-up instrumentation adds diagnostic-only controls
+  `--picf-action-detach-from-anchor`, `--freeze-recycle-path`, and
+  `--recycle-logit-clamp`, plus token-aware local refinement diagnostics
+  `aqr_same_role_local_true_overlap_*`, `aqr_same_role_local_jaccard_*`, and
+  `aqr_local_source_mass_*`. These are for causal attribution of action-gradient
+  recycle saturation and local-overlap false positives; they are not new default
+  training objectives.
 
 Default recommendation:
 

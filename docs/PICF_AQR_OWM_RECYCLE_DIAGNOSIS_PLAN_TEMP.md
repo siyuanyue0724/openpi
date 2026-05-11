@@ -1109,3 +1109,120 @@ S2 is the current best evidence.
 Posterior recycle is the blocker for claiming identity health or enabling
 predictive auxiliary losses.
 ```
+
+## 17. 2026-05-11 Follow-Up Diagnostic Matrix
+
+The later E1/E3 recycle-diagnosis run made the causal split sharper:
+
+```text
+E1: R0/300 + action weight 0.25
+  step 695:
+    loss_action_default_equiv       = 0.0621
+    aqr_same_role_support_overlap   = 0.7088
+    posterior_recycle_rate          = 1.0
+    posterior_recycle_logit_mean    = 421.6
+    posterior_address_update_rate   = 0.0
+
+E3: R0/300 + action weight 0.0
+  step 685:
+    loss_action_default_equiv       = 0.1448  # monitor only
+    aqr_same_role_support_overlap   = 0.4188
+    posterior_recycle_rate          = 0.6924
+    posterior_recycle_logit_mean    = 1.53
+    posterior_address_update_rate   = 0.00335
+```
+
+This isolates the main failure mode:
+
+```text
+action gradient reaches PICF posterior/recycle path
+-> recycle logits saturate
+-> posterior content resets through the shared residual/dustbin proposal
+-> address update is multiplied by (1 - recycle) and starves
+-> identity continuity is not learned even when scalar action loss falls.
+```
+
+This is not proof that all anchors collapsed into one. The effective anchor
+count remains high. The failure is temporal identity starvation: multiple
+anchors exist, but same-role specialization is unstable because posterior
+identity is repeatedly recycled.
+
+The local-refinement overlap metric also needs correction before it can be
+used as strong evidence. The old `aqr_same_role_local_overlap_max` compared
+only top-k weight vectors. It could be high when two anchors selected different
+tokens with similar sorted weight profiles. The follow-up instrumentation now
+adds token-aware metrics:
+
+```text
+aqr_same_role_local_true_overlap_max
+aqr_same_role_local_true_overlap_mean
+aqr_same_role_local_jaccard_max
+aqr_same_role_local_jaccard_mean
+aqr_local_source_mass_visual
+aqr_local_source_mass_temporal
+aqr_local_source_mass_point
+aqr_local_source_mass_tracklet
+aqr_local_source_mass_proposal
+```
+
+These distinguish true shared-token local collapse from a diagnostic false
+positive.
+
+## 18. Short Diagnostic Schedule
+
+Each diagnostic should finish within about three hours by running 300 optimizer
+steps from the R0 step-300 checkpoint. The goal is causal attribution, not
+final performance.
+
+```text
+A2 action-detach-PICF:
+  action loss is reported normally but detached before PICF anchor/posterior.
+  If action metrics improve while recycle stays healthy, action gradient
+  pollution is confirmed.
+
+A3 freeze-recycle:
+  freeze recycle_head and residual reset heads.
+  If support health returns under action weight 0.25, the recycle/reset path is
+  the action shortcut.
+
+A4 clamp-recycle:
+  clamp recycle logits, e.g. --recycle-logit-clamp 6.
+  If recycle no longer saturates and address updates remain nonzero, unbounded
+  sigmoid saturation is the direct bug.
+
+B1 pos-only:
+  action position weight 0.25; rotation/gripper zero.
+
+B2 rot-only:
+  action rotation weight 0.25; position/gripper zero.
+
+C1 local-debug-current:
+  same objective as E1/E3 but using token-aware local overlap diagnostics.
+```
+
+Decision rules:
+
+```text
+If A2 succeeds:
+  use staged detach or gradient routing before full cotrain.
+
+If A3 succeeds:
+  freeze or low-LR the recycle/reset path during action warmup.
+
+If A4 succeeds:
+  keep bounded recycle logits and consider recycle budget/regularization.
+
+If B1 or B2 alone triggers saturation:
+  delay or downweight that action component.
+
+If C1 true local overlap is low:
+  old local-overlap alarm was a diagnostic false positive.
+
+If C1 true local overlap is high:
+  replace local weighted averaging with source/token-aware local attention.
+```
+
+Do not enable slot-JEPA, support prediction, or binding consistency until the
+action/recycle attribution is resolved. Those losses assume usable temporal
+identity; enabling them while recycle saturates will train against unstable
+targets.

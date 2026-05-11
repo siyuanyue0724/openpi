@@ -320,12 +320,13 @@ def run_static_checks() -> list[Finding]:
     checks.append(
         _finding(
             "local_refinement_uses_existing_typed_memory_not_visual_only",
-            "_add_local_component(visual_priors, token_field.visual_tokens)" in aqr_graph
+            "_add_local_component(visual_priors, token_field.visual_tokens" in aqr_graph
             and "_add_local_component(" in aqr_graph
             and "vjepa_temporal_priors" in aqr_graph
             and "point_priors" in aqr_graph
             and "tracklet_priors" in aqr_graph
             and "proposal_priors" in aqr_graph
+            and "local_token_indices" in aqr_graph
             and "local_refinement_weight" in aqr_graph
             and "local_read" in aqr_graph,
             severity="fail",

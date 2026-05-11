@@ -190,6 +190,7 @@ class PicfCoreConfig:
     bind_address_innovation_downweight: float = 1.0
     address_update_rate: float = 0.05
     address_update_max_rate: float = 0.20
+    recycle_logit_clamp: float = 0.0
     local_refinement_enabled: bool = True
     local_refinement_topk: int = 32
     local_refinement_weight: float = 0.25

@@ -77,6 +77,7 @@ class PicfTransitionLossConfig:
     lambda_support_pred: float = 0.0
     lambda_binding_consistency: float = 0.0
     lambda_aqr_denoising: float = 0.0
+    detach_action_loss_from_picf: bool = False
     mapg_siglip_tau: float = 0.07
     mapg_vicreg_var_target: float = 1.0
     mapg_vicreg_cov_weight: float = 0.04
@@ -1788,31 +1789,37 @@ def compute_transition_loss(
     )
 
     if action_loss_override is not None:
-        action_pos = action_pos_override if action_pos_override is not None else action_loss_override
-        action_rot = action_rot_override if action_rot_override is not None else action_loss_override
-        action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_override
-        action_default_equiv = action_loss_override
+        action_loss_source = action_loss_override.detach() if bool(cfg.detach_action_loss_from_picf) else action_loss_override
+        action_pos = action_pos_override if action_pos_override is not None else action_loss_source
+        action_rot = action_rot_override if action_rot_override is not None else action_loss_source
+        action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_source
+        if bool(cfg.detach_action_loss_from_picf):
+            action_pos = action_pos.detach()
+            action_rot = action_rot.detach()
+            action_gripper = action_gripper.detach()
+        action_default_equiv = action_loss_source
         action_loss = _weighted_action_override_loss(
-            action_loss_override,
+            action_loss_source,
             action_pos,
             action_rot,
             action_gripper,
             config=cfg,
         )
     else:
+        pred_action = predictive.action.detach() if bool(cfg.detach_action_loss_from_picf) else predictive.action
         action_target_t = _action_target_tensor(
             action_target,
-            device=predictive.action.device,
-            dtype=predictive.action.dtype,
+            device=pred_action.device,
+            dtype=pred_action.dtype,
         )
         if action_target_t is None:
-            action_pos = _zero_weight_loss(predictive.action[:3], predictive.action)
-            action_rot = _zero_weight_loss(predictive.action[3:6], predictive.action)
-            action_gripper = _zero_weight_loss(predictive.action[6:], predictive.action)
+            action_pos = _zero_weight_loss(pred_action[:3], pred_action)
+            action_rot = _zero_weight_loss(pred_action[3:6], pred_action)
+            action_gripper = _zero_weight_loss(pred_action[6:], pred_action)
         else:
-            action_pos = fn.l1_loss(predictive.action[:3], action_target_t[:3])
-            action_rot = fn.l1_loss(predictive.action[3:6], action_target_t[3:6])
-            action_gripper = fn.l1_loss(predictive.action[6:], action_target_t[6:])
+            action_pos = fn.l1_loss(pred_action[:3], action_target_t[:3])
+            action_rot = fn.l1_loss(pred_action[3:6], action_target_t[3:6])
+            action_gripper = fn.l1_loss(pred_action[6:], action_target_t[6:])
         action_loss = (
             (cfg.lambda_action_pos * action_pos)
             + (cfg.lambda_action_rot * action_rot)

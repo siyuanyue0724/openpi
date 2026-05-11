@@ -2951,6 +2951,8 @@ class PicfFullCore(nn.Module):
         tracklet_priors = torch.zeros((anchor_count, tracklet_count), device=self.device, dtype=self.dtype) if tracklet_count > 0 else None
         proposal_priors = torch.zeros((anchor_count, proposal_count), device=self.device, dtype=self.dtype) if proposal_count > 0 else None
         local_priors = None
+        local_token_indices = None
+        local_source_ids = None
         rounds = max(int(self.config.aqr_query_rounds), 1)
         q = queries[None, :, :]
         for _ in range(rounds):
@@ -3038,8 +3040,12 @@ class PicfFullCore(nn.Module):
                 local_vectors: list[torch.Tensor] = []
                 local_masses: list[torch.Tensor] = []
                 local_weight_rows: list[torch.Tensor] = []
+                local_index_rows: list[torch.Tensor] = []
+                local_source_rows: list[torch.Tensor] = []
+                local_token_offset = 0
 
-                def _add_local_component(priors: torch.Tensor | None, tokens: torch.Tensor | None) -> None:
+                def _add_local_component(priors: torch.Tensor | None, tokens: torch.Tensor | None, source_id: int) -> None:
+                    nonlocal local_token_offset
                     if priors is None or tokens is None or priors.numel() == 0 or tokens.numel() == 0:
                         return
                     if priors.shape[-1] != tokens.shape[0]:
@@ -3052,21 +3058,27 @@ class PicfFullCore(nn.Module):
                     local_vectors.append((top_values[..., None] * gathered).sum(dim=1))
                     local_masses.append(top_values.sum(dim=-1))
                     local_weight_rows.append(top_values)
+                    local_index_rows.append(top_indices.to(device=self.device, dtype=torch.long) + int(local_token_offset))
+                    local_source_rows.append(torch.full_like(top_indices, int(source_id), dtype=torch.long, device=self.device))
+                    local_token_offset += int(tokens.shape[0])
 
-                _add_local_component(visual_priors, token_field.visual_tokens)
+                _add_local_component(visual_priors, token_field.visual_tokens, 1)
                 _add_local_component(
                     vjepa_temporal_priors,
                     None if token_field.temporal_visual is None else token_field.temporal_visual.tokens,
+                    2,
                 )
-                _add_local_component(point_priors, token_field.point_tokens)
-                _add_local_component(tracklet_priors, None if token_field.tracklet is None else token_field.tracklet.tokens)
-                _add_local_component(proposal_priors, None if token_field.proposal is None else token_field.proposal.tokens)
+                _add_local_component(point_priors, token_field.point_tokens, 3)
+                _add_local_component(tracklet_priors, None if token_field.tracklet is None else token_field.tracklet.tokens, 4)
+                _add_local_component(proposal_priors, None if token_field.proposal is None else token_field.proposal.tokens, 5)
                 if local_vectors:
                     local_read = torch.stack(local_vectors, dim=0).sum(dim=0)
                     local_mass = torch.stack(local_masses, dim=0).sum(dim=0)
                     local_read = local_read / torch.clamp(local_mass[:, None], min=self.config.epsilon_a)
                     q = q + (float(self.config.local_refinement_weight) * (local_read[None, :, :] - q))
                     local_priors = _normalize_rows(torch.cat(local_weight_rows, dim=-1), eps=self.config.epsilon_a)
+                    local_token_indices = torch.cat(local_index_rows, dim=-1) if local_index_rows else None
+                    local_source_ids = torch.cat(local_source_rows, dim=-1) if local_source_rows else None
             if self.aqr_query_self is not None:
                 q = self.aqr_query_self(q)
 
@@ -3134,6 +3146,8 @@ class PicfFullCore(nn.Module):
             tracklet_priors=tracklet_priors,
             proposal_priors=proposal_priors,
             local_priors=local_priors,
+            local_token_indices=local_token_indices,
+            local_source_ids=local_source_ids,
             slot_address=self._physical_query_addresses(previous, physical_count) if self.aqr_physical_query_tokens is not None else None,
             slot_content=anchor_tokens,
             support_uncertainty=1.0 - anchor_conf,
@@ -5680,6 +5694,9 @@ class PicfFullCore(nn.Module):
             dim=-1,
         )
         recycle_logits = self.recycle_head(recycle_in).squeeze(-1)
+        recycle_logit_clamp = float(getattr(self.config, "recycle_logit_clamp", 0.0))
+        if recycle_logit_clamp > 0.0:
+            recycle_logits = torch.clamp(recycle_logits, min=-recycle_logit_clamp, max=recycle_logit_clamp)
         recycle = torch.sigmoid(recycle_logits)
         recycle_share = recycle / torch.clamp(1.0 + recycle.sum(), min=self.config.epsilon_a)
         binding_support = support_raw + (recycle_share[:, None] * dustbin_raw[None, :])
@@ -6638,6 +6655,17 @@ class PicfFullCore(nn.Module):
                 lp_entropy = -(lp * torch.log(torch.clamp(lp, min=self.config.epsilon_a))).sum(dim=-1)
                 lp_entropy = lp_entropy / math.log(max(int(lp.shape[-1]), 2))
                 debug["aqr_local_support_entropy_mean"] = float(lp_entropy.mean().item())
+                local_source_ids = graph.local_source_ids
+                if local_source_ids is not None and local_source_ids.shape == lp.shape:
+                    for source_id, source_name in (
+                        (1, "visual"),
+                        (2, "temporal"),
+                        (3, "point"),
+                        (4, "tracklet"),
+                        (5, "proposal"),
+                    ):
+                        source_mask = (local_source_ids.to(device=self.device) == int(source_id)).to(device=self.device, dtype=self.dtype)
+                        debug[f"aqr_local_source_mass_{source_name}"] = float((lp * source_mask).sum(dim=-1).mean().item())
                 if lp.shape[0] > 1:
                     lp_overlap = lp @ lp.T
                     lp_diag = torch.clamp(torch.diag(lp_overlap), min=self.config.epsilon_a)
@@ -6646,6 +6674,35 @@ class PicfFullCore(nn.Module):
                     lp_pair_mask = torch.triu(lp_same_role, diagonal=1)
                     if bool(lp_pair_mask.any().item()):
                         debug["aqr_same_role_local_overlap_max"] = float(lp_overlap[lp_pair_mask].max().item())
+                    local_indices = graph.local_token_indices
+                    if (
+                        local_indices is not None
+                        and local_indices.shape == lp.shape
+                        and bool(lp_pair_mask.any().item())
+                    ):
+                        idx = local_indices.to(device=self.device, dtype=torch.long)
+                        true_overlap_values: list[torch.Tensor] = []
+                        jaccard_values: list[torch.Tensor] = []
+                        anchor_count = int(lp.shape[0])
+                        for i in range(anchor_count):
+                            for j in range(i + 1, anchor_count):
+                                if not bool(lp_same_role[i, j].item()):
+                                    continue
+                                same = idx[i, :, None] == idx[j, None, :]
+                                true_dot = (lp[i, :, None] * lp[j, None, :] * same.to(dtype=self.dtype)).sum()
+                                true_overlap_values.append(true_dot)
+                                uniq_i = torch.unique(idx[i])
+                                uniq_j = torch.unique(idx[j])
+                                inter = (uniq_i[:, None] == uniq_j[None, :]).any(dim=1).sum().to(dtype=self.dtype)
+                                union = torch.unique(torch.cat([uniq_i, uniq_j], dim=0)).numel()
+                                jaccard_values.append(inter / max(float(union), 1.0))
+                        if true_overlap_values:
+                            true_overlap = torch.stack(true_overlap_values)
+                            true_jaccard = torch.stack(jaccard_values)
+                            debug["aqr_same_role_local_true_overlap_max"] = float(true_overlap.max().item())
+                            debug["aqr_same_role_local_true_overlap_mean"] = float(true_overlap.mean().item())
+                            debug["aqr_same_role_local_jaccard_max"] = float(true_jaccard.max().item())
+                            debug["aqr_same_role_local_jaccard_mean"] = float(true_jaccard.mean().item())
             debug["mapg_point_available"] = 1.0 if graph.point_priors is not None else 0.0
             debug["mapg_tactile_available"] = 1.0 if graph.tactile_priors is not None else 0.0
             debug["mapg_posterior_available"] = 1.0 if graph.posterior_priors is not None else 0.0

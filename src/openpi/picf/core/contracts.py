@@ -73,6 +73,8 @@ class PicfAnchorPriorGraphState:
     tracklet_priors: torch.Tensor | None = None
     proposal_priors: torch.Tensor | None = None
     local_priors: torch.Tensor | None = None
+    local_token_indices: torch.Tensor | None = None
+    local_source_ids: torch.Tensor | None = None
     slot_address: torch.Tensor | None = None
     slot_content: torch.Tensor | None = None
     support_uncertainty: torch.Tensor | None = None
