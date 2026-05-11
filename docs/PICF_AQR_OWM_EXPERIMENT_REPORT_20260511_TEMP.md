@@ -477,114 +477,175 @@ Do not claim full behavior-level completion until these pass:
    in training.
 ```
 
-## A5 10-hour follow-up plan
+## A5 10-hour follow-up plan, revised after E1 early failure
 
-Purpose:
+Current judgment from live data:
 
 ```text
-Use the idle A5 2xA100 machine to test whether the A7 step-520 recycle spike is
-reproducible under the same unroll=2 launch, whether PaliGemma training pressure
-is the trigger, and whether tiny guarded predictive/binding losses immediately
-conflict with the repaired action-prefix-stopgrad path.
+A5 E1 has already produced enough diagnostic evidence.
+It does not need to run to 900 steps.
 ```
 
-Machine and tmux:
+Observed E1 profile:
 
 ```text
-ssh -p 29776 root@36.139.225.68
-tmux attach -t a5_owm_10h_unroll2_diagnosis_95ea69b
-```
-
-Common contract:
-
-```text
+run: picf_a5_e1_unroll2_semtrain_repro900_20260511_95ea69b
 runtime: 95ea69b
-resume: /mnt/checkpoints/picf_core/picf_core/model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b
-training_strategy: fsdp_full_shard
-unroll_steps: 2
-accum_steps: 1
-num_train_steps: 900
-perception_finetune_mode: frozen
-Sonata/V-JEPA/AnyTouch: frozen
-PICF trainable_scope: all
-picf_action_prefix_stopgrad: enabled
-cache_read_weight: 0.05
-binding_signature_weight: 0.25
+profile: all PICF trainable, PaliGemma trainable, unroll_steps=2, accum_steps=1, guarded OWM losses 0
+latest inspected: step 720
+posterior_recycle_rate: 1.0
+posterior_address_update_rate_mean: 0.0
+aqr_same_role_support_overlap_max: 0.99995
+loss_anchor_pv: 4.74
+loss_mapg_routing: 1.17
+loss_slot_jepa diagnostic: O(180), lambda still 0
+grad_norm: clipped at 5.0
+```
+
+Mathematical interpretation:
+
+```text
+This is a true identity-filter failure, not just noisy scalar loss.
+The posterior recycle gate has saturated, the address update path is effectively
+shut off, and same-role supports have collapsed to almost identical evidence.
+Since lambda_slot_jepa/lambda_support_pred/lambda_binding_consistency are zero,
+the failure cannot be blamed on enabled predictive auxiliary losses.
+```
+
+This updates the causal hypotheses:
+
+```text
+H1: Direct all-scope unroll=2 with PaliGemma cotrain is too aggressive for
+    the current anchor identity filter.
+H2: PaliGemma cotrain is still likely necessary for final action adaptation,
+    based on older action runs, so freezing PG is an isolation test only, not
+    the preferred final recipe.
+H3: State-only burn-in may provide the identity inertia missing from short
+    unroll=2 while keeping PaliGemma cotrain.
+H4: Tiny predictive/binding aux losses should only be tested after the base
+    identity path is stable; they are not the cause of E1 because they were 0.
+```
+
+Why 500 steps is enough for this diagnostic layer:
+
+```text
+The observed failure appears by the first post-500 samples and remains locked
+through step 720. For early identity-filter acceptance, 500 steps is enough to
+catch the failure mode: recycle saturation, overlap collapse, address update
+shutdown, and clipped gradients. Passing 500 steps is not final training proof;
+it only permits moving to a longer 2500-step acceptance run.
+```
+
+Revised A5 tmux plan:
+
+```text
+Machine:
+  ssh -p 29776 root@36.139.225.68
+
+Session:
+  tmux attach -t a5_owm_10h_matrix500_95ea69b
+
+Common runtime:
+  /root/openpi_runtimec_95ea69b
+  runtime commit 95ea69b
+  resume /mnt/checkpoints/picf_core/picf_core/model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b
+  FSDP full shard, 2xA100
+  Sonata/V-JEPA/AnyTouch frozen
+  PI0.5 action path active
+  picf_action_prefix_stopgrad enabled
+  evidence_cache_read_weight=0.05
+  bind_embedding_signature_weight=0.25
+  progress enabled
+  num_train_steps=500
+  log_interval=20
+  save_interval=500
 ```
 
 Runs:
 
 ```text
-E1 picf_a5_e1_unroll2_semtrain_repro900_20260511_95ea69b
-  PaliGemma trainable, guarded OWM losses 0.
-  Question: does A7's recycle spike reproduce under the same unroll=2 profile?
+M1 picf_a5_m1_unroll2_frozenpg_aux0_500_20260512_95ea69b
+  PaliGemma frozen, unroll_steps=2, accum_steps=1, OWM aux losses 0.
+  Question: does full all-scope unroll=2 collapse even without semantic cotrain?
+  If M1 collapses, the problem is not PG cotrain; it is all-scope/action-window
+  pressure on identity.
 
-E2 picf_a5_e2_unroll2_frozenpg_repro900_20260511_95ea69b
-  PaliGemma frozen, guarded OWM losses 0.
-  Question: if E1 spikes but E2 does not, semantic/PaliGemma trainable pressure
-  is a likely contributor.
+M2 picf_a5_m2_burnin4_semtrain_aux0_500_20260512_95ea69b
+  PaliGemma trainable, burnin_steps=4, burnin_mode=state_only, unroll_steps=1,
+  accum_steps=1, OWM aux losses 0.
+  Question: can we keep the action-useful PG cotrain while restoring posterior
+  identity inertia through state-only burn-in?
+  This is the most important candidate for the next production recipe.
 
-E3 picf_a5_e3_unroll2_semtrain_tinyaux900_20260511_95ea69b
-  PaliGemma trainable, lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=1e-4.
-  Question: do tiny guarded predictive/binding losses immediately reintroduce
-  recycle/support-overlap conflict?
+M3 picf_a5_m3_burnin4_semtrain_tinyaux_500_20260512_95ea69b
+  Same as M2, but lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=1e-4.
+  Question: after the identity path is protected by burn-in, do tiny predictive
+  hooks immediately conflict, or can they be considered for later warmup?
+
+M4 picf_a5_m4_unroll2_semtrain_semlr01_aux0_500_20260512_95ea69b
+  PaliGemma trainable, unroll_steps=2, accum_steps=1, semantic_lr_scale=0.1,
+  OWM aux losses 0.
+  Question: if M2 succeeds but direct unroll=2 fails, can reduced semantic LR
+  make PG cotrain compatible with short unroll? This is a fallback, not the
+  preferred recipe unless it beats M2 on identity metrics.
+```
+
+Primary acceptance criteria for each 500-step run:
+
+```text
+posterior_recycle_rate <= 0.05 after step 300, no sustained spikes > 0.2
+posterior_address_update_rate_mean > 0.003 unless recycle is intentionally active
+aqr_same_role_support_overlap_max < 0.85, and preferably < 0.70
+aqr_same_role_local_true_overlap_max remains low (< 0.12)
+grad_norm not permanently clipped at 5.0
+loss_anchor_pv not stuck near 4.7
+loss_mapg_routing not monotonically worsening above ~1.17
+loss_action_default_equiv is tracked but is not sufficient acceptance by itself
+```
+
+Decision table:
+
+```text
+M1 stable, M2 stable:
+  E1 failure is mainly PaliGemma cotrain + short-window interaction. Prefer M2
+  for final run because PG cotrain remains action-useful and burn-in protects identity.
+
+M1 stable, M2 fails:
+  PG cotrain pressure itself is too strong even with burn-in. Use staged recipe:
+  anchor/identity warmup with PG frozen, then low-LR PG cotrain.
+
+M1 fails:
+  all-scope unroll=2/action-window pressure is enough to break identity. Avoid
+  direct unroll=2 all-scope long runs; use state-only burn-in or staged anchor warmup.
+
+M2 stable, M3 fails:
+  predictive/binding aux losses still conflict and must stay 0 for production.
+
+M2 stable, M3 stable:
+  tiny aux hooks are not immediately toxic, but still require a longer 2500-step
+  acceptance before default enablement.
+
+M4 stable while E1 failed:
+  semantic LR is a significant lever. It can be used as a speed fallback, but
+  compare against M2 before choosing final production profile.
 ```
 
 Tail commands:
 
 ```bash
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_e1_unroll2_semtrain_repro900_20260511_95ea69b.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_e2_unroll2_frozenpg_repro900_20260511_95ea69b.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_e3_unroll2_semtrain_tinyaux900_20260511_95ea69b.train_tmux.log
-```
-
-Acceptance metrics:
-
-```text
-Primary:
-  posterior_recycle_rate
-  posterior_recycle_logit_mean
-  posterior_address_update_rate_mean
-  aqr_same_role_support_overlap_max
-  aqr_same_role_local_true_overlap_max
-  loss_action_default_equiv
-
-Secondary:
-  loss_slot_jepa
-  loss_support_pred
-  loss_binding_consistency
-  loss_anchor_pv
-  loss_pv_weak
-  loss_mapg_cycle
-  grad_norm
-```
-
-Interpretation rules:
-
-```text
-E1 spike and E2 stable:
-  PaliGemma trainable pressure is the likely long-run destabilizer.
-
-E1 stable and A7 spike remains isolated:
-  A7 spike may be transient/batch-specific; wait for A7 2500-step checkpoint.
-
-E3 worse than E1:
-  predictive/binding losses must remain guarded at 0 for the next long run.
-
-E3 similar to E1:
-  tiny aux losses are not immediately conflicting, but still not mature enough
-  to enable by default without longer evidence.
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1_unroll2_frozenpg_aux0_500_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m2_burnin4_semtrain_aux0_500_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m3_burnin4_semtrain_tinyaux_500_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4_unroll2_semtrain_semlr01_aux0_500_20260512_95ea69b.train_tmux.log
 ```
 
 Scope boundary:
 
 ```text
-Tracklet/proposal and ordinal are not resolved by these three CALVIN runs.
-Current CALVIN tensors still show owm_tracklet_tokens=0 and owm_proposal_tokens=0.
-Those paths require either optional episode fields or a dedicated synthetic/
-offline dataflow test. The IsSameObject paper-derived audit is also offline:
-it needs weak same/different pairs and should not be inferred from scalar
-training loss alone.
+These four runs are designed to isolate training-pressure conflicts. They do
+not solve tracklet/proposal inactivity, ordinal grounding, or offline
+IsSameObject probing. Those require separate dataflow/probe tests and should
+not be inferred from scalar training loss alone.
 ```
 
 Guarded losses remain guarded:

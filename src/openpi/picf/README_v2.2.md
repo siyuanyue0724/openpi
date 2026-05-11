@@ -516,14 +516,21 @@ Current training profiles:
   FSDP, PaliGemma trainable, Sonata/V-JEPA/AnyTouch frozen, and
   `--picf-action-prefix-stopgrad`. That smoke proves the runtime entry and
   metrics execute on GPU; it is not convergence or behavior acceptance.
-- 2026-05-11 A5 follow-up diagnosis:
+- 2026-05-12 A5 follow-up diagnosis revised:
   [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md)
-  now defines a 10-hour A5 tmux plan with three sequential unroll=2 probes:
-  E1 reproduces the A7 PaliGemma-trainable profile, E2 freezes PaliGemma to
-  isolate semantic pressure, and E3 enables tiny `1e-4` guarded
-  slot-JEPA/support/binding losses to test immediate aux-loss conflict. These
-  runs are diagnostic; they do not resolve tracklet/proposal, ordinal, or the
-  offline IsSameObject audit by themselves.
+  now records that A5 E1 already failed decisively by the post-500 samples:
+  `posterior_recycle_rate=1.0`, `posterior_address_update_rate_mean=0.0`, and
+  `aqr_same_role_support_overlap_max≈0.99995` under all-scope `unroll_steps=2`
+  with PaliGemma cotrain. This is enough evidence to stop the 900-step E1 and
+  replace it with a 500-step matrix: M1 freezes PaliGemma to isolate semantic
+  cotrain pressure, M2 keeps PaliGemma cotrain but uses `burnin_steps=4`
+  `state_only` identity inertia, M3 adds tiny `1e-4` guarded predictive hooks
+  on top of M2, and M4 tests reduced `semantic_lr_scale=0.1` under direct
+  `unroll_steps=2`. PaliGemma cotrain remains a likely requirement for final
+  action adaptation; freezing it is a diagnostic isolation, not the preferred
+  production recipe unless the cotrain paths fail. These runs are diagnostic;
+  they do not resolve tracklet/proposal, ordinal, or the offline IsSameObject
+  audit by themselves.
 
 Default recommendation:
 
