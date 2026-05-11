@@ -22,7 +22,7 @@ The current update must start from previous posterior/predictive carry, not from
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:6142: def observe_step(`
+- `src/openpi/picf/core/pipeline.py:6155: def observe_step(`
 - `src/openpi/picf/core/pipeline.py:967: previous: PicfPreviousState | None`
 
 ## 2. Production default profile - PASS
@@ -42,7 +42,7 @@ The latest OWM profile must be the default path; legacy routers and risky auxili
 Evidence:
 
 - `src/openpi/picf/core/config.py:143: aqr_mapg_enabled: bool = True`
-- `scripts/picf_core_train.py:6518: default="paligemma",`
+- `scripts/picf_core_train.py:6538: default="paligemma",`
 - `src/openpi/picf/core/training.py:71: lambda_mapg_cycle: float = 0.02`
 - `src/openpi/picf/core/training.py:76: lambda_slot_jepa: float = 0.0`
 
@@ -229,11 +229,11 @@ Posterior after correction is the authoritative current belief.
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:5800: lambda_prior = 1.0 / torch.clamp(bar_var, min=self.config.sigma_min2)`
-- `src/openpi/picf/core/pipeline.py:5801: eta_prior = lambda_prior * bar_mu`
-- `src/openpi/picf/core/pipeline.py:5802: lambda_meas = torch.sum(beta[:, :, None] / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
-- `src/openpi/picf/core/pipeline.py:5803: eta_meas = torch.sum(beta[:, :, None] * vote_mu_t / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
-- `src/openpi/picf/core/pipeline.py:5805: mu_post = var_post * (eta_prior + eta_meas)`
+- `src/openpi/picf/core/pipeline.py:5801: lambda_prior = 1.0 / torch.clamp(bar_var, min=self.config.sigma_min2)`
+- `src/openpi/picf/core/pipeline.py:5802: eta_prior = lambda_prior * bar_mu`
+- `src/openpi/picf/core/pipeline.py:5803: lambda_meas = torch.sum(beta[:, :, None] / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
+- `src/openpi/picf/core/pipeline.py:5804: eta_meas = torch.sum(beta[:, :, None] * vote_mu_t / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
+- `src/openpi/picf/core/pipeline.py:5806: mu_post = var_post * (eta_prior + eta_meas)`
 
 ## 12. State-only burn-in consistency - PASS
 
@@ -251,7 +251,7 @@ Burn-in and train suffix must use the same measurement model.
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:6369: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
+- `src/openpi/picf/core/pipeline.py:6382: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
 - `src/openpi/picf/core/pipeline.py:2814: def _build_aqr_anchor_graph(`
 - `src/openpi/picf/core/pipeline_test.py:1213: def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:`
 
@@ -332,7 +332,7 @@ Evidence:
 
 - `src/openpi/picf/core/training.py:385: def _aqr_support_denoising_loss(`
 - `src/openpi/picf/core/training.py:79: lambda_aqr_denoising: float = 0.0`
-- `scripts/picf_core_train.py:6385: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
+- `scripts/picf_core_train.py:6405: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
 - `src/openpi/picf/core/training_test.py:461: def test_aqr_denoising_loss_is_training_only_and_guarded(tmp_path: Path) -> None:`
 
 ## 17. Evidence cache write - PASS
