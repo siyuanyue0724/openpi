@@ -504,7 +504,18 @@ Current training profiles:
   `posterior_recycle_logit_mean=-47.61`, `loss_action_default_equiv=0.0772`,
   and `aqr_temporal_view_mass_1=0.556`, while `owm_tracklet_tokens=0` and
   `owm_proposal_tokens=0` confirm tracklet/proposal evidence is still inactive
-  in the current CALVIN training dataflow.
+  in the current CALVIN training dataflow. A later live check reached step
+  `520` with `loss_action_default_equiv=0.0682` but a recycle spike
+  `posterior_recycle_rate=0.4627`; this keeps A7 in pending acceptance. Do not
+  claim long-run stability from the earlier healthy samples alone.
+- 2026-05-11 validation addendum: the experiment report also records the latest
+  local and idle-card checks. Local checks passed `py_compile`, OWM verifier
+  `31/31`, strict diagnose, dataflow trace, MVTrack deep audit, scripts pytest
+  `4 passed`, targeted pipeline pytest `10 passed`, and targeted training pytest
+  `24 passed`. A5 also completed a two-step full trainer runtime smoke with
+  FSDP, PaliGemma trainable, Sonata/V-JEPA/AnyTouch frozen, and
+  `--picf-action-prefix-stopgrad`. That smoke proves the runtime entry and
+  metrics execute on GPU; it is not convergence or behavior acceptance.
 
 Default recommendation:
 

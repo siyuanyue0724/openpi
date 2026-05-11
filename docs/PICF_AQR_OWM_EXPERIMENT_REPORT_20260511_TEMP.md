@@ -87,6 +87,33 @@ Interpretation:
    no-op in this run.
 ```
 
+Later live check:
+
+```text
+step 480:
+  recycle_rate=3.9e-7, action_default_equiv=0.0797,
+  same_role_overlap=0.8505
+
+step 500:
+  recycle_rate=7.6e-8, action_default_equiv=0.0606,
+  same_role_overlap=0.7299
+
+step 520:
+  recycle_rate=0.4627, recycle_logit_mean=-1.6363,
+  action_default_equiv=0.0682, same_role_overlap=0.8539,
+  local_true_overlap=0.0495
+```
+
+Interpretation:
+
+```text
+The A7 long run is still active and not yet accepted. The step-520 recycle
+spike shows that the prefix-stopgrad/binding-signature repair is not proven
+stable under long-run all/PaliGemma-trainable cotrain. It may be a transient
+batch spike, but it must be judged by the next checkpoints and recycle/overlap
+trend, not by the earlier healthy step-460 or step-500 samples alone.
+```
+
 Tail command:
 
 ```bash
@@ -144,6 +171,89 @@ Interpretation:
 This is the strongest short-run evidence so far that action-prefix stopgrad
 plus binding-subspace support signatures prevents the recycle-saturation
 failure while preserving useful action-side feedback as a monitored signal.
+```
+
+### A5 runtime smoke and local audit addendum
+
+This addendum records the extra validation performed after the A7 long run was
+launched. It is not behavior acceptance; it is a code-path and runtime-entry
+check for the current branch.
+
+Local checks on the working tree:
+
+```text
+python -m py_compile:
+  contracts/config/pipeline/training/vjepa wrapper/train/serve/diagnosis/evidence
+  scripts all passed.
+
+python scripts/verify_picf_owm_contract.py:
+  31/31 PASS.
+
+python scripts/picf_owm_strict_diagnose.py --fail-on-fail:
+  PASS. Warnings only when no metrics/eval bundle is supplied.
+
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+  PASS.
+
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS.
+
+pytest -q scripts/verify_picf_owm_contract_test.py scripts/picf_owm_evidence_bundle_test.py:
+  4 passed.
+
+pytest -q src/openpi/picf/core/pipeline_test.py -k "tracklet or proposal or ordinal or mvtrack or cache or temporal":
+  10 passed, 60 deselected.
+
+pytest -q src/openpi/picf/core/training_test.py -k "jepa or support or binding or action or loss":
+  24 passed, 5 deselected.
+```
+
+A5 idle-card runtime smoke:
+
+```text
+machine: A5, ssh -p 29776 root@36.139.225.68
+runtime: 95ea69b
+tmux: a5_runtime_smoke_2step_95ea69b, completed
+log:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_runtime_smoke_2step_20260511_95ea69b.train_tmux.log
+metrics:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_runtime_smoke_2step_20260511_95ea69b/metrics.jsonl
+profile:
+  full foundation-backbone trainer entry, FSDP, PaliGemma trainable,
+  Sonata/V-JEPA/AnyTouch frozen, action-prefix stopgrad enabled.
+```
+
+Step 2 smoke metrics:
+
+```text
+loss_total: 1.3319
+loss_alignment: 1.0745
+loss_action_default_equiv: 0.5149
+loss_action_active7: 0.8047
+posterior_recycle_rate: 0.0918
+posterior_recycle_logit_mean: -2.4118
+posterior_address_update_rate_mean: 0.00270
+aqr_same_role_support_overlap_max: 0.9480
+aqr_same_role_local_true_overlap_max: 0.00966
+owm_posterior_binding_signature_norm_mean: 1.0
+owm_tracklet_tokens: 0
+owm_proposal_tokens: 0
+grad_clip_applied: true
+preclip_grad_norm: 106.1
+grad_norm: 5.0
+```
+
+Interpretation:
+
+```text
+1. The current trainer entry, FSDP loading, frozen/trainable profile,
+   action-prefix stopgrad, binding-signature path, and metric logging execute
+   on GPU.
+2. This two-step smoke is intentionally too short to prove convergence.
+3. The no-resume smoke starts from a cold model, so its overlap/recycle numbers
+   are not comparable to the resumed A5 step-600 or A7 step-460 runs.
+4. It independently confirms that current CALVIN dataflow still leaves
+   tracklet/proposal evidence inactive unless those tensors are supplied.
 ```
 
 ## Historical diagnosis matrix
