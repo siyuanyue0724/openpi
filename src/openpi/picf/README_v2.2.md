@@ -174,6 +174,13 @@ only if an upstream source provides them.
   when same-role support overlap improves, and lists the recycle logits,
   dustbin, support-mass, and staged-action ablations that must be run before
   predictive OWM auxiliary losses are enabled.
+- [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md)
+  Live 2026-05-11 experiment report for the current A5/A7 cloud runs. It
+  records the active A7 30k launch contract, the completed A5 prefix-stopgrad
+  diagnosis, historical direct-action/recycle ablations, loss-scale
+  interpretation, and the paper-derived object-binding audit. Use this document
+  to distinguish code-level repairs and short-run evidence from still-pending
+  behavior acceptance.
 - [`docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md)
   Temporary live deployment ledger for the OWM implementation. Use this while
   reviewing the current branch because it records which final README contract
@@ -483,6 +490,21 @@ Current training profiles:
   uses `hidden + geometry + support-overlap + binding-subspace + gated-address`.
   This is a structural binding term, not a new high-risk loss. It is intended to
   protect same-object slot identity without requiring dataset relabeling.
+- 2026-05-11 cloud report update:
+  [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md)
+  is the current live experiment ledger. A5 has no active tmux and its completed
+  `picf_a5_prefixstopgrad_a025_bindsub_diag300_20260511_95ea69b` diagnosis
+  ended at step `600` with `posterior_recycle_rate=0.000469`,
+  `posterior_recycle_logit_mean=-11.6767`, and
+  `aqr_same_role_support_overlap_max=0.3027`. A7 is running
+  `picf_a7_30k_prefixstopgrad_all_a1_semtrain_fast_from450_20260511_95ea69b`
+  on runtime `95ea69b` with PaliGemma trainable, Sonata/V-JEPA/AnyTouch frozen,
+  `accum_steps=1`, `unroll_steps=2`, and progress enabled. At early step `460`,
+  A7 shows `posterior_recycle_rate=0.00838`,
+  `posterior_recycle_logit_mean=-47.61`, `loss_action_default_equiv=0.0772`,
+  and `aqr_temporal_view_mass_1=0.556`, while `owm_tracklet_tokens=0` and
+  `owm_proposal_tokens=0` confirm tracklet/proposal evidence is still inactive
+  in the current CALVIN training dataflow.
 
 Default recommendation:
 
