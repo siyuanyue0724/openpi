@@ -142,6 +142,7 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.future_condition_reader.*",
     "core.predictive_semantic_world.*",
     "core.predictive_state_proj.*",
+    "core.binding_signature_proj.*",
     "semantic_prefix_proj.*",
     "posterior_to_control_proj.*",
     "global_post_to_control_proj.*",
@@ -173,6 +174,7 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "future_condition_reader.*",
     "predictive_semantic_world.*",
     "predictive_state_proj.*",
+    "binding_signature_proj.*",
 )
 _COMPAT_ALLOWED_UNEXPECTED_KEYS = (
     "core.semantic_summary_proj.*",
@@ -4320,10 +4322,23 @@ def _load_checkpoint(
                     try:
                         model.load_state_dict(model_state, strict=True)
                     except RuntimeError as exc:
-                        raise RuntimeError(
-                            "FSDP checkpoint load failed. Compatibility migration is not supported for "
-                            "training_strategy=fsdp_full_shard; load a checkpoint written by the same architecture."
-                        ) from exc
+                        try:
+                            missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(model, model_state)
+                            logging.warning(
+                                "Loaded FSDP PICF trainer checkpoint with compatibility migration. "
+                                "missing_keys=%s unexpected_keys=%s shape_mismatch_keys=%s. "
+                                "Optimizer state will be reinitialized.",
+                                missing,
+                                unexpected,
+                                shape_mismatches,
+                            )
+                            optimizer_loaded = False
+                        except RuntimeError as compat_exc:
+                            raise RuntimeError(
+                                "FSDP checkpoint load failed. Compatibility migration is restricted to "
+                                "explicitly allowed PICF extension parameters; load a checkpoint written by "
+                                "the same architecture or add a narrow compatibility rule."
+                            ) from compat_exc
                     if optimizer_loaded:
                         optimizer.load_state_dict(
                             FullyShardedDataParallel.optim_state_dict_to_load(model, optimizer, optimizer_state)
