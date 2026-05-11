@@ -748,3 +748,173 @@ longer cotrain.
    same-role support overlap remained high. The new A7 burnin4/state_only run is
    the current medium-horizon candidate stress test.
 ```
+
+## Compact Handoff, 2026-05-12 02:00 CST
+
+This section is the minimal state needed to continue after context compaction.
+
+### Current Code State
+
+```text
+branch: Posterior_VLA
+latest documented commit: 6ba5a21 Document A7 burnin candidate stress test
+runtime used on A5/A7: /root/openpi_runtimec_95ea69b
+runtime commit marker: 95ea69b
+```
+
+Local validation before handoff:
+
+```text
+python -m py_compile scripts/picf_core_train.py src/openpi/picf/core/{config,contracts,pipeline,training}.py: PASS
+python scripts/verify_picf_owm_contract.py: PASS, including MVTrack README guard
+```
+
+### What Is Already Decided
+
+```text
+Direct all-scope unroll=2 is not a healthy production recipe.
+```
+
+Evidence:
+
+```text
+A5 E1, PaliGemma trainable, unroll=2, aux=0:
+  posterior_recycle_rate -> 1.0
+  posterior_address_update_rate_mean -> 0.0
+  aqr_same_role_support_overlap_max -> ~0.99995
+
+A5 M1d, semantic_lr_scale=1e-6, unroll=2, aux=0:
+  still collapses by step 580-680
+  recycle_rate ~= 1.0
+  address_update ~= 0.0
+  same_role_overlap ~= 0.99
+  grad_norm clipped at 5.0
+```
+
+Interpretation:
+
+```text
+The failure is not merely PaliGemma parameter-update pressure. It appears when
+all-scope action training is paired with short direct unroll=2. The identity
+filter can collapse even when semantic LR is effectively frozen.
+```
+
+### A7 Current Role
+
+Old A7 direct `unroll_steps=2` run was stopped and is not an acceptance run.
+It showed action learning but unhealthy global same-role overlap:
+
+```text
+old A7 direct tail mean:
+  loss_action_default_equiv ~= 0.061
+  posterior_recycle_rate ~= 0.0017
+  posterior_address_update_rate_mean ~= 0.021
+  aqr_same_role_support_overlap_max ~= 0.962
+  aqr_same_role_local_true_overlap_max ~= 0.051
+```
+
+Current A7 run:
+
+```text
+session: a7_burnin4_semtrain_1000new_95ea69b
+run: picf_a7_burnin4_semtrain_aux0_1000new_20260512_95ea69b
+profile:
+  PaliGemma trainable
+  Sonata/V-JEPA/AnyTouch frozen
+  burnin_steps=4
+  burnin_mode=state_only
+  unroll_steps=1
+  aux losses = 0
+  action_prefix_stopgrad enabled
+  num_train_steps=1450, about 1000 new steps from resume step ~450
+```
+
+Latest inspected A7 burnin4 state at step 660:
+
+```text
+posterior_recycle_rate ~ 0
+posterior_address_update_rate_mean ~= 0.039
+posterior_identity_switch_rate ~= 0.79-0.82
+same_role_support_overlap tail mean ~= 0.959
+loss_anchor_pv tail mean ~= 4.40
+grad_norm clipped at 5.0; preclip norms often huge
+```
+
+Interpretation:
+
+```text
+Burnin4/state_only suppresses recycle saturation, but it has not yet solved
+same-role support overlap or identity switching. Let it continue only if the goal
+is to see whether this recovers by ~950/1450; do not treat early burnin4 as a
+healthy solution yet.
+```
+
+Tail:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_burnin4_semtrain_aux0_1000new_20260512_95ea69b.train_tmux.log
+```
+
+### A5 Current Role
+
+A5 is now running only the remaining useful short diagnostics after M1d already
+failed:
+
+```text
+session: a5_owm_m2to4_500new_95ea69b
+script: /tmp/a5_owm_m2to4_500new.sh
+```
+
+Runs in order:
+
+```text
+M2 picf_a5_m2b_burnin4_semtrain_aux0_500new_20260512_95ea69b
+  PaliGemma trainable, burnin4/state_only, unroll1, aux=0.
+  Checks whether A7 burnin4 behavior reproduces in short diagnostic form.
+
+M3 picf_a5_m3b_burnin4_semtrain_tinyaux_500new_20260512_95ea69b
+  Same as M2 plus slot/support/binding aux = 1e-4.
+  Only meaningful if M2 is at least not collapsed.
+
+M4 picf_a5_m4b_unroll2_semtrain_semlr01_aux0_500new_20260512_95ea69b
+  Direct unroll2, PaliGemma trainable but semantic_lr_scale=0.1, aux=0.
+  Tests whether reducing semantic LR helps direct unroll2. If M1d already failed,
+  M4 is a fallback, not the preferred production recipe.
+```
+
+Tail:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m2b_burnin4_semtrain_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m3b_burnin4_semtrain_tinyaux_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4b_unroll2_semtrain_semlr01_aux0_500new_20260512_95ea69b.train_tmux.log
+```
+
+### Decision Rules For Next Operator
+
+```text
+If M2/A7 burnin4 still has same_role_overlap > 0.9 and identity_switch > 0.5:
+  burnin4 alone is insufficient. Do not start 30k from this recipe.
+  Next test should reduce all-scope action pressure or use staged anchor warmup.
+
+If M2 stabilizes overlap < 0.85 and recycle < 0.05:
+  burnin4/state_only becomes the leading production candidate.
+  Then compare M3 to decide whether tiny predictive aux is safe.
+
+If M3 worsens relative to M2:
+  keep slot_jepa/support_pred/binding_consistency at 0 for production.
+
+If M4 improves direct unroll2 substantially:
+  semantic LR is a useful control lever, but still compare against M2.
+```
+
+### Uncovered Issues
+
+These are not solved by A5/A7 scalar training diagnostics:
+
+```text
+tracklet/proposal dataflow remains inactive in CALVIN: owm_tracklet_tokens=0, owm_proposal_tokens=0.
+ordinal/fourth-object grounding remains weak diagnostic, not rank-supervised.
+offline IsSameObject probe has not been run.
+behavior acceptance still requires fresh CALVIN/video/anchor overlays.
+```
