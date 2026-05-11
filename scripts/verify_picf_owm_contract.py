@@ -34,6 +34,7 @@ def run_checks() -> list[Check]:
     contracts = _read("src/openpi/picf/core/contracts.py")
     config = _read("src/openpi/picf/core/config.py")
     pipeline = _read("src/openpi/picf/core/pipeline.py")
+    policy = _read("src/openpi/picf/policy.py")
     training = _read("src/openpi/picf/core/training.py")
     trainer = _read("scripts/picf_core_train.py")
     wrapper = _read("src/openpi/picf/vjepa/wrapper.py")
@@ -71,6 +72,7 @@ def run_checks() -> list[Check]:
                 "slot_content",
                 "support_uncertainty",
                 "support_signature",
+                "binding_signature",
             ),
             "Anchor graph must expose temporal/cache/address/content/uncertainty fields.",
         ),
@@ -118,6 +120,9 @@ def run_checks() -> list[Check]:
                 "tracklet_memory_enabled: bool = True",
                 "proposal_memory_enabled: bool = True",
                 "bind_support_signature_weight",
+                "bind_embedding_signature_weight",
+                "binding_signature_dim",
+                "action_prefix_stopgrad",
                 "evidence_cache_address_weight",
             ),
             "Config must default to the direct-final OWM graph profile, with legacy routers off and typed evidence on.",
@@ -156,8 +161,35 @@ def run_checks() -> list[Check]:
                 "bind_address_weight",
                 "local_priors",
                 "ordinal_target_rank",
+                "binding_signature_proj",
+                "bind_embedding_signature_weight",
             ),
             "Pipeline must route multiview temporal, tracklet, support-signature binding, local refinement, and weak ordinal states.",
+        ),
+        Check(
+            "pipeline_uses_pairwise_binding_subspace",
+            _contains(
+                pipeline,
+                "def _binding_keys",
+                "binding_signature_proj",
+                "_support_binding_signature",
+                "prev.binding_signature",
+                "obs.binding_signature",
+                "bind_embedding_signature_weight",
+            ),
+            "Binding must include an explicit projected same-object subspace instead of relying only on hidden cosine/support mass.",
+        ),
+        Check(
+            "policy_supports_action_prefix_stop_gradient",
+            _contains(
+                policy,
+                "def _action_prefix_tokens",
+                "action_prefix_stopgrad",
+                "tokens.detach()",
+                "extra_prefix_tokens=self._action_prefix_tokens",
+            )
+            and _contains(trainer, "--picf-action-prefix-stopgrad", "action_prefix_stopgrad"),
+            "Cotrain must support stopping action-flow gradients at PICF pi-prefix tokens without detaching the action loss itself.",
         ),
         Check(
             "pipeline_preserves_pg_priors",
@@ -313,6 +345,7 @@ def run_checks() -> list[Check]:
                 "posterior_recycle_logit_mean",
                 "posterior_dustbin_mass_raw",
                 "posterior_address_update_rate_mean",
+                "owm_posterior_binding_signature_norm_mean",
                 "aqr_same_role_local_true_overlap_max",
                 "_owm_debug_metrics_from_output",
             ),
@@ -328,6 +361,7 @@ def run_checks() -> list[Check]:
                 "aqr_temporal_support_entropy_mean",
                 "aqr_proposal_support_entropy_mean",
                 "aqr_same_role_local_true_overlap_max",
+                "owm_posterior_binding_signature_norm_mean",
                 "posterior_identity_switch_rate",
                 "evidence_cache_trust_mean",
             ),

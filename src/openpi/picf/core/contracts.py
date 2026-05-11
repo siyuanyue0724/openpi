@@ -79,6 +79,7 @@ class PicfAnchorPriorGraphState:
     slot_content: torch.Tensor | None = None
     support_uncertainty: torch.Tensor | None = None
     support_signature: torch.Tensor | None = None
+    binding_signature: torch.Tensor | None = None
     binding_support_score: torch.Tensor | None = None
     binding_address_score: torch.Tensor | None = None
 
@@ -216,6 +217,7 @@ class PicfObservationAnchorState:
     graph_proposal_weights: torch.Tensor | None = None
     anchor_address: torch.Tensor | None = None
     support_signature: torch.Tensor | None = None
+    binding_signature: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -300,6 +302,7 @@ class PicfPosteriorAnchorState:
     tracklet_signature: torch.Tensor | None = None
     proposal_signature: torch.Tensor | None = None
     support_signature: torch.Tensor | None = None
+    binding_signature: torch.Tensor | None = None
     recycle_logits: torch.Tensor | None = None
     recycle_support_mass_raw: torch.Tensor | None = None
     recycle_prior_var_mean: torch.Tensor | None = None

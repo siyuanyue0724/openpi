@@ -186,6 +186,8 @@ class PicfCoreConfig:
     proposal_confidence_floor: float = 0.05
     proposal_read_weight: float = 0.15
     bind_support_signature_weight: float = 0.50
+    bind_embedding_signature_weight: float = 0.25
+    binding_signature_dim: int = 128
     bind_address_weight: float = 0.25
     bind_address_innovation_downweight: float = 1.0
     address_update_rate: float = 0.05
@@ -206,6 +208,7 @@ class PicfCoreConfig:
     task_point_reread_topk: int = 32
     tokenwise_ff_chunk_size: int = 0
     require_pi0_action_generator: bool = True
+    action_prefix_stopgrad: bool = False
 
     @property
     def point_occ_dim(self) -> int:

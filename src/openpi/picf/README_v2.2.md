@@ -466,6 +466,23 @@ Current training profiles:
   `aqr_local_source_mass_*`. These are for causal attribution of action-gradient
   recycle saturation and local-overlap false positives; they are not new default
   training objectives.
+- 2026-05-11 recycle attribution result: direct action gradients into PICF
+  posterior/control prefix drive recycle saturation, while full action-loss
+  detachment keeps recycle/address healthy. `--freeze-recycle-path` and
+  `--recycle-logit-clamp=6` were insufficient, and both position-only and
+  rotation-only action losses triggered recycle saturation. The correct cotrain
+  repair is therefore a bridge-level stop-gradient:
+  `--picf-action-prefix-stopgrad`. This lets PI0.5 action-flow loss train the
+  action side normally while stopping the gradient at
+  `conditioned_control.pi_prefix_tokens`, so action cannot use posterior recycle
+  as a shortcut. This is not a permanent no-action regime; it is the safe
+  staged-cotrain bridge before selectively re-opening PICF action gradients.
+- The object-binding extraction path now follows the same pairwise/quadratic
+  principle used by recent ViT object-binding probes: support distributions are
+  converted into a projected `binding_signature` subspace, and posterior binding
+  uses `hidden + geometry + support-overlap + binding-subspace + gated-address`.
+  This is a structural binding term, not a new high-risk loss. It is intended to
+  protect same-object slot identity without requiring dataset relabeling.
 
 Default recommendation:
 

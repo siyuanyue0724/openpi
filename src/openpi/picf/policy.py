@@ -71,6 +71,11 @@ class PicfPi05Policy:
             )
         return prefix
 
+    def _action_prefix_tokens(self, tokens: torch.Tensor) -> torch.Tensor:
+        if bool(getattr(getattr(self.core, "config", None), "action_prefix_stopgrad", False)):
+            return tokens.detach()
+        return tokens
+
     def encode_semantic(self, observation: PicfObservation) -> Any | None:
         if self.semantic_encoder is None:
             return None
@@ -223,7 +228,7 @@ class PicfPi05Policy:
                         "compute_action_flow_loss",
                         "compute_action_flow_loss",
                         semantic_override,
-                        extra_prefix_tokens=self._legacy_action_condition_tokens(output),
+                        extra_prefix_tokens=self._action_prefix_tokens(self._legacy_action_condition_tokens(output)),
                         action_chunk_target=action_chunk_target,
                     )
                     output.state.predictive.action = flow_override["predicted_action"]
@@ -250,7 +255,7 @@ class PicfPi05Policy:
                 "compute_action_flow_loss",
                 "compute_action_flow_loss",
                 semantic_override,
-                extra_prefix_tokens=observed.conditioned_control.pi_prefix_tokens,
+                extra_prefix_tokens=self._action_prefix_tokens(observed.conditioned_control.pi_prefix_tokens),
                 action_chunk_target=action_chunk_target,
             )
         output = self.core.finalize_with_action(

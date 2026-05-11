@@ -1226,3 +1226,94 @@ Do not enable slot-JEPA, support prediction, or binding consistency until the
 action/recycle attribution is resolved. Those losses assume usable temporal
 identity; enabling them while recycle saturates will train against unstable
 targets.
+
+## 19. 2026-05-11 Attribution Results And Repair
+
+The full A2/A3/A4/B1/B2/C1 matrix completed from the R0 step-300 checkpoint:
+
+```text
+A2 action-detach:
+  posterior_recycle_rate        = 0.046
+  posterior_recycle_logit_mean  = -5.47
+  posterior_address_update_mean = 0.0071
+  action_default_equiv          = 0.149
+
+A3 freeze-recycle-path:
+  posterior_recycle_rate        = 1.0
+  posterior_recycle_logit_mean  = 26.58
+  posterior_address_update_mean = ~0
+  action_default_equiv          = 0.081
+
+A4 recycle-logit-clamp=6:
+  posterior_recycle_rate        = 0.998
+  posterior_recycle_logit_mean  = 6.0
+  posterior_address_update_mean = ~0
+  action_default_equiv          = 0.071
+
+B1 pos-only:
+  posterior_recycle_rate        = 1.0
+  posterior_recycle_logit_mean  = 283.8
+
+B2 rot-only:
+  posterior_recycle_rate        = 1.0
+  posterior_recycle_logit_mean  = 326.4
+
+C1 local-debug:
+  posterior_recycle_rate        = 1.0
+  posterior_recycle_logit_mean  = 341.8
+  aqr_same_role_local_true_overlap_max = 0.044
+```
+
+Interpretation:
+
+```text
+1. The action loss must eventually cotrain, but direct early gradients into
+   PICF posterior/control-prefix state create a recycle shortcut.
+2. Freezing recycle_head/residual reset parameters is not enough, because the
+   action loss can still shape upstream posterior/control states that feed
+   recycle.
+3. clamp=6 is mathematically too loose: sigmoid(6) ~= 0.998, so recycle is
+   still effectively fully open.
+4. Position and rotation losses each independently trigger saturation, so the
+   bug is not a single action component.
+5. Low true local overlap/Jaccard shows local-refinement overlap was largely a
+   diagnostic false positive, not all anchors selecting identical tokens.
+```
+
+Implemented repair:
+
+```text
+--picf-action-prefix-stopgrad
+```
+
+This stops gradients from PI0.5 action-flow loss at
+`conditioned_control.pi_prefix_tokens` while still letting the action side
+receive and report its normal loss. It is more precise than
+`--picf-action-detach-from-anchor`, which detaches the whole action loss before
+the total loss. The intended staged training path is:
+
+```text
+Stage A:
+  anchor/support warmup, action zero or prefix-stopgrad.
+
+Stage B:
+  action prefix-stopgrad cotrain. PI0.5/action side may learn; PICF binding,
+  recycle, and address are protected from shortcut gradients.
+
+Stage C:
+  selectively re-open PICF action gradients only after recycle_rate, recycle
+  logits, address_update_rate, and same-role overlap remain healthy.
+```
+
+Object-binding extraction repair:
+
+```text
+token -> binding_key = normalize(W_b token)
+slot_binding_signature = weighted_mean(binding_key, support_weights)
+binding_logit += lambda_b * gate * dot(prev_binding_signature, obs_binding_signature)
+```
+
+This implements the pairwise/quadratic binding principle used by recent ViT
+object-binding probes without requiring new dataset labels and without adding a
+new strong loss. The term is gated by alpha/recycle/innovation and therefore
+cannot hard-lock stale identity.

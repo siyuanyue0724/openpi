@@ -1116,6 +1116,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "vjepa_max_views",
         "tracklet_max_tokens",
         "proposal_max_tokens",
+        "binding_signature_dim",
         "local_refinement_topk",
     ):
         if getattr(args, _name, None) is None:
@@ -1133,6 +1134,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "support_prediction_enabled",
         "ordinal_relation_enabled",
         "ordinal_weak_target_enabled",
+        "action_prefix_stopgrad",
     ):
         if getattr(args, _name, None) is None:
             setattr(args, _name, bool(getattr(_SPEC_DEFAULTS, _name)))
@@ -1153,6 +1155,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "proposal_confidence_floor",
         "proposal_read_weight",
         "bind_support_signature_weight",
+        "bind_embedding_signature_weight",
         "bind_address_weight",
         "bind_address_innovation_downweight",
         "address_update_rate",
@@ -2771,6 +2774,7 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "owm_proposal_tokens",
     "owm_proposal_valid_fraction",
     "owm_posterior_support_signature_mean",
+    "owm_posterior_binding_signature_norm_mean",
     "evidence_cache_trust_mean",
     "evidence_cache_age_mean",
     "innovation_norm_visual",
@@ -4739,6 +4743,10 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         bind_support_signature_weight=float(
             _arg_or_default("bind_support_signature_weight", _SPEC_DEFAULTS.bind_support_signature_weight)
         ),
+        bind_embedding_signature_weight=float(
+            _arg_or_default("bind_embedding_signature_weight", _SPEC_DEFAULTS.bind_embedding_signature_weight)
+        ),
+        binding_signature_dim=int(_arg_or_default("binding_signature_dim", _SPEC_DEFAULTS.binding_signature_dim)),
         bind_address_weight=float(_arg_or_default("bind_address_weight", _SPEC_DEFAULTS.bind_address_weight)),
         bind_address_innovation_downweight=float(
             _arg_or_default("bind_address_innovation_downweight", _SPEC_DEFAULTS.bind_address_innovation_downweight)
@@ -4782,6 +4790,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         action_output_clip=getattr(args, "action_output_clip", None),
         tokenwise_ff_chunk_size=int(_arg_or_default("tokenwise_ff_chunk_size", _SPEC_DEFAULTS.tokenwise_ff_chunk_size)),
         require_pi0_action_generator=bool(_arg_or_default("require_pi0_action_generator", _SPEC_DEFAULTS.require_pi0_action_generator)),
+        action_prefix_stopgrad=bool(_arg_or_default("action_prefix_stopgrad", _SPEC_DEFAULTS.action_prefix_stopgrad)),
     )
     point_feature_extractor = None
     if picf_enabled and args.point_backbone == "sonata":
@@ -5076,6 +5085,17 @@ def _materialize_model_parameters(
                 dtype=core.dtype,
             )
             _ = core.innovation_proj(innovation_in)
+        binding_signature_proj = getattr(core, "binding_signature_proj", None)
+        if picf_enabled and binding_signature_proj is not None and isinstance(binding_signature_proj.weight, UninitializedParameter):
+            # The pairwise binding-signature adapter is used whenever typed
+            # supports are present, but materialize it explicitly so optional
+            # support no-op batches expose the same anchor-only parameter set.
+            binding_in = torch.zeros(
+                (1, core.config.hidden_dim),
+                device=core.device,
+                dtype=core.dtype,
+            )
+            _ = binding_signature_proj(binding_in)
         if picf_enabled and isinstance(core.tactile_route_reread.key_proj.weight, UninitializedParameter):
             tactile_dense_dim = _infer_tactile_dense_dim(core)
             dummy_queries = torch.zeros(
@@ -5207,6 +5227,7 @@ _ANCHOR_ONLY_TRAINABLE_PATTERNS: tuple[str, ...] = (
     "core.point_align_proj.*",
     "core.visual_align_proj.*",
     "core.tactile_align_proj.*",
+    "core.binding_signature_proj.*",
     "core.temporal_visual_time_proj.*",
     "core.temporal_visual_view_embedding.*",
     "core.projective_bias_head.*",
@@ -6486,6 +6507,18 @@ def main() -> None:
     )
     parser.add_argument("--no-picf-action-detach-from-anchor", dest="detach_action_loss_from_picf", action="store_false")
     parser.set_defaults(detach_action_loss_from_picf=_LOSS_DEFAULTS.detach_action_loss_from_picf)
+    parser.add_argument(
+        "--picf-action-prefix-stopgrad",
+        dest="action_prefix_stopgrad",
+        action="store_true",
+        help=(
+            "Stop gradients from PI0.5 action-flow loss at PICF pi-prefix tokens while still allowing "
+            "the action generator side to receive its normal loss. This is the cotrain-safe bridge "
+            "for preventing action gradients from using posterior recycle/reset as a shortcut."
+        ),
+    )
+    parser.add_argument("--no-picf-action-prefix-stopgrad", dest="action_prefix_stopgrad", action="store_false")
+    parser.set_defaults(action_prefix_stopgrad=_SPEC_DEFAULTS.action_prefix_stopgrad)
     parser.add_argument("--mapg-siglip-tau", type=float, default=_LOSS_DEFAULTS.mapg_siglip_tau)
     parser.add_argument("--mapg-vicreg-var-target", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_var_target)
     parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_cov_weight)
@@ -6807,6 +6840,8 @@ def main() -> None:
     parser.add_argument("--proposal-confidence-floor", type=float, default=_SPEC_DEFAULTS.proposal_confidence_floor)
     parser.add_argument("--proposal-read-weight", type=float, default=_SPEC_DEFAULTS.proposal_read_weight)
     parser.add_argument("--bind-support-signature-weight", type=float, default=_SPEC_DEFAULTS.bind_support_signature_weight)
+    parser.add_argument("--bind-embedding-signature-weight", type=float, default=_SPEC_DEFAULTS.bind_embedding_signature_weight)
+    parser.add_argument("--binding-signature-dim", type=int, default=_SPEC_DEFAULTS.binding_signature_dim)
     parser.add_argument("--bind-address-weight", type=float, default=_SPEC_DEFAULTS.bind_address_weight)
     parser.add_argument(
         "--bind-address-innovation-downweight",

@@ -1055,6 +1055,7 @@ class PicfFullCore(nn.Module):
         self.point_align_proj = nn.LazyLinear(hidden_dim)
         self.visual_align_proj = nn.LazyLinear(hidden_dim)
         self.tactile_align_proj = nn.LazyLinear(hidden_dim)
+        self.binding_signature_proj = nn.LazyLinear(int(self.config.binding_signature_dim))
         self.proprio_context_proj = nn.LazyLinear(hidden_dim)
         self.action_context_proj = nn.LazyLinear(hidden_dim)
         self.timing_context_proj = nn.LazyLinear(hidden_dim)
@@ -2422,6 +2423,26 @@ class PicfFullCore(nn.Module):
         physical = self._physical_query_addresses(previous, physical_count)
         task = self.aqr_task_query_tokens[:task_count].to(device=self.device, dtype=self.dtype)
         return torch.cat([physical, task], dim=0)
+
+    def _binding_keys(self, tokens: torch.Tensor | None) -> torch.Tensor:
+        if tokens is None or tokens.numel() == 0:
+            width = max(int(self.config.binding_signature_dim), 1)
+            return torch.zeros((0, width), device=self.device, dtype=self.dtype)
+        projected = self.binding_signature_proj(tokens.to(device=self.device, dtype=self.dtype))
+        return _normalize_tensor(projected, eps=self.config.epsilon_residual)
+
+    def _support_binding_signature(
+        self,
+        weights: torch.Tensor | None,
+        tokens: torch.Tensor | None,
+    ) -> torch.Tensor | None:
+        if weights is None or tokens is None or weights.numel() == 0 or tokens.numel() == 0:
+            return None
+        if int(weights.shape[-1]) != int(tokens.shape[0]):
+            return None
+        normalized_weights = _normalize_rows(weights.to(device=self.device, dtype=self.dtype), eps=self.config.epsilon_a)
+        signature = normalized_weights @ self._binding_keys(tokens)
+        return _normalize_tensor(signature, eps=self.config.epsilon_residual)
 
     def _previous_evidence_cache_tokens(
         self,
@@ -5263,6 +5284,31 @@ class PicfFullCore(nn.Module):
             x = torch.zeros((n_obs, 3), device=self.device, dtype=self.dtype)
             S = _diag_embed(torch.full((n_obs, 3), self.config.epsilon_s, device=self.device, dtype=self.dtype))
             a = _to_tensor(self.config.a_min_m, device=self.device, dtype=self.dtype)[None, :].expand(n_obs, -1)
+        binding_parts: list[torch.Tensor] = []
+
+        def _add_binding_part(weights: torch.Tensor | None, tokens: torch.Tensor | None) -> None:
+            signature = self._support_binding_signature(weights, tokens)
+            if signature is not None and signature.numel() > 0:
+                binding_parts.append(signature)
+
+        _add_binding_part(point_weights, token_field.point_tokens)
+        _add_binding_part(
+            graph_visual_weights if graph_visual_weights is not None else routing_mass_visual,
+            dense_memory.visual_payload,
+        )
+        _add_binding_part(
+            graph_temporal_weights,
+            None if token_field.temporal_visual is None else token_field.temporal_visual.tokens,
+        )
+        if token_field.tracklet is not None:
+            _add_binding_part(graph_tracklet_weights, token_field.tracklet.tokens)
+        if token_field.proposal is not None:
+            _add_binding_part(graph_proposal_weights, token_field.proposal.tokens)
+        obs_binding_signature = (
+            _normalize_tensor(torch.stack(binding_parts, dim=0).mean(dim=0), eps=self.config.epsilon_residual)
+            if binding_parts
+            else self._binding_keys(obs_tokens)
+        )
         return PicfObservationAnchorState(
             seed_indices=seed_indices,
             tokens=obs_tokens,
@@ -5297,6 +5343,7 @@ class PicfFullCore(nn.Module):
                 ],
                 dim=-1,
             ),
+            binding_signature=obs_binding_signature,
         )
 
     def _initial_persistent(self) -> tuple[torch.Tensor, ...]:
@@ -5443,6 +5490,23 @@ class PicfFullCore(nn.Module):
                     inertia = inertia * (1.0 - prev.recycle_gate.to(device=self.device, dtype=self.dtype).reshape(-1)[: logits.shape[0]].clamp(0.0, 1.0))
                 inertia = inertia * innovation_decay
                 logits = logits + (float(self.config.bind_support_signature_weight) * inertia[:, None] * support_score)
+            if prev.binding_signature is not None and obs.binding_signature is not None and prev.binding_signature.numel() > 0 and obs.binding_signature.numel() > 0:
+                prev_binding = prev.binding_signature.to(device=self.device, dtype=self.dtype)[: logits.shape[0]]
+                obs_binding = obs.binding_signature.to(device=self.device, dtype=self.dtype)
+                if prev_binding.shape[-1] == obs_binding.shape[-1]:
+                    binding_score = _normalize_tensor(prev_binding, eps=self.config.epsilon_residual) @ _normalize_tensor(
+                        obs_binding,
+                        eps=self.config.epsilon_residual,
+                    ).T
+                    bind_gate = torch.ones((logits.shape[0],), device=self.device, dtype=self.dtype)
+                    if prev.alpha is not None:
+                        bind_gate = bind_gate * prev.alpha.to(device=self.device, dtype=self.dtype).reshape(-1)[: logits.shape[0]].clamp(0.0, 1.0)
+                    if prev.recycle_gate is not None:
+                        bind_gate = bind_gate * (
+                            1.0 - prev.recycle_gate.to(device=self.device, dtype=self.dtype).reshape(-1)[: logits.shape[0]].clamp(0.0, 1.0)
+                        )
+                    bind_gate = bind_gate * innovation_decay
+                    logits = logits + (float(self.config.bind_embedding_signature_weight) * bind_gate[:, None] * binding_score)
             if prev.slot_address is not None and obs.anchor_address is not None and prev.slot_address.numel() > 0 and obs.anchor_address.numel() > 0:
                 prev_addr = prev.slot_address.to(device=self.device, dtype=self.dtype)[: logits.shape[0]]
                 obs_addr = obs.anchor_address.to(device=self.device, dtype=self.dtype)
@@ -5874,6 +5938,11 @@ class PicfFullCore(nn.Module):
             if sig is not None and sig.numel() > 0
         ]
         support_signature = torch.cat(signature_parts, dim=-1) if signature_parts else support_mass[:, None]
+        binding_signature = (
+            _normalize_tensor(binding_cond @ obs_anchors.binding_signature.to(device=self.device, dtype=self.dtype), eps=self.config.epsilon_residual)
+            if obs_anchors.binding_signature is not None and obs_anchors.binding_signature.numel() > 0
+            else self._binding_keys(tokens)
+        )
         base_address = (
             previous.posterior.slot_address.to(device=self.device, dtype=self.dtype)
             if previous is not None and previous.posterior.slot_address is not None
@@ -5919,6 +5988,7 @@ class PicfFullCore(nn.Module):
             tracklet_signature=tracklet_signature,
             proposal_signature=proposal_signature,
             support_signature=support_signature,
+            binding_signature=binding_signature,
             recycle_logits=recycle_logits,
             recycle_support_mass_raw=support_mass_raw,
             recycle_prior_var_mean=var_prior.mean(dim=-1),
@@ -6739,6 +6809,10 @@ class PicfFullCore(nn.Module):
             debug["owm_slot_address_norm_mean"] = float(torch.linalg.norm(observed.posterior.slot_address, dim=-1).mean().item())
         if observed.posterior.support_signature is not None:
             debug["owm_posterior_support_signature_mean"] = float(observed.posterior.support_signature.mean().item())
+        if observed.posterior.binding_signature is not None:
+            debug["owm_posterior_binding_signature_norm_mean"] = float(
+                torch.linalg.norm(observed.posterior.binding_signature, dim=-1).mean().item()
+            )
         if observed.posterior.binding is not None and observed.posterior.binding.numel() > 0:
             previous_posterior = None if observed.previous is None else getattr(observed.previous, "posterior", None)
             previous_binding = None if previous_posterior is None else getattr(previous_posterior, "binding", None)

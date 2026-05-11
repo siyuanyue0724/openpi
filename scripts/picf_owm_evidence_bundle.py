@@ -69,6 +69,7 @@ OWM_KEYS: tuple[str, ...] = (
     "owm_proposal_tokens",
     "owm_proposal_valid_fraction",
     "owm_posterior_support_signature_mean",
+    "owm_posterior_binding_signature_norm_mean",
     "evidence_cache_trust_mean",
     "evidence_cache_age_mean",
     "innovation_norm_visual",
