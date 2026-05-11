@@ -5294,7 +5294,7 @@ class PicfFullCore(nn.Module):
         _add_binding_part(point_weights, token_field.point_tokens)
         _add_binding_part(
             graph_visual_weights if graph_visual_weights is not None else routing_mass_visual,
-            dense_memory.visual_payload,
+            token_field.visual_tokens,
         )
         _add_binding_part(
             graph_temporal_weights,

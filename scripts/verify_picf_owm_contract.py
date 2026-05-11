@@ -173,6 +173,7 @@ def run_checks() -> list[Check]:
                 "def _binding_keys",
                 "binding_signature_proj",
                 "_support_binding_signature",
+                "token_field.visual_tokens",
                 "prev.binding_signature",
                 "obs.binding_signature",
                 "bind_embedding_signature_weight",
