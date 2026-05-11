@@ -414,6 +414,22 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
+            "recycle_diagnostics_explain_temporal_identity_failures",
+            "recycle_logits=recycle_logits" in posterior
+            and "recycle_support_mass_raw=support_mass_raw" in posterior
+            and "recycle_dustbin_raw_mass=dustbin_raw.sum" in posterior
+            and "identity_innovation_risk=identity_innovation_risk" in posterior
+            and "address_update_rate=address_update_rate" in posterior
+            and strict.contains("posterior_recycle_logit_mean", "posterior_dustbin_mass_raw", "posterior_address_update_rate_mean"),
+            severity="fail",
+            detail="Recycle saturation must be diagnosable from logits, input mass, dustbin transfer, innovation risk, and address-update rate before changing the posterior math.",
+            evidence=pipeline.node_refs("_posterior_update")
+            + pipeline.refs("recycle_logits", "recycle_dustbin_raw_mass", "address_update_rate")
+            + strict.refs("posterior_recycle_logit_mean", "posterior_dustbin_mass_raw", "posterior_address_update_rate_mean"),
+        )
+    )
+    checks.append(
+        _finding(
             "matched_predictive_losses_are_permutation_tolerant_and_detached",
             "target.detach()" in matched_loss
             and "cost = 1.0 - (pred_n @ target_n.T)" in matched_loss

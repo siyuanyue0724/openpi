@@ -167,6 +167,13 @@ only if an upstream source provides them.
   records the math, code touchpoints, paper support, verification gates, and
   CALVIN/video acceptance boundary before behavior-level completion can be
   claimed.
+- [`docs/PICF_AQR_OWM_RECYCLE_DIAGNOSIS_PLAN_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_RECYCLE_DIAGNOSIS_PLAN_TEMP.md)
+  Active 2026-05-11 diagnosis plan for the staged anchor/action runs. It
+  records the R0/S1/S2/S3/S4/S5/D1 experiment matrix, explains why
+  `posterior_recycle_rate=1.0` is an unresolved posterior-identity issue even
+  when same-role support overlap improves, and lists the recycle logits,
+  dustbin, support-mass, and staged-action ablations that must be run before
+  predictive OWM auxiliary losses are enabled.
 - [`docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md)
   Temporary live deployment ledger for the OWM implementation. Use this while
   reviewing the current branch because it records which final README contract
@@ -403,6 +410,49 @@ Current training profiles:
   partition. It is not a convergence claim. The high early recycle rate is
   expected to be judged across the 100/500-step checkpoints together with
   support overlap, support entropy, and anchor videos.
+
+2026-05-11 staged anchor/action recycle diagnosis:
+
+- Source: [`docs/PICF_AQR_OWM_RECYCLE_DIAGNOSIS_PLAN_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_RECYCLE_DIAGNOSIS_PLAN_TEMP.md).
+- R0 anchor-only warmup
+  `picf_mvtrack_anchor_noaction_supportdiv_acc4_lr3e4_probe300_20260510_225402`
+  reached step `300` with `loss_total=0.7145`, `loss_action=0`,
+  `aqr_same_role_support_overlap_max=0.3756`, last20 overlap mean `0.4815`,
+  `aqr_effective_anchor_count~=23.6`, and `posterior_recycle_rate=0.3837`.
+  This proves the anchor-only objective can form non-collapsed supports.
+- Direct action cotrain controls were structurally unhealthy even while scalar
+  losses fell: R1 last20 overlap mean `0.9579`, R2 last20 overlap mean
+  `0.9964`, both with `posterior_recycle_rate=1.0`. Do not use direct
+  cotrain scalar loss descent as evidence of healthy anchor identity.
+- The best staged candidate so far is S2
+  `picf_s2_stage300_a05_cache005_sd005_den0_900_20260511_0155`: step `900`
+  had `loss_total=0.7239`, `loss_action=0.0174` under action lambdas `0.5`,
+  `loss_action_active7=0.3147`, last20 overlap mean `0.4551`, and
+  `aqr_effective_anchor_count~=23.4`. Its default-weight-equivalent action loss
+  is about `0.0696`, so it is comparable to old v22 action runs around the
+  early `300-1000` step regime, not to old `20k+` step convergence.
+- S2 is structurally much better than direct cotrain, but it still has
+  `posterior_recycle_rate=1.0`. This is unresolved because
+  `posterior_recycle_rate` is `recycle_gate.mean()` in `pipeline.py`, and high
+  recycle means the posterior content path is mostly reset from residual
+  evidence rather than temporally carried.
+- Until recycle is understood, keep `lambda_slot_jepa=0`,
+  `lambda_support_pred=0`, and `lambda_binding_consistency=0`. The staged
+  action runs log `loss_slot_jepa` in the thousands; even a small nonzero
+  weight could dominate the objective before identity continuity is healthy.
+- Next required diagnostics are debug-only recycle instrumentation
+  (`posterior_recycle_logit_*`, dustbin mass, raw/final support mass,
+  residual-summary norm, role-wise recycle, address update rate), a staged
+  action `0.25` run from R0, and an anchor-only continuation from R0. Do not add
+  a recycle penalty or enable predictive auxiliaries before those diagnostics.
+- 2026-05-11 diagnostic instrumentation is now code-level deployed and verified:
+  `posterior_recycle_logit_*`, `posterior_recycle_gate_*`,
+  `posterior_recycle_rate_effector/scene`, raw/final support mass, raw/final
+  dustbin mass, prior variance/alpha, residual-summary norm, identity
+  innovation risk, address-update rate, and local same-role overlap are carried
+  through `PicfPosteriorAnchorState`, pipeline debug, trainer metrics, evidence
+  bundle, strict diagnose, and MVTrack deep audit. These are observability-only
+  fields; they do not change posterior update math or training losses.
 
 Default recommendation:
 

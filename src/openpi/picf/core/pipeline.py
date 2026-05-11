@@ -5679,7 +5679,8 @@ class PicfFullCore(nn.Module):
             ],
             dim=-1,
         )
-        recycle = torch.sigmoid(self.recycle_head(recycle_in)).squeeze(-1)
+        recycle_logits = self.recycle_head(recycle_in).squeeze(-1)
+        recycle = torch.sigmoid(recycle_logits)
         recycle_share = recycle / torch.clamp(1.0 + recycle.sum(), min=self.config.epsilon_a)
         binding_support = support_raw + (recycle_share[:, None] * dustbin_raw[None, :])
         dustbin_final = dustbin_raw / torch.clamp(1.0 + recycle.sum(), min=self.config.epsilon_a)
@@ -5861,13 +5862,16 @@ class PicfFullCore(nn.Module):
             if previous is not None and previous.posterior.slot_address is not None
             else slot_token
         )
+        address_update_rate = torch.zeros_like(support_mass)
+        identity_innovation_risk = self._innovation_risk_scalar(identity_innovation_norm)
         if obs_anchors.anchor_address is not None and obs_anchors.anchor_address.numel() > 0:
             obs_address = binding_cond @ obs_anchors.anchor_address.to(device=self.device, dtype=self.dtype)
             rate = float(self.config.address_update_rate) * support_mass.clamp(0.0, 1.0) * (1.0 - recycle.clamp(0.0, 1.0))
             rate = rate * torch.exp(
-                -float(self.config.bind_address_innovation_downweight) * self._innovation_risk_scalar(identity_innovation_norm)
+                -float(self.config.bind_address_innovation_downweight) * identity_innovation_risk
             )
             rate = torch.clamp(rate, min=0.0, max=float(self.config.address_update_max_rate))
+            address_update_rate = rate
             slot_address = _normalize_tensor(((1.0 - rate[:, None]) * base_address) + (rate[:, None] * obs_address), eps=self.config.epsilon_residual)
         else:
             slot_address = base_address
@@ -5898,6 +5902,15 @@ class PicfFullCore(nn.Module):
             tracklet_signature=tracklet_signature,
             proposal_signature=proposal_signature,
             support_signature=support_signature,
+            recycle_logits=recycle_logits,
+            recycle_support_mass_raw=support_mass_raw,
+            recycle_prior_var_mean=var_prior.mean(dim=-1),
+            recycle_prior_alpha=alpha_prior,
+            recycle_residual_summary_norm=torch.linalg.norm(residual_summary).reshape(()),
+            recycle_dustbin_raw_mass=dustbin_raw.sum().reshape(()),
+            recycle_dustbin_final_mass=dustbin_final.sum().reshape(()),
+            identity_innovation_risk=identity_innovation_risk.reshape(()),
+            address_update_rate=address_update_rate,
         )
 
     @staticmethod
@@ -6625,6 +6638,14 @@ class PicfFullCore(nn.Module):
                 lp_entropy = -(lp * torch.log(torch.clamp(lp, min=self.config.epsilon_a))).sum(dim=-1)
                 lp_entropy = lp_entropy / math.log(max(int(lp.shape[-1]), 2))
                 debug["aqr_local_support_entropy_mean"] = float(lp_entropy.mean().item())
+                if lp.shape[0] > 1:
+                    lp_overlap = lp @ lp.T
+                    lp_diag = torch.clamp(torch.diag(lp_overlap), min=self.config.epsilon_a)
+                    lp_overlap = lp_overlap / torch.sqrt(torch.clamp(lp_diag[:, None] * lp_diag[None, :], min=self.config.epsilon_a))
+                    lp_same_role = graph.anchor_roles[:, None] == graph.anchor_roles[None, :]
+                    lp_pair_mask = torch.triu(lp_same_role, diagonal=1)
+                    if bool(lp_pair_mask.any().item()):
+                        debug["aqr_same_role_local_overlap_max"] = float(lp_overlap[lp_pair_mask].max().item())
             debug["mapg_point_available"] = 1.0 if graph.point_priors is not None else 0.0
             debug["mapg_tactile_available"] = 1.0 if graph.tactile_priors is not None else 0.0
             debug["mapg_posterior_available"] = 1.0 if graph.posterior_priors is not None else 0.0
@@ -6673,7 +6694,52 @@ class PicfFullCore(nn.Module):
                     previous_ids = previous_binding[:slot_count].reshape(slot_count, -1).argmax(dim=-1)
                     debug["posterior_identity_switch_rate"] = float((current_ids != previous_ids).to(dtype=self.dtype).mean().item())
         if observed.posterior.recycle_gate is not None and observed.posterior.recycle_gate.numel() > 0:
-            debug["posterior_recycle_rate"] = float(observed.posterior.recycle_gate.to(dtype=self.dtype).mean().item())
+            recycle = observed.posterior.recycle_gate.to(device=self.device, dtype=self.dtype).reshape(-1)
+            debug["posterior_recycle_rate"] = float(recycle.mean().item())
+            debug["posterior_recycle_gate_std"] = float(recycle.std(unbiased=False).item()) if recycle.numel() > 1 else 0.0
+            debug["posterior_recycle_gate_min"] = float(recycle.min().item())
+            debug["posterior_recycle_gate_max"] = float(recycle.max().item())
+            role_ids = observed.posterior.role_ids
+            if role_ids is not None and role_ids.numel() == recycle.numel():
+                roles = role_ids.to(device=self.device, dtype=torch.long).reshape(-1)
+                effector_mask = roles == 0
+                scene_mask = roles != 0
+                if bool(effector_mask.any().item()):
+                    debug["posterior_recycle_rate_effector"] = float(recycle[effector_mask].mean().item())
+                if bool(scene_mask.any().item()):
+                    debug["posterior_recycle_rate_scene"] = float(recycle[scene_mask].mean().item())
+
+            def _debug_tensor_stats(prefix: str, value: torch.Tensor | None) -> None:
+                if value is None or value.numel() == 0:
+                    return
+                tensor = value.detach().to(device=self.device, dtype=self.dtype).reshape(-1)
+                debug[f"{prefix}_mean"] = float(tensor.mean().item())
+                debug[f"{prefix}_std"] = float(tensor.std(unbiased=False).item()) if tensor.numel() > 1 else 0.0
+                debug[f"{prefix}_min"] = float(tensor.min().item())
+                debug[f"{prefix}_max"] = float(tensor.max().item())
+
+            _debug_tensor_stats("posterior_recycle_logit", observed.posterior.recycle_logits)
+            _debug_tensor_stats("posterior_support_mass_raw", observed.posterior.recycle_support_mass_raw)
+            _debug_tensor_stats("posterior_support_mass_final", observed.posterior.support_mass)
+            _debug_tensor_stats("posterior_prior_var", observed.posterior.recycle_prior_var_mean)
+            _debug_tensor_stats("posterior_prior_alpha", observed.posterior.recycle_prior_alpha)
+            _debug_tensor_stats("posterior_address_update_rate", observed.posterior.address_update_rate)
+            if observed.posterior.recycle_residual_summary_norm is not None:
+                debug["posterior_residual_summary_norm"] = float(
+                    observed.posterior.recycle_residual_summary_norm.to(device=self.device, dtype=self.dtype).reshape(()).item()
+                )
+            if observed.posterior.recycle_dustbin_raw_mass is not None:
+                debug["posterior_dustbin_mass_raw"] = float(
+                    observed.posterior.recycle_dustbin_raw_mass.to(device=self.device, dtype=self.dtype).reshape(()).item()
+                )
+            if observed.posterior.recycle_dustbin_final_mass is not None:
+                debug["posterior_dustbin_mass_final"] = float(
+                    observed.posterior.recycle_dustbin_final_mass.to(device=self.device, dtype=self.dtype).reshape(()).item()
+                )
+            if observed.posterior.identity_innovation_risk is not None:
+                debug["posterior_identity_innovation_risk"] = float(
+                    observed.posterior.identity_innovation_risk.to(device=self.device, dtype=self.dtype).reshape(()).item()
+                )
         if observed.task_readout.ordinal_active is not None:
             debug["owm_ordinal_active"] = 1.0 if bool(observed.task_readout.ordinal_active.item()) else 0.0
             if observed.task_readout.ordinal_target_rank is not None:

@@ -305,7 +305,16 @@ def run_checks() -> list[Check]:
         ),
         Check(
             "trainer_logs_required_owm_metrics",
-            _contains(trainer, "OWM_DEBUG_METRIC_KEYS", "aqr_temporal_support_entropy_mean", "evidence_cache_trust_mean", "_owm_debug_metrics_from_output"),
+            _contains(
+                trainer,
+                "OWM_DEBUG_METRIC_KEYS",
+                "aqr_temporal_support_entropy_mean",
+                "evidence_cache_trust_mean",
+                "posterior_recycle_logit_mean",
+                "posterior_dustbin_mass_raw",
+                "posterior_address_update_rate_mean",
+                "_owm_debug_metrics_from_output",
+            ),
             "Training metrics must carry OWM debug keys into metrics.jsonl.",
         ),
         Check(

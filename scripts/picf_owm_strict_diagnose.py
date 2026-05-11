@@ -487,10 +487,26 @@ def run_static_checks() -> list[Finding]:
     checks.append(
         _finding(
             "trainer_logs_owm_debug_metrics",
-            trainer.contains("OWM_DEBUG_METRIC_KEYS", "aqr_same_role_support_overlap_max", "posterior_identity_switch_rate", "evidence_cache_trust_mean"),
+            trainer.contains(
+                "OWM_DEBUG_METRIC_KEYS",
+                "aqr_same_role_support_overlap_max",
+                "posterior_identity_switch_rate",
+                "evidence_cache_trust_mean",
+                "posterior_recycle_logit_mean",
+                "posterior_dustbin_mass_raw",
+                "posterior_address_update_rate_mean",
+            ),
             severity="fail",
             detail="Training metrics must carry the OWM diagnostics needed to detect anchor collapse and cache misuse.",
-            evidence=trainer.refs("OWM_DEBUG_METRIC_KEYS", "aqr_same_role_support_overlap_max", "posterior_identity_switch_rate", "evidence_cache_trust_mean"),
+            evidence=trainer.refs(
+                "OWM_DEBUG_METRIC_KEYS",
+                "aqr_same_role_support_overlap_max",
+                "posterior_identity_switch_rate",
+                "evidence_cache_trust_mean",
+                "posterior_recycle_logit_mean",
+                "posterior_dustbin_mass_raw",
+                "posterior_address_update_rate_mean",
+            ),
         )
     )
     checks.append(

@@ -298,6 +298,15 @@ class PicfPosteriorAnchorState:
     tracklet_signature: torch.Tensor | None = None
     proposal_signature: torch.Tensor | None = None
     support_signature: torch.Tensor | None = None
+    recycle_logits: torch.Tensor | None = None
+    recycle_support_mass_raw: torch.Tensor | None = None
+    recycle_prior_var_mean: torch.Tensor | None = None
+    recycle_prior_alpha: torch.Tensor | None = None
+    recycle_residual_summary_norm: torch.Tensor | None = None
+    recycle_dustbin_raw_mass: torch.Tensor | None = None
+    recycle_dustbin_final_mass: torch.Tensor | None = None
+    identity_innovation_risk: torch.Tensor | None = None
+    address_update_rate: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
