@@ -543,7 +543,7 @@ Machine:
   ssh -p 29776 root@36.139.225.68
 
 Session:
-  tmux attach -t a5_owm_10h_matrix500_95ea69b
+  tmux attach -t a5_owm_10h_matrix500final_95ea69b
 
 Common runtime:
   /root/openpi_runtimec_95ea69b
@@ -565,11 +565,12 @@ Common runtime:
 Runs:
 
 ```text
-M1 picf_a5_m1b_unroll2_frozenpg_aux0_500new_20260512_95ea69b
-  PaliGemma frozen, unroll_steps=2, accum_steps=1, OWM aux losses 0.
-  Question: does full all-scope unroll=2 collapse even without semantic cotrain?
-  If M1 collapses, the problem is not PG cotrain; it is all-scope/action-window
-  pressure on identity.
+M1 picf_a5_m1c_unroll2_semlr0_aux0_500new_20260512_95ea69b
+  PaliGemma present but semantic_lr_scale=0.0, unroll_steps=2, accum_steps=1, OWM aux losses 0.
+  Question: does full all-scope unroll=2 collapse even without PaliGemma weight updates?
+  The code path has no --no-semantic-trainable flag under foundation profile, so lr_scale=0.0 is
+  the clean isolation of semantic cotrain update pressure. If M1 collapses, the problem is
+  not PG parameter update; it is all-scope/action-window pressure on identity.
 
 M2 picf_a5_m2b_burnin4_semtrain_aux0_500new_20260512_95ea69b
   PaliGemma trainable, burnin_steps=4, burnin_mode=state_only, unroll_steps=1,
@@ -618,11 +619,11 @@ Decision table:
 
 ```text
 M1 stable, M2 stable:
-  E1 failure is mainly PaliGemma cotrain + short-window interaction. Prefer M2
+  E1 failure is mainly PaliGemma update pressure + short-window interaction. Prefer M2
   for final run because PG cotrain remains action-useful and burn-in protects identity.
 
 M1 stable, M2 fails:
-  PG cotrain pressure itself is too strong even with burn-in. Use staged recipe:
+  PaliGemma cotrain update pressure itself is too strong even with burn-in. Use staged recipe:
   anchor/identity warmup with PG frozen, then low-LR PG cotrain.
 
 M1 fails:
@@ -644,7 +645,7 @@ M4 stable while E1 failed:
 Tail commands:
 
 ```bash
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1b_unroll2_frozenpg_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1c_unroll2_semlr0_aux0_500new_20260512_95ea69b.train_tmux.log
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m2b_burnin4_semtrain_aux0_500new_20260512_95ea69b.train_tmux.log
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m3b_burnin4_semtrain_tinyaux_500new_20260512_95ea69b.train_tmux.log
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4b_unroll2_semtrain_semlr01_aux0_500new_20260512_95ea69b.train_tmux.log
