@@ -524,15 +524,16 @@ Current training profiles:
   with PaliGemma cotrain. This is enough evidence to stop the 900-step E1 and
   replace it with a `500new` matrix: because the resume starts near trainer step
   450, the revised A5 runs use `num_train_steps=950` to obtain about 500 new
-  optimizer steps. M1 sets `semantic_lr_scale=0.0` to isolate semantic cotrain update pressure,
+  optimizer steps. M1 sets `semantic_lr_scale=1e-6` to isolate semantic cotrain update pressure,
   M2 keeps PaliGemma cotrain but uses `burnin_steps=4`
   `state_only` identity inertia, M3 adds tiny `1e-4` guarded predictive hooks
   on top of M2, and M4 tests reduced `semantic_lr_scale=0.1` under direct
-  `unroll_steps=2`. The aborted non-`500new` launch with `num_train_steps=500`, and the aborted
-  `m1b` launch without `semantic_lr_scale=0.0`, are not used for conclusions.
-  The former would only add about 50 steps after resume; the latter did not
-  isolate PaliGemma update pressure because the foundation profile defaults
-  semantic parameters to trainable. PaliGemma cotrain remains a likely requirement for final
+  `unroll_steps=2`. The aborted non-`500new` launch with `num_train_steps=500`, the aborted
+  `m1b` launch without a semantic LR override, and the invalid `m1c` launch with
+  `semantic_lr_scale=0.0` are not used for conclusions. The first would only add
+  about 50 steps after resume; the second did not isolate PaliGemma update
+  pressure because the foundation profile defaults semantic parameters to
+  trainable; the third failed argument validation because LR scales must be > 0. PaliGemma cotrain remains a likely requirement for final
   action adaptation; freezing it is a diagnostic isolation, not the preferred
   production recipe unless the cotrain paths fail. These runs are diagnostic;
   they do not resolve tracklet/proposal, ordinal, or the offline IsSameObject

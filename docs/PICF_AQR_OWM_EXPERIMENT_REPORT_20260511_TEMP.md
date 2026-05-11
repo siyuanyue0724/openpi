@@ -543,7 +543,7 @@ Machine:
   ssh -p 29776 root@36.139.225.68
 
 Session:
-  tmux attach -t a5_owm_10h_matrix500final_95ea69b
+  tmux attach -t a5_owm_10h_matrix500final2_95ea69b
 
 Common runtime:
   /root/openpi_runtimec_95ea69b
@@ -565,10 +565,10 @@ Common runtime:
 Runs:
 
 ```text
-M1 picf_a5_m1c_unroll2_semlr0_aux0_500new_20260512_95ea69b
-  PaliGemma present but semantic_lr_scale=0.0, unroll_steps=2, accum_steps=1, OWM aux losses 0.
+M1 picf_a5_m1c_unroll2_semlr1e6_aux0_500new_20260512_95ea69b
+  PaliGemma present but semantic_lr_scale=1e-6, unroll_steps=2, accum_steps=1, OWM aux losses 0.
   Question: does full all-scope unroll=2 collapse even without PaliGemma weight updates?
-  The code path has no --no-semantic-trainable flag under foundation profile, so lr_scale=0.0 is
+  The code path has no --no-semantic-trainable flag under foundation profile, so lr_scale=1e-6 is
   the clean isolation of semantic cotrain update pressure. If M1 collapses, the problem is
   not PG parameter update; it is all-scope/action-window pressure on identity.
 
@@ -584,7 +584,7 @@ M3 picf_a5_m3b_burnin4_semtrain_tinyaux_500new_20260512_95ea69b
   Question: after the identity path is protected by burn-in, do tiny predictive
   hooks immediately conflict, or can they be considered for later warmup?
 
-M4 picf_a5_m4b_unroll2_semtrain_semlr01_aux0_500new_20260512_95ea69b
+M4 picf_a5_m4b_unroll2_semtrain_semlr1e61_aux0_500new_20260512_95ea69b
   PaliGemma trainable, unroll_steps=2, accum_steps=1, semantic_lr_scale=0.1,
   OWM aux losses 0.
   Question: if M2 succeeds but direct unroll=2 fails, can reduced semantic LR
@@ -645,10 +645,10 @@ M4 stable while E1 failed:
 Tail commands:
 
 ```bash
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1c_unroll2_semlr0_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m1c_unroll2_semlr1e6_aux0_500new_20260512_95ea69b.train_tmux.log
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m2b_burnin4_semtrain_aux0_500new_20260512_95ea69b.train_tmux.log
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m3b_burnin4_semtrain_tinyaux_500new_20260512_95ea69b.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4b_unroll2_semtrain_semlr01_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_m4b_unroll2_semtrain_semlr1e61_aux0_500new_20260512_95ea69b.train_tmux.log
 ```
 
 Scope boundary:
