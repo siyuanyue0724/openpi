@@ -628,7 +628,10 @@ Current training profiles:
   reuse. Step 500 is stricter: A5 support-only rebounds to
   `aqr_same_role_support_overlap_max≈0.982` with
   `aqr_same_role_local_jaccard_max≈0.988`, proving the remaining issue is local
-  candidate-set reuse inside AQR/local refinement, not action or PV alone. See
+  candidate-set reuse inside AQR/local refinement, not action or PV alone.
+  Step 520 is decisive: A5 reaches `overlap≈0.999` and `local_jaccard=1.0`,
+  so the next repair must move anti-collapse pressure into role-wise local
+  candidate selection/ownership before support aggregation. See
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.

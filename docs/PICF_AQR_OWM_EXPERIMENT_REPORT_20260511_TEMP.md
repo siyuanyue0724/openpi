@@ -1905,3 +1905,33 @@ assignment contract:
   pressure and a warm-start-safe gradient;
   then rerun the no-action/support-only isolation before reintroducing PV/action.
 ```
+
+Step-520 A5 decisive failure:
+
+```text
+A5 support-only:
+  aqr_same_role_support_overlap_max = 0.9988
+  aqr_same_role_local_jaccard_max = 1.0000
+  posterior_recycle_rate = 1.1e-26
+  loss_total = 4.2220
+```
+
+Interpretation:
+
+```text
+This is a decisive rejection of the current supportfix objective as a complete
+solution. The cleanest no-action/support-only run collapses into identical
+local candidate sets by step 520. The failure occurs with recycle off, action
+off, PV off, cycle off, and predictive losses off. Therefore the unresolved
+mechanism is inside AQR/local candidate construction and role-wise assignment
+competition.
+
+Do not continue treating this as a scalar-weight tuning problem. The next
+correct repair is structural but still minimal:
+
+  add role-aware or same-role competitive candidate allocation before local
+  support aggregation;
+  make same-role anchors compete for candidate ownership/top-k slots, not only
+  penalize overlap after they have already selected the same candidates;
+  keep the no-action/support-only isolation as the first acceptance gate.
+```
