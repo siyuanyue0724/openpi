@@ -80,6 +80,14 @@ and token-level IsSameObject probing, not stronger cache, address inertia, JEPA,
 action pressure, or reintroduced hand-coded role/coverage heuristics. This is a
 probe-level result, not behavior acceptance.
 
+2026-05-13 signature-probe update: commit `c4ac7b3` adds read-only
+`anchor_debug` export of observation/posterior support and binding signatures,
+plus signature-aware same-object probe metrics. This does not change train or
+serve behavior unless anchor debug export is enabled. The active A5 diagnostic
+is recorded in the experiment report and tests whether the deployed
+`binding_signature_proj` subspace carries same-object information before any
+new loss or identity-inertia change is considered.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

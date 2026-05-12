@@ -4863,3 +4863,65 @@ candidate, but not enough assignment diversity to allocate several same-role
 object slots. Losses that preserve identity (`address`, `cache`, JEPA) should
 only be trusted after the assignment stage can produce multiple differentiated
 same-role candidates.
+
+### A5 Signature-Level Probe Deployment
+
+The first next-stage deployment is A5 signature-level probing. This is a
+diagnostic-only code path:
+
+```text
+commit:
+  c4ac7b3 Export binding signatures for same-object probe
+
+machine:
+  A5 / ssh -p 29776 root@36.139.225.68
+
+base:
+  /mnt/calvin_eval_logs/picf_a5_signature_probe_c4ac7b3_20260513_011838
+
+server tmux:
+  a5_sig_serve_c4ac7b3
+  port 8016
+  device cuda:1
+
+eval tmux:
+  a5_sig_eval_c4ac7b3
+  num_sequences=1
+
+checkpoint:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be
+```
+
+The deployed code exports these extra read-only debug fields:
+
+```text
+anchor_debug.observation.support_signature
+anchor_debug.observation.binding_signature
+anchor_debug.posterior.{visual,temporal,point,pg,tactile,tracklet,proposal}_signature
+anchor_debug.posterior.support_signature
+anchor_debug.posterior.binding_signature
+```
+
+This is not a new loss and not a runtime action-path change. It only exposes the
+already-computed support/binding signatures so the probe can test whether the
+object-binding-inspired pairwise subspace is actually separable in the current
+checkpoint.
+
+Decision rule:
+
+```text
+binding_signature_cos_auc >= 0.70:
+  the pairwise binding subspace contains usable same-object information. The
+  next engineering step can be a coefficient/reader audit that uses this
+  subspace more directly, still without opening JEPA/support-pred losses.
+
+binding_signature_cos_auc < 0.70 while geometry_auc remains high:
+  current exported binding signatures are not enough. Do not increase identity
+  inertia. Move to token-level ViT/V-JEPA/PG probing or activate real
+  tracklet/proposal evidence.
+```
+
+This follows the object-binding paper's claim that IsSameObject is best treated
+as a pairwise/quadratic relation in representation space, not as a pointwise
+anchor class label. It also avoids reviving the rejected role-competition or
+coverage-seed heuristics.
