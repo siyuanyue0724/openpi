@@ -5984,3 +5984,158 @@ Post-cleanup check:
 No May-or-later numeric checkpoint or tmp_* checkpoint payloads remain under:
   /mnt/checkpoints/picf_core/picf_core
 ```
+
+## 2026-05-13 2-3 Hour Causal Check: Local Signature Rerank
+
+### Question
+
+The interrupted A5/A7 run suggested:
+
+```text
+local_refinement_binding_weight=0.25:
+  better late local duplicate metrics than 0.50.
+
+local_refinement_binding_weight=0.50:
+  stronger early duplicate suppression, but late same-role overlap rebounded.
+```
+
+Because those runs stopped early due to `/mnt` exhaustion, the next experiment
+must answer a narrower causal question:
+
+```text
+Does signature-guided local candidate reranking improve local duplicate
+suppression relative to the same profile with the rerank disabled?
+```
+
+This is not a new architecture change and not a new loss. It tests whether the
+same-object subspace already decoded by `binding_signature_proj` is useful when
+applied to the local refinement candidate ranking.
+
+### Mathematical Rationale
+
+The local refiner builds candidate sets:
+
+```math
+\Omega_j =
+TopK(p_j^{visual})
+\cup
+TopK(p_j^{temporal})
+\cup
+TopK(p_j^{point})
+\cup
+TopK(p_j^{tracklet})
+\cup
+TopK(p_j^{proposal})
+```
+
+The observed failure is not that local evidence is absent. It is that different
+same-role anchors can select overlapping local candidate sets:
+
+```math
+|\Omega_i \cap \Omega_j| / |\Omega_i \cup \Omega_j|
+```
+
+can remain high even when action loss decreases.
+
+The repair under test modifies only the local candidate distribution:
+
+```math
+\tilde p_{j,k}
+\propto
+p_{j,k}
+\lambda_{local-bind}
+\langle
+  W_b q_j,\ W_b z_k
+\rangle
+```
+
+where `W_b` is the existing projected same-object subspace. This is coherent
+with the object-binding probe result:
+
+```text
+binding_signature AUC is high, but duplicate local candidate fraction remains
+high.
+```
+
+So the hypothesis is:
+
+```text
+the representation has separability, but the local readout is not using it
+strongly enough.
+```
+
+A higher weight is not automatically better. If `lambda_local-bind` is too high,
+anchors can chase the same dominant same-object signature and reduce local
+diversity. The interrupted A7 run is consistent with that failure mode.
+
+### Design
+
+Use the preserved full PICF baseline checkpoint as the common start point:
+
+```text
+/mnt/checkpoints/picf_core/picf_core/
+  picf_v22_full_picf_a6_30000_ckpt2500_print100_p192_20260424_r2/10000
+```
+
+Use the current May template args for the guarded MVTrack profile, with:
+
+```text
+action_prefix_stopgrad = true
+burnin_steps = 4
+unroll_steps = 1
+lambda_slot_jepa = 0
+lambda_support_pred = 0
+lambda_binding_consistency = 0
+lambda_aqr_denoising = 0
+local_refinement_weight = 0.10
+save_interval = 100
+keep_last_checkpoints = 1
+num_train_steps = 10300
+```
+
+Two runs differ only in `local_refinement_binding_weight`:
+
+```text
+A5 control:
+  local_refinement_binding_weight = 0.0
+  run = picf_a5_siglocal000_full10000_to10300_20260513_2a09b12
+
+A7 test:
+  local_refinement_binding_weight = 0.25
+  run = picf_a7_siglocal025_full10000_to10300_20260513_2a09b12
+```
+
+### Acceptance Criteria
+
+The test run is better only if it satisfies all of:
+
+```text
+1. aqr_same_role_local_true_overlap_max lower than control.
+2. aqr_same_role_local_jaccard_max lower than control.
+3. aqr_same_role_support_overlap_max not worse by more than about 0.1.
+4. loss_action_default_equiv not worse by more than about 10%.
+5. posterior_recycle_rate does not rise toward saturation.
+6. post-run same-object probe remains high-AUC.
+```
+
+If A7 improves local overlap without action/recycle degradation:
+
+```text
+promote local_refinement_binding_weight=0.25 as the next maintained local
+candidate profile.
+```
+
+If A7 does not improve over A5:
+
+```text
+do not keep pushing local rerank weight. Move to dataflow-level evidence:
+tracklet/proposal activation or local assignment visualization.
+```
+
+If A7 worsens same-role support overlap:
+
+```text
+the 0.25 structural prior is already too strong from this checkpoint; keep the
+binding-signature term in posterior binding only and disable it inside local
+refinement by default.
+```

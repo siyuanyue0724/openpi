@@ -3834,6 +3834,15 @@ Storage cleanup:
   their metrics/logs remain as diagnostic records. See the experiment report for
   the exact cleanup policy and caveats.
 
+Next causal check:
+  run a 2-3 hour paired experiment from the preserved full PICF 10000-step
+  checkpoint. A5 disables local signature reranking
+  (`local_refinement_binding_weight=0.0`); A7 enables the moderate setting
+  (`0.25`). All other guarded MVTrack settings match. This directly tests
+  whether the projected same-object subspace should be used inside local
+  refinement, without adding a new loss or changing the posterior/action
+  contract.
+
 Important guard:
   this is not a new loss, not a hard cross-anchor ownership rule, and not a
   claim that ordinal/fourth-object grounding is solved. It is a structural
