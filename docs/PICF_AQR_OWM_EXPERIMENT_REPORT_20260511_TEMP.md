@@ -2718,3 +2718,267 @@ Current clean next steps:
    Action loss alone is not sufficient because the model can reduce action loss
    while collapsing object support.
 ```
+
+---
+
+## 2026-05-12 Next Experiment Plan After Production Cleanup
+
+Current verified code state:
+
+```text
+HEAD = 145654a
+Rejected role/coverage local candidate heuristics are removed from active code.
+verify_picf_owm_contract.py = PASS
+picf_owm_strict_diagnose.py --fail-on-fail = PASS
+picf_owm_dataflow_trace.py --fail-on-fail = PASS
+picf_owm_mvtrack_deep_audit.py --fail-on-fail = PASS
+selected pipeline/training pytest = PASS
+```
+
+Primary diagnosis:
+
+```text
+The current failure is not explained by action alone, PV alone, recycle
+saturation alone, role competition absence, coverage priors, or stronger
+binding-signature weights. Multiple branches collapse through the same late
+failure mode:
+
+  aqr_same_role_local_jaccard_max -> 1.0
+  aqr_same_role_support_overlap_max -> 0.99+
+
+This indicates that same-role AQR rows become nearly identical before local
+refinement can preserve distinct evidence. Once this happens, candidate
+selection heuristics cannot recover identity.
+```
+
+Mathematical model of the failure:
+
+```math
+p_{j,i}^{(m)}
+  =
+  softmax_i(q_j^T k_i^{(m)} + b_{j,i}^{(m)})
+
+\Omega_j
+  =
+  TopK_i(p_{j,i}^{(m)})
+
+Collapse condition:
+
+  p_{j,\cdot}^{(m)} \approx p_{k,\cdot}^{(m)}
+  for same-role j,k
+
+then
+
+  Jaccard(\Omega_j,\Omega_k) \to 1
+
+and any post-hoc candidate multiplier h(j,i) gives
+
+  TopK(p_{j,i} h(j,i))
+
+without creating new object information if p_{j,\cdot} and p_{k,\cdot} are
+already indistinguishable.
+```
+
+Therefore, the next experiments must test whether distinct object information
+exists before/inside AQR, not add more post-hoc local candidate heuristics.
+
+### Experiment 1: Clean staged cotrain baseline
+
+Purpose:
+
+```text
+Test whether the cleaned production path can keep anchor supports distinct when
+using the previously healthiest training shape:
+
+  action_prefix_stopgrad warmup
+  conservative support/geometry diversity
+  moderate binding_signature
+  no strong address inertia
+  predictive losses still zero
+```
+
+Run shape:
+
+```text
+resume from the common 450-step anchor checkpoint
+unroll_steps = 1
+burnin_steps = 4
+burnin_mode = state_only
+foundation backbones on
+freeze Sonata / V-JEPA / AnyTouch
+train PaliGemma if memory allows
+lambda_slot_jepa = 0
+lambda_support_pred = 0
+lambda_binding_consistency = 0
+lambda_aqr_denoising = 0
+```
+
+Acceptance gates:
+
+```text
+At 500-750 diagnostic steps:
+  aqr_same_role_local_jaccard_max should not stay > 0.98 for 3 logs.
+  aqr_same_role_support_overlap_max should not stay > 0.95 for 3 logs.
+  posterior_recycle_rate should not saturate near 1.0.
+  grad_norm must stay finite.
+  loss_action_default_equiv may fall, but it cannot override anchor-health fail.
+```
+
+Interpretation:
+
+```text
+Pass:
+  cleaned production path is viable for a longer 2500-step diagnostic.
+
+Fail:
+  local collapse is upstream of current local refinement and must be diagnosed
+  with an IsSameObject probe or real tracklet/proposal evidence.
+```
+
+### Experiment 2: Direct cotrain control
+
+Purpose:
+
+```text
+Test whether staged warmup is actually necessary or whether action gradients can
+co-train without destroying the object-binding subspace.
+```
+
+Only difference from Experiment 1:
+
+```text
+action_prefix_stopgrad disabled from the beginning
+same resume / same data / same batch regime
+```
+
+Critical comparison:
+
+```text
+If direct cotrain reduces loss_action_default_equiv faster but local_jaccard
+goes to 1.0 earlier, action is not the sole cause but it is a destabilizer.
+
+If both staged and direct collapse at similar step, the issue is upstream AQR
+evidence separability.
+
+If direct remains healthy, staged warmup can be shortened or removed.
+```
+
+### Experiment 3: Offline IsSameObject probe
+
+Purpose:
+
+```text
+Follow the object-binding ViT result directly: test whether pretrained
+V-JEPA/static/wrist tokens encode pairwise same-object information before we
+ask AQR to bind them.
+```
+
+Weak labels, no dataset annotation change:
+
+```text
+positive pairs:
+  same high-confidence posterior slot across adjacent frames
+  close point-cloud neighborhood with consistent motion
+  same contact neighborhood
+  high PG support overlap
+
+negative pairs:
+  different high-confidence posterior slots
+  far point neighborhoods
+  incompatible contact/role support
+```
+
+Probe:
+
+```math
+score(i,k) = z_i^T W z_k
+
+Metrics:
+  AUC / accuracy / calibration by layer, view, and modality.
+```
+
+Decision:
+
+```text
+Good probe:
+  train or freeze a small pairwise binding subspace and feed it into binding
+  logits as evidence.
+
+Bad probe:
+  do not keep increasing binding weights. The tokens do not expose enough
+  object signal under current data/backbone path.
+```
+
+### Experiment 4: Real tracklet/proposal dataflow activation
+
+Purpose:
+
+```text
+Test the MVTrack branch honestly. Current code supports tracklet/proposal
+fields, but if CALVIN episodes do not contain those fields, the branch is a
+safe no-op and must not be claimed as active.
+```
+
+Minimal valid test:
+
+```text
+Prepare a small subset with tracklet_xy / visibility / confidence / ids /
+view_ids / age, or proposal_centers_xy / boxes / objectness.
+
+Run the same clean staged profile.
+Require:
+  owm_tracklet_tokens > 0 or owm_proposal_tokens > 0
+  aqr_tracklet_support_entropy or aqr_proposal_support_entropy logged
+  same-role local_jaccard improves without action loss regression
+```
+
+Decision:
+
+```text
+If tracklet/proposal data improves anchor health, this is the clean path forward.
+If not, tracklet/proposal should remain optional evidence, not default claims.
+```
+
+### Experiment 5: Predictive auxiliary delayed activation
+
+Purpose:
+
+```text
+Do not open slot-JEPA/support/binding losses during unstable identity formation.
+Only test them after Experiment 1 passes anchor-health gates.
+```
+
+Schedule:
+
+```text
+steps 0-750:
+  all predictive lambdas = 0
+
+after anchor health passes:
+  lambda_slot_jepa = 1e-4
+  lambda_support_pred = 1e-4
+  lambda_binding_consistency = 1e-4
+
+hard stop if:
+  local_jaccard rises above 0.98,
+  recycle saturates,
+  or loss_slot_jepa becomes monotonic divergent.
+```
+
+Rationale:
+
+```text
+Predictive losses are mathematically valid only when slot identity is stable.
+Before that, even permutation-tolerant matching can amplify wrong latent
+assignments if all same-role supports are already identical.
+```
+
+Final priority order:
+
+```text
+1. Clean staged cotrain baseline.
+2. Direct cotrain control.
+3. Offline IsSameObject probe.
+4. Real tracklet/proposal activation.
+5. Delayed predictive auxiliary cotrain only after anchor health is stable.
+```
