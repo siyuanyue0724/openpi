@@ -4976,6 +4976,14 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         mapg_support_div_margin_posterior=float(getattr(args, "mapg_support_div_margin_posterior", defaults.mapg_support_div_margin_posterior)),
         mapg_support_div_sigma_visual_patches=float(getattr(args, "mapg_support_div_sigma_visual_patches", defaults.mapg_support_div_sigma_visual_patches)),
         mapg_support_div_sigma_point_m=float(getattr(args, "mapg_support_div_sigma_point_m", defaults.mapg_support_div_sigma_point_m)),
+        mapg_support_div_direct_visual_weight=float(
+            getattr(args, "mapg_support_div_direct_visual_weight", defaults.mapg_support_div_direct_visual_weight)
+        ),
+        mapg_support_div_local_candidate_weight=float(
+            getattr(args, "mapg_support_div_local_candidate_weight", defaults.mapg_support_div_local_candidate_weight)
+        ),
+        mapg_support_div_local_margin=float(getattr(args, "mapg_support_div_local_margin", defaults.mapg_support_div_local_margin)),
+        mapg_support_div_tail_topk=int(getattr(args, "mapg_support_div_tail_topk", defaults.mapg_support_div_tail_topk)),
         mapg_geometry_diversity_margin=float(getattr(args, "mapg_geometry_diversity_margin", defaults.mapg_geometry_diversity_margin)),
         mapg_geometry_diversity_jitter_m=float(getattr(args, "mapg_geometry_diversity_jitter_m", defaults.mapg_geometry_diversity_jitter_m)),
     )
@@ -6543,6 +6551,10 @@ def main() -> None:
     parser.add_argument("--mapg-support-div-margin-posterior", type=float, default=_LOSS_DEFAULTS.mapg_support_div_margin_posterior)
     parser.add_argument("--mapg-support-div-sigma-visual-patches", type=float, default=_LOSS_DEFAULTS.mapg_support_div_sigma_visual_patches)
     parser.add_argument("--mapg-support-div-sigma-point-m", type=float, default=_LOSS_DEFAULTS.mapg_support_div_sigma_point_m)
+    parser.add_argument("--mapg-support-div-direct-visual-weight", type=float, default=_LOSS_DEFAULTS.mapg_support_div_direct_visual_weight)
+    parser.add_argument("--mapg-support-div-local-candidate-weight", type=float, default=_LOSS_DEFAULTS.mapg_support_div_local_candidate_weight)
+    parser.add_argument("--mapg-support-div-local-margin", type=float, default=_LOSS_DEFAULTS.mapg_support_div_local_margin)
+    parser.add_argument("--mapg-support-div-tail-topk", type=int, default=_LOSS_DEFAULTS.mapg_support_div_tail_topk)
     parser.add_argument("--mapg-geometry-diversity-margin", type=float, default=_LOSS_DEFAULTS.mapg_geometry_diversity_margin)
     parser.add_argument("--mapg-geometry-diversity-jitter-m", type=float, default=_LOSS_DEFAULTS.mapg_geometry_diversity_jitter_m)
     parser.add_argument("--enable-aux-budgeting", dest="enable_aux_budgeting", action="store_true")

@@ -203,6 +203,10 @@ def _base_args() -> argparse.Namespace:
         mapg_support_div_margin_posterior=0.10,
         mapg_support_div_sigma_visual_patches=1.0,
         mapg_support_div_sigma_point_m=0.04,
+        mapg_support_div_direct_visual_weight=1.0,
+        mapg_support_div_local_candidate_weight=0.5,
+        mapg_support_div_local_margin=0.10,
+        mapg_support_div_tail_topk=4,
         mapg_geometry_diversity_margin=1.0,
         mapg_geometry_diversity_jitter_m=0.005,
         tau_pv=0.07,
@@ -2061,6 +2065,10 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     args.mapg_support_div_margin_posterior = 0.12
     args.mapg_support_div_sigma_visual_patches = 1.3
     args.mapg_support_div_sigma_point_m = 0.05
+    args.mapg_support_div_direct_visual_weight = 1.7
+    args.mapg_support_div_local_candidate_weight = 0.8
+    args.mapg_support_div_local_margin = 0.2
+    args.mapg_support_div_tail_topk = 3
     args.mapg_geometry_diversity_margin = 1.2
     args.mapg_geometry_diversity_jitter_m = 0.006
     _MODULE._normalize_train_args(args)
@@ -2116,6 +2124,10 @@ def test_build_model_and_loss_config_propagate_mapg_knobs(tmp_path: Path, monkey
     assert loss_config.mapg_support_div_margin_posterior == pytest.approx(0.12)
     assert loss_config.mapg_support_div_sigma_visual_patches == pytest.approx(1.3)
     assert loss_config.mapg_support_div_sigma_point_m == pytest.approx(0.05)
+    assert loss_config.mapg_support_div_direct_visual_weight == pytest.approx(1.7)
+    assert loss_config.mapg_support_div_local_candidate_weight == pytest.approx(0.8)
+    assert loss_config.mapg_support_div_local_margin == pytest.approx(0.2)
+    assert loss_config.mapg_support_div_tail_topk == 3
     assert loss_config.mapg_geometry_diversity_margin == pytest.approx(1.2)
     assert loss_config.mapg_geometry_diversity_jitter_m == pytest.approx(0.006)
 

@@ -792,6 +792,65 @@ def test_mapg_support_diversity_low_confidence_cannot_hide_active_collapse() -> 
     assert loss > 0.1
 
 
+def test_mapg_support_diversity_penalizes_same_local_candidate_reuse() -> None:
+    dtype = torch.float32
+    visual_priors = torch.tensor(
+        [
+            [0.95, 0.05, 0.00, 0.00],
+            [0.05, 0.95, 0.00, 0.00],
+            [0.00, 0.00, 0.05, 0.95],
+        ],
+        dtype=dtype,
+    )
+    local_priors = torch.tensor(
+        [
+            [0.70, 0.30],
+            [0.30, 0.70],
+            [0.50, 0.50],
+        ],
+        dtype=dtype,
+    )
+
+    def make_state(local_indices: torch.Tensor) -> SimpleNamespace:
+        anchor_count = int(visual_priors.shape[0])
+        graph = PicfAnchorPriorGraphState(
+            pg_priors=None,
+            visual_priors=visual_priors,
+            point_priors=None,
+            tactile_priors=None,
+            posterior_priors=None,
+            anchor_tokens=torch.zeros((anchor_count, 4), dtype=dtype),
+            anchor_roles=torch.zeros((anchor_count,), dtype=torch.long),
+            anchor_scores=torch.ones((anchor_count,), dtype=dtype),
+            anchor_confidence=torch.ones((anchor_count,), dtype=dtype),
+            anchor_x=torch.zeros((anchor_count, 3), dtype=dtype),
+            anchor_S=torch.eye(3, dtype=dtype).repeat(anchor_count, 1, 1),
+            geometry_valid=torch.ones((anchor_count,), dtype=torch.bool),
+            obs_slot_assignment=torch.eye(anchor_count, dtype=dtype),
+            task_assignment=None,
+            modality_confidence=torch.ones((anchor_count, 5), dtype=dtype),
+            valid=torch.ones((anchor_count,), dtype=torch.bool),
+            local_priors=local_priors,
+            local_token_indices=local_indices,
+        )
+        return SimpleNamespace(anchor_prior_graph=graph, token_field=SimpleNamespace(projective_geometry=None, point_projectable_mask=None))
+
+    reused_indices = torch.tensor([[10, 11], [10, 11], [12, 13]], dtype=torch.long)
+    disjoint_indices = torch.tensor([[10, 11], [14, 15], [12, 13]], dtype=torch.long)
+    config = PicfTransitionLossConfig(
+        mapg_support_div_local_candidate_weight=1.0,
+        mapg_support_div_local_margin=0.10,
+    )
+    reference = torch.zeros((), dtype=dtype)
+
+    reused_loss = _mapg_support_overlap_loss(make_state(reused_indices), config=config, reference=reference, eps=1e-6)
+    disjoint_loss = _mapg_support_overlap_loss(make_state(disjoint_indices), config=config, reference=reference, eps=1e-6)
+
+    assert torch.isfinite(reused_loss)
+    assert torch.isfinite(disjoint_loss)
+    assert reused_loss > disjoint_loss + 0.1
+
+
 def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_unavailable(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]

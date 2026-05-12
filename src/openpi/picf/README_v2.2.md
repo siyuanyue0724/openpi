@@ -609,6 +609,13 @@ Current training profiles:
   support-diversity is a useful but insufficient proxy; the next implementation
   should directly optimize same-role visual overlap tails and soft local
   candidate-set competition before action/PV cotrain is reintroduced.
+- 2026-05-12 health-aligned support patch: `loss_mapg_support_diversity` now
+  includes the runtime health metric's normalized same-role visual-overlap tail
+  and a differentiable local-candidate reuse penalty using
+  `local_token_indices/local_priors`. This is deliberately not a new module or
+  new loss family; it aligns the existing anti-collapse objective with the
+  observed failure. The first validation remains no-action isolation before
+  PV/action are reintroduced.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

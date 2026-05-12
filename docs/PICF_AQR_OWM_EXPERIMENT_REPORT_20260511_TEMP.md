@@ -1579,3 +1579,113 @@ The current supported root cause is:
   same-role specialization requires a health-metric-aligned role-wise competition
   objective; current support-diversity is a useful but insufficient proxy.
 ```
+
+### Health-aligned support objective patch, 2026-05-12 13:55 CST
+
+The next implementation keeps the existing `loss_mapg_support_diversity` family
+and changes its internal math. This is intentionally not a new auxiliary module:
+the failure was inside the same-role anti-collapse objective, so the correction
+belongs in that objective.
+
+Implemented changes:
+
+```text
+1. direct same-role visual overlap tail
+   Adds a penalty on the same normalized visual-prior overlap used by the runtime
+   health metric `aqr_same_role_support_overlap_max`.
+
+2. differentiable local candidate reuse penalty
+   Uses `graph.local_token_indices` and `graph.local_priors` to penalize same-role
+   anchors placing mass on the same local candidate ids. The term uses a
+   Bhattacharyya-style same-candidate overlap, so it remains high when two
+   anchors reuse the same local set with different weights. This targets the
+   observed failure where local Jaccard reached 1.0 while true local overlap was
+   only modest.
+
+3. configurable but conservative weights
+   The new terms live under the existing support-diversity lambda:
+     mapg_support_div_direct_visual_weight = 1.0
+     mapg_support_div_local_candidate_weight = 0.5
+     mapg_support_div_local_margin = 0.10
+     mapg_support_div_tail_topk = 4
+
+4. no action/PV reintroduction yet
+   The first validation must repeat the no-action isolation. If the loss cannot
+   keep overlap healthy without action, schedule changes cannot be trusted.
+```
+
+Mathematical form:
+
+```text
+For normalized visual priors p_i and p_j:
+
+  O_visual(i,j) =
+    <p_i, p_j> / sqrt(<p_i,p_i><p_j,p_j>)
+
+  L_visual_tail =
+    mean_topk_same_role relu(O_visual - margin_visual)^2
+
+For local candidate rows l_i, l_j and candidate ids c_i, c_j:
+
+  O_local(i,j) =
+    sum_{a,b: c_i[a] = c_j[b]} sqrt(l_i[a] l_j[b])
+
+  L_local =
+    weighted_same_role_mean relu(O_local - margin_local)^2
+    plus top-k same-role tail pressure
+
+The final support-diversity loss is:
+
+  L_support =
+    L_existing_kernel_proxy
+    + w_visual L_visual_tail
+    + w_local L_local
+```
+
+Why this is not a patchwork fix:
+
+```text
+The change does not add a new head, modality, teacher, or loss family. It only
+aligns the already-existing anti-collapse objective with the exact health
+metrics that exposed the failure. This preserves the belief-state design:
+evidence routing remains in AQR, posterior remains authoritative, and action
+remains disabled for first validation.
+```
+
+Local validation:
+
+```text
+py_compile:
+  training.py, picf_core_train.py, training_test.py, picf_core_train_test.py
+
+pytest:
+  PYTHONPATH=src pytest -q src/openpi/picf/core/training_test.py -k support_diversity
+    3 passed
+  PYTHONPATH=src pytest -q scripts/picf_core_train_test.py -k 'loss_config or mapg'
+    2 passed
+
+verifiers:
+  PYTHONPATH=src python scripts/verify_picf_owm_contract.py
+    PASS
+  PYTHONPATH=src python scripts/picf_owm_strict_diagnose.py --fail-on-fail
+    PASS
+```
+
+Next validation runs:
+
+```text
+E-fix-1:
+  repeat A5 no-action/support-only from the same 450-step resume.
+  Acceptance:
+    overlap must not rebound to >0.95 by step 750.
+    local_jaccard should fall materially below 1.0.
+    effective_anchor_count should remain >20.
+    recycle should remain near 0.
+
+E-fix-2:
+  repeat A7 no-action with anchor/PV retained.
+  Acceptance:
+    if E-fix-1 is healthy but E-fix-2 collapses, PV/cycle pressure remains a
+    conflict and needs staged reintroduction.
+    if both are healthy, proceed to small-action reintroduction.
+```

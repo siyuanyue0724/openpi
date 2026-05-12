@@ -87,6 +87,10 @@ class PicfTransitionLossConfig:
     mapg_support_div_margin_posterior: float = 0.10
     mapg_support_div_sigma_visual_patches: float = 1.0
     mapg_support_div_sigma_point_m: float = 0.04
+    mapg_support_div_direct_visual_weight: float = 1.0
+    mapg_support_div_local_candidate_weight: float = 0.5
+    mapg_support_div_local_margin: float = 0.10
+    mapg_support_div_tail_topk: int = 4
     mapg_geometry_diversity_margin: float = 1.0
     mapg_geometry_diversity_jitter_m: float = 0.005
 
@@ -1327,32 +1331,113 @@ def _mapg_support_overlap_loss(
     if not bool((base_weight.sum() > eps).item()):
         return _zero_weight_sum(reference, graph.anchor_tokens)
 
+    usage_pair = usage[:, None] * usage[None, :]
+    confidence_floor = torch.full_like(confidence, 0.25)
+    confidence_weight = torch.maximum(confidence, confidence_floor)
+    confidence_weight = torch.clamp(confidence_weight, min=0.0, max=1.0)
+    active_pair_mask = pair_mask & (usage_pair > eps)
+    tail_topk = max(1, int(config.mapg_support_div_tail_topk))
+
+    def _tail_mean(penalty: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        values = penalty[mask]
+        if values.numel() == 0:
+            return _zero_weight_sum(reference, penalty)
+        topk = min(tail_topk, int(values.numel()))
+        return torch.topk(values, k=topk).values.mean()
+
+    def _weighted_pair_mean(penalty: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+        weights = usage_pair * confidence_weight[:, None] * confidence_weight[None, :]
+        weights = torch.where(mask, weights, torch.zeros_like(weights))
+        if not bool((weights.sum() > eps).item()):
+            return _zero_weight_sum(reference, penalty)
+        return (weights * penalty).sum() / torch.clamp(weights.sum(), min=eps)
+
+    def _direct_visual_overlap_loss() -> torch.Tensor | None:
+        priors = graph.visual_priors
+        if priors is None or priors.numel() == 0:
+            return None
+        priors_ref = torch.clamp(
+            torch.nan_to_num(priors.to(device=reference.device, dtype=reference.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+            min=0.0,
+        )
+        valid = priors_ref.sum(dim=-1) > eps
+        valid_pair = valid[:, None] & valid[None, :] & active_pair_mask
+        if not bool(valid_pair.any().item()):
+            return None
+        norm = priors_ref / torch.clamp(priors_ref.sum(dim=-1, keepdim=True), min=eps)
+        overlap = norm @ norm.T
+        diag = torch.clamp(torch.diag(overlap), min=eps)
+        overlap = overlap / torch.sqrt(torch.clamp(diag[:, None] * diag[None, :], min=eps))
+        penalty = fn.relu(overlap - float(config.mapg_support_div_margin_visual)).pow(2)
+        return (_weighted_pair_mean(penalty, valid_pair) + _tail_mean(penalty, valid_pair)) / 2.0
+
+    def _local_candidate_overlap_loss() -> torch.Tensor | None:
+        local_priors = graph.local_priors
+        local_indices = graph.local_token_indices
+        if (
+            local_priors is None
+            or local_indices is None
+            or local_priors.numel() == 0
+            or local_indices.shape != local_priors.shape
+        ):
+            return None
+        priors_ref = torch.clamp(
+            torch.nan_to_num(local_priors.to(device=reference.device, dtype=reference.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+            min=0.0,
+        )
+        priors_ref = priors_ref / torch.clamp(priors_ref.sum(dim=-1, keepdim=True), min=eps)
+        idx = local_indices.to(device=reference.device, dtype=torch.long)
+        penalties: list[torch.Tensor] = []
+        weights: list[torch.Tensor] = []
+        anchor_count = int(priors_ref.shape[0])
+        for i in range(anchor_count):
+            for j in range(i + 1, anchor_count):
+                if not bool(active_pair_mask[i, j].item()):
+                    continue
+                same = idx[i, :, None] == idx[j, None, :]
+                if not bool(same.any().item()):
+                    penalties.append(_zero_weight_sum(reference, priors_ref))
+                    weights.append(usage_pair[i, j] * confidence_weight[i] * confidence_weight[j])
+                    continue
+                # Bhattacharyya-style same-candidate overlap is a differentiable
+                # proxy for local candidate-set reuse. Unlike raw true-dot, it
+                # remains high when two anchors reuse the same local candidates
+                # with slightly different weights.
+                overlap = (
+                    torch.sqrt(torch.clamp(priors_ref[i, :, None] * priors_ref[j, None, :], min=0.0))
+                    * same.to(dtype=reference.dtype)
+                ).sum()
+                penalties.append(fn.relu(overlap - float(config.mapg_support_div_local_margin)).pow(2))
+                weights.append(usage_pair[i, j] * confidence_weight[i] * confidence_weight[j])
+        if not penalties:
+            return None
+        penalty_vec = torch.stack(penalties)
+        weight_vec = torch.clamp(torch.stack(weights).to(device=reference.device, dtype=reference.dtype), min=0.0)
+        if not bool((weight_vec.sum() > eps).item()):
+            return _tail_mean(penalty_vec, torch.ones_like(penalty_vec, dtype=torch.bool))
+        weighted = (weight_vec * penalty_vec).sum() / torch.clamp(weight_vec.sum(), min=eps)
+        topk = min(tail_topk, int(penalty_vec.numel()))
+        tail = torch.topk(penalty_vec, k=topk).values.mean()
+        return (weighted + tail) / 2.0
+
     def _one_modality(priors: torch.Tensor | None, overlap: torch.Tensor | None, margin: float) -> torch.Tensor | None:
         if priors is None or priors.numel() == 0 or overlap is None:
             return None
         priors_ref = priors.to(device=reference.device, dtype=reference.dtype)
         valid = priors_ref.sum(dim=-1) > eps
         valid_pair = valid[:, None] & valid[None, :] & pair_mask
-        usage_pair = usage[:, None] * usage[None, :]
-        # Confidence should scale the pressure, but it must not let collapsed active
-        # anchors opt out of the anti-overlap objective by lowering confidence.
-        confidence_floor = torch.full_like(confidence, 0.25)
-        confidence_weight = torch.maximum(confidence, confidence_floor)
-        confidence_weight = torch.clamp(confidence_weight, min=0.0, max=1.0)
         weighted_pair = usage_pair * confidence_weight[:, None] * confidence_weight[None, :]
         weighted_pair = torch.where(valid_pair, weighted_pair, torch.zeros_like(weighted_pair))
         active_pair = torch.where(valid_pair, usage_pair, torch.zeros_like(usage_pair))
-        active_pair_mask = valid_pair & (usage_pair > eps)
-        if not bool((active_pair.sum() > eps).item()) or not bool(active_pair_mask.any().item()):
+        active_mask = valid_pair & (usage_pair > eps)
+        if not bool((active_pair.sum() > eps).item()) or not bool(active_mask.any().item()):
             return None
         penalty = fn.relu(overlap.to(device=reference.device, dtype=reference.dtype) - float(margin)).pow(2)
         weighted_mean = (weighted_pair * penalty).sum() / torch.clamp(weighted_pair.sum(), min=eps)
         active_mean = (active_pair * penalty).sum() / torch.clamp(active_pair.sum(), min=eps)
         # Keep the averaged objective aligned with the health metric, which is a
         # worst-pair same-role overlap. Top-k is less brittle than a single max.
-        active_penalty = penalty[active_pair_mask]
-        topk = min(4, int(active_penalty.numel()))
-        tail_mean = torch.topk(active_penalty, k=topk).values.mean()
+        tail_mean = _tail_mean(penalty, active_mask)
         return (weighted_mean + active_mean + tail_mean) / 3.0
 
     losses = []
@@ -1400,7 +1485,15 @@ def _mapg_support_overlap_loss(
     losses = [loss for loss in losses if loss is not None]
     if not losses:
         return _zero_weight_sum(reference, graph.anchor_tokens, graph.visual_priors)
-    return torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
+    proxy_loss = torch.stack(losses).mean().to(device=reference.device, dtype=reference.dtype)
+    direct_visual = _direct_visual_overlap_loss()
+    local_candidate = _local_candidate_overlap_loss()
+    total = proxy_loss
+    if direct_visual is not None:
+        total = total + (float(config.mapg_support_div_direct_visual_weight) * direct_visual)
+    if local_candidate is not None:
+        total = total + (float(config.mapg_support_div_local_candidate_weight) * local_candidate)
+    return total.to(device=reference.device, dtype=reference.dtype)
 
 
 def _mapg_geometry_diversity_loss(
