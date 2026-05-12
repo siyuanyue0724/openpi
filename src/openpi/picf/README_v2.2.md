@@ -746,6 +746,16 @@ Current training profiles:
   experiments should increase stable-slot coverage and then test controlled
   action pressure. Do not add a raw identity-switch loss or open predictive
   OWM losses yet.
+- 2026-05-12 three-line follow-up deployment: A5 is now assigned to CALVIN
+  anchor/prediction visualization from the stable-id checkpoint, while A7 runs
+  the stable-coverage continuation from the local top-k 8 / residual 0.10
+  branch. This is paired with a paper-grounded review of 2025+ object-binding
+  and VLA tracking work. The immediate hypothesis is that stable slots are
+  reliable when they exist, but coverage is too low; the correct next fix is
+  support/signature same-object evidence and real tracklet/proposal dataflow,
+  not a raw identity-switch loss or early predictive auxiliary pressure. See
+  `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md` section
+  `2026-05-12 Three-Line Follow-Up`.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

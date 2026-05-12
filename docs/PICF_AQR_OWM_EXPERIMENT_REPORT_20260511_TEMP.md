@@ -3985,3 +3985,203 @@ Do not increase address weight first:
   address is an inertia term; increasing it before stable-slot coverage grows
   risks lock-in.
 ```
+
+## 2026-05-12 Three-Line Follow-Up: Anchor Visualization, Stable Coverage, and Paper-Grounded Fix Plan
+
+This section records the next diagnostic stage after the stable-identity
+confirmation run. The goal is not to add another compensating loss. The goal is
+to separate three questions that were previously entangled:
+
+```text
+1. What do the anchor positions and support overlays actually do in CALVIN
+   rollouts?
+2. Does the stable-slot subset expand with more warmup under the current clean
+   local-refinement contract?
+3. Do recent object-binding / VLA tracking papers suggest a structural fix that
+   is consistent with the current belief-state design?
+```
+
+### Deployment
+
+A5 is assigned to visualization:
+
+```text
+machine: A5 / ZWWQO6
+policy server tmux: a5_anchor_serve_83cf6df
+eval tmux: a5_anchor_eval_83cf6df
+checkpoint:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be
+server port: 8015
+eval output:
+  /mnt/calvin_eval_logs/picf_a5_stableid_anchor_253c9be/
+purpose:
+  generate CALVIN anchor overlays, prediction debug, and videos so that the
+  numeric stable-slot diagnosis can be checked against real spatial behavior.
+```
+
+A7 is assigned to stable-coverage continuation:
+
+```text
+machine: A7 / qgE72e
+tmux: a7_stabcov_83cf6df
+run:
+  picf_a7_stabcov_localk8w01_burnin4_1050new_20260512_83cf6df
+resume:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_localk8w01_burnin4_750new_20260512_7bff430/750
+target step: 1050
+local_refinement_topk: 8
+local_refinement_weight: 0.10
+high-risk predictive losses: 0
+purpose:
+  test whether stable_slot_fraction increases with additional clean warmup while
+  stable identity switches stay low.
+```
+
+Tail commands:
+
+```bash
+ssh -p 29776 root@36.139.225.68
+tail -f /mnt/calvin_eval_logs/picf_a5_stableid_anchor_253c9be/eval.log
+
+ssh -p 28060 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_stabcov_localk8w01_burnin4_1050new_20260512_83cf6df.train_tmux.log
+```
+
+### Paper-Grounded Interpretation
+
+Recent object-binding evidence changes what should be fixed first.
+
+`Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?`
+reports that pretrained ViTs can encode whether two patches belong to the same
+object as an `IsSameObject` property, that a quadratic similarity probe can
+decode it with high accuracy, and that the signal appears as a low-dimensional
+subspace on top of object features. This supports the current
+`binding_signature_proj` direction: binding should include a pairwise
+same-object support/signature subspace, not only hidden cosine and geometry.
+It also argues against adding a raw identity-switch loss before we know whether
+the token evidence contains separable same-object information.
+
+`TrackVLA: Embodied Visual Tracking in the Wild` treats visual tracking as a
+core VLA capability under occlusion and dynamics. This supports tracklet/proposal
+evidence as the clean long-term way to increase stable-slot coverage, but it
+does not justify pretending that absent tracklet data is already active in the
+current CALVIN training flow.
+
+`WristWorld` explicitly frames wrist views as important because they capture
+fine-grained hand-object interaction. This supports keeping wrist as a typed
+temporal evidence view and using anchor overlays to inspect whether gripper-view
+evidence helps contact-phase binding. Without calibrated extrinsics, wrist
+tokens must remain typed evidence rather than static-frame geometry truth.
+
+`MAP-VLA` supports memory as auxiliary retrieved context for long-horizon
+manipulation. This is aligned with the current small residual cache gate. It
+does not justify letting cache become posterior truth, nor opening predictive
+losses before stable-slot coverage improves.
+
+Sources used for this interpretation:
+
+```text
+https://arxiv.org/abs/2510.24709
+https://proceedings.mlr.press/v305/wang25f.html
+https://arxiv.org/abs/2510.07313
+https://arxiv.org/abs/2511.09516
+```
+
+### Mathematical Reading
+
+The current belief update should remain:
+
+```math
+b_t = U_{\mathrm{post}}\left(P(b_{t-1}, a_{t-1}), R_{\mathrm{AQR}}(o_t)\right)
+```
+
+The stable-id run showed:
+
+```text
+raw identity_switch high
+stable identity_switch near zero
+stable_slot_fraction low
+```
+
+Therefore the correct diagnosis is:
+
+```text
+not proven global identity collapse;
+stable slots are reliable when they exist;
+coverage of reliable slots is insufficient.
+```
+
+The next fix should target stable-slot coverage, not raw switch suppression.
+The most coherent structural lever is:
+
+```math
+\ell_{j,i}
+=
+\ell^{hidden}_{j,i}
++ \ell^{geom}_{j,i}
++ \lambda_s g_j \langle P_\sigma \sigma^-_j, P_\sigma \sigma_i \rangle
++ \lambda_a g_j \langle P_a a^-_j, P_a a_i \rangle
+```
+
+with the ordering:
+
+```text
+1. use support/signature same-object evidence first;
+2. keep address as a gated inertia term;
+3. only strengthen cache/address after stable-slot coverage rises;
+4. keep future predictive losses closed until stable slots cover enough objects.
+```
+
+This is a structural binding route, not a new auxiliary loss. It is consistent
+with the IsSameObject paper because it probes and uses a pairwise object-binding
+subspace. It is consistent with the POMDP belief filter because it changes the
+assignment compatibility term, not the posterior authority.
+
+### Acceptance Gates
+
+A5 visualization acceptance:
+
+```text
+Anchor overlays must show whether stable slots correspond to task-relevant
+objects/contact regions or only to easy high-margin background regions.
+
+If overlays show stable slots mostly on irrelevant regions, stable_slot_fraction
+alone is not sufficient.
+
+If overlays show stable slots on task-relevant objects but coverage is low,
+the next fix should increase coverage through support-signature / tracklet
+evidence rather than changing action loss.
+```
+
+A7 stable-coverage acceptance:
+
+```text
+posterior_stable_slot_fraction:
+  should rise above 0.20..0.30 before longer cotrain is accepted.
+
+posterior_identity_switch_rate_stable:
+  should stay below 0.10.
+
+aqr_same_role_support_overlap_max:
+  should stay below 0.70, with local_true_overlap remaining small.
+
+loss_action_default_equiv:
+  should not improve at the cost of stable-slot collapse.
+```
+
+If A7 passes:
+
+```text
+move to controlled action-pressure continuation;
+keep predictive losses closed;
+use CALVIN overlay evidence to decide whether tracklet/proposal dataflow is the
+next necessary investment.
+```
+
+If A7 fails:
+
+```text
+do not add raw identity loss;
+do not increase address weight first;
+run a support-signature coefficient audit and an offline IsSameObject probe.
+```
