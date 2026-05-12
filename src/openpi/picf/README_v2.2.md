@@ -3818,6 +3818,15 @@ Live remote status from the same re-audit:
   tokens remain zero in this CALVIN dataflow test, so the run evaluates
   signature-guided local candidate use only.
 
+Latest remote stop diagnosis:
+  A5/A7 later stopped before the planned 1650-step target because /mnt was
+  full. GPUs are idle and tmux sessions are gone. There is no clear train-log
+  traceback or NaN/Inf signal. A5 has usable partial metrics through step 1225
+  and a 1200 checkpoint; A7 has usable partial metrics through step 1200 but
+  left tmp_1200 during checkpoint write. These runs are interrupted diagnostics,
+  not completed acceptance runs. Do not launch more /mnt-writing experiments
+  until old checkpoints/eval artifacts are explicitly pruned.
+
 Important guard:
   this is not a new loss, not a hard cross-anchor ownership rule, and not a
   claim that ordinal/fourth-object grounding is solved. It is a structural

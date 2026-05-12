@@ -5843,3 +5843,87 @@ for final acceptance. Tracklet/proposal tokens remain zero as expected for this
 CALVIN dataflow test, so this round evaluates signature-guided local candidate
 use only, not full MVTrack tracklet/proposal behavior.
 ```
+
+### 2026-05-13 Remote Stop Diagnosis
+
+Later status check found that both remote jobs had stopped before the planned
+1650-step target.
+
+Observed remote state:
+
+```text
+A5:
+  tmux: no server running
+  GPU: idle, 0 MiB used on both GPUs
+  latest metrics step: 1225
+  train.log progress tail: step 1239
+  checkpoint artifacts: 900, 1200, latest.pt
+  traceback / NaN / Inf in train.log or metrics: not found
+
+A7:
+  tmux: no server running
+  GPU: idle, 0 MiB used on both GPUs
+  latest metrics step: 1200
+  train.log progress tail: step 1200
+  checkpoint artifacts: 900, latest.pt, tmp_1200
+  traceback / NaN / Inf in train.log or metrics: not found
+```
+
+Machine-level diagnosis:
+
+```text
+df -h /mnt:
+  Size 1.8T, Used 1.8T, Avail 0, Use% 100%
+```
+
+Interpretation:
+
+```text
+The signature-local runs did not finish and should not be treated as completed
+1650-step experiments. The failure mode is storage exhaustion on /mnt, not a
+clear model-side NaN/Inf/traceback.
+
+A7 appears to have stopped during the 1200 checkpoint write, leaving tmp_1200.
+A5 completed the 1200 checkpoint and then ran further, but metrics/checkpoint
+persistence stopped before the 1650 target.
+```
+
+Usable evidence from this interrupted run:
+
+```text
+A5 up to latest metrics step 1225:
+  loss_total: 0.725866
+  loss_action_default_equiv: 0.063656
+  loss_anchor_pv: 2.370466
+  loss_pv_weak: 1.547877
+  loss_mapg_routing: 1.134488
+  aqr_same_role_support_overlap_max: 0.720813
+  aqr_same_role_local_true_overlap_max: 0.049409
+  aqr_same_role_local_jaccard_max: 0.495348
+  posterior_recycle_rate: 0.282764
+  posterior_stable_slot_fraction: 0.113333
+
+A7 up to latest metrics step 1200:
+  loss_total: 0.744512
+  loss_action_default_equiv: 0.059805
+  loss_anchor_pv: 2.360714
+  loss_pv_weak: 1.555988
+  loss_mapg_routing: 1.150512
+  aqr_same_role_support_overlap_max: 0.949820
+  aqr_same_role_local_true_overlap_max: 0.102317
+  aqr_same_role_local_jaccard_max: 0.688900
+  posterior_recycle_rate: 0.266900
+  posterior_stable_slot_fraction: 0.111111
+```
+
+Conclusion:
+
+```text
+Do not resume or launch more /mnt-writing experiments until old checkpoints or
+eval artifacts are explicitly pruned. The A5/A7 partial metrics are useful as
+interrupted diagnostics only:
+  - A5 is the better partial result for local duplicate suppression.
+  - A7's stronger local_refinement_binding_weight did not clearly improve the
+    late same-role overlap and may be too strong.
+  - Neither run reached the planned endpoint or post-run probe/eval stage.
+```
