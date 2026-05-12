@@ -196,6 +196,10 @@ class PicfCoreConfig:
     local_refinement_enabled: bool = True
     local_refinement_topk: int = 32
     local_refinement_weight: float = 0.25
+    # Optional same-object subspace reranking for local candidate selection.
+    # This keeps the local refiner inside the binding-signature geometry instead
+    # of adding a new loss or hand-coded cross-anchor ownership rule.
+    local_refinement_binding_weight: float = 0.0
     slot_jepa_enabled: bool = True
     support_prediction_enabled: bool = True
     ordinal_relation_enabled: bool = True

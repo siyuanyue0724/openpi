@@ -3077,6 +3077,19 @@ class PicfFullCore(nn.Module):
                     if priors.shape[-1] != tokens.shape[0]:
                         return
                     weights = _normalize_rows(torch.clamp(priors.to(device=self.device, dtype=self.dtype), min=0.0), eps=self.config.epsilon_a)
+                    binding_weight = float(getattr(self.config, "local_refinement_binding_weight", 0.0))
+                    if binding_weight != 0.0 and q.numel() > 0:
+                        token_binding = self._binding_keys(tokens.to(device=self.device, dtype=self.dtype))
+                        query_binding = self._binding_keys(q[0].to(device=self.device, dtype=self.dtype))
+                        if (
+                            query_binding.shape[0] == weights.shape[0]
+                            and token_binding.shape[0] == weights.shape[-1]
+                            and query_binding.shape[-1] == token_binding.shape[-1]
+                        ):
+                            binding_logits = query_binding @ token_binding.T
+                            local_logits = torch.log(torch.clamp(weights, min=self.config.epsilon_a))
+                            local_logits = local_logits + (binding_weight * binding_logits)
+                            weights = torch.softmax(local_logits, dim=-1)
                     topk = min(max(int(self.config.local_refinement_topk), 1), int(weights.shape[-1]))
                     _, top_indices = torch.topk(weights, k=topk, dim=-1)
                     top_values = torch.gather(weights, dim=-1, index=top_indices)
@@ -6812,6 +6825,19 @@ class PicfFullCore(nn.Module):
                             debug["aqr_same_role_local_true_overlap_mean"] = float(true_overlap.mean().item())
                             debug["aqr_same_role_local_jaccard_max"] = float(true_jaccard.max().item())
                             debug["aqr_same_role_local_jaccard_mean"] = float(true_jaccard.mean().item())
+                if graph.anchor_tokens.numel() > 0 and graph.anchor_roles.numel() == graph.anchor_tokens.shape[0]:
+                    anchor_binding = self._binding_keys(graph.anchor_tokens.to(device=self.device, dtype=self.dtype))
+                    if anchor_binding.shape[0] > 1:
+                        bind_sim = anchor_binding @ anchor_binding.T
+                        bind_same_role = graph.anchor_roles[:, None] == graph.anchor_roles[None, :]
+                        bind_pair_mask = torch.triu(bind_same_role, diagonal=1)
+                        if bool(bind_pair_mask.any().item()):
+                            debug["aqr_same_role_anchor_binding_signature_overlap_max"] = float(
+                                bind_sim[bind_pair_mask].max().item()
+                            )
+                            debug["aqr_same_role_anchor_binding_signature_overlap_mean"] = float(
+                                bind_sim[bind_pair_mask].mean().item()
+                            )
             debug["mapg_point_available"] = 1.0 if graph.point_priors is not None else 0.0
             debug["mapg_tactile_available"] = 1.0 if graph.tactile_priors is not None else 0.0
             debug["mapg_posterior_available"] = 1.0 if graph.posterior_priors is not None else 0.0
@@ -6852,6 +6878,28 @@ class PicfFullCore(nn.Module):
             debug["owm_posterior_binding_signature_norm_mean"] = float(
                 torch.linalg.norm(observed.posterior.binding_signature, dim=-1).mean().item()
             )
+        if (
+            observed.observation_anchors.binding_signature is not None
+            and observed.observation_anchors.binding_signature.numel() > 0
+            and observed.observation_anchors.role_ids is not None
+            and observed.observation_anchors.role_ids.numel() == observed.observation_anchors.binding_signature.shape[0]
+        ):
+            obs_binding = _normalize_tensor(
+                observed.observation_anchors.binding_signature.to(device=self.device, dtype=self.dtype),
+                eps=self.config.epsilon_residual,
+            )
+            if obs_binding.shape[0] > 1:
+                obs_bind_sim = obs_binding @ obs_binding.T
+                obs_roles = observed.observation_anchors.role_ids.to(device=self.device, dtype=torch.long)
+                obs_same_role = obs_roles[:, None] == obs_roles[None, :]
+                obs_pair_mask = torch.triu(obs_same_role, diagonal=1)
+                if bool(obs_pair_mask.any().item()):
+                    debug["aqr_same_role_obs_binding_signature_overlap_max"] = float(
+                        obs_bind_sim[obs_pair_mask].max().item()
+                    )
+                    debug["aqr_same_role_obs_binding_signature_overlap_mean"] = float(
+                        obs_bind_sim[obs_pair_mask].mean().item()
+                    )
         if observed.posterior.binding is not None and observed.posterior.binding.numel() > 0:
             previous_posterior = None if observed.previous is None else getattr(observed.previous, "posterior", None)
             previous_binding = None if previous_posterior is None else getattr(previous_posterior, "binding", None)

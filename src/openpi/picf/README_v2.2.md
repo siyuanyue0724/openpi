@@ -3774,3 +3774,35 @@ one clean integration-layer rewrite:
 4. remove raw semantic prefix as a direct core control/future mainline
 
 That is the correct one-shot target.
+
+## 15. MVTrack Experiment Ledger
+
+The active MVTrack / AQR-OWM training and diagnostic ledger is maintained here:
+
+```text
+docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md
+```
+
+Current 2026-05-13 status:
+
+```text
+Code-level verifier:
+  31/31 PASS after adding the guarded signature-guided local candidate repair.
+
+Representational diagnosis:
+  A5/A7 same-object probes show high binding_signature separability
+  (AUC ~= 0.96-0.98), but high duplicate candidate fraction (~0.85).
+
+Active next test:
+  use the existing binding_signature subspace inside local refinement top-k
+  reranking via --local-refinement-binding-weight.
+
+Important guard:
+  this is not a new loss, not a hard cross-anchor ownership rule, and not a
+  claim that ordinal/fourth-object grounding is solved. It is a structural
+  readout test for the already-decoded same-object subspace.
+```
+
+For the exact mathematical derivation, experiment matrix, commands, and
+acceptance criteria, read the "2026-05-13 10-Hour Plan: Signature-Guided Local
+Candidate Repair" section in the experiment report above.

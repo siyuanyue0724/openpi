@@ -5360,3 +5360,272 @@ pairwise binding subspace under the current CALVIN observations?
 
 Only after that question is answered should we choose between reader/scale
 repair, token-level signature extraction, or real tracklet/proposal dataflow.
+
+## 2026-05-13 10-Hour Plan: Signature-Guided Local Candidate Repair
+
+### Diagnosis From A5/A7 Signature Probes
+
+Both A5 and A7 answered the first binding question:
+
+```text
+A5 binding_signature_cos_auc: 0.976374
+A7 binding_signature_cos_auc: 0.964458
+
+A5 duplicate_candidate_fraction_within_frame: 0.848016
+A7 duplicate_candidate_fraction_within_frame: 0.854286
+```
+
+This is not an "identity signal absent" failure. The pairwise same-object
+subspace exists and is highly decodable. The remaining observed failure is that
+candidate selection can still reuse the same local supports across same-role
+anchors before posterior binding gets a clean set of observation anchors.
+
+Mathematically, the current local refiner previously selected top-k candidates
+from each typed prior:
+
+```math
+\Omega_j^{(m)} = TopK_i(p_{j,i}^{(m)})
+```
+
+but it did not use the learned pairwise object-binding subspace that was shown
+to be decodable by the probe. That creates a mismatch:
+
+```text
+offline probe:
+  binding_signature can separate same/different object pairs
+
+online local refinement:
+  top-k selection may ignore that subspace and duplicate candidates
+```
+
+The coherent repair is therefore not a new loss and not a hard coverage rule.
+It is to use the existing `binding_signature_proj` as a local readout geometry:
+
+```math
+\tilde p_{j,i}^{(m)}
+=
+softmax_i(
+  \log p_{j,i}^{(m)}
+  + \lambda_{local-bind}
+    \langle
+      \phi(q_j), \phi(z_i^{(m)})
+    \rangle
+)
+```
+
+where:
+
+```text
+q_j:
+  current AQR anchor query after typed readers
+
+z_i:
+  candidate typed-memory token
+
+phi:
+  existing normalized binding_signature projection
+
+lambda_local-bind:
+  guarded experimental coefficient
+```
+
+This is structurally consistent with the object-binding paper direction:
+object information is often recoverable in a nonlinear/projected subspace, so
+the correct integration point is a pairwise readout/reranking term, not a new
+classification head or a scalar collapse penalty.
+
+### Code Change
+
+Implemented as a guarded field:
+
+```text
+PicfCoreConfig.local_refinement_binding_weight = 0.0
+```
+
+and exposed through:
+
+```bash
+--local-refinement-binding-weight
+```
+
+Default remains `0.0` until the run evidence is available. This avoids silently
+changing the maintained baseline. The 10-hour experiment explicitly enables it.
+
+Additional debug metrics:
+
+```text
+aqr_same_role_anchor_binding_signature_overlap_max
+aqr_same_role_anchor_binding_signature_overlap_mean
+aqr_same_role_obs_binding_signature_overlap_max
+aqr_same_role_obs_binding_signature_overlap_mean
+```
+
+These distinguish:
+
+```text
+anchor-query collapse:
+  anchor binding signatures overlap before observation anchors.
+
+observation-anchor duplicate collapse:
+  observation anchor binding signatures overlap after local readout.
+
+support duplicate collapse:
+  local true overlap / local jaccard stay high.
+```
+
+### Design Constraints
+
+This plan deliberately does not:
+
+```text
+add slot-JEPA/support-prediction pressure;
+increase address/cache inertia;
+turn on ordinal losses;
+restore role competition or coverage-seed heuristics;
+force cross-anchor hard exclusion;
+change PI0.5 action semantics.
+```
+
+Reason:
+
+```text
+The probes show the representational subspace is present. The next scientifically
+minimal move is to test whether using that subspace at the candidate-selection
+site reduces duplicate candidates. Anything stronger would obscure attribution.
+```
+
+### 10-Hour Experiment Matrix
+
+Run two independent profiles on A5 and A7.
+
+#### A5: Conservative Signature Rerank
+
+Purpose:
+
+```text
+Test whether a small binding-subspace local rerank improves duplicate support
+without harming action-scale training.
+```
+
+Profile:
+
+```text
+local_refinement_topk: 8
+local_refinement_weight: 0.10
+local_refinement_binding_weight: 0.25
+burnin_steps: 4
+unroll_steps: 2
+action_prefix_stopgrad: true
+slot_jepa/support_pred/binding_consistency: 0
+paligemma cotrain: enabled if the current launch profile already uses it
+```
+
+Duration:
+
+```text
+900 train steps, then CALVIN 1-sequence eval + same-object probe.
+```
+
+Expected runtime:
+
+```text
+~5-7 hours for train, ~20-40 minutes for eval/probe depending on checkpoint IO.
+```
+
+#### A7: Stronger Signature Rerank Stress Test
+
+Purpose:
+
+```text
+Check whether stronger signature reranking improves assignment or over-constrains
+anchor specialization.
+```
+
+Profile:
+
+```text
+local_refinement_topk: 8
+local_refinement_weight: 0.10
+local_refinement_binding_weight: 0.50
+burnin_steps: 4
+unroll_steps: 2
+action_prefix_stopgrad: true
+slot_jepa/support_pred/binding_consistency: 0
+paligemma cotrain: enabled if the current launch profile already uses it
+```
+
+Duration:
+
+```text
+900 train steps, then CALVIN 1-sequence eval + same-object probe.
+```
+
+Expected runtime:
+
+```text
+~5-7 hours for train, ~20-40 minutes for eval/probe.
+```
+
+### Acceptance Criteria
+
+Primary structural acceptance:
+
+```text
+aqr_same_role_local_true_overlap_max:
+  should remain materially below the previous duplicate regime.
+
+aqr_same_role_local_jaccard_max:
+  should fall or stay low, not rebound toward broad candidate reuse.
+
+posterior_stable_slot_fraction:
+  should not collapse relative to the prior best endpoint.
+
+posterior_recycle_rate:
+  should not return to sustained saturation.
+
+loss_action_default_equiv:
+  should remain comparable to the current action-scale baseline.
+```
+
+Probe acceptance:
+
+```text
+binding_signature_cos_auc:
+  should remain high (>0.90). If it collapses, the rerank is damaging the
+  binding subspace.
+
+duplicate_candidate_fraction_within_frame:
+  should improve from ~0.85. If it stays unchanged while local jaccard improves,
+  the probe candidate definition may be too broad and needs a token-level audit.
+```
+
+Decision tree:
+
+```text
+If A5 improves duplicate metrics and A7 over-constrains:
+  keep a small coefficient, likely 0.25.
+
+If both improve:
+  promote signature-guided local ranking into the next maintained profile after
+  a longer cotrain check.
+
+If neither improves but binding AUC remains high:
+  the problem is not local top-k score use; move to real tracklet/proposal
+  episode dataflow or a deeper assignment audit.
+
+If action loss degrades sharply:
+  reduce local_refinement_weight before reducing binding_weight; the problem is
+  local residual magnitude, not pairwise subspace ranking.
+```
+
+### Current Verification
+
+Local structural checks after adding the guarded repair:
+
+```text
+python -m py_compile src/openpi/picf/core/config.py src/openpi/picf/core/pipeline.py scripts/picf_core_train.py scripts/verify_picf_owm_contract.py
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py
+
+Result:
+  31/31 PASS
+```

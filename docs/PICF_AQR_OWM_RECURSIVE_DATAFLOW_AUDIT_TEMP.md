@@ -22,7 +22,7 @@ The current update must start from previous posterior/predictive carry, not from
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:6281: def observe_step(`
+- `src/openpi/picf/core/pipeline.py:6294: def observe_step(`
 - `src/openpi/picf/core/pipeline.py:967: previous: PicfPreviousState | None`
 
 ## 2. Production default profile - PASS
@@ -42,7 +42,7 @@ The latest OWM profile must be the default path; legacy routers and risky auxili
 Evidence:
 
 - `src/openpi/picf/core/config.py:143: aqr_mapg_enabled: bool = True`
-- `scripts/picf_core_train.py:6688: default="paligemma",`
+- `scripts/picf_core_train.py:6703: default="paligemma",`
 - `src/openpi/picf/core/training.py:71: lambda_mapg_cycle: float = 0.02`
 - `src/openpi/picf/core/training.py:76: lambda_slot_jepa: float = 0.0`
 
@@ -84,7 +84,7 @@ Evidence:
 
 - `src/openpi/picf/core/pipeline.py:2264: for index, (start, end) in enumerate(semantic.image_token_ranges):`
 - `src/openpi/picf/core/pipeline.py:2291: pg_priors[rows] = self._aqr_competitive_support(pg_weights, eps=self.config.epsilon_a)`
-- `src/openpi/picf/core/pipeline.py:3188: pg_priors=pg_priors,`
+- `src/openpi/picf/core/pipeline.py:3201: pg_priors=pg_priors,`
 
 ## 5. Typed token field - PASS
 
@@ -190,8 +190,8 @@ Evidence:
 
 - `src/openpi/picf/core/pipeline.py:2974: local_priors = None`
 - `src/openpi/picf/core/pipeline.py:2975: local_token_indices = None`
-- `src/openpi/picf/core/pipeline.py:3138: q = q + (float(self.config.local_refinement_weight) * (local_read[None, :, :] - q))`
-- `src/openpi/picf/core/pipeline.py:3135: local_read = torch.stack(local_vectors, dim=0).sum(dim=0)`
+- `src/openpi/picf/core/pipeline.py:3151: q = q + (float(self.config.local_refinement_weight) * (local_read[None, :, :] - q))`
+- `src/openpi/picf/core/pipeline.py:3148: local_read = torch.stack(local_vectors, dim=0).sum(dim=0)`
 
 ## 10. Projective point-visual geometry - PASS
 
@@ -230,9 +230,9 @@ Prior is predicted from previous posterior, previous action, and proprio before 
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:5432: def _current_prior(self, previous: PicfPreviousState | None, observation: PicfObservation) -> tuple[torch.Tensor, ...]:`
+- `src/openpi/picf/core/pipeline.py:5445: def _current_prior(self, previous: PicfPreviousState | None, observation: PicfObservation) -> tuple[torch.Tensor, ...]:`
 - `src/openpi/picf/core/pipeline.py:2339: post_count = int(previous.posterior.tokens.shape[0])`
-- `src/openpi/picf/core/pipeline.py:3525: executed = getattr(previous.predictive, "executed_action", None)`
+- `src/openpi/picf/core/pipeline.py:3538: executed = getattr(previous.predictive, "executed_action", None)`
 
 ## 12. Posterior correction - PASS
 
@@ -250,11 +250,11 @@ Posterior after correction is the authoritative current belief.
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:5921: lambda_prior = 1.0 / torch.clamp(bar_var, min=self.config.sigma_min2)`
-- `src/openpi/picf/core/pipeline.py:5922: eta_prior = lambda_prior * bar_mu`
-- `src/openpi/picf/core/pipeline.py:5923: lambda_meas = torch.sum(beta[:, :, None] / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
-- `src/openpi/picf/core/pipeline.py:5924: eta_meas = torch.sum(beta[:, :, None] * vote_mu_t / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
-- `src/openpi/picf/core/pipeline.py:5926: mu_post = var_post * (eta_prior + eta_meas)`
+- `src/openpi/picf/core/pipeline.py:5934: lambda_prior = 1.0 / torch.clamp(bar_var, min=self.config.sigma_min2)`
+- `src/openpi/picf/core/pipeline.py:5935: eta_prior = lambda_prior * bar_mu`
+- `src/openpi/picf/core/pipeline.py:5936: lambda_meas = torch.sum(beta[:, :, None] / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
+- `src/openpi/picf/core/pipeline.py:5937: eta_meas = torch.sum(beta[:, :, None] * vote_mu_t / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
+- `src/openpi/picf/core/pipeline.py:5939: mu_post = var_post * (eta_prior + eta_meas)`
 
 ## 13. State-only burn-in consistency - PASS
 
@@ -272,7 +272,7 @@ Burn-in and train suffix must use the same measurement model.
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:6508: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
+- `src/openpi/picf/core/pipeline.py:6521: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
 - `src/openpi/picf/core/pipeline.py:2835: def _build_aqr_anchor_graph(`
 - `src/openpi/picf/core/pipeline_test.py:1213: def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:`
 
@@ -293,7 +293,7 @@ Innovation compares real current targets against world-only prediction; it gates
 Evidence:
 
 - `src/openpi/picf/core/pipeline.py:2372: def _innovation_risk_scalar(self, innovation_norm: torch.Tensor | None) -> torch.Tensor:`
-- `src/openpi/picf/core/pipeline.py:4109: physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)`
+- `src/openpi/picf/core/pipeline.py:4122: physical_prediction_cache = self._prediction_cache_from_global(physical_global_pred)`
 - `src/openpi/picf/core/pipeline.py:977: innovation_norm: torch.Tensor`
 
 ## 15. Slot prediction targets - PASS
@@ -353,7 +353,7 @@ Evidence:
 
 - `src/openpi/picf/core/training.py:394: def _aqr_support_denoising_loss(`
 - `src/openpi/picf/core/training.py:79: lambda_aqr_denoising: float = 0.0`
-- `scripts/picf_core_train.py:6528: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
+- `scripts/picf_core_train.py:6543: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
 - `src/openpi/picf/core/training_test.py:461: def test_aqr_denoising_loss_is_training_only_and_guarded(tmp_path: Path) -> None:`
 
 ## 18. Evidence cache write - PASS
@@ -372,7 +372,7 @@ Cache is written after posterior correction and is auxiliary evidence for later 
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:4165: def _write_evidence_cache(`
+- `src/openpi/picf/core/pipeline.py:4178: def _write_evidence_cache(`
 - `src/openpi/picf/core/pipeline.py:2406: if previous is None or previous.posterior.slot_address is None or previous.posterior.slot_address.numel() == 0:`
 - `src/openpi/picf/core/pipeline.py:2471: innovation = cache.innovation_at_write.to(device=self.device, dtype=self.dtype)[valid]`
 
@@ -392,7 +392,7 @@ PI0.5 remains final action generator; OWM does not create a separate action head
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:4013: def _build_conditioned_control_state(`
+- `src/openpi/picf/core/pipeline.py:4026: def _build_conditioned_control_state(`
 - `src/openpi/picf/core/pipeline.py:1364: self.posterior_to_control_proj = nn.LazyLinear(semantic_trunk_dim)`
 - `src/openpi/picf/core/pipeline.py:1366: self.innovation_to_control_proj = nn.LazyLinear(semantic_trunk_dim)`
 - `src/openpi/picf/core/pipeline.py:1368: self.task_to_control_proj = nn.LazyLinear(semantic_trunk_dim)`
@@ -413,8 +413,8 @@ Removed dead knobs/loss-looking placeholders and stale metrics that could create
 
 Evidence:
 
-- `scripts/verify_picf_owm_contract.py:281: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
-- `scripts/verify_picf_owm_contract.py:281: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:286: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:286: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
 - `docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md:2177: 3. Do not expose placeholder losses for cross-modal alignment, ordinal rank, or`
 
 ## Final Interpretation
