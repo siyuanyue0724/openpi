@@ -5498,6 +5498,11 @@ site reduces duplicate candidates. Anything stronger would obscure attribution.
 
 Run two independent profiles on A5 and A7.
 
+Both jobs resume from the same 750-step stable local-refinement baseline and
+run to absolute step 1650. Keeping `unroll_steps=1` here is intentional: the
+best recent endpoint used burn-in 4 + unroll 1, and this experiment isolates
+the candidate-selection change rather than retesting unroll length.
+
 #### A5: Conservative Signature Rerank
 
 Purpose:
@@ -5514,7 +5519,7 @@ local_refinement_topk: 8
 local_refinement_weight: 0.10
 local_refinement_binding_weight: 0.25
 burnin_steps: 4
-unroll_steps: 2
+unroll_steps: 1
 action_prefix_stopgrad: true
 slot_jepa/support_pred/binding_consistency: 0
 paligemma cotrain: enabled if the current launch profile already uses it
@@ -5523,7 +5528,7 @@ paligemma cotrain: enabled if the current launch profile already uses it
 Duration:
 
 ```text
-900 train steps, then CALVIN 1-sequence eval + same-object probe.
+900 new train steps from the shared 750-step baseline, then CALVIN 1-sequence eval + same-object probe.
 ```
 
 Expected runtime:
@@ -5548,7 +5553,7 @@ local_refinement_topk: 8
 local_refinement_weight: 0.10
 local_refinement_binding_weight: 0.50
 burnin_steps: 4
-unroll_steps: 2
+unroll_steps: 1
 action_prefix_stopgrad: true
 slot_jepa/support_pred/binding_consistency: 0
 paligemma cotrain: enabled if the current launch profile already uses it
@@ -5557,7 +5562,7 @@ paligemma cotrain: enabled if the current launch profile already uses it
 Duration:
 
 ```text
-900 train steps, then CALVIN 1-sequence eval + same-object probe.
+900 new train steps from the shared 750-step baseline, then CALVIN 1-sequence eval + same-object probe.
 ```
 
 Expected runtime:
