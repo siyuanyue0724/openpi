@@ -2748,6 +2748,9 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_local_source_mass_point",
     "aqr_local_source_mass_tracklet",
     "aqr_local_source_mass_proposal",
+    "aqr_local_role_competition_enabled",
+    "aqr_local_role_competition_strength",
+    "aqr_local_role_competition_floor",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
     "posterior_identity_switch_rate",
@@ -4778,6 +4781,24 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         local_refinement_weight=float(
             _arg_or_default("local_refinement_weight", _SPEC_DEFAULTS.local_refinement_weight)
         ),
+        local_refinement_role_competition_enabled=bool(
+            _arg_or_default(
+                "local_refinement_role_competition_enabled",
+                _SPEC_DEFAULTS.local_refinement_role_competition_enabled,
+            )
+        ),
+        local_refinement_role_competition_strength=float(
+            _arg_or_default(
+                "local_refinement_role_competition_strength",
+                _SPEC_DEFAULTS.local_refinement_role_competition_strength,
+            )
+        ),
+        local_refinement_role_competition_floor=float(
+            _arg_or_default(
+                "local_refinement_role_competition_floor",
+                _SPEC_DEFAULTS.local_refinement_role_competition_floor,
+            )
+        ),
         slot_jepa_enabled=bool(_arg_or_default("slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
         support_prediction_enabled=bool(
             _arg_or_default("support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)
@@ -5862,7 +5883,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s local_refinement_enabled=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s local_refinement_enabled=%s local_role_competition=%s local_role_competition_strength=%s local_role_competition_floor=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -5898,6 +5919,27 @@ def train(args: argparse.Namespace) -> None:
                 bool(getattr(args, "tracklet_memory_enabled", _SPEC_DEFAULTS.tracklet_memory_enabled)),
                 bool(getattr(args, "proposal_memory_enabled", _SPEC_DEFAULTS.proposal_memory_enabled)),
                 bool(getattr(args, "local_refinement_enabled", _SPEC_DEFAULTS.local_refinement_enabled)),
+                bool(
+                    getattr(
+                        args,
+                        "local_refinement_role_competition_enabled",
+                        _SPEC_DEFAULTS.local_refinement_role_competition_enabled,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "local_refinement_role_competition_strength",
+                        _SPEC_DEFAULTS.local_refinement_role_competition_strength,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "local_refinement_role_competition_floor",
+                        _SPEC_DEFAULTS.local_refinement_role_competition_floor,
+                    )
+                ),
                 bool(getattr(args, "slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
                 bool(getattr(args, "support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)),
                 bool(getattr(args, "ordinal_relation_enabled", _SPEC_DEFAULTS.ordinal_relation_enabled)),
@@ -6885,6 +6927,25 @@ def main() -> None:
     )
     parser.add_argument("--local-refinement-topk", type=int, default=_SPEC_DEFAULTS.local_refinement_topk)
     parser.add_argument("--local-refinement-weight", type=float, default=_SPEC_DEFAULTS.local_refinement_weight)
+    parser.add_argument(
+        "--local-refinement-role-competition-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.local_refinement_role_competition_enabled,
+        help=(
+            "Apply soft same-role capacity competition before local-refinement top-k selection. "
+            "Original support weights are still used for the local read."
+        ),
+    )
+    parser.add_argument(
+        "--local-refinement-role-competition-strength",
+        type=float,
+        default=_SPEC_DEFAULTS.local_refinement_role_competition_strength,
+    )
+    parser.add_argument(
+        "--local-refinement-role-competition-floor",
+        type=float,
+        default=_SPEC_DEFAULTS.local_refinement_role_competition_floor,
+    )
     parser.add_argument(
         "--slot-jepa-enabled",
         action=argparse.BooleanOptionalAction,

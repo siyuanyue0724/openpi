@@ -1959,3 +1959,52 @@ root issue:
 This should be treated as an AQR/local-refinement assignment-contract problem,
 not a learning-rate, action-loss, or recycle-gate problem.
 ```
+
+### Role-wise soft local candidate competition, 2026-05-12 17:20 CST
+
+The next code change moves the anti-collapse mechanism before top-k local
+candidate truncation, but deliberately avoids hard exclusion or an extra loss.
+
+For local support weights `p_ji` from anchor `j` to candidate token `i`, define
+the same-role ownership share:
+
+```text
+own_ji = p_ji / sum_{k: role_k = role_j} p_ki
+```
+
+and the selection-only score:
+
+```text
+score_ji = p_ji * max(floor, own_ji * |role_j group|)^gamma
+```
+
+Implementation details:
+
+```text
+1. top-k local candidate indices are selected from score_ji;
+2. local read vectors and local_priors still use the original p_ji values;
+3. cross-role anchors may still reuse the same evidence;
+4. if same-role anchors have exactly identical p_ji for all tokens, the
+   mechanism preserves symmetry rather than fabricating identity evidence;
+5. no posterior state, action target, cache truth, or auxiliary loss is added.
+```
+
+This is the Slot-Attention-style competition principle applied to typed local
+candidate construction: evidence tokens have limited same-role capacity before
+top-k truncation. It is not a "亡羊补牢" scalar loss patch, because it changes the
+assignment contract at the point where the failure was observed: local candidate
+sets had already become identical before overlap penalties could reliably keep
+them apart.
+
+New acceptance runs:
+
+```text
+A5 ownerfix:
+  support-only, no action/PV/cycle/predictive loss
+  expected: local_jaccard no longer returns to 1.0 by step 520/600/750
+
+A7 ownerfix:
+  anchor/PV no-action pressure retained
+  expected: PV may increase pressure, but same-role overlap should not rebound
+  to the >0.95 failure zone if candidate competition is sufficient
+```

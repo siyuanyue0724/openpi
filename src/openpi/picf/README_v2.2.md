@@ -634,6 +634,16 @@ Current training profiles:
   so the next repair must move anti-collapse pressure into role-wise local
   candidate selection/ownership before support aggregation. See
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
+- 2026-05-12 role-wise soft local candidate competition: local refinement now
+  scores top-k candidates with a same-role capacity factor before selection:
+  `score_ji = p_ji * (((p_ji / sum_{k:role_k=role_j} p_ki) * |role|)^gamma)`.
+  The local read still uses the original support weight `p_ji`; the competition
+  only chooses which existing typed-memory candidates each anchor rereads. This
+  is intentionally not a hard exclusion rule, not a new loss family, and not a
+  posterior truth override. If all same-role anchors have exactly identical
+  evidence over all tokens, this mechanism will not invent asymmetry; that is
+  the correct information-theoretic behavior. Its purpose is to amplify real
+  per-anchor preferences before top-k truncation erases them.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
