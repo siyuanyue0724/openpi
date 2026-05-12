@@ -62,9 +62,14 @@ def test_main_runs_without_pytorch_lightning_dependency(monkeypatch: pytest.Monk
     monkeypatch.setitem(sys.modules, "evaluation.evaluate_policy", fake_eval)
 
     class _DummyModel:
-        def __init__(self, *, host: str, port: int):
+        def __init__(self, *, host: str, port: int, **kwargs):
             self.host = host
             self.port = port
+            self.kwargs = kwargs
+            self.closed = False
+
+        def close(self):
+            self.closed = True
 
     monkeypatch.setattr(sut, "_PicfCalvinModel", _DummyModel)
     monkeypatch.setattr(
@@ -101,3 +106,6 @@ def test_main_runs_without_pytorch_lightning_dependency(monkeypatch: pytest.Monk
     assert calls["eval_log_dir"] == str(tmp_path / "eval")
     assert calls["debug"] is False
     assert calls["create_plan_tsne"] is False
+    assert calls["model"].kwargs["save_anchor_debug"] is False
+    assert calls["model"].kwargs["save_prediction_debug"] is False
+    assert calls["model"].closed is True

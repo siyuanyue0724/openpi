@@ -3154,3 +3154,282 @@ The next clean branches remain:
   real tracklet/proposal dataflow activation,
   delayed predictive auxiliary only after anchor-health passes.
 ```
+
+## 2026-05-12 Stricter Multi-Layer Local Audit
+
+This pass was run because the previous local audit was too narrow. The goal was
+not to add another mechanism. The goal was to check whether the current
+README-to-code contract, deleted/guarded paths, tests, and runtime diagnostics
+are mutually consistent before interpreting cloud loss curves.
+
+Local repository state:
+
+```text
+branch: Posterior_VLA
+starting HEAD for this stricter audit: 98fe770
+working tree at audit start: clean
+```
+
+Layer 1, README and stale-path audit:
+
+```text
+repo README:
+  routes to src/openpi/picf/README_v2.2.md
+
+PICF README:
+  routes to README_v2.2.md
+
+README_v2.2:
+  routes to MVTrack deployment README and this experiment report.
+
+Removed or rejected active-code paths:
+  posterior_address_drift_mean: absent from active code
+  aqr_temporal_memory_tokens: absent from active code
+  ordinal_confidence_threshold: absent from active code
+  lambda_cross_modal_align: absent from active loss/config code
+  lambda_innovation_calib: absent from active loss/config code
+  rejected role-competition / coverage-seed local-candidate heuristics:
+    absent from active src/scripts code, retained only as historical experiment
+    notes and absence assertions in audit scripts.
+
+Intentional explicit no-op / unsupported paths:
+  picf_augmentation_mode=multimodal_geometry:
+    raises NotImplementedError instead of silently running an unimplemented
+    geometry augmentation path.
+  SAM/DINO/proposal generation:
+    not generated inside this pass; proposal tensors are consumed only if an
+    upstream source supplies them.
+```
+
+Layer 2, key invariants checked by code search and scripts:
+
+```text
+action comparability:
+  loss_action_default_equiv and action_weight_scale exist.
+
+action/PICF gradient isolation:
+  picf_action_prefix_stopgrad exists.
+
+binding subspace:
+  binding_signature_proj and support-weighted binding signatures exist.
+
+cache:
+  PicfCacheReadState exists.
+  latest immediate posterior cache row is skipped.
+  cache read remains residual-gated through q_before_cache.
+
+future target leakage:
+  future.posterior_tokens.detach() is present in prediction losses.
+
+optional dataflow:
+  tracklet and proposal observation fields are present and optional.
+  missing tracklet/proposal data remains a valid no-op.
+
+multiview:
+  rgb_gripper and view_ids are present in the temporal visual path.
+
+ordinal:
+  ordinal state remains prompt-gated diagnostic / weak target; it is not a
+  posterior rewrite.
+```
+
+Layer 3, commands and results:
+
+```bash
+python -m py_compile $(rg --files src/openpi/picf scripts | rg '\.py$' | tr '\n' ' ')
+
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py
+PYTHONPATH=src python scripts/picf_owm_strict_diagnose.py --fail-on-fail
+PYTHONPATH=src python scripts/picf_owm_dataflow_trace.py --fail-on-fail
+PYTHONPATH=src python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail
+
+PYTHONPATH=src pytest -q $(cat /tmp/picf_test_files_no_train_test.txt)
+PYTHONPATH=src pytest -q scripts/train_test.py
+```
+
+Observed result:
+
+```text
+full PICF/script py_compile:
+  PASS
+
+OWM verifier:
+  PASS
+
+strict diagnose:
+  PASS with expected WARN boundaries when no runtime metrics/eval path is
+  supplied.
+
+recursive dataflow trace:
+  PASS
+
+MVTrack deep audit:
+  PASS
+
+44-file PICF/script pytest excluding scripts/train_test.py:
+  370 passed, 3 skipped
+
+scripts/train_test.py:
+  collection blocked by the local base-training dependency environment:
+  ModuleNotFoundError: No module named 'wandb_watchdog.observers.polling'
+```
+
+Fix made during this audit:
+
+```text
+scripts/calvin/evaluate_picf_policy_test.py:
+  The monkeypatched _DummyModel was stale. It did not accept the current
+  save_anchor_debug / save_prediction_debug constructor arguments and did not
+  implement close(), while the production eval wrapper now closes the policy in
+  a finally block. The test stub was updated to accept extra keyword arguments,
+  preserve them for assertion, implement close(), and assert that close() was
+  called. This was a test-lifecycle drift fix, not a runtime behavior change.
+```
+
+Strict conclusion:
+
+```text
+The current local code/dataflow audit is stronger than the earlier targeted
+pass. It verifies that the maintained README story, active code, guarded no-op
+paths, MVTrack invariants, and local regression tests are mutually consistent
+under the available environment.
+
+It still does not prove:
+  CALVIN behavior success,
+  anchor-health stability on A5/A7,
+  video/overlay quality,
+  active real tracklet/proposal evidence on CALVIN,
+  or final ordinal/fine-instance grounding.
+
+Those remain live-run acceptance questions, not local static-audit questions.
+```
+
+## 2026-05-12 Live A5/A7 Status After Stricter Local Audit
+
+Checked from the active cloud tmux sessions after the stricter local audit.
+
+### A5 clean staged cotrain
+
+Runtime:
+
+```text
+machine: A5 / ZWWQO6
+tmux: a5_clean_staged_7bff430
+run: /mnt/checkpoints/picf_core/picf_core/picf_a5_clean_staged_burnin4_750new_20260512_7bff430
+log: /mnt/checkpoints/picf_core/picf_core/picf_a5_clean_staged_burnin4_750new_20260512_7bff430.train_tmux.log
+progress at check: step 560 / 1200
+speed: about 16.6 s/step
+GPU: both A100s active
+```
+
+Recent metrics, last 10 logged rows:
+
+```text
+loss_total:
+  last 0.7407, mean10 0.7550
+loss_alignment:
+  last 0.7321, mean10 0.7453
+loss_action_default_equiv:
+  last 0.0695, mean10 0.0780
+aqr_same_role_support_overlap_max:
+  last 0.7426, mean10 0.8335, range10 0.7426..0.9213
+aqr_same_role_local_jaccard_max:
+  last 0.9079, mean10 0.9222
+aqr_same_role_local_true_overlap_max:
+  last 0.0483, mean10 0.0530
+posterior_recycle_rate:
+  last 0.4275, mean10 0.3633, range10 0.1683..0.6057
+posterior_identity_switch_rate:
+  last 0.6889, mean10 0.7611
+grad_norm:
+  last 5.0, mean10 2.1370
+```
+
+Interpretation:
+
+```text
+A5 is running normally and action/alignment losses are decreasing, but the
+anchor-state health is not accepted. same-role support overlap is no longer
+hard-collapsed at 0.99, yet local_jaccard remains high and recycle/identity
+switch are still too active. This means the staged path is useful for
+diagnosis but not yet proof that anchor identity is stable.
+```
+
+Tail command:
+
+```bash
+ssh -p 29776 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_clean_staged_burnin4_750new_20260512_7bff430.train_tmux.log
+```
+
+### A7 direct cotrain control
+
+Runtime:
+
+```text
+machine: A7 / qgE72e
+tmux: a7_direct_cotrain_7bff430
+run: /mnt/checkpoints/picf_core/picf_core/picf_a7_direct_cotrain_burnin4_750new_20260512_7bff430
+log: /mnt/checkpoints/picf_core/picf_core/picf_a7_direct_cotrain_burnin4_750new_20260512_7bff430.train_tmux.log
+progress at check: step 550 / 1200
+GPU: both A100s active
+```
+
+Recent metrics, last 10 logged rows:
+
+```text
+loss_total:
+  last 0.7387, mean10 0.7650
+loss_alignment:
+  last 0.7296, mean10 0.7541
+loss_action_default_equiv:
+  last 0.0733, mean10 0.0877
+aqr_same_role_support_overlap_max:
+  last 0.5787, mean10 0.8762, range10 0.5787..0.9973
+aqr_same_role_local_jaccard_max:
+  last 0.9776, mean10 0.9525
+aqr_same_role_local_true_overlap_max:
+  last 0.0521, mean10 0.0726
+posterior_recycle_rate:
+  last 3.64e-14, mean10 0.00114
+posterior_identity_switch_rate:
+  last 0.8333, mean10 0.7861
+grad_norm:
+  last 0.7371, mean10 1.0176
+```
+
+Interpretation:
+
+```text
+A7 is also running normally. Direct cotrain does not currently show recycle
+saturation, and the last logged same-role support overlap is low. However,
+local_jaccard remains very high and the 10-row same-role support mean is still
+high because earlier rows reached near-collapse. This run is therefore not yet
+accepted either. The useful contrast is that A5 has nontrivial recycle while A7
+has near-zero recycle but both still show high local candidate reuse. That
+points the next analysis toward local candidate/support reuse and posterior
+identity switching, not only action-gradient recycle.
+```
+
+Tail command:
+
+```bash
+ssh -p 28060 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_direct_cotrain_burnin4_750new_20260512_7bff430.train_tmux.log
+```
+
+Strict live-run conclusion:
+
+```text
+Both runs are alive and producing comparable action metrics. Neither run is
+accepted yet. The current evidence supports this decomposition:
+
+1. The previous hard recycle-saturation failure is not universally present.
+2. Action/alignment losses can decrease under the cleaned profile.
+3. same-role row support can temporarily improve.
+4. local candidate reuse remains high enough that anchor identity is not
+   proven stable.
+
+The next decision should wait for later rows or checkpoint-level diagnostics,
+not just the current loss decrease.
+```

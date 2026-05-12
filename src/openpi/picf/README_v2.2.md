@@ -688,6 +688,25 @@ Current training profiles:
   metrics or CALVIN/video behavior evidence. The detailed command ledger and
   boundary conditions are recorded in
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
+- 2026-05-12 stricter multi-layer local audit: after the later
+  `98fe770` audit note, the local audit was repeated over the full PICF/script
+  test inventory instead of only the targeted subsets. The stricter pass
+  verified README routing, stale/removed knobs, explicit no-op guards,
+  MVTrack invariants, key-file and full PICF/script `py_compile`, verifier,
+  strict diagnose, recursive dataflow trace, and MVTrack deep audit. The full
+  PICF/script test set contains 45 pytest files. `scripts/train_test.py` is
+  currently blocked at collection by the local `wandb`/`wandb_watchdog`
+  installation (`No module named wandb_watchdog.observers.polling`), which is
+  a base training-entry environment issue rather than a PICF/MVTrack failure.
+  The remaining 44 PICF/script test files pass after updating the CALVIN eval
+  dummy policy test to match the current debug-argument and `close()` lifecycle:
+  `370 passed, 3 skipped`. This is the current strongest local code/dataflow
+  audit result, but it is still not behavior acceptance; A5/A7 metrics,
+  CALVIN evals, videos, and anchor-health overlays remain the behavior gate.
+  The same experiment report records the post-audit live A5/A7 status:
+  both runs are alive and action/alignment losses are decreasing, but neither
+  is accepted yet because local candidate reuse and posterior identity-switch
+  diagnostics remain too high.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
