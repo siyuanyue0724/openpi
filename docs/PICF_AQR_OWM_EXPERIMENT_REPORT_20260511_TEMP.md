@@ -5187,6 +5187,109 @@ https://gh.llkk.cc/https://github.com/siyuanyue0724/openpi
 
 and checked out the current signature-export scripts at commit `7702c49`.
 
+#### A7 Signature Probe Result
+
+The A7 endpoint signature eval completed on the 1050-step stable-coverage
+checkpoint.
+
+Result:
+
+```text
+binding_signature_cos_auc:
+  0.964458
+
+binding_signature_cos_pos_mean:
+  0.988212
+
+binding_signature_cos_neg_mean:
+  0.858590
+
+support_signature_cos_auc:
+  0.533023
+
+visual_cos_auc:
+  0.504134
+
+point_cos_auc:
+  0.528002
+
+geometry_auc:
+  1.0
+
+combined_auc:
+  0.923401
+
+duplicate_candidate_fraction_within_frame:
+  0.854286
+
+decision:
+  binding_subspace_decodable_but_assignment_duplicates_candidates
+```
+
+A7 agrees with A5:
+
+```text
+A5 binding_signature_cos_auc:
+  0.976374
+
+A7 binding_signature_cos_auc:
+  0.964458
+
+A5 duplicate_candidate_fraction:
+  0.848016
+
+A7 duplicate_candidate_fraction:
+  0.854286
+```
+
+Conclusion:
+
+```text
+The current training profile did not destroy the pairwise binding subspace.
+Both A5 and A7 expose a strong decodable same-object signal in
+binding_signature. The remaining failure is repeated candidate assignment /
+coverage, not absence of object-binding information and not action-gradient
+destruction of the binding subspace in this endpoint.
+```
+
+This rules out several hypotheses:
+
+```text
+Rejected:
+  The binding_signature_proj path is useless.
+  A7 failed because it lost all pairwise object-binding signal.
+  The next fix should be a stronger identity loss.
+  The next fix should be stronger cache/address inertia.
+  The next fix should be opening slot-JEPA/support-prediction.
+
+Still live:
+  AQR assignment/local candidate selection is not using the binding subspace to
+  distribute same-role slots over distinct candidates.
+  Raw support_signature is nearly constant and cannot be used as the primary
+  object discriminator.
+  Tracklet/proposal evidence may still be needed if per-frame candidate
+  assignment cannot produce enough coverage.
+```
+
+Next coherent engineering move:
+
+```text
+Use the already-decoded binding_signature as a read/assignment signal, not as a
+new loss target. Audit scale and insertion point:
+
+1. measure binding_signature contribution inside `_binding_logits`;
+2. compare candidate selection before and after local top-k using the projected
+   binding signature score;
+3. if the signal is present before top-k but lost after top-k, fix local
+   candidate selection;
+4. if the signal is weak at assignment time despite high offline AUC, fix the
+   binding reader/coefficient schedule;
+5. only if both fail, activate real temporal correspondence evidence
+   (tracklet/proposal dataflow).
+```
+
+This remains a structure/readout repair, not a loss pile-up.
+
 #### 12-Hour Acceptance Matrix
 
 The next checkpoint should be judged by the following matrix:

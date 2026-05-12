@@ -105,6 +105,16 @@ object-binding question: the projected pairwise binding subspace is decodable.
 The remaining failure is assignment/coverage reuse of candidates, not absence
 of same-object signal. A7 endpoint signature probing is the next discriminator.
 
+2026-05-13 A7 signature-probe result: A7 agrees with A5. The A7 endpoint reports
+`binding_signature_cos_auc=0.964` and
+`duplicate_candidate_fraction_within_frame=0.854`. This rules out the hypothesis
+that A7 destroyed the pairwise binding subspace. The remaining bottleneck is
+that AQR assignment/local candidate selection does not distribute same-role
+slots over distinct candidates even though a same-object binding signal is
+available. The next repair must audit binding-signature scale and local top-k
+candidate selection before any new loss, stronger cache/address inertia, or
+slot-JEPA/support-prediction pressure is enabled.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)
