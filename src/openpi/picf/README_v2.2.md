@@ -773,6 +773,17 @@ Current training profiles:
   current bottleneck is coverage/differentiation, not stable-slot switching. If
   the 1050-step endpoint does not raise stable coverage, the next experiment is
   an offline IsSameObject probe, not another action/JEPA/raw-switch loss sweep.
+- 2026-05-13 completed A5 overlay plus A7 step-880 update: A5 CALVIN
+  visualization finished with behavior success `0/2`, but its anchor overlays
+  are diagnostically useful. The effector-like role-0 slot tracks a distinct
+  region, while scene slots 1..7 repeatedly share the same pixel/XYZ candidate
+  across both `push_blue_block_right` and `open_drawer`. A7 at step 880 remains
+  better than the 0.99 overlap-collapse runs
+  (`same_role_support_overlap≈0.35`, `local_true_overlap≈0.035`) and stable
+  slots have high binding margin (`≈0.96`), but stable coverage is still only
+  `≈0.117`. The current gate is unchanged: finish A7 to 1050, then run the
+  offline IsSameObject probe if stable coverage does not rise materially. Do
+  not add action/JEPA/raw-switch penalties as a shortcut.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

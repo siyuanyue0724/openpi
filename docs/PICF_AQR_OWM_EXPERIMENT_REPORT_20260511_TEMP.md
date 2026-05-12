@@ -4588,3 +4588,104 @@ Probe negative:
   activate real tracklet/proposal dataflow. This follows TrackVLA-style temporal
   correspondence rather than adding more scalar regularizers.
 ```
+
+### A5 Completed Anchor-Overlay Reading And A7 Step-880 Update
+
+A5 CALVIN anchor/prediction visualization completed for checkpoint:
+
+```text
+/mnt/checkpoints/picf_core/picf_core/picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be
+```
+
+The two-sequence CALVIN smoke result is behavior-negative:
+
+```text
+push_blue_block_right: 0 / 1
+open_drawer: 0 / 1
+average successful sequence length: 0.0
+```
+
+This run is not treated as behavior acceptance. It is used to inspect anchor
+placement. The completed `anchor_debug.jsonl` has 720 frames and gives a
+consistent diagnosis:
+
+```text
+frame 0, push blue block right:
+  slot 0 role=0 pixel=[57.6,95.6], xyz=[0.001,-0.197,0.572]
+  slots 1..7 role=1 all pixel=[75.7,107.3], xyz=[-0.183,-0.045,0.348]
+  same_role_visual_overlap=0.5005
+  same_role_point_overlap=0.7107
+
+frame 360, open drawer:
+  slot 0 role=0 pixel=[58.0,95.9], xyz=[-0.015,-0.186,0.558]
+  slots 1..7 role=1 all pixel=[71.6,97.3], xyz=[-0.136,-0.063,0.424]
+  same_role_visual_overlap=0.7615
+  same_role_point_overlap=0.5483
+
+frame 719, open drawer:
+  slot 0 role=0 pixel=[110.0,87.6], xyz=[0.104,-0.063,0.487]
+  slots 1..7 role=1 all pixel=[84.9,89.3], xyz=[-0.076,-0.039,0.440]
+  same_role_visual_overlap=0.8216
+  same_role_point_overlap=0.3936
+```
+
+Interpretation:
+
+```text
+The issue is not that every anchor is random. The effector-like role-0 slot
+tracks a separate region. The issue is that same-role scene slots 1..7 can be
+stable while sharing one candidate. Therefore stable identity switch is a
+necessary but insufficient metric. The acceptance target must include stable
+coverage and visual/3D differentiation among same-role scene slots.
+```
+
+A7 stable-coverage continuation is still running. The latest inspected metric
+row is step 880:
+
+```text
+loss_total=0.7226
+loss_action_default_equiv=0.0626
+same_role_support_overlap=0.3506
+local_jaccard=0.5106
+local_true_overlap=0.0353
+raw_identity_switch=0.7667
+stable_identity_switch=0.0250
+stable_slot_fraction=0.1167
+recycle_rate=0.3474
+stable_binding_margin=0.9596
+```
+
+Tail mean through the continuation segment:
+
+```text
+loss_total=0.7249
+loss_action_default_equiv=0.0657
+same_role_support_overlap=0.5034
+local_jaccard=0.5299
+local_true_overlap=0.0460
+raw_identity_switch=0.8000
+stable_identity_switch=0.0038
+stable_slot_fraction=0.1128
+recycle_rate=0.3355
+stable_binding_margin=0.9708
+```
+
+Decision status:
+
+```text
+Positive:
+  same_role_support_overlap is much lower than the 0.99 collapse runs;
+  local_true_overlap remains low;
+  stable slots have high binding margin.
+
+Negative:
+  stable_slot_fraction remains near 0.11 through step 880;
+  A5 overlays show same-role scene slots are not differentiated;
+  tracklet/proposal evidence remains inactive in the training metrics.
+
+Current decision:
+  continue A7 to step 1050 because it is close to completion;
+  if stable_slot_fraction remains near 0.11, stop coverage-continuation tests
+  and run Offline IsSameObject Probe v0 before any new loss or action-pressure
+  sweep.
+```
