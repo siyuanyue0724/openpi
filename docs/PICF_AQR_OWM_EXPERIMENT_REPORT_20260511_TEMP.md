@@ -4185,3 +4185,74 @@ do not add raw identity loss;
 do not increase address weight first;
 run a support-signature coefficient audit and an offline IsSameObject probe.
 ```
+
+### Preliminary A5 Anchor-Overlay Reading
+
+The first A5 CALVIN visualization pass is now producing:
+
+```text
+/mnt/calvin_eval_logs/picf_a5_stableid_anchor_253c9be/anchor_debug/anchor_debug.jsonl
+/mnt/calvin_eval_logs/picf_a5_stableid_anchor_253c9be/anchor_debug/anchor_overlay_ep0000.mp4
+/mnt/calvin_eval_logs/picf_a5_stableid_anchor_253c9be/prediction_debug/prediction_compare_ep0000.mp4
+/mnt/calvin_eval_logs/picf_a5_stableid_anchor_253c9be/videos/push_blue_block_right_1778600884964.mp4
+```
+
+Initial parsed frames for goal `go push the blue block right`:
+
+```text
+frame 0:
+  slot 0 role=0 alpha=0.497 pixel=[57.6, 95.6] xyz=[0.001, -0.197, 0.572]
+  slots 1..7 role=1 alpha=0.499 pixel=[75.7, 107.3]
+    xyz=[-0.183, -0.045, 0.348]
+
+frame 30:
+  slot 0 role=0 alpha=0.490 pixel=[55.0, 94.1] xyz=[0.009, -0.207, 0.589]
+  slots 1..7 role=1 alpha=0.489 pixel=[82.0, 96.3]
+    xyz=[-0.101, -0.048, 0.415]
+  same_role_visual_overlap=0.939
+  same_role_point_overlap=0.941
+
+frame 60:
+  slot 0 role=0 alpha=0.489 pixel=[56.5, 95.8] xyz=[0.002, -0.201, 0.575]
+  slots 1..7 role=1 alpha=0.489 pixel=[73.3, 95.9]
+    xyz=[-0.134, -0.054, 0.422]
+  same_role_visual_overlap=0.914
+  same_role_point_overlap=0.297
+```
+
+Per-slot alpha>=0.25 pixel stability over the first 61 frames:
+
+```text
+slot 0:
+  n=61 mean_xy=[53.1, 94.2] std_xy=[2.0, 1.7]
+
+slots 1..7:
+  n=61 mean_xy=[76.6, 97.4] std_xy=[3.4, 3.3]
+  nearly identical across all seven same-role slots
+```
+
+Interpretation:
+
+```text
+The stable-id metric was useful, but it is not sufficient as an acceptance gate.
+Stable-switch near zero can mean that several same-role slots are stably sharing
+the same candidate, not that object identity coverage is healthy.
+
+The immediate problem is therefore sharper:
+  same-role slot differentiation / candidate ownership is still insufficient in
+  rollout space.
+
+The correct next action is not a raw identity-switch loss and not predictive
+JEPA cotrain. The next action should be a principled differentiation source:
+  1. real tracklet/proposal evidence when available;
+  2. an offline IsSameObject probe to test whether V-JEPA/PG/wrist/point tokens
+     contain separable same-object information;
+  3. a support-signature coefficient audit only if the probe or overlay evidence
+     indicates separability exists.
+```
+
+This preliminary overlay result also explains why earlier numeric runs could
+look partially healthy while same-role overlap reappeared: the slots can be
+stable and high-margin, but stable around the same candidate. That is a
+coverage/differentiation failure, not a gradient explosion, recycle saturation,
+or action-loss-only failure.

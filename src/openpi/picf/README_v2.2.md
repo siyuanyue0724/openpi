@@ -756,6 +756,13 @@ Current training profiles:
   not a raw identity-switch loss or early predictive auxiliary pressure. See
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md` section
   `2026-05-12 Three-Line Follow-Up`.
+- 2026-05-12 preliminary anchor-overlay reading: A5 CALVIN rollout debug is now
+  producing anchor overlays and JSON. The first `push blue block right` frames
+  show slot 0 stable at one region while same-role slots 1..7 are nearly
+  identical in pixel/xyz coordinates. This means stable-switch near zero is not
+  sufficient as acceptance: same-role slots can be stable while sharing the same
+  candidate. The next gate is stable coverage plus visual/3D differentiation,
+  not raw identity-switch suppression.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
