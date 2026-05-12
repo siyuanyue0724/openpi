@@ -208,8 +208,6 @@ def run_static_checks() -> list[Finding]:
                 "tracklet_memory_enabled: bool = True",
                 "proposal_memory_enabled: bool = True",
                 "local_refinement_enabled: bool = True",
-                "local_refinement_role_competition_enabled: bool = False",
-                "local_refinement_coverage_seed_enabled",
                 "lambda_aqr_denoising: float = 0.0",
             )
             and training.contains(
@@ -330,14 +328,13 @@ def run_static_checks() -> list[Finding]:
             and "proposal_priors" in aqr_graph
             and "local_token_indices" in aqr_graph
             and "local_refinement_weight" in aqr_graph
-            and "_coverage_seed_selection_scores" in aqr_graph
             and "local_read" in aqr_graph,
             severity="fail",
             detail=(
-                "Local refinement must aggregate top-k evidence from existing typed memories and apply "
-                "guarded seeded candidate proposal before top-k selection when the diagnostic is enabled."
+                "Local refinement must aggregate top-k evidence from existing typed memories without "
+                "reintroducing rejected role-competition or coverage-seed candidate heuristics."
             ),
-            evidence=pipeline.refs("_add_local_component", "_coverage_seed_selection_scores", "local_refinement_weight"),
+            evidence=pipeline.refs("_add_local_component", "local_refinement_weight", "local_read"),
         )
     )
     checks.append(

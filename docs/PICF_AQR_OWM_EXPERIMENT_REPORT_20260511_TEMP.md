@@ -2608,3 +2608,113 @@ Next useful experiment:
   evidence into CALVIN. More scalar/local-candidate heuristics are not expected
   to be clean or decisive.
 ```
+
+---
+
+## 2026-05-12 Production Cleanup and Theory Reconciliation
+
+Decision:
+
+```text
+Remove from active production code:
+  - local_refinement_role_competition_*
+  - local_refinement_coverage_seed_*
+
+Keep in active production code:
+  - evidence-weighted local refinement over existing typed memories
+  - moderate binding_signature support/address prior
+  - support-diversity and geometry-diversity losses at conservative weights
+  - guarded OWM predictive hooks with default lambda=0
+
+Do not add new scalar heuristics until one of these is true:
+  - offline IsSameObject probe identifies a real object-binding subspace;
+  - real tracklet/proposal data enters the train/replay/serve dataflow;
+  - a failure case proves a missing term with a falsifiable metric.
+```
+
+Code cleanup performed:
+
+```text
+1. Removed role-competition and coverage-seed fields from PicfCoreConfig.
+2. Removed their train CLI arguments and startup/debug metric keys.
+3. Removed their helper functions and tests from pipeline/pipeline_test.
+4. Removed verifier/strict/dataflow/deep-audit requirements that treated them
+   as part of the current contract.
+5. Updated README_v2.2 so these are historical rejected diagnostics only.
+```
+
+Why removal is mathematically cleaner:
+
+```math
+Local refinement should approximate
+
+  \Omega_j =
+    TopK(p^v_j)
+    \cup TopK(p^{temp}_j)
+    \cup TopK(p^{point}_j)
+    \cup TopK(p^{track}_j)
+    \cup TopK(p^{prop}_j)
+
+and then reread typed evidence inside \Omega_j.
+```
+
+The rejected role/coverage heuristics changed the candidate set by hand:
+
+```math
+score_{j,i}
+  =
+  p_{j,i} \cdot h(j,i)
+```
+
+where `h(j,i)` was not learned from current evidence and not tied to posterior
+belief quality. The experiments showed the failure mode directly: when same-role
+AQR rows become nearly identical, deterministic role/coverage factors cannot
+recover object identity. Keeping those knobs would preserve a false sense of
+control while adding operator burden and semantic noise.
+
+Paper reconciliation:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  - Supports probing pairwise IsSameObject information in pretrained ViT tokens.
+  - It does not support hand-coded role/coverage candidate ownership after rows
+    have already collapsed.
+  - Our binding_signature path is the coherent structural approximation; the
+    missing rigorous step is an offline IsSameObject probe/audit.
+
+V-JEPA 2 / VLA-JEPA:
+  - Support temporal latent evidence and leakage-free future targets.
+  - They support typed temporal memory and guarded predictive hooks, not
+    strong default JEPA losses before identity is stable.
+
+OA-WAM:
+  - Supports persistent address + time-varying content.
+  - It argues for address-aware binding/cache, but address must remain gated by
+    current evidence, recycle, and innovation; it must not become a hard lock.
+
+WristWorld / MLA / RoboGround / CoTracker3:
+  - Support wrist/multisensory/grounded/tracklet evidence when available.
+  - They do not justify pretending absent tracklet/proposal data is active.
+```
+
+Current clean next steps:
+
+```text
+1. Run an offline IsSameObject probe over V-JEPA/static/wrist tokens using weak
+   labels from posterior continuity, point neighborhoods, contact neighborhoods,
+   PG support overlap, and later tracklets when available.
+
+2. Feed real tracklet/proposal fields through CALVIN train/replay/serve only
+   when those files exist; missing fields must stay no-op.
+
+3. Continue staged cotrain diagnostics with:
+   action_prefix_stopgrad warmup,
+   conservative support/geometry diversity,
+   moderate binding_signature,
+   no strong address inertia,
+   OWM predictive lambdas default 0.
+
+4. Treat high same-role overlap and local Jaccard as primary failure metrics.
+   Action loss alone is not sufficient because the model can reduce action loss
+   while collapsing object support.
+```

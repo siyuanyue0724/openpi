@@ -252,8 +252,6 @@ def run_static_checks() -> list[Finding]:
                 "aqr_pg_image_support_enabled: bool = True",
                 'aqr_vjepa_temporal_mode: str = "last_two_tokens"',
                 "evidence_cache_read_weight: float = 0.05",
-                "local_refinement_role_competition_enabled: bool = False",
-                "local_refinement_coverage_seed_enabled",
             )
             and trainer.contains(
                 "_LOSS_DEFAULTS = PicfTransitionLossConfig()",
@@ -274,8 +272,6 @@ def run_static_checks() -> list[Finding]:
                 "mapg_enabled",
                 "aqr_vjepa_temporal_mode",
                 "evidence_cache_read_weight",
-                "local_refinement_role_competition_enabled",
-                "local_refinement_coverage_seed_enabled",
             )
             + trainer.refs('default="paligemma"', "_LOSS_DEFAULTS", "default=_LOSS_DEFAULTS.lambda_mapg_cycle"),
         )

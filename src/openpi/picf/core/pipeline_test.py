@@ -16,8 +16,6 @@ from openpi.picf.core.contracts import PicfObservationAnchorState
 from openpi.picf.core.contracts import PicfVLGroundingState
 from openpi.picf.core import pipeline as pipeline_module
 from openpi.picf.core.pipeline import PicfFullCore
-from openpi.picf.core.pipeline import _coverage_seed_selection_scores
-from openpi.picf.core.pipeline import _role_competitive_selection_scores
 from openpi.picf.core.pipeline import _variance_from_logvar
 from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.pointcloud_picf import CalvinDepthToPicfPointCloud
@@ -72,124 +70,6 @@ class _StubTactileEncoder:
             hidden_dim=64,
             pooled_dim=128,
         )
-
-
-def test_role_competitive_selection_amplifies_same_role_preference() -> None:
-    weights = torch.tensor(
-        [
-            [0.90, 0.80, 0.10],
-            [0.89, 0.10, 0.80],
-        ],
-        dtype=torch.float32,
-    )
-    weights = weights / weights.sum(dim=-1, keepdim=True)
-    roles = torch.tensor([2, 2], dtype=torch.long)
-
-    plain = _role_competitive_selection_scores(
-        weights,
-        roles,
-        enabled=False,
-        strength=2.0,
-        floor=0.05,
-        eps=1e-6,
-    )
-    competitive = _role_competitive_selection_scores(
-        weights,
-        roles,
-        enabled=True,
-        strength=2.0,
-        floor=0.05,
-        eps=1e-6,
-    )
-
-    assert torch.topk(plain, k=1, dim=-1).indices.squeeze(-1).tolist() == [0, 0]
-    assert torch.topk(competitive, k=1, dim=-1).indices.squeeze(-1).tolist() == [1, 2]
-    assert torch.all(torch.isfinite(competitive))
-    assert torch.allclose(competitive.sum(dim=-1), torch.ones(2), atol=1e-5)
-
-
-def test_role_competitive_selection_preserves_cross_role_reuse() -> None:
-    weights = torch.tensor(
-        [
-            [0.90, 0.10],
-            [0.85, 0.15],
-        ],
-        dtype=torch.float32,
-    )
-    roles = torch.tensor([1, 2], dtype=torch.long)
-    competitive = _role_competitive_selection_scores(
-        weights,
-        roles,
-        enabled=True,
-        strength=2.0,
-        floor=0.05,
-        eps=1e-6,
-    )
-    assert torch.topk(competitive, k=1, dim=-1).indices.squeeze(-1).tolist() == [0, 0]
-
-
-def test_role_competitive_selection_does_not_invent_asymmetry() -> None:
-    weights = torch.tensor(
-        [
-            [0.70, 0.20, 0.10],
-            [0.70, 0.20, 0.10],
-        ],
-        dtype=torch.float32,
-    )
-    roles = torch.tensor([3, 3], dtype=torch.long)
-    competitive = _role_competitive_selection_scores(
-        weights,
-        roles,
-        enabled=True,
-        strength=2.0,
-        floor=0.05,
-        eps=1e-6,
-    )
-    assert torch.allclose(competitive[0], competitive[1])
-    assert torch.topk(competitive, k=1, dim=-1).indices.squeeze(-1).tolist() == [0, 0]
-
-
-def test_coverage_seed_selection_breaks_identical_rows_by_anchor_seed() -> None:
-    weights = torch.full((2, 4), 0.25, dtype=torch.float32)
-    coverage = torch.tensor([[-1.0, -1.0], [1.0, 1.0]], dtype=torch.float32)
-    coords = torch.tensor(
-        [
-            [-1.0, -1.0],
-            [-0.8, -0.8],
-            [0.8, 0.8],
-            [1.0, 1.0],
-        ],
-        dtype=torch.float32,
-    )
-    seeded = _coverage_seed_selection_scores(
-        weights,
-        coverage,
-        coords,
-        enabled=True,
-        strength=1.0,
-        sigma=0.5,
-        eps=1e-6,
-    )
-
-    assert torch.topk(seeded, k=1, dim=-1).indices.squeeze(-1).tolist() == [0, 3]
-    assert torch.allclose(seeded.sum(dim=-1), torch.ones(2), atol=1e-5)
-
-
-def test_coverage_seed_selection_preserves_original_when_disabled() -> None:
-    weights = torch.tensor([[0.7, 0.3], [0.7, 0.3]], dtype=torch.float32)
-    coverage = torch.tensor([[-1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
-    coords = torch.tensor([[-1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
-    seeded = _coverage_seed_selection_scores(
-        weights,
-        coverage,
-        coords,
-        enabled=False,
-        strength=1.0,
-        sigma=0.5,
-        eps=1e-6,
-    )
-
-    assert torch.allclose(seeded, weights)
 
 
 class _FeatureMapFromClip:

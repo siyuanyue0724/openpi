@@ -634,28 +634,13 @@ Current training profiles:
   so the next repair must move anti-collapse pressure into role-wise local
   candidate selection/ownership before support aggregation. See
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
-- 2026-05-12 role-wise soft local candidate competition: local refinement now
-  scores top-k candidates with a same-role capacity factor before selection:
-  `score_ji = p_ji * (((p_ji / sum_{k:role_k=role_j} p_ki) * |role|)^gamma)`.
-  The local read still uses the original support weight `p_ji`; the competition
-  only chooses which existing typed-memory candidates each anchor rereads. This
-  is intentionally not a hard exclusion rule, not a new loss family, and not a
-  posterior truth override. If all same-role anchors have exactly identical
-  evidence over all tokens, this mechanism will not invent asymmetry; that is
-  the correct information-theoretic behavior. Its purpose is to amplify real
-  per-anchor preferences before top-k truncation erases them.
-- 2026-05-12 ownerfix rejection and coverage-seed diagnostic: the role-wise
-  competition mechanism was rejected by A5/A7 step-520 evidence. Both runs
-  returned to `aqr_same_role_local_jaccard_max=1.0` and high same-role support
-  overlap, proving that soft competition cannot create candidate asymmetry
-  after same-role AQR rows have already become identical. The next guarded
-  diagnostic is `local_refinement_coverage_seed_enabled`: local top-k candidate
-  proposal is weakly biased by deterministic `aqr_coverage_codes`, while the
-  local value read still uses the original support weights. This is a proposal
-  prior only, not a new posterior truth and not a new loss family. Production
-  default keeps both role competition and coverage seed disabled until the
-  diagnostic passes. The experiment design, mathematical definition, and
-  acceptance gates are in
+- 2026-05-12 rejected local-candidate heuristics cleanup: role-wise soft local
+  candidate competition and deterministic coverage-seeded local proposal were
+  both rejected by A5/A7 evidence. They reduced neither the high local Jaccard
+  tail nor the same-role support collapse once AQR rows had already become
+  nearly identical. These paths have been removed from production config, CLI,
+  debug logging, verifier contracts, and runtime tests. They remain documented
+  only as historical experiments in
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
 - 2026-05-12 coverage-seed result: both A5 and A7 completed to step 750 and
   rejected the coverage-seeded proposal. A5 ended with
@@ -675,9 +660,9 @@ Current training profiles:
   binding-strong reached `support_overlap≈0.999` and `local_jaccard=1.0`.
   This rejects further weight sweeps of the current binding-signature path.
   Keep the moderate binding-signature prior as an architecture-aligned low-cost
-  term, but do not enable strong binding weights, coverage seed, or role
-  competition by default. The next clean test is an offline IsSameObject token
-  probe or real tracklet/proposal dataflow.
+  term, but do not reintroduce strong binding weights or removed local-candidate
+  heuristics. The next clean test is an offline IsSameObject token probe or real
+  tracklet/proposal dataflow.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

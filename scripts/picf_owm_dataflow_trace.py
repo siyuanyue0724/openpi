@@ -96,15 +96,11 @@ NODES: tuple[TraceNode, ...] = (
         needles=("def _build_aqr_anchor_graph", "visual_priors", "point_priors", "tactile_priors", "posterior_priors"),
     ),
     TraceNode(
-        name="Seeded local candidate proposal",
-        formula="score_{j,i}=p_{j,i}(1+w exp(-||coverage_j-xy_i||^2/(2sigma^2))); local read still uses p_{j,i}",
-        invariant="Coverage seeds can propose distinct local neighborhoods before top-k truncation; this is structural evidence routing, not posterior truth or an auxiliary loss.",
-        sources=("src/openpi/picf/core/pipeline.py", "src/openpi/picf/core/config.py", "src/openpi/picf/core/pipeline_test.py"),
-        needles=(
-            "_coverage_seed_selection_scores",
-            "local_refinement_coverage_seed_enabled",
-            "test_coverage_seed_selection_breaks_identical_rows_by_anchor_seed",
-        ),
+        name="Local typed-memory refinement",
+        formula="Omega_j=TopK(p_visual_j) U TopK(p_temporal_j) U TopK(p_point_j) U TopK(p_track_j) U TopK(p_prop_j)",
+        invariant="Local refinement rereads existing typed evidence only; rejected role-competition and coverage-seed heuristics are not production routing paths.",
+        sources=("src/openpi/picf/core/pipeline.py", "src/openpi/picf/core/contracts.py"),
+        needles=("local_priors", "local_token_indices", "local_refinement_weight", "local_read"),
     ),
     TraceNode(
         name="Projective point-visual geometry",
