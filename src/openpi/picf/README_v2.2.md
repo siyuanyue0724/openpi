@@ -3794,6 +3794,12 @@ Local audit:
   verifier/evidence-bundle pytest pass locally. Runtime-artifact WARNs are
   expected until a metrics/eval path is supplied.
 
+Latest local re-audit:
+  repeated after commit 8cce28a with the same pass results:
+  py_compile PASS, verify_picf_owm_contract 31/31 PASS, strict diagnose PASS,
+  dataflow trace PASS, MVTrack deep audit PASS, targeted pytest 4 passed, and
+  git diff --check PASS.
+
 Representational diagnosis:
   A5/A7 same-object probes show high binding_signature separability
   (AUC ~= 0.96-0.98), but high duplicate candidate fraction (~0.85).
@@ -3805,6 +3811,12 @@ Active next test:
 Remote runs:
   A5: picf_a5_siglocal025_burnin4_from750_to1650_20260513_08fbf31
   A7: picf_a7_siglocal050_burnin4_from750_to1650_20260513_08fbf31
+
+Live remote status from the same re-audit:
+  both jobs remain active in tmux. A5 had reached step 800; A7 had reached
+  step 775. Neither showed tracebacks, NaN/Inf, or idle GPUs. Tracklet/proposal
+  tokens remain zero in this CALVIN dataflow test, so the run evaluates
+  signature-guided local candidate use only.
 
 Important guard:
   this is not a new loss, not a hard cross-anchor ownership rule, and not a

@@ -5731,3 +5731,115 @@ Do not stop or alter these jobs unless one of the following happens:
   - loss_action_default_equiv or loss_total diverges sharply for multiple logs;
   - both GPUs become idle while driver.log has no "done" marker.
 ```
+
+### 2026-05-13 Local Re-Audit And Live Remote Check
+
+This checkpoint was taken after documentation commit:
+
+```text
+8cce28a Record active signature local runs
+```
+
+Local checkout:
+
+```text
+branch:
+  Posterior_VLA
+
+working tree:
+  clean
+```
+
+Local audit commands rerun:
+
+```text
+python -m py_compile \
+  src/openpi/picf/core/config.py \
+  src/openpi/picf/core/pipeline.py \
+  scripts/picf_core_train.py \
+  scripts/verify_picf_owm_contract.py \
+  scripts/picf_owm_same_object_probe.py \
+  scripts/picf_owm_strict_diagnose.py \
+  scripts/picf_owm_dataflow_trace.py \
+  scripts/picf_owm_mvtrack_deep_audit.py
+
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py
+PYTHONPATH=src python scripts/picf_owm_strict_diagnose.py --fail-on-fail
+PYTHONPATH=src python scripts/picf_owm_dataflow_trace.py --fail-on-fail
+PYTHONPATH=src python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail
+pytest -q scripts/verify_picf_owm_contract_test.py scripts/picf_owm_evidence_bundle_test.py
+git diff --check
+```
+
+Results:
+
+```text
+py_compile:
+  PASS
+
+verify_picf_owm_contract:
+  31/31 PASS
+
+strict diagnose:
+  PASS, with only expected runtime-artifact WARNs when no metrics/eval paths
+  are supplied.
+
+dataflow trace:
+  PASS
+
+MVTrack deep audit:
+  PASS
+
+targeted pytest:
+  4 passed
+
+git diff --check:
+  PASS
+```
+
+Live remote status at the same audit point:
+
+```text
+A5:
+  tmux session: siglocal_a5
+  latest logged step: 800
+  loss_total: 0.740409
+  loss_action_default_equiv: 0.059182
+  loss_anchor_pv: 2.391390
+  loss_pv_weak: 1.637834
+  loss_mapg_routing: 1.141746
+  aqr_same_role_support_overlap_max: 0.791688
+  aqr_same_role_local_true_overlap_max: 0.082113
+  aqr_same_role_local_jaccard_max: 0.636993
+  posterior_recycle_rate: 0.228806
+  posterior_stable_slot_fraction: 0.111111
+  owm_tracklet_tokens: 0
+  owm_proposal_tokens: 0
+
+A7:
+  tmux session: siglocal_a7
+  latest logged step: 775
+  loss_total: 0.735043
+  loss_action_default_equiv: 0.064387
+  loss_anchor_pv: 2.404265
+  loss_pv_weak: 1.660162
+  loss_mapg_routing: 1.128123
+  aqr_same_role_support_overlap_max: 0.530347
+  aqr_same_role_local_true_overlap_max: 0.041773
+  aqr_same_role_local_jaccard_max: 0.382661
+  posterior_recycle_rate: 0.342753
+  posterior_stable_slot_fraction: 0.111111
+  owm_tracklet_tokens: 0
+  owm_proposal_tokens: 0
+```
+
+Interpretation:
+
+```text
+No local code blocker was found.
+Both remote jobs are still running in tmux and should continue.
+A7 has the cleaner early local-duplicate signal, but neither job is far enough
+for final acceptance. Tracklet/proposal tokens remain zero as expected for this
+CALVIN dataflow test, so this round evaluates signature-guided local candidate
+use only, not full MVTrack tracklet/proposal behavior.
+```
