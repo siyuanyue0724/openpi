@@ -714,6 +714,25 @@ Current training profiles:
   refinement; A7 keeps it but reduces top-k and residual weight. This is a
   causal diagnostic for high same-role local-candidate reuse, not a new
   mechanism or a production long-run.
+- 2026-05-12 local-refinement isolation checkpoint: the step-600+ evidence
+  is sufficient to move to the next diagnostic. A5 local-off reaches
+  `aqr_same_role_support_overlap_max=0.7294` at step 750 with local priors
+  disabled by construction, while A7 local top-k 8 / residual 0.10 reaches
+  `aqr_same_role_support_overlap_max=0.3308` and
+  `aqr_same_role_local_jaccard_max=0.4734` by step 740. This confirms that
+  local refinement was an overlap amplifier. It does not yet prove identity
+  health, because both branches still report raw
+  `posterior_identity_switch_rate≈0.81..0.83`. The next step is therefore a
+  debug-only stable-slot identity audit, not another scalar identity loss:
+  mask low-confidence/recycled/ambiguous slots and log binding margins before
+  deciding whether assignment math or only the raw switch metric is failing.
+  The local patch adds these metrics without changing training behavior:
+  `posterior_identity_switch_rate_stable`,
+  `posterior_identity_switch_rate_nonrecycled`,
+  `posterior_identity_switch_rate_recycled`,
+  `posterior_stable_slot_fraction`, and
+  `posterior_binding_top1_margin_*`. Use the stable metric as the next
+  acceptance discriminator; keep raw switch as an alarm.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

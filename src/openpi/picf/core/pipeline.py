@@ -6856,13 +6856,59 @@ class PicfFullCore(nn.Module):
             previous_posterior = None if observed.previous is None else getattr(observed.previous, "posterior", None)
             previous_binding = None if previous_posterior is None else getattr(previous_posterior, "binding", None)
             if previous_binding is not None and previous_binding.numel() > 0:
-                current_binding = observed.posterior.binding.to(device=self.device)
-                previous_binding = previous_binding.to(device=self.device)
+                current_binding = observed.posterior.binding.to(device=self.device, dtype=self.dtype)
+                previous_binding = previous_binding.to(device=self.device, dtype=self.dtype)
                 slot_count = min(int(current_binding.shape[0]), int(previous_binding.shape[0]))
                 if slot_count > 0:
-                    current_ids = current_binding[:slot_count].reshape(slot_count, -1).argmax(dim=-1)
-                    previous_ids = previous_binding[:slot_count].reshape(slot_count, -1).argmax(dim=-1)
-                    debug["posterior_identity_switch_rate"] = float((current_ids != previous_ids).to(dtype=self.dtype).mean().item())
+                    current_flat = current_binding[:slot_count].reshape(slot_count, -1)
+                    previous_flat = previous_binding[:slot_count].reshape(slot_count, -1)
+                    current_ids = current_flat.argmax(dim=-1)
+                    previous_ids = previous_flat.argmax(dim=-1)
+                    switched = current_ids != previous_ids
+                    debug["posterior_identity_switch_rate"] = float(switched.to(dtype=self.dtype).mean().item())
+
+                    def _binding_margin(flat: torch.Tensor) -> torch.Tensor:
+                        if flat.shape[-1] <= 1:
+                            return torch.ones((flat.shape[0],), device=self.device, dtype=self.dtype)
+                        top2 = torch.topk(flat, k=2, dim=-1).values
+                        return top2[:, 0] - top2[:, 1]
+
+                    current_margin = _binding_margin(current_flat)
+                    previous_margin = _binding_margin(previous_flat)
+                    debug["posterior_binding_top1_margin_mean"] = float(current_margin.mean().item())
+                    debug["posterior_binding_top1_margin_min"] = float(current_margin.min().item())
+
+                    nonrecycled = torch.ones((slot_count,), device=self.device, dtype=torch.bool)
+                    current_recycle = observed.posterior.recycle_gate
+                    previous_recycle = getattr(previous_posterior, "recycle_gate", None)
+                    if current_recycle is not None and current_recycle.numel() >= slot_count:
+                        nonrecycled = nonrecycled & (
+                            current_recycle.to(device=self.device, dtype=self.dtype).reshape(-1)[:slot_count] <= 0.5
+                        )
+                    if previous_recycle is not None and previous_recycle.numel() >= slot_count:
+                        nonrecycled = nonrecycled & (
+                            previous_recycle.to(device=self.device, dtype=self.dtype).reshape(-1)[:slot_count] <= 0.5
+                        )
+                    if bool(nonrecycled.any().item()):
+                        debug["posterior_identity_switch_rate_nonrecycled"] = float(switched[nonrecycled].to(dtype=self.dtype).mean().item())
+                    recycled = ~nonrecycled
+                    if bool(recycled.any().item()):
+                        debug["posterior_identity_switch_rate_recycled"] = float(switched[recycled].to(dtype=self.dtype).mean().item())
+
+                    # Stable-slot switch rate separates true persistent identity
+                    # instability from raw argmax churn on low-confidence slots.
+                    stable = nonrecycled.clone()
+                    for value in (observed.posterior.alpha, getattr(previous_posterior, "alpha", None)):
+                        if value is not None and value.numel() >= slot_count:
+                            stable = stable & (value.to(device=self.device, dtype=self.dtype).reshape(-1)[:slot_count] >= 0.25)
+                    for value in (observed.posterior.support_mass, getattr(previous_posterior, "support_mass", None)):
+                        if value is not None and value.numel() >= slot_count:
+                            stable = stable & (value.to(device=self.device, dtype=self.dtype).reshape(-1)[:slot_count] >= 0.05)
+                    stable = stable & (current_margin >= 0.05) & (previous_margin >= 0.05)
+                    debug["posterior_stable_slot_fraction"] = float(stable.to(dtype=self.dtype).mean().item())
+                    if bool(stable.any().item()):
+                        debug["posterior_identity_switch_rate_stable"] = float(switched[stable].to(dtype=self.dtype).mean().item())
+                        debug["posterior_binding_top1_margin_stable_mean"] = float(current_margin[stable].mean().item())
         if observed.posterior.recycle_gate is not None and observed.posterior.recycle_gate.numel() > 0:
             recycle = observed.posterior.recycle_gate.to(device=self.device, dtype=self.dtype).reshape(-1)
             debug["posterior_recycle_rate"] = float(recycle.mean().item())

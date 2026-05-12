@@ -3625,3 +3625,201 @@ is still high in both early rows, so the step-470 sample cannot yet distinguish
 startup noise from persistent posterior assignment instability. Judge at
 step 520/600/750.
 ```
+
+### Local-Refinement Isolation Checkpoint: Step 600+
+
+Status:
+
+```text
+date: 2026-05-12
+runtime commit on cloud: 7bff430
+local audit commit documenting this checkpoint: pending after this note
+
+A5:
+  run: picf_a5_localoff_burnin4_750new_20260512_7bff430
+  intervention: local refinement disabled
+  latest inspected step: 750
+
+A7:
+  run: picf_a7_localk8w01_burnin4_750new_20260512_7bff430
+  intervention: local refinement kept but constrained
+  overrides:
+    --local-refinement-topk 8
+    --local-refinement-weight 0.10
+  latest inspected step: 740
+```
+
+Latest metrics:
+
+```text
+A5 local-off, step 750:
+  loss_total = 0.7314
+  loss_action_default_equiv = 0.0905
+  aqr_same_role_support_overlap_max = 0.7294
+  aqr_same_role_local_jaccard_max = 0.0
+  aqr_same_role_local_true_overlap_max = 0.0
+  posterior_identity_switch_rate = 0.8278
+
+A7 local topk=8, weight=0.10, step 740:
+  loss_total = 0.7215
+  loss_action_default_equiv = 0.0540
+  aqr_same_role_support_overlap_max = 0.3308
+  aqr_same_role_local_jaccard_max = 0.4734
+  posterior_identity_switch_rate = 0.8111
+```
+
+Mathematical interpretation:
+
+```text
+The local-refinement branch is a real overlap amplifier, but it is not the only
+identity failure source.
+
+A5 proves that disabling local refinement can strongly reduce same-role support
+overlap while preserving clean loss descent. Because local priors are absent,
+local_jaccard and local_true_overlap are exactly zero by construction.
+
+A7 proves that reducing local top-k and residual weight also lowers local
+candidate reuse versus the old topk=32 / weight=0.25 regime. The remaining
+local_jaccard ~=0.49 and true overlap ~=0.036 are no longer catastrophic.
+
+However both branches still report posterior_identity_switch_rate ~=0.79..0.83.
+Therefore the current identity_switch signal cannot be explained solely by
+local candidate reuse, action gradients, or recycle saturation. A7 even has
+healthy support overlap at the latest inspected point but still high switch.
+```
+
+Code audit of the identity metric:
+
+```text
+pipeline.py currently computes posterior_identity_switch_rate by comparing
+argmax(binding_j) at time t and t-1 for each slot index j.
+
+This is useful as a coarse alarm, but it is not a mathematically sufficient
+identity-health metric because it does not mask:
+  low-alpha slots
+  high-recycle slots
+  low-support-mass slots
+  ambiguous binding rows with small top1-top2 margin
+  legitimate permutation/reassignment events
+
+Thus the next step should not add another scalar training loss. It should add
+stable-slot identity diagnostics that distinguish real identity swaps from
+metric over-counting on uncertain slots.
+```
+
+Decision:
+
+```text
+Move on after both runs finish their 750-step closure rows.
+Do not treat local-off or local-k8 as production acceptance yet.
+Do not keep tuning local_refinement_topk/weight as the next main action.
+Do not add a new identity loss before verifying whether the current switch
+metric is over-counting unstable or low-confidence slots.
+
+Next diagnostic:
+  add masked/stable identity-switch metrics and binding-margin diagnostics,
+  then run a short confirmation job with the best local settings.
+```
+
+Next diagnostic design:
+
+```text
+Add debug-only metrics:
+  posterior_stable_slot_fraction
+  posterior_identity_switch_rate_stable
+  posterior_identity_switch_rate_recycled
+  posterior_binding_top1_margin_mean
+  posterior_binding_top1_margin_stable_mean
+  posterior_binding_argmax_agreement_rate
+
+Stable slot mask:
+  alpha >= alpha threshold if alpha exists
+  recycle <= recycle threshold
+  support mass raw above threshold if available
+  binding top1-top2 margin above threshold
+
+Interpretation:
+  If stable switch is low while raw switch is high:
+    the previous identity alarm was too pessimistic and the next training
+    question is support/action tradeoff, not identity collapse.
+
+  If stable switch remains high:
+    binding assignment is truly unstable and the next structural fix should
+    target assignment compatibility or support-signature binding, not local
+    refinement.
+```
+
+Local implementation status:
+
+```text
+Implemented on local branch after this checkpoint:
+  posterior_identity_switch_rate_stable
+  posterior_identity_switch_rate_nonrecycled
+  posterior_identity_switch_rate_recycled
+  posterior_stable_slot_fraction
+  posterior_binding_top1_margin_mean
+  posterior_binding_top1_margin_min
+  posterior_binding_top1_margin_stable_mean
+
+Implementation scope:
+  debug metrics only
+  no change to posterior update
+  no change to AQR routing
+  no change to action path
+  no new loss
+
+Mathematical guard:
+  raw identity_switch remains the alarm metric;
+  stable identity_switch is the acceptance diagnostic.
+
+Stable mask:
+  nonrecycled current/previous slots
+  alpha >= 0.25 when available
+  support_mass >= 0.05 when available
+  current and previous binding top1-top2 margin >= 0.05
+```
+
+Local validation after implementation:
+
+```text
+python -m py_compile:
+  pipeline.py
+  picf_core_train.py
+  picf_owm_evidence_bundle.py
+  verify_picf_owm_contract.py
+  picf_owm_strict_diagnose.py
+  PASS
+
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_strict_diagnose.py --fail-on-fail:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS
+
+PYTHONPATH=src pytest -q \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py:
+  4 passed
+```
+
+Next run after pushing this patch:
+
+```text
+short confirmation only, not a new full training phase:
+  use the better local-refinement setting from the completed 750-step closure
+  rows, then inspect stable identity-switch metrics.
+
+Expected resolution:
+  If raw switch high but stable switch low:
+    move on to longer cotrain with stable-switch as the true identity gate.
+
+  If stable switch high:
+    do not move to long-run; inspect binding assignment compatibility and
+    support-signature/address coefficients.
+```
