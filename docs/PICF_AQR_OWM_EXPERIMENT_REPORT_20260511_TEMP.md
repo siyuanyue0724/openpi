@@ -5927,3 +5927,60 @@ interrupted diagnostics only:
     late same-role overlap and may be too strong.
   - Neither run reached the planned endpoint or post-run probe/eval stage.
 ```
+
+### 2026-05-13 Storage Cleanup
+
+Cleanup policy:
+
+```text
+Keep:
+  args.json
+  metrics.jsonl
+  train_tmux.log / launch logs
+  lightweight run roots
+  written experiment notes
+
+Remove:
+  May-or-later numeric checkpoint payload directories
+  May-or-later tmp_* incomplete checkpoint directories
+  May-or-later model-only resume checkpoint payloads
+  May-or-later eval heavy artifacts: videos, anchor_debug, prediction_debug
+```
+
+Removed apparent payload:
+
+```text
+about 408 GiB
+```
+
+Disk state after cleanup:
+
+```text
+/mnt:
+  1.8T total
+  1.4T used
+  409G available
+  78% used
+```
+
+Important details:
+
+```text
+The interrupted A5/A7 signature-local checkpoint payloads were removed, but
+their metrics/log records remain.
+
+The cleanup included one checkpoint payload under:
+  picf_v22_frozen2x40_photometric_unroll2_30000_ckpt5000_20260430_r1/10000
+
+Rationale:
+  although the run name contains 20260430, that checkpoint payload had May
+  mtime and was a removable weight artifact under the current "remove May-era
+  checkpoint payloads, preserve records" policy.
+```
+
+Post-cleanup check:
+
+```text
+No May-or-later numeric checkpoint or tmp_* checkpoint payloads remain under:
+  /mnt/checkpoints/picf_core/picf_core
+```

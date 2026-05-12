@@ -3827,6 +3827,13 @@ Latest remote stop diagnosis:
   not completed acceptance runs. Do not launch more /mnt-writing experiments
   until old checkpoints/eval artifacts are explicitly pruned.
 
+Storage cleanup:
+  May-era checkpoint payloads and eval heavy artifacts were pruned while keeping
+  args/metrics/log records. /mnt changed from full to about 409G free. The
+  interrupted A5/A7 checkpoint payloads are no longer available for resume, but
+  their metrics/logs remain as diagnostic records. See the experiment report for
+  the exact cleanup policy and caveats.
+
 Important guard:
   this is not a new loss, not a hard cross-anchor ownership rule, and not a
   claim that ordinal/fourth-object grounding is solved. It is a structural
