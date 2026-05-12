@@ -766,6 +766,13 @@ Current training profiles:
   stable-coverage continuation, A5 overlay reading, offline IsSameObject probe
   if coverage fails, then support-signature audit or real tracklet/proposal
   dataflow depending on whether same-object evidence is decodable.
+- 2026-05-13 stable-coverage midpoint: A7 reaches step 800 with
+  `stable_identity_switch=0.0` and controlled overlap
+  (`same_role_support_overlap≈0.52`), but
+  `posterior_stable_slot_fraction` remains fixed at `≈0.111`. This confirms the
+  current bottleneck is coverage/differentiation, not stable-slot switching. If
+  the 1050-step endpoint does not raise stable coverage, the next experiment is
+  an offline IsSameObject probe, not another action/JEPA/raw-switch loss sweep.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

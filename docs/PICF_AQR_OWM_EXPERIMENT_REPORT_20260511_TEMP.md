@@ -4438,3 +4438,153 @@ The rigorous ordering is:
 6. only after anchor health passes, test controlled action cotrain;
 7. only after anchor/action coexistence is stable, consider predictive aux.
 ```
+
+### A7 Stable-Coverage Midpoint Reading
+
+At the first recorded continuation points after resuming from step 750:
+
+```text
+step 760:
+  loss_total=0.7149
+  loss_action_default_equiv=0.0555
+  same_role_support_overlap=0.4208
+  local_jaccard=0.4341
+  local_true_overlap=0.0471
+  raw_identity_switch=0.8222
+  stable_identity_switch=0.0
+  stable_slot_fraction=0.1111
+  recycle_rate=0.3457
+
+step 780:
+  loss_total=0.7360
+  loss_action_default_equiv=0.0692
+  same_role_support_overlap=0.6298
+  local_jaccard=0.5581
+  local_true_overlap=0.0548
+  stable_identity_switch=0.0
+  stable_slot_fraction=0.1111
+
+step 800:
+  loss_total=0.7252
+  loss_action_default_equiv=0.0470
+  same_role_support_overlap=0.5234
+  local_jaccard=0.5716
+  local_true_overlap=0.0528
+  raw_identity_switch=0.7944
+  stable_identity_switch=0.0
+  stable_slot_fraction=0.1111
+  recycle_rate=0.3232
+```
+
+Tail mean over available rows:
+
+```text
+loss_total=0.7273
+loss_action_default_equiv=0.0614
+same_role_support_overlap=0.5243
+local_jaccard=0.5313
+local_true_overlap=0.0505
+raw_identity_switch=0.8244
+stable_identity_switch=0.0
+stable_slot_fraction=0.1111
+recycle_rate=0.3109
+stable_binding_margin=0.9793
+```
+
+Interpretation:
+
+```text
+The current clean local-refinement setting controls exact overlap better than
+the failed collapse runs, and stable slots have high binding margin. However,
+stable_slot_fraction is not increasing at all through step 800.
+
+This is a stronger version of the A5 overlay finding:
+  reliable slots exist,
+  but there are too few of them,
+  and same-role slots can be reliable around the same candidate.
+
+Therefore a longer continuation by itself is unlikely to be sufficient unless
+the later 800->1050 segment changes stable_slot_fraction. The acceptance gate
+for the remaining segment is now explicit:
+  if stable_slot_fraction remains near 0.111 at step 1050, this experiment is
+  rejected as a coverage-expansion method even if action loss improves.
+```
+
+Immediate next plan after A7 reaches step 1050:
+
+```text
+If stable_slot_fraction > 0.20 and overlays show differentiated slots:
+  run controlled action-pressure continuation.
+
+If stable_slot_fraction remains ~0.11:
+  do not tune action, JEPA, or raw switch;
+  run Offline IsSameObject Probe v0.
+
+If A5 overlays show all same-role slots sharing candidates:
+  prioritize tracklet/proposal evidence activation over another coefficient
+  sweep.
+```
+
+### Offline IsSameObject Probe v0 Design
+
+This is the next highest-value diagnostic if A7 fails to expand stable coverage.
+It is a probe, not a production loss.
+
+Data sources available without changing the CALVIN dataset:
+
+```text
+1. anchor_debug JSON:
+   posterior pixel/xyz, role ids, support mass, alpha, graph priors.
+
+2. prediction_debug JSON/video:
+   whether the policy predicts coherent motion around the same spatial region.
+
+3. existing runtime token dumps if enabled in a short debug pass:
+   V-JEPA temporal view tokens, PG support weights, point/projective tokens.
+
+4. weak pairing from geometry:
+   positives = close projected xyz / close posterior slot over adjacent frames;
+   negatives = far projected xyz / different high-confidence same-role candidates.
+```
+
+Probe objective:
+
+```math
+s(i,j)=z_i^T W z_j
+```
+
+where `z_i` and `z_j` are frozen token/signature features from one modality or
+a typed concatenation. The probe should report:
+
+```text
+AUC(same-object vs different-object)
+same-minus-different margin
+per-modality separability:
+  static V-JEPA
+  wrist V-JEPA
+  PG image support
+  point/projective support
+  posterior support signatures
+```
+
+Why this is not a patch:
+
+```text
+The object-binding paper shows that IsSameObject can be a decodable property of
+pretrained ViT activations and that ablating it hurts downstream use. If this
+property is present in our tokens, AQR should use it as assignment compatibility.
+If it is absent, no amount of slot loss tuning can create fine-instance identity
+without new evidence.
+```
+
+Decision after probe:
+
+```text
+Probe positive:
+  implement/support a small coefficient audit around support-signature binding,
+  or add a read-only pairwise binding audit metric first.
+
+Probe negative:
+  activate real tracklet/proposal dataflow. This follows TrackVLA-style temporal
+  correspondence rather than adding more scalar regularizers.
+```
