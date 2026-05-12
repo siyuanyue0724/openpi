@@ -669,6 +669,15 @@ Current training profiles:
   object-binding probes: A5 disables `bind_*signature/address` terms, while A7
   emphasizes support/binding signatures with weak address inertia. See the
   experiment report for exact overrides and acceptance gates.
+- 2026-05-12 pairwise binding-subspace result: the diagnostic was stopped at
+  step 500 because both branches failed the local-candidate reuse gate. A5
+  binding-off reached `support_overlap≈0.994` and `local_jaccard≈0.9997`; A7
+  binding-strong reached `support_overlap≈0.999` and `local_jaccard=1.0`.
+  This rejects further weight sweeps of the current binding-signature path.
+  Keep the moderate binding-signature prior as an architecture-aligned low-cost
+  term, but do not enable strong binding weights, coverage seed, or role
+  competition by default. The next clean test is an offline IsSameObject token
+  probe or real tracklet/proposal dataflow.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

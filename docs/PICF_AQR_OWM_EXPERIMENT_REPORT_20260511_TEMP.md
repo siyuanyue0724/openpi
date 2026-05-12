@@ -2526,3 +2526,85 @@ Safety gates:
   preclip_grad_norm should not remain clip-dominated;
   owm_tracklet_tokens/proposal_tokens are expected to remain 0 in this dataflow.
 ```
+
+### Pairwise binding-subspace early-stop result, 2026-05-12 18:25 CST
+
+The pairwise binding-subspace diagnostic was stopped at step 500 because both
+branches had already failed the primary local-candidate reuse gate. This is a
+valid early stop: the target was to keep `aqr_same_role_local_jaccard_max` below
+the high-reuse regime, not to optimize final policy quality.
+
+Result:
+
+```text
+A5 negative control, binding signature/address off:
+  step 460:
+    aqr_same_role_support_overlap_max = 0.7611
+    aqr_same_role_local_jaccard_max = 0.8174
+    posterior_recycle_rate = 0.0100
+    preclip_grad_norm = 4745.9
+  step 480:
+    aqr_same_role_support_overlap_max = 0.9571
+    aqr_same_role_local_jaccard_max = 0.9808
+    posterior_recycle_rate ~= 0
+  step 500:
+    aqr_same_role_support_overlap_max = 0.9944
+    aqr_same_role_local_jaccard_max = 0.9997
+    posterior_recycle_rate ~= 0
+
+A7 positive test, support/binding signature emphasized and address weak:
+  step 460:
+    aqr_same_role_support_overlap_max = 0.7197
+    aqr_same_role_local_jaccard_max = 0.8477
+    posterior_recycle_rate = 0.0100
+    preclip_grad_norm = 17698.1
+  step 480:
+    aqr_same_role_support_overlap_max = 0.9956
+    aqr_same_role_local_jaccard_max = 0.9992
+    posterior_recycle_rate ~= 0
+  step 500:
+    aqr_same_role_support_overlap_max = 0.9987
+    aqr_same_role_local_jaccard_max = 1.0000
+    posterior_recycle_rate ~= 0
+```
+
+Interpretation:
+
+```text
+1. The current binding-signature path is not sufficient to prevent same-role
+   local candidate reuse. Strengthening it did not keep A7 healthy.
+
+2. Turning it off also fails quickly, so the old short healthy run was not a
+   proof that all later anchor configurations would remain healthy.
+
+3. The result does not mean the object-binding paper direction is wrong. It
+   means the currently deployed support-weighted signature is only a weak
+   approximation of a real IsSameObject probe/subspace. It is not enough when
+   local candidate rows have already become nearly identical.
+
+4. The failure is again not recycle saturation: both branches collapsed while
+   `posterior_recycle_rate` was near zero.
+```
+
+Decision:
+
+```text
+Stop this branch. Do not keep running pairwise-weight sweeps.
+
+Production/default should keep:
+  - the moderate binding-signature path as a low-cost structural prior;
+  - local refinement as an instrumented evidence path;
+  - support-diversity at conservative weight.
+
+Production/default should not enable:
+  - role-wise local candidate competition;
+  - coverage-seeded local proposal;
+  - strong binding-signature weights;
+  - strong address inertia;
+  - high-risk predictive losses.
+
+Next useful experiment:
+  either run an offline IsSameObject token probe, or feed real tracklet/proposal
+  evidence into CALVIN. More scalar/local-candidate heuristics are not expected
+  to be clean or decisive.
+```
