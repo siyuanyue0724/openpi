@@ -657,6 +657,18 @@ Current training profiles:
   diagnostic passes. The experiment design, mathematical definition, and
   acceptance gates are in
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
+- 2026-05-12 coverage-seed result: both A5 and A7 completed to step 750 and
+  rejected the coverage-seeded proposal. A5 ended with
+  `aqr_same_role_support_overlap_max≈0.99936`,
+  `aqr_same_role_local_jaccard_max=1.0`, and `posterior_recycle_rate=1.0`;
+  A7 ended with `aqr_same_role_support_overlap_max≈0.99933`,
+  `aqr_same_role_local_jaccard_max=1.0`, but `posterior_recycle_rate=0.0`.
+  This proves the remaining collapse is not just action/PV pressure, role
+  competition, deterministic coverage priors, or recycle saturation. The next
+  one-hour diagnostic is a pairwise binding-subspace ablation inspired by
+  object-binding probes: A5 disables `bind_*signature/address` terms, while A7
+  emphasizes support/binding signatures with weak address inertia. See the
+  experiment report for exact overrides and acceptance gates.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

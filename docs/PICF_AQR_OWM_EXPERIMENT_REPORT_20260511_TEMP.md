@@ -2385,3 +2385,144 @@ Both fail with recycle saturation:
   Do not open predictive losses or action cotrain until identity/recycle
   instrumentation is corrected.
 ```
+
+### Coverage-seed result, 2026-05-12 17:55 CST
+
+Both coverage-seeded diagnostics completed to step 750. The diagnostic was
+enabled as intended (`local_refinement_coverage_seed_enabled=1.0`) and
+role-wise local competition stayed disabled. This makes the result a valid test
+of weak anchor-specific proposal seeding, not a mixed ownerfix/coverage run.
+
+Final status:
+
+```text
+A5 support-only coverage seed:
+  step = 750
+  aqr_same_role_support_overlap_max = 0.99936
+  aqr_same_role_local_jaccard_max = 1.00000
+  posterior_recycle_rate = 1.00000
+  posterior_identity_switch_rate = 0.83889
+  posterior_address_update_rate_mean = 0.00000
+  loss_slot_jepa = 88.98
+  preclip_grad_norm = 107.98
+  owm_tracklet_tokens = 0
+  owm_proposal_tokens = 0
+
+A7 anchor/PV coverage seed:
+  step = 750
+  aqr_same_role_support_overlap_max = 0.99933
+  aqr_same_role_local_jaccard_max = 1.00000
+  posterior_recycle_rate = 0.00000
+  posterior_identity_switch_rate = 0.75556
+  posterior_address_update_rate_mean = 0.03636
+  loss_slot_jepa = 4.38
+  preclip_grad_norm = 212.43
+  owm_tracklet_tokens = 0
+  owm_proposal_tokens = 0
+```
+
+Interpretation:
+
+```text
+1. Coverage seeding works as an early proposal asymmetry but does not prevent
+   same-role local candidate-set collapse. Both A5 and A7 returned to
+   local_jaccard=1.0 and support_overlap≈0.999.
+
+2. The failure is not primarily action loss, PV pressure, role competition, or
+   burn-in length. A5 had no action/PV pressure and still collapsed.
+
+3. The failure is not only recycle saturation. A5 collapsed with recycle=1.0;
+   A7 collapsed with recycle=0.0.
+
+4. Tracklet/proposal evidence remains inactive in the current CALVIN dataflow
+   (`owm_tracklet_tokens=0`, `owm_proposal_tokens=0`), so MVTrack cannot yet
+   rely on those branches for object separation.
+```
+
+Mathematical conclusion:
+
+```text
+The tested mechanisms try to preserve candidate diversity using scalar losses,
+role-wise competition, or deterministic reference proposals. All three fail
+once same-role evidence rows become indistinguishable. The next falsifiable
+question is whether current typed memory contains an exploitable pairwise
+same-object subspace at all.
+```
+
+This follows the object-binding probe literature: object membership is better
+tested as a pairwise/quadratic relation between token embeddings than as a raw
+pointwise cosine or a hard slot label. If such a subspace is present, binding
+should use it before local candidate selection and posterior correction. If it
+is absent, further scalar tuning of AQR losses cannot create the missing object
+information.
+
+## Pairwise Binding-Subspace Diagnostic, 2026-05-12 18:05 CST
+
+### Purpose
+
+The next one-hour diagnostic isolates whether the deployed pairwise/support
+binding-signature path is causally useful. It does not introduce a new loss, new
+truth source, or hard slot assignment. It changes only how strongly the existing
+same-object subspace contributes to posterior binding.
+
+Run both experiments from the shared step-450 prefix-stopgrad checkpoint and use
+the same A5 support-only base configuration to avoid A5/A7 base-config
+confounds.
+
+### A5 negative control: pairwise binding off
+
+```text
+exp_name:
+  picf_a5_anchoronly_noaction_pairbind_off_200new_20260512_41cf317
+
+override:
+  bind_support_signature_weight = 0.0
+  bind_embedding_signature_weight = 0.0
+  bind_address_weight = 0.0
+  local_refinement_role_competition_enabled = false
+  local_refinement_coverage_seed_enabled = false
+  num_train_steps = 650
+```
+
+This removes the object-binding paper inspired term. If this run behaves the
+same as the positive run, then the current binding-signature path is not the
+dominant missing mechanism.
+
+### A7 positive test: pairwise binding emphasized, address kept weak
+
+```text
+exp_name:
+  picf_a7_anchoronly_noaction_pairbind_strong_200new_20260512_41cf317
+
+override:
+  bind_support_signature_weight = 1.25
+  bind_embedding_signature_weight = 0.75
+  bind_address_weight = 0.10
+  bind_address_innovation_downweight = 2.0
+  local_refinement_role_competition_enabled = false
+  local_refinement_coverage_seed_enabled = false
+  num_train_steps = 650
+```
+
+The address term stays weak because address inertia can lock in false identity
+when support evidence is unstable. The intended test is pairwise support
+subspace, not hard address identity.
+
+### Acceptance gates by step 650
+
+```text
+Strong evidence for pairwise binding:
+  A7 support_overlap and local_jaccard stay materially below A5.
+  Target: A7 aqr_same_role_support_overlap_max < 0.90 and
+          aqr_same_role_local_jaccard_max < 0.90.
+
+Weak or negative evidence:
+  both runs return to local_jaccard≈1.0 and support_overlap≈0.999.
+  In this case, stop more loss/weight tuning and run an offline IsSameObject
+  token-probe or feed real tracklet/proposal evidence.
+
+Safety gates:
+  posterior_recycle_rate must not saturate near 1.0;
+  preclip_grad_norm should not remain clip-dominated;
+  owm_tracklet_tokens/proposal_tokens are expected to remain 0 in this dataflow.
+```
