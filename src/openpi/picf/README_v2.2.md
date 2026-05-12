@@ -707,6 +707,13 @@ Current training profiles:
   both runs are alive and action/alignment losses are decreasing, but neither
   is accepted yet because local candidate reuse and posterior identity-switch
   diagnostics remain too high.
+- 2026-05-12 move-on gate: the A5/A7 clean/direct cotrain pair is stopped at
+  the step-600 diagnostic point and superseded by the local-refinement
+  isolation matrix recorded in
+  `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`: A5 disables local
+  refinement; A7 keeps it but reduces top-k and residual weight. This is a
+  causal diagnostic for high same-role local-candidate reuse, not a new
+  mechanism or a production long-run.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

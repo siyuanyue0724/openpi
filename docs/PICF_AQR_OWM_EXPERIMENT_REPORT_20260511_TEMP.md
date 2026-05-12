@@ -3457,3 +3457,137 @@ A7 step 560:
 Interpretation stays unchanged: action/alignment losses are reasonable, but
 local candidate reuse and identity switching are not yet healthy enough for
 acceptance.
+
+## 2026-05-12 Move-On Gate at A5/A7 Step 600
+
+The clean/direct pair has now produced enough evidence. It should be stopped
+and replaced with a local-refinement diagnostic rather than extended unchanged.
+
+Final aligned evidence:
+
+```text
+A5 clean staged, step 600:
+  loss_total=0.7486
+  loss_action_default_equiv=0.0808
+  same_role_support_overlap=0.9098
+  local_jaccard=0.8803
+  local_true_overlap=0.0439
+  recycle=0.3291
+  identity_switch=0.6833
+
+A5 later stop point, step 620:
+  loss_total=0.7442
+  loss_action_default_equiv=0.1043
+  same_role_support_overlap=0.7243
+  local_jaccard=0.8948
+  local_true_overlap=0.0528
+  recycle=0.4152
+  identity_switch=0.7944
+
+A7 direct cotrain, step 600:
+  loss_total=0.7412
+  loss_action_default_equiv=0.0760
+  same_role_support_overlap=0.9267
+  local_jaccard=0.9400
+  local_true_overlap=0.0656
+  recycle=1.88e-12
+  identity_switch=0.8833
+```
+
+Mathematical reading:
+
+```text
+Let P_j be the row-level AQR support distribution and Ω_j be the local
+refinement candidate set formed from top-k visual/temporal/point/tracklet/
+proposal evidence.
+
+The observed combination is:
+  J(Ω_i, Ω_j) is high for same-role pairs,
+  but weighted local true overlap remains low.
+
+Therefore the failure is not simply that every anchor has the identical local
+weights. It is that same-role anchors repeatedly reuse the same candidate pool,
+then make slightly different reads from that pool. That is enough to destabilize
+posterior identity assignment because the binding path sees ambiguous evidence
+sets over time even when final row weights are not exactly identical.
+
+A7 is especially diagnostic:
+  recycle is essentially zero, but identity_switch and local_jaccard remain
+  high. This rules out recycle saturation as the only cause. The next test
+  should isolate local refinement before changing recycle or action loss again.
+```
+
+Decision:
+
+```text
+Move on from the clean/direct cotrain pair.
+Do not move to production long-run acceptance.
+Do not add new scalar losses yet.
+Run a two-branch local-refinement diagnostic:
+  A5: local refinement off.
+  A7: local refinement constrained by smaller top-k and lower residual weight.
+```
+
+### Next Diagnostic: Local Refinement Isolation
+
+Purpose:
+
+```text
+Determine whether high same-role local candidate reuse is caused by the local
+refinement branch itself or by upstream AQR supports before local refinement.
+```
+
+Experiment L0, A5:
+
+```text
+name: picf_a5_localoff_burnin4_750new_20260512_7bff430
+change from clean staged:
+  --no-local-refinement-enabled
+
+Interpretation:
+  If identity_switch / support_overlap improve while action loss remains
+  comparable, local refinement is currently destabilizing identity.
+  If they do not improve, the problem is upstream AQR support/binding rather
+  than the local refinement residual.
+```
+
+Experiment L1, A7:
+
+```text
+name: picf_a7_localk8w01_burnin4_750new_20260512_7bff430
+change from clean staged:
+  --local-refinement-topk 8
+  --local-refinement-weight 0.10
+
+Interpretation:
+  If L1 improves while L0 hurts action/anchor alignment, local refinement is
+  useful but too broad/strong at topk=32, weight=0.25.
+  If L1 still has high local_jaccard and identity_switch, a code-level
+  competitive local allocation or better tracklet/proposal evidence is required.
+```
+
+Acceptance gates by step 600 or 750:
+
+```text
+hard gates:
+  posterior_identity_switch_rate < 0.50
+  aqr_same_role_local_jaccard_max < 0.80
+  aqr_same_role_support_overlap_max < 0.80
+  finite grad_norm without frequent clipping
+
+secondary gates:
+  loss_action_default_equiv not worse than the clean/direct pair by >20%
+  loss_total continues around 0.73..0.76
+  recycle does not saturate to either 0 or 1 in a way that hides assignment
+  failures.
+```
+
+Tail commands:
+
+```bash
+ssh -p 29776 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_localoff_burnin4_750new_20260512_7bff430.train_tmux.log
+
+ssh -p 28060 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_localk8w01_burnin4_750new_20260512_7bff430.train_tmux.log
+```
