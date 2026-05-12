@@ -178,9 +178,11 @@ only if an upstream source provides them.
   Live 2026-05-11 experiment report for the current A5/A7 cloud runs. It
   records the active A7 30k launch contract, the completed A5 prefix-stopgrad
   diagnosis, historical direct-action/recycle ablations, loss-scale
-  interpretation, and the paper-derived object-binding audit. Use this document
-  to distinguish code-level repairs and short-run evidence from still-pending
-  behavior acceptance.
+  interpretation, the paper-derived object-binding audit, and the 2026-05-12
+  burn-in/support-collapse matrix. Use this document to distinguish code-level
+  repairs and short-run evidence from still-pending behavior acceptance, and to
+  avoid treating scalar action-loss improvement as anchor-health proof when
+  same-role support overlap remains high.
 - [`docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md)
   Temporary live deployment ledger for the OWM implementation. Use this while
   reviewing the current branch because it records which final README contract

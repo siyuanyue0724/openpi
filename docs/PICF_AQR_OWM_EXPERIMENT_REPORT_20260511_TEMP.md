@@ -918,3 +918,175 @@ ordinal/fourth-object grounding remains weak diagnostic, not rank-supervised.
 offline IsSameObject probe has not been run.
 behavior acceptance still requires fresh CALVIN/video/anchor overlays.
 ```
+
+## 2026-05-12 10-hour diagnostic matrix: burn-in length vs support collapse
+
+Status:
+
+```text
+launched after freeing /mnt checkpoint quota by deleting 2026-05-11/12 numeric
+checkpoint directories while preserving logs, metrics, and the shared
+model_only_resume checkpoint.
+```
+
+### Why same-role support overlap reappeared
+
+The earlier "same-role support fixed" conclusion was only true for short
+anchor-isolation or early prefix-stopgrad windows. It was not proven under
+longer full action cotrain. The new A5/A7 evidence separates two failures:
+
+```text
+Failure A: posterior recycle saturation
+  direct unroll=2, burnin=0 drives posterior_recycle_rate -> 1.0 and
+  address_update -> 0.0.
+
+Failure B: same-role support assignment collapse
+  burnin4/state_only fixes recycle_rate -> 0 and restores address_update,
+  but aqr_same_role_support_overlap_max still returns to ~0.999.
+```
+
+Therefore `burnin4` is necessary evidence for recurrent carry stability, but it
+is not sufficient proof of healthy anchor specialization. The remaining issue is
+not "all anchors became one token"; `aqr_effective_anchor_count` remains high.
+The issue is that same-role anchors learn nearly identical global support
+distributions, so they do not divide evidence into stable object-specific
+assignments.
+
+Mathematically, the current action-cotrain objective has a degenerate basin:
+
+```math
+q_1,\ldots,q_K \rightarrow \text{same high-action-saliency support}
+```
+
+can reduce action loss and local alignment while leaving object identity
+ambiguous. The support-diversity loss is currently too weak to dominate this
+basin. In the failed tails it reports nonzero loss, but its weighted
+contribution is small compared with action/alignment/PV pressure. This explains
+why support overlap can be low early and then re-collapse later.
+
+### What the next matrix tests
+
+The matrix is designed to answer four separate causal questions, not to produce
+a production checkpoint:
+
+```text
+Q1. Is burnin=1 enough to avoid recycle saturation?
+Q2. Is burnin=2 enough to avoid recycle saturation while preserving speed?
+Q3. If burnin=2 is enough for recycle, can stronger support/geometry diversity
+    prevent same-role support collapse during action cotrain?
+Q4. If strong diversity works in anchor_only but not all-scope cotrain, is the
+    remaining collapse caused by action cotrain rather than support loss form?
+```
+
+### Active A5 runs
+
+Machine:
+
+```text
+ssh -p 29776 root@36.139.225.68
+tmux attach -t a5_burnin_sweep_95ea69b
+```
+
+Runs:
+
+```text
+picf_a5_u2_b1_semtrain_aux0_500new_20260512_95ea69b
+  unroll_steps=2
+  burnin_steps=1
+  burnin_mode=state_only
+  PaliGemma trainable
+  Sonata/V-JEPA/AnyTouch frozen
+  action_prefix_stopgrad enabled
+  OWM predictive aux losses = 0
+  support_div=0.05, geom_div=0.02
+
+picf_a5_u2_b2_semtrain_aux0_500new_20260512_95ea69b
+  same as above, but burnin_steps=2
+```
+
+Tail:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_u2_b1_semtrain_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_u2_b2_semtrain_aux0_500new_20260512_95ea69b.train_tmux.log
+```
+
+### Active A7 runs
+
+Machine:
+
+```text
+ssh -p 28060 root@36.139.225.68
+tmux attach -t a7_support_collapse_95ea69b
+```
+
+Runs:
+
+```text
+picf_a7_u2_b2_divstrong_semtrain_aux0_500new_20260512_95ea69b
+  unroll_steps=2
+  burnin_steps=2
+  burnin_mode=state_only
+  PaliGemma trainable
+  all-scope PICF cotrain
+  action_prefix_stopgrad enabled
+  OWM predictive aux losses = 0
+  support_div=0.25, geom_div=0.05
+
+picf_a7_anchoronly_u2_b2_divstrong_500new_20260512_95ea69b
+  same window and diversity settings, but picf_trainable_scope=anchor_only
+```
+
+Tail:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_u2_b2_divstrong_semtrain_aux0_500new_20260512_95ea69b.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_anchoronly_u2_b2_divstrong_500new_20260512_95ea69b.train_tmux.log
+```
+
+### Acceptance rules
+
+For a recipe to be considered a viable next production candidate, the tail
+window must satisfy all of:
+
+```text
+posterior_recycle_rate < 0.05
+posterior_address_update_rate_mean > 0.02
+aqr_same_role_support_overlap_max < 0.85, preferably < 0.70
+aqr_same_role_local_true_overlap_max < 0.12
+posterior_identity_switch_rate < 0.50, preferably trending down
+loss_anchor_pv not stuck near 4.7
+loss_mapg_routing not rising monotonically
+loss_action_default_equiv decreases without being the only healthy metric
+```
+
+Interpretation table:
+
+```text
+A5 burnin1 fails, burnin2 passes:
+  use unroll=2 + burnin=2 as the speed/stability default candidate.
+
+A5 burnin2 still recycle-collapses:
+  burnin=2 is insufficient; burnin4/state_only remains the minimum stable
+  recurrent carry candidate.
+
+A7 strong-div all-scope fixes overlap:
+  support-diversity weight was the missing stabilizer; follow with a 2k-5k
+  candidate run at the same window.
+
+A7 anchor-only fixes overlap but all-scope does not:
+  support loss form can work, but action cotrain is still dominating assignment.
+  Next step should be staged warmup or selective action-gradient scheduling.
+
+Neither A7 run fixes overlap:
+  current support-diversity formulation is not the right anti-collapse term.
+  Do not spend 30k on this recipe; implement a direct same-role overlap-max
+  penalty or stronger assignment-level competition before long training.
+```
+
+### Guarded losses
+
+`slot_jepa`, `support_pred`, and `binding_consistency` stay at zero in this
+matrix. The current failure is visible without predictive aux pressure. Opening
+these losses now would confound the diagnosis and could reintroduce
+permutation-index pressure before support assignment is healthy.
