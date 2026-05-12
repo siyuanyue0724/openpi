@@ -4811,8 +4811,10 @@ same-role duplicate candidates are common.
 ```
 
 So the next 12 hours should not be spent on larger action cotrain, cache
-inertia, or predictive auxiliary losses. Those are downstream of assignment.
-The disciplined plan is:
+inertia, predictive auxiliary losses, or reintroducing the previously rejected
+role-wise competition / deterministic coverage-seed heuristics. Those are
+downstream of assignment or hand-coded candidate ownership. The disciplined plan
+is:
 
 ```text
 0. Finish A7 to step 1050.
@@ -4820,17 +4822,19 @@ The disciplined plan is:
    separated in overlays. Otherwise archive as "partial non-collapse, low
    coverage".
 
-1. Run a coverage/competition audit.
+1. Run a read-only coverage/competition audit.
    Keep action-prefix stopgrad, OWM predictive losses at 0, cache small, and
-   do not increase address inertia. Test whether a support-competition objective
-   aligned to same-role coverage can raise stable_slot_fraction without driving
-   same_role_support_overlap back to 0.99.
+   do not increase address inertia. Measure whether differentiated same-role
+   evidence exists before adding any new pressure. This is not permission to
+   revive the rejected role-competition or coverage-seed local-candidate
+   heuristics.
 
-2. Run a token-level IsSameObject probe if step 1 does not improve coverage.
+2. Run a token-level IsSameObject probe.
    The current probe used exported anchor-debug supports, not raw V-JEPA/PG
    token embeddings. If token-level ViT/V-JEPA features have pairwise object
-   separability, the binding reader should use that subspace. If they do not,
-   tracklet/proposal evidence must be activated before more loss tuning.
+   separability, the binding reader should use that learned/probed subspace. If
+   they do not, tracklet/proposal evidence must be activated before more loss
+   tuning.
 
 3. Activate optional tracklet/proposal dataflow only if token-level probe or
    overlays confirm that current per-frame evidence is insufficient.

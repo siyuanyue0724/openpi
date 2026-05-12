@@ -75,9 +75,10 @@ same-object signal (`combined_auc=0.893`) but weak exported visual/point/support
 signature separability (`AUC≈0.52`) and high same-role duplicate-candidate
 fraction (`0.827`). A7 is healthier than the earlier 0.99-overlap collapse run,
 but as of step 970 stable slot coverage remains low (`stable_slot_fraction≈0.11`).
-The next experiment gate is therefore coverage/competition, not stronger cache,
-address inertia, JEPA, or action pressure. This is a probe-level result, not
-behavior acceptance.
+The next experiment gate is therefore read-only coverage/competition diagnosis
+and token-level IsSameObject probing, not stronger cache, address inertia, JEPA,
+action pressure, or reintroduced hand-coded role/coverage heuristics. This is a
+probe-level result, not behavior acceptance.
 
 ## Quick Navigation
 
