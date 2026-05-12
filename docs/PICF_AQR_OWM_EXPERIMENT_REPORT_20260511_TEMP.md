@@ -2008,3 +2008,84 @@ A7 ownerfix:
   expected: PV may increase pressure, but same-role overlap should not rebound
   to the >0.95 failure zone if candidate competition is sufficient
 ```
+
+### Ownerfix launch contract, 2026-05-12 15:40 CST
+
+These runs test the smallest structural repair implied by the previous
+supportfix failure. They do not introduce a new loss, do not alter the action
+path, and do not write a hard owner assignment into posterior state. The only
+changed contract is local candidate selection:
+
+```text
+selection_score_ji =
+  p_ji * max(floor, |R_j| * p_ji / sum_{k: role_k = role_j} p_ki)^gamma
+
+local_read_ji still uses the original support weight p_ji.
+```
+
+This follows the 2025 object-binding probe result that object membership is a
+pairwise/subspace relation, not a pointwise class label. The competition is
+therefore only allowed to amplify existing same-role preference differences
+before top-k truncation. It must not fabricate identity when all evidence rows
+are exactly identical.
+
+Started runs:
+
+```text
+A5:
+  host/session: px-cloud1 / tmux a5_ownerfix_9947b0e
+  repo: /root/openpi_ownerfix_9947b0e
+  commit: 9947b0e
+  exp_name: picf_a5_anchoronly_noaction_ownerfix_sdiv1_300new_20260512_9947b0e
+  base args: picf_a5_anchoronly_noaction_supportfix_sdiv1_300new_20260512_81811b4
+  role competition: enabled, strength=2.0, floor=0.05
+
+A7:
+  host/session: px-cloud2 / tmux a7_ownerfix_9947b0e
+  repo: /root/openpi_ownerfix_9947b0e
+  commit: 9947b0e
+  exp_name: picf_a7_anchoronly_noaction_anchorpv_ownerfix_sdiv1_300new_20260512_9947b0e
+  base args: picf_a7_anchoronly_noaction_anchorpv_supportfix_sdiv1_300new_20260512_81811b4
+  role competition: enabled, strength=2.0, floor=0.05
+```
+
+Acceptance gates:
+
+```text
+Primary:
+  aqr_same_role_local_jaccard_max must not return to 1.0 by step 520/600/750.
+
+Secondary:
+  aqr_same_role_support_overlap_max should stay below the previous failure
+  zone. A5 should remain <0.90; A7 may be noisier due to anchor/PV pressure,
+  but repeated >0.95 means PV still overwhelms local specialization.
+
+Safety:
+  posterior_recycle_rate should remain near zero.
+  grad_norm should stay finite.
+  aqr_local_role_competition_enabled must be logged as 1.0.
+```
+
+Decision table:
+
+```text
+A5 passes, A7 passes:
+  Candidate construction was the immediate blocker. Reintroduce action in a
+  staged run with prefix-stopgrad and low action/PV pressure.
+
+A5 passes, A7 fails:
+  Candidate construction is fixed, but anchor/PV terms still pull same-role
+  anchors back together. Keep ownerfix and stage PV/action more slowly.
+
+A5 fails:
+  The issue is not repairable by soft same-role selection alone. Do not increase
+  scalar diversity loss again. Move to evidence/seed-level changes:
+    anchor-specific coverage/proposal seeds,
+    real tracklet/proposal dataflow,
+    or a dedicated offline IsSameObject probe to verify token separability.
+
+Both fail:
+  The current typed memory rows are effectively indistinguishable for same-role
+  anchors under this setup. Treat this as an evidence identifiability problem,
+  not a loss-weight tuning problem.
+```
