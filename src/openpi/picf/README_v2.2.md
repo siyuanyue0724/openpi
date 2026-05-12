@@ -663,6 +663,19 @@ Current training profiles:
   term, but do not reintroduce strong binding weights or removed local-candidate
   heuristics. The next clean test is an offline IsSameObject token probe or real
   tracklet/proposal dataflow.
+- 2026-05-12 cleaned two-branch diagnostic deployment: after the cleanup at
+  `145654a` and the experiment plan at `7bff430`, the next live test is not a
+  new mechanism. It is a causal training-pressure split:
+  `clean staged cotrain` keeps `picf_action_prefix_stopgrad` during warmup,
+  while `direct cotrain control` removes that stop-gradient from the beginning.
+  Both use the same 450-step model-only resume, foundation backbones,
+  trainable PaliGemma when memory allows, moderate binding signatures,
+  conservative support/geometry diversity, cache read weight `0.05`, and
+  zero predictive auxiliary lambdas. The acceptance gates are
+  `aqr_same_role_local_jaccard_max`, `aqr_same_role_support_overlap_max`,
+  `posterior_recycle_rate`, finite gradients, and only secondarily
+  `loss_action_default_equiv`. See
+  `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
