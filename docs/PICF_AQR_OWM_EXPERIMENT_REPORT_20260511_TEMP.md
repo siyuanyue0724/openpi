@@ -3841,3 +3841,147 @@ purpose: collect stable-slot identity metrics under the constrained-local
 Tail:
   tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be.train_tmux.log
 ```
+
+### Stable-Identity Confirmation Result
+
+Run:
+
+```text
+name: picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be
+code: 253c9be
+resume: model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b
+completed: step 650
+local_refinement_topk: 8
+local_refinement_weight: 0.10
+```
+
+Final row:
+
+```text
+step = 650
+loss_total = 0.7243
+loss_alignment = 0.7123
+loss_action_default_equiv = 0.0963
+aqr_same_role_support_overlap_max = 0.4313
+aqr_same_role_local_jaccard_max = 0.4651
+aqr_same_role_local_true_overlap_max = 0.0280
+posterior_identity_switch_rate = 0.6722
+posterior_identity_switch_rate_stable = 0.0
+posterior_identity_switch_rate_nonrecycled = 0.6722
+posterior_identity_switch_rate_recycled = 0.0
+posterior_stable_slot_fraction = 0.1167
+posterior_binding_top1_margin_mean = 0.1121
+posterior_binding_top1_margin_min = 0.0000033
+posterior_binding_top1_margin_stable_mean = 0.9603
+posterior_recycle_rate = 0.3014
+posterior_address_update_rate_mean = 0.0299
+grad_norm = 0.3828
+```
+
+Last-10 mean:
+
+```text
+loss_total = 0.7256
+loss_alignment = 0.7156
+loss_action_default_equiv = 0.0803
+same_role_support_overlap = 0.4491
+local_jaccard = 0.5054
+local_true_overlap = 0.0406
+raw identity_switch = 0.7722
+stable identity_switch = 0.0025
+stable_slot_fraction = 0.1167
+binding_margin_mean = 0.1133
+binding_margin_stable_mean = 0.9554
+recycle_rate = 0.2955
+grad_norm = 0.5102
+```
+
+Conclusion:
+
+```text
+The high raw posterior_identity_switch_rate is not reliable as a standalone
+identity-collapse claim. Under the stable-slot mask, identity switches are
+near zero. Stable slots have very high binding margins, while the global margin
+mean remains low, meaning most raw argmax churn comes from ambiguous slots.
+
+This changes the next experiment target:
+  do not add a new identity loss;
+  do not change posterior math yet;
+  do not continue tuning local_refinement alone.
+
+The actual bottleneck is now stable-slot coverage:
+  stable_slot_fraction ~= 0.12 is too low for claiming mature identity tracking.
+```
+
+Next experiment matrix:
+
+```text
+E1. Stable coverage warmup
+  Purpose:
+    increase stable_slot_fraction without breaking stable identity.
+  Change:
+    keep local_refinement_topk=8 and weight=0.10;
+    keep action-prefix stopgrad;
+    keep OWM predictive losses at 0;
+    run longer from the same resume or from this 650 checkpoint if available.
+  Acceptance:
+    stable_slot_fraction trends upward above 0.20..0.30;
+    posterior_identity_switch_rate_stable stays below 0.10;
+    same_role_support_overlap stays below 0.70;
+    action_default_equiv does not drift upward.
+
+E2. Controlled action pressure
+  Purpose:
+    test whether action cotrain destroys stable identity once stable slots exist.
+  Change:
+    same as E1, but sweep action weight scale or prefix-stopgrad boundary only
+    if E1 shows stable-slot fraction increasing.
+  Acceptance:
+    action loss improves while stable switch remains low.
+  Reject:
+    stable switch rises or stable_slot_fraction collapses.
+
+E3. Support-signature coefficient audit
+  Purpose:
+    determine whether more same-object binding pressure increases stable-slot
+    coverage or merely locks wrong identities.
+  Change:
+    small sweep only after E1:
+      bind_support_signature_weight: current vs 0.75
+      bind_embedding_signature_weight: current vs 0.35
+      bind_address_weight unchanged
+  Reason:
+    object-binding papers imply pairwise same-object subspace should help,
+    but address should stay gated. Increase support/signature before address.
+  Acceptance:
+    stable_slot_fraction rises, stable switch remains low, overlap does not
+    re-collapse.
+
+E4. Longer cotrain candidate
+  Purpose:
+    only after E1/E2 gates pass.
+  Contract:
+    local_refinement_topk=8
+    local_refinement_weight=0.10
+    prefix-stopgrad retained initially
+    PaliGemma trainable
+    predictive/JEPA losses still 0
+  Reason:
+    current evidence supports the routing/binding contract, but not yet
+    predictive auxiliary cotrain.
+```
+
+Do not run next:
+
+```text
+Do not open slot-JEPA/support-pred/binding-consistency yet:
+  stable_slot_fraction is still too low; predictive targets would supervise
+  too many ambiguous slots.
+
+Do not hard-penalize raw identity_switch:
+  stable-switch evidence shows raw switch is dominated by ambiguous slots.
+
+Do not increase address weight first:
+  address is an inertia term; increasing it before stable-slot coverage grows
+  risks lock-in.
+```

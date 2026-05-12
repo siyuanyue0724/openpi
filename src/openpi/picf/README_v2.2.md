@@ -735,6 +735,17 @@ Current training profiles:
   acceptance discriminator; keep raw switch as an alarm. A5 has started
   `picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be` on commit
   `253c9be` to collect these metrics under local top-k 8 / residual 0.10.
+- 2026-05-12 stable-identity result: the A5 stable-id run completed to
+  step 650. The final row has `posterior_identity_switch_rate=0.6722` but
+  `posterior_identity_switch_rate_stable=0.0`; the last-10 mean is
+  `raw_switch=0.7722`, `stable_switch=0.0025`. Same-role overlap remains
+  controlled (`last=0.4313`, last-10 mean `0.4491`) and stable slots have
+  high binding margin (`posterior_binding_top1_margin_stable_mean≈0.96`).
+  The current bottleneck is therefore not proven identity collapse; it is low
+  stable-slot coverage (`posterior_stable_slot_fraction≈0.12`). The next
+  experiments should increase stable-slot coverage and then test controlled
+  action pressure. Do not add a raw identity-switch loss or open predictive
+  OWM losses yet.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
