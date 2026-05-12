@@ -581,6 +581,16 @@ Current training profiles:
   anchor-only also collapses, the current support-diversity loss form is
   insufficient and the next code change should be a direct same-role overlap-max
   or role-wise assignment-competition objective.
+- 2026-05-12 second-stage update: A5 `burnin_steps=2` also kept recycle off but
+  still showed `aqr_same_role_support_overlap_max≈0.982`, while A7
+  `anchor_only` with strong diversity still showed
+  `aqr_same_role_support_overlap_max≈0.999`. This means the issue is not just
+  insufficient burn-in and not just all-scope/PaliGemma cotrain. The next
+  counterfactuals isolate the anti-collapse objective itself: one
+  `anchor_only/no-action/support-only` run and one `anchor_only/no-action` run
+  with anchor/PV retained. If both still collapse, ordinary support-diversity
+  is not enough and the next implementation should directly optimize the
+  same-role overlap health metric or add role-wise assignment competition.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

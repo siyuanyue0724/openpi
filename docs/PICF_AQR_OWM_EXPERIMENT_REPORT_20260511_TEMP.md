@@ -1173,3 +1173,115 @@ action/all-scope cotrain pressure dominating assignment. If A7 anchor-only also
 collapses, the support-diversity formulation itself is insufficient and should
 be replaced by a direct same-role overlap-max or role-wise assignment
 competition term before any long run.
+
+### Second-stage observation, 2026-05-12 12:05 CST
+
+The queued counterfactuals also produced early diagnostic evidence:
+
+```text
+A5 picf_a5_u2_b2_semtrain_aux0_500new_20260512_95ea69b
+  latest inspected step: 560
+  posterior_recycle_rate: ~0
+  posterior_address_update_rate_mean: 0.0379
+  aqr_same_role_support_overlap_max: 0.9824
+  aqr_same_role_local_true_overlap_max: 0.0564
+  posterior_identity_switch_rate: 0.799
+  loss_anchor_pv: 4.647
+  loss_mapg_routing: 1.140
+  loss_action_default_equiv: 0.0947
+
+Interpretation:
+  burnin=2, like burnin=1, can keep recycle off and address updates alive, but
+  it still does not create stable same-role support specialization.
+
+A7 picf_a7_anchoronly_u2_b2_divstrong_500new_20260512_95ea69b
+  latest inspected step: 680
+  posterior_recycle_rate: ~0
+  posterior_address_update_rate_mean: 0.0362
+  aqr_same_role_support_overlap_max: 0.9995
+  aqr_same_role_local_true_overlap_max: 0.0829
+  posterior_identity_switch_rate: 0.794
+  loss_anchor_pv: 4.733
+  loss_mapg_routing: 1.142
+  loss_action_default_equiv: 0.1493
+
+Interpretation:
+  anchor_only plus strong support/geometry diversity still collapses globally.
+  This rules out the simple explanation that all-scope or PaliGemma cotrain
+  alone causes the collapse. It does not yet rule out action-loss pressure,
+  because action loss still backpropagates into trainable anchor modules in
+  `anchor_only`.
+```
+
+Metric reading:
+
+```text
+posterior_recycle_rate:
+  low values prove the recycle shortcut can be suppressed. They do not prove
+  identity binding is healthy.
+
+posterior_address_update_rate_mean:
+  nonzero ~0.036-0.038 means the address/content pathway is not dead. It also
+  does not prove object identity, because all same-role anchors can update while
+  still reading the same support.
+
+aqr_effective_anchor_count:
+  remaining around 22-23 means anchors are active. The failure is not "all
+  anchors disappeared"; it is that active same-role anchors share support.
+
+aqr_same_role_support_overlap_max:
+  0.98-0.999 is the core failure. It means at least one same-role pair has
+  almost identical global visual support distribution.
+
+aqr_same_role_local_true_overlap_max:
+  values around 0.05-0.08 are lower than global overlap, so local weighting is
+  not literally identical everywhere. However, combined with local Jaccard near
+  1.0, it indicates the same local candidate set is being reused by multiple
+  same-role anchors.
+
+loss_anchor_pv:
+  staying near 4.6-4.75 indicates the anchor-to-PV structure did not become a
+  strong positive signal in these windows.
+
+loss_mapg_routing:
+  around 1.1 and not trending cleanly down means assignment/routing health is
+  not improving even when action loss improves.
+
+loss_action_default_equiv:
+  improving action-equivalent scalar loss is not acceptance evidence here. The
+  action path can improve while the anchor supports remain collapsed.
+```
+
+The next experiment should therefore stop asking whether `burnin=1/2` or
+stronger ordinary support-diversity is enough. It is not enough. The next
+counterfactual must isolate the support-diversity objective itself:
+
+```text
+E-next-1: anchor_only, no action, support-only
+  lambda_action_pos/rot/gripper = 0
+  lambda_anchor_pv = 0
+  lambda_pv_weak = 0
+  lambda_mapg_cycle = 0
+  lambda_mapg_support_diversity = 1.0
+  lambda_mapg_geometry_diversity = 0.1
+
+Purpose:
+  If same-role overlap still stays near 1.0, the current support-diversity
+  implementation does not generate enough useful gradient on the priors. The
+  next code change must be a direct health-metric-aligned role-wise competition
+  or overlap-max loss.
+
+E-next-2: anchor_only, no action, anchor/PV retained
+  lambda_action_pos/rot/gripper = 0
+  lambda_anchor_pv = 0.25
+  lambda_pv_weak = 0.05
+  lambda_mapg_cycle = 0.05
+  lambda_mapg_support_diversity = 1.0
+  lambda_mapg_geometry_diversity = 0.1
+
+Purpose:
+  If E-next-1 improves but E-next-2 collapses, PV/alignment pressure is pulling
+  same-role anchors back to the same salient support. If both improve, action
+  pressure was the missing cause. If both collapse, ordinary support-diversity
+  is insufficient regardless of action.
+```
