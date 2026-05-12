@@ -3789,6 +3789,11 @@ Current 2026-05-13 status:
 Code-level verifier:
   31/31 PASS after adding the guarded signature-guided local candidate repair.
 
+Local audit:
+  py_compile, strict diagnose, dataflow trace, MVTrack deep audit, and targeted
+  verifier/evidence-bundle pytest pass locally. Runtime-artifact WARNs are
+  expected until a metrics/eval path is supplied.
+
 Representational diagnosis:
   A5/A7 same-object probes show high binding_signature separability
   (AUC ~= 0.96-0.98), but high duplicate candidate fraction (~0.85).
@@ -3796,6 +3801,10 @@ Representational diagnosis:
 Active next test:
   use the existing binding_signature subspace inside local refinement top-k
   reranking via --local-refinement-binding-weight.
+
+Remote runs:
+  A5: picf_a5_siglocal025_burnin4_from750_to1650_20260513_08fbf31
+  A7: picf_a7_siglocal050_burnin4_from750_to1650_20260513_08fbf31
 
 Important guard:
   this is not a new loss, not a hard cross-anchor ownership rule, and not a

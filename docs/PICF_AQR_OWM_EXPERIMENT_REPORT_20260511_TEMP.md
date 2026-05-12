@@ -5634,3 +5634,100 @@ PYTHONPATH=src python scripts/verify_picf_owm_contract.py
 Result:
   31/31 PASS
 ```
+
+Additional local checks on the same checkout:
+
+```text
+PYTHONPATH=src python scripts/picf_owm_strict_diagnose.py --fail-on-fail
+PYTHONPATH=src python scripts/picf_owm_dataflow_trace.py --fail-on-fail
+PYTHONPATH=src python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail
+pytest -q scripts/verify_picf_owm_contract_test.py scripts/picf_owm_evidence_bundle_test.py
+
+Result:
+  strict diagnose: PASS, with only runtime-artifact WARNs when no metrics/eval
+                   path is supplied.
+  dataflow trace: PASS.
+  MVTrack deep audit: PASS.
+  targeted pytest: 4 passed.
+```
+
+### Active Remote Runs
+
+Both jobs were launched in tmux after syncing through the China GitHub mirror to
+commit:
+
+```text
+2a09b12 Clarify signature local experiment schedule
+```
+
+A5:
+
+```text
+machine:
+  ssh -p 29776 root@36.139.225.68
+
+tmux:
+  siglocal_a5
+
+run:
+  picf_a5_siglocal025_burnin4_from750_to1650_20260513_08fbf31
+
+base:
+  /mnt/calvin_eval_logs/picf_a5_siglocal025_burnin4_from750_to1650_20260513_08fbf31
+
+tail:
+  BASE=$(cat /tmp/a5_siglocal_base.txt)
+  tail -f "$BASE/train.log"
+  tail -f "$BASE/driver.log"
+  tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_siglocal025_burnin4_from750_to1650_20260513_08fbf31/metrics.jsonl
+
+early speed:
+  about 17 s/step after resume.
+```
+
+A7:
+
+```text
+machine:
+  ssh -p 28060 root@36.139.225.68
+
+tmux:
+  siglocal_a7
+
+run:
+  picf_a7_siglocal050_burnin4_from750_to1650_20260513_08fbf31
+
+base:
+  /mnt/calvin_eval_logs/picf_a7_siglocal050_burnin4_from750_to1650_20260513_08fbf31
+
+tail:
+  BASE=$(cat /tmp/a7_siglocal_base.txt)
+  tail -f "$BASE/train.log"
+  tail -f "$BASE/driver.log"
+  tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_siglocal050_burnin4_from750_to1650_20260513_08fbf31/metrics.jsonl
+
+early speed:
+  about 18.5 s/step after resume.
+```
+
+Estimated completion window from launch:
+
+```text
+training:
+  A5 around 4.5 hours after first training step;
+  A7 around 4.8-5.0 hours after first training step.
+
+eval + same-object probe:
+  approximately 20-40 minutes after training, depending on checkpoint IO and
+  CALVIN server startup.
+```
+
+Current rule:
+
+```text
+Do not stop or alter these jobs unless one of the following happens:
+  - train.log reports a traceback;
+  - metrics show NaN/Inf;
+  - loss_action_default_equiv or loss_total diverges sharply for multiple logs;
+  - both GPUs become idle while driver.log has no "done" marker.
+```
