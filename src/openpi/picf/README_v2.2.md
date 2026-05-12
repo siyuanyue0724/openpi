@@ -676,6 +676,18 @@ Current training profiles:
   `posterior_recycle_rate`, finite gradients, and only secondarily
   `loss_action_default_equiv`. See
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
+- 2026-05-12 local audit checkpoint: commit `146bb86` is the audited
+  README/experiment-record deployment base. Local verification
+  passed the OWM verifier, strict diagnosis, recursive dataflow trace,
+  MVTrack deep audit, key-file `py_compile`, targeted PICF
+  `pipeline`/`training`/script regressions, broader script regression
+  (`162 passed` after updating stale test loss stubs), broader non-core PICF
+  regression (`31 passed`), and full core `pipeline`/`training` regression
+  (`101 passed`). The final combined local audit regression passed
+  `232 passed`. This is a code/dataflow audit, not a replacement for live A5/A7
+  metrics or CALVIN/video behavior evidence. The detailed command ledger and
+  boundary conditions are recorded in
+  `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

@@ -2726,8 +2726,9 @@ Current clean next steps:
 Current verified code state:
 
 ```text
-HEAD = 145654a
+HEAD = 146bb86
 Rejected role/coverage local candidate heuristics are removed from active code.
+README_v2.2 records the cleaned two-branch diagnostic deployment.
 verify_picf_owm_contract.py = PASS
 picf_owm_strict_diagnose.py --fail-on-fail = PASS
 picf_owm_dataflow_trace.py --fail-on-fail = PASS
@@ -2981,4 +2982,175 @@ Final priority order:
 3. Offline IsSameObject probe.
 4. Real tracklet/proposal activation.
 5. Delayed predictive auxiliary cotrain only after anchor health is stable.
+```
+
+---
+
+## 2026-05-12 Local Audit After Clean Diagnostic Deployment
+
+Source index:
+
+```text
+README entry:
+  src/openpi/picf/README_v2.2.md
+
+Detailed experiment ledger:
+  docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md
+
+MVTrack architecture contract:
+  docs/PICF_AQR_OWM_MVTRACK_DEPLOYMENT_README.md
+```
+
+Local repository state:
+
+```text
+branch = Posterior_VLA
+audited deployment base HEAD = 146bb86
+previous code-cleanup commit = 145654a
+previous experiment-plan commit = 7bff430
+working tree status before this audit note = clean
+```
+
+Local verification commands run from `/home/siyuanyue/Documents/openpi`:
+
+```bash
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py
+PYTHONPATH=src python scripts/picf_owm_strict_diagnose.py --fail-on-fail
+PYTHONPATH=src python scripts/picf_owm_dataflow_trace.py --fail-on-fail
+PYTHONPATH=src python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail
+
+python -m py_compile \
+  src/openpi/picf/core/contracts.py \
+  src/openpi/picf/core/config.py \
+  src/openpi/picf/core/pipeline.py \
+  src/openpi/picf/core/training.py \
+  src/openpi/picf/vjepa/wrapper.py \
+  scripts/picf_core_train.py \
+  scripts/serve_picf_policy.py \
+  scripts/verify_picf_owm_contract.py \
+  scripts/picf_owm_strict_diagnose.py \
+  scripts/picf_owm_dataflow_trace.py \
+  scripts/picf_owm_mvtrack_deep_audit.py \
+  scripts/picf_owm_evidence_bundle.py
+
+PYTHONPATH=src pytest -q \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py \
+  src/openpi/picf/vjepa/wrapper_test.py
+
+PYTHONPATH=src pytest -q \
+  src/openpi/picf/core/pipeline_test.py \
+  -k 'cache or burnin or mvtrack or temporal or pg or ordinal or local or binding'
+
+PYTHONPATH=src pytest -q \
+  src/openpi/picf/core/training_test.py \
+  -k 'slot or support or binding or jepa or denois or matched or next_posterior'
+
+PYTHONPATH=src pytest -q \
+  scripts/picf_core_train_test.py \
+  scripts/serve_picf_policy_test.py \
+  scripts/picf_replay_windows_test.py \
+  scripts/picf_loss_audit_test.py \
+  scripts/picf_watch_metrics_test.py \
+  scripts/picf_plot_metrics_test.py \
+  scripts/picf_resume_train_test.py \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py
+
+PYTHONPATH=src pytest -q \
+  src/openpi/picf/action_normalization_test.py \
+  src/openpi/picf/pointcloud_picf_test.py \
+  src/openpi/picf/policy_test.py \
+  src/openpi/picf/replay/calvin_replay_test.py \
+  src/openpi/picf/scaffold/matching_test.py \
+  src/openpi/picf/scaffold/pipeline_test.py \
+  src/openpi/picf/posterior/fusion_test.py \
+  src/openpi/picf/posterior/pipeline_test.py \
+  src/openpi/picf/posterior/prior_test.py
+
+PYTHONPATH=src pytest -q \
+  src/openpi/picf/core/pipeline_test.py \
+  src/openpi/picf/core/training_test.py
+```
+
+Observed result:
+
+```text
+OWM verifier:
+  PASS
+
+strict diagnose:
+  PASS with expected runtime-artifact WARN boundaries when no metrics/eval
+  path is supplied.
+
+recursive dataflow trace:
+  PASS
+
+MVTrack deep audit:
+  PASS
+
+py_compile:
+  PASS
+
+targeted script/V-JEPA tests:
+  13 passed
+
+targeted pipeline tests:
+  16 passed
+
+targeted training tests:
+  8 passed
+
+broader script regression:
+  initially exposed 3 stale test-stub failures in
+  scripts/picf_core_train_test.py because monkeypatched dummy losses did not
+  carry the current action comparability fields:
+    action_default_equiv
+    action_weight_scale
+
+  The test stubs were updated; rerun result:
+    162 passed
+
+broader non-core PICF regression:
+  31 passed
+
+full core pipeline/training regression:
+  101 passed
+
+final combined local audit regression:
+  232 passed
+```
+
+Boundary conditions:
+
+```text
+This local audit proves code-level contracts, parser/compile health, guarded
+dataflow invariants, and selected regression coverage.
+
+It does not prove:
+  A5/A7 live training acceptance,
+  CALVIN behavior success,
+  video/overlay quality,
+  active tracklet/proposal evidence on datasets that do not provide those
+  fields,
+  or final ordinal/fine-instance grounding.
+```
+
+Strict interpretation:
+
+```text
+If local audit passes but live metrics fail, do not add scalar losses first.
+Use the failure gate:
+
+  local_jaccard -> upstream same-role evidence reuse.
+  same_role_support_overlap -> row-level AQR support collapse.
+  recycle_rate/logit -> posterior identity/reset instability.
+  loss_action_default_equiv -> secondary action comparability only.
+
+The next clean branches remain:
+  clean staged cotrain,
+  direct cotrain control,
+  offline IsSameObject probe,
+  real tracklet/proposal dataflow activation,
+  delayed predictive auxiliary only after anchor-health passes.
 ```
