@@ -98,6 +98,13 @@ A7 base `/mnt/calvin_eval_logs/picf_a7_signature_probe_c4ac7b3_now_20260513_0131
 The 12-hour gate is documented in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
 
+2026-05-13 A5 signature-probe result: after a Python-3.8 compatibility fix in
+the probe script, A5 reports `binding_signature_cos_auc=0.976` but
+`duplicate_candidate_fraction_within_frame=0.848`. This answers the first
+object-binding question: the projected pairwise binding subspace is decodable.
+The remaining failure is assignment/coverage reuse of candidates, not absence
+of same-object signal. A7 endpoint signature probing is the next discriminator.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

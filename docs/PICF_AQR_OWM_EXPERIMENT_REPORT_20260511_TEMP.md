@@ -5066,6 +5066,87 @@ and `observation.binding_signature` has shape:
 This confirms that A5 is not an empty probe. It is actively collecting the
 signature evidence needed for the pairwise IsSameObject audit.
 
+#### A5 Signature Probe Result
+
+The A5 retry completed CALVIN rollout and the Python-3.8 compatibility issue in
+the probe was fixed by removing the `zip(..., strict=False)` dependency. The
+probe was rerun on the already generated anchor-debug bundle without rerunning
+CALVIN.
+
+Result:
+
+```text
+binding_signature_cos_auc:
+  0.976374
+
+binding_signature_cos_pos_mean:
+  0.988203
+
+binding_signature_cos_neg_mean:
+  0.878755
+
+support_signature_cos_auc:
+  0.542649
+
+visual_cos_auc:
+  0.530407
+
+point_cos_auc:
+  0.538722
+
+geometry_auc:
+  1.0
+
+combined_auc:
+  0.913601
+
+duplicate_candidate_fraction_within_frame:
+  0.848016
+
+decision:
+  binding_subspace_decodable_but_assignment_duplicates_candidates
+```
+
+Interpretation:
+
+```text
+The object-binding-inspired projected binding signature is real signal. It is
+not a random add-on and not just geometry: it separates weak same-object pairs
+far better than raw visual/point/support means. However, same-role anchor
+assignment still duplicates candidates heavily within frame. The unresolved
+failure is therefore assignment/coverage usage of the binding subspace, not
+absence of a pairwise binding subspace.
+```
+
+This changes the next engineering question:
+
+```text
+Old question:
+  Does a same-object subspace exist?
+
+Answered by A5:
+  Yes, in binding_signature.
+
+Current question:
+  Why does AQR assignment still reuse the same candidate despite that subspace?
+```
+
+Consequences:
+
+```text
+Do not add a new identity loss just because stable coverage is low.
+Do not increase address/cache inertia yet.
+Do not turn on slot-JEPA/support-prediction.
+Do not resurrect role-competition or deterministic coverage seed.
+
+Next coherent test:
+  compare A7 endpoint binding_signature AUC against A5;
+  if A7 also has high binding AUC, audit binding coefficient scale and local
+  candidate selection;
+  if A7 binding AUC collapses, the issue is training-profile damage to the
+  binding subspace.
+```
+
 #### A7 Deployment
 
 The first A7 post-run script had a wait-loop bug:
