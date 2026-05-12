@@ -3591,3 +3591,37 @@ tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_localoff_burnin4_750new_202
 ssh -p 28060 root@36.139.225.68
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_localk8w01_burnin4_750new_20260512_7bff430.train_tmux.log
 ```
+
+Initial sanity check:
+
+```text
+A5 local-off, step 470:
+  loss_total=0.7573
+  loss_action_default_equiv=0.1146
+  same_role_support_overlap=0.5098
+  local_jaccard=0.0
+  local_true_overlap=0.0
+  recycle=0.0804
+  identity_switch=0.7278
+
+A7 local topk=8 weight=0.10, step 470:
+  loss_total=0.7625
+  loss_action_default_equiv=0.1102
+  same_role_support_overlap=0.7917
+  local_jaccard=0.5482
+  local_true_overlap=0.0502
+  recycle=0.2472
+  identity_switch=0.7278
+```
+
+Early interpretation:
+
+```text
+The local-refinement hypothesis is plausible but not yet proven. A5 local-off
+removes local candidate reuse by construction and immediately lowers
+same-role support overlap. A7 constrained-local substantially lowers local
+jaccard versus the previous topk=32 / weight=0.25 run. However identity_switch
+is still high in both early rows, so the step-470 sample cannot yet distinguish
+startup noise from persistent posterior assignment instability. Judge at
+step 520/600/750.
+```
