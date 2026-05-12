@@ -88,6 +88,16 @@ is recorded in the experiment report and tests whether the deployed
 `binding_signature_proj` subspace carries same-object information before any
 new loss or identity-inertia change is considered.
 
+2026-05-13 deployment update: A7 reached the planned 1050-step endpoint with
+controlled support overlap (`aqr_same_role_support_overlap_max≈0.294`) but low
+stable-slot coverage (`posterior_stable_slot_fraction≈0.122`). It is therefore
+archived as partial non-collapse, not accepted as a long-run line. A5 and A7 are
+now both assigned to read-only signature-level same-object probes:
+A5 base `/mnt/calvin_eval_logs/picf_a5_signature_probe_c4ac7b3_retry_20260513_012306`;
+A7 base `/mnt/calvin_eval_logs/picf_a7_signature_probe_c4ac7b3_now_20260513_013143`.
+The 12-hour gate is documented in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

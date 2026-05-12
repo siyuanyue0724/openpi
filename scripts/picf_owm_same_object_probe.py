@@ -180,7 +180,7 @@ def run_probe(
     }
     examples = {"positive": 0, "negative": 0, "ambiguous": 0}
 
-    for (ep_a, _step_a, _goal_a, anchors_a), (ep_b, _step_b, _goal_b, anchors_b) in zip(frames, frames[1:], strict=False):
+    for (ep_a, _step_a, _goal_a, anchors_a), (ep_b, _step_b, _goal_b, anchors_b) in zip(frames, frames[1:]):
         if ep_a != ep_b:
             continue
         for a in anchors_a:

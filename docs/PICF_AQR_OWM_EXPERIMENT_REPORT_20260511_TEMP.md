@@ -4925,3 +4925,254 @@ This follows the object-binding paper's claim that IsSameObject is best treated
 as a pairwise/quadratic relation in representation space, not as a pointwise
 anchor class label. It also avoids reviving the rejected role-competition or
 coverage-seed heuristics.
+
+### 2026-05-13 12-Hour Signature Probe Deployment
+
+This section is the active 12-hour acceptance plan after the A7 step-1050
+endpoint. The goal is deliberately narrow:
+
+```text
+Determine whether the remaining low stable-slot coverage is caused by missing
+same-object evidence in the exported signatures, or by AQR assignment failing
+to use evidence that is already present.
+```
+
+This is a read-only diagnosis stage. It must not introduce a new scalar loss,
+raise address/cache inertia, reopen slot-JEPA/support-prediction, or revive the
+rejected role-competition / deterministic coverage-seed proposals. Those would
+be downstream pressure terms. The current unresolved question is upstream:
+whether the object-binding evidence exists in the representation at all.
+
+#### A7 Endpoint Record
+
+A7 completed the planned 1050-step stable-coverage endpoint:
+
+```text
+run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_stabcov_localk8w01_burnin4_1050new_20260512_83cf6df
+
+step:
+  1050
+
+loss_total:
+  0.720651
+
+loss_action_default_equiv:
+  0.082193
+
+aqr_same_role_support_overlap_max:
+  0.293733
+
+aqr_same_role_local_true_overlap_max:
+  0.026267
+
+posterior_stable_slot_fraction:
+  0.122222
+
+posterior_recycle_rate:
+  0.320914
+
+posterior_identity_switch_rate_stable:
+  0.0
+
+posterior_binding_top1_margin_stable_mean:
+  0.926945
+```
+
+Interpretation:
+
+```text
+A7 is not the earlier 0.99 same-role support-collapse failure. It maintains
+low support overlap and low true local overlap at the endpoint. However, it
+does not solve the coverage bottleneck: only about 12% of posterior slots are
+stable. Stable slots are reliable when they exist, but too few slots become
+stable.
+```
+
+This makes A7 useful as a partial non-collapse endpoint, not as a long-run
+acceptance line. Extending this exact run would mostly test whether more steps
+eventually improve coverage, but it would not identify why coverage is low. The
+correct next action is signature/token evidence diagnosis.
+
+#### Mathematical Gate
+
+Let `Y` be object identity, `Z` be typed evidence, `S` be the support/binding
+signature, and `A` be the selected action/anchor assignment.
+
+```math
+I(Y; A_t \mid \ell) \le I(Y; Z_{\le t} \mid \ell)
+```
+
+If the exported signatures have low same-object separability, stronger action
+loss, stronger cache, stronger address inertia, or predictive JEPA pressure can
+only preserve or amplify a weak assignment. They cannot create object identity
+information. If the signatures are separable, the next problem is the reader /
+coefficient / assignment path, not the data representation.
+
+The active probe therefore tests:
+
+```math
+score(i,j) = z_i^T W z_j
+```
+
+for weak same-object pairs derived from geometry / posterior support in anchor
+debug output. This follows the 2025 object-binding result that IsSameObject is
+best treated as a pairwise or quadratic relation in pretrained ViT-like
+representations. The probe is diagnostic: it does not train the policy.
+
+#### A5 Deployment
+
+The first A5 attempt used the correct debug-export server but the CALVIN eval
+environment was missing `calvin_agent` in `PYTHONPATH`. It was restarted with
+the same checkpoint and corrected CALVIN paths.
+
+Active A5 run:
+
+```text
+machine:
+  A5 / ssh -p 29776 root@36.139.225.68
+
+server tmux:
+  a5_sig_serve_c4ac7b3
+
+eval tmux:
+  a5_sig_eval_c4ac7b3
+
+port:
+  8016
+
+checkpoint:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be
+
+active base:
+  /mnt/calvin_eval_logs/picf_a5_signature_probe_c4ac7b3_retry_20260513_012306
+```
+
+The retry is confirmed to emit `anchor_debug` rows containing:
+
+```text
+anchor_debug.observation.support_signature
+anchor_debug.observation.binding_signature
+anchor_debug.posterior.support_signature
+anchor_debug.posterior.binding_signature
+```
+
+and `observation.binding_signature` has shape:
+
+```text
+16 x 128
+```
+
+This confirms that A5 is not an empty probe. It is actively collecting the
+signature evidence needed for the pairwise IsSameObject audit.
+
+#### A7 Deployment
+
+The first A7 post-run script had a wait-loop bug:
+
+```bash
+pgrep -f "${RUN_NAME}"
+```
+
+matched the tmux/script command line after the actual trainer had finished.
+This caused the signature evaluation to wait even though both GPUs were idle.
+The waiting script was stopped and replaced by a direct post-run signature
+evaluation.
+
+Active A7 run:
+
+```text
+machine:
+  A7 / ssh -p 28060 root@36.139.225.68
+
+eval tmux:
+  a7_sig_now_c4ac7b3
+
+port:
+  8017
+
+checkpoint:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_stabcov_localk8w01_burnin4_1050new_20260512_83cf6df
+
+active base:
+  /mnt/calvin_eval_logs/picf_a7_signature_probe_c4ac7b3_now_20260513_013143
+```
+
+The A7 script synchronized through the configured China GitHub mirror:
+
+```text
+https://gh.llkk.cc/https://github.com/siyuanyue0724/openpi
+```
+
+and checked out the current signature-export scripts at commit `7702c49`.
+
+#### 12-Hour Acceptance Matrix
+
+The next checkpoint should be judged by the following matrix:
+
+```text
+Case A:
+  binding_signature_cos_auc >= 0.70
+  support_signature_cos_auc improves materially over raw visual/point cosine
+
+Decision:
+  same-object information exists in the deployed signature subspace. The next
+  engineering work should be a coefficient/reader audit: verify that binding
+  logits and AQR support routing actually use this subspace with the intended
+  scale. Do not add more dataflow yet.
+
+Case B:
+  geometry_auc high but binding_signature_cos_auc < 0.70
+
+Decision:
+  the model can localize a weak same-object candidate geometrically, but the
+  exported learned signature is not object-discriminative enough. Do not
+  increase identity inertia or predictive losses. Move to token-level
+  V-JEPA/PG/wrist probing, and then either improve signature extraction or feed
+  real tracklet/proposal evidence.
+
+Case C:
+  all same-object AUCs weak and duplicate_candidate_fraction remains high
+
+Decision:
+  current CALVIN evidence is insufficient for robust multi-instance binding
+  under this debug target. The next coherent upgrade is real temporal
+  correspondence evidence (tracklets/proposals), not scalar loss tuning.
+```
+
+#### Tail Commands
+
+```bash
+# A5
+ssh -p 29776 root@36.139.225.68
+BASE=$(cat /tmp/a5_signature_probe_base.txt)
+tail -f "$BASE/eval.log"
+tail -f "$BASE/probe.log"
+cat "$BASE/same_object_probe_signature.json"
+
+# A7
+ssh -p 28060 root@36.139.225.68
+BASE=$(cat /tmp/a7_signature_probe_base.txt)
+tail -f "$BASE/driver.log"
+tail -f "$BASE/eval.log"
+tail -f "$BASE/probe.log"
+cat "$BASE/same_object_probe_signature.json"
+```
+
+#### Self-Critique
+
+This plan is intentionally not a full new training experiment. That is the
+point. The last several runs already showed that loss-level interventions can
+produce locally plausible action loss and even low same-role overlap while
+leaving stable coverage low. A new cotrain sweep would not distinguish whether
+the failure is representational or assignment-side.
+
+The probe answers the more basic question first:
+
+```text
+Can current frozen/perception-trained features express "same object" in a
+pairwise binding subspace under the current CALVIN observations?
+```
+
+Only after that question is answered should we choose between reader/scale
+repair, token-level signature extraction, or real tracklet/proposal dataflow.
