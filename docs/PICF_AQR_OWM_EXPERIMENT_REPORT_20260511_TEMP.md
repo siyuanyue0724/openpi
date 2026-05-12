@@ -3433,3 +3433,27 @@ accepted yet. The current evidence supports this decomposition:
 The next decision should wait for later rows or checkpoint-level diagnostics,
 not just the current loss decrease.
 ```
+
+Latest minute check after this report entry:
+
+```text
+A5 step 580:
+  loss_total=0.7515
+  loss_action_default_equiv=0.0726
+  same_role_support_overlap=0.8803
+  local_jaccard=0.8938
+  recycle=0.2938
+  identity_switch=0.8000
+
+A7 step 560:
+  loss_total=0.7308
+  loss_action_default_equiv=0.0691
+  same_role_support_overlap=0.6789
+  local_jaccard=0.9656
+  recycle=2.15e-14
+  identity_switch=0.7778
+```
+
+Interpretation stays unchanged: action/alignment losses are reasonable, but
+local candidate reuse and identity switching are not yet healthy enough for
+acceptance.
