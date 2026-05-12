@@ -3646,7 +3646,7 @@ A7:
   overrides:
     --local-refinement-topk 8
     --local-refinement-weight 0.10
-  latest inspected step: 740
+  latest inspected step: 750
 ```
 
 Latest metrics:
@@ -3660,12 +3660,12 @@ A5 local-off, step 750:
   aqr_same_role_local_true_overlap_max = 0.0
   posterior_identity_switch_rate = 0.8278
 
-A7 local topk=8, weight=0.10, step 740:
-  loss_total = 0.7215
-  loss_action_default_equiv = 0.0540
-  aqr_same_role_support_overlap_max = 0.3308
-  aqr_same_role_local_jaccard_max = 0.4734
-  posterior_identity_switch_rate = 0.8111
+A7 local topk=8, weight=0.10, step 750:
+  loss_total = 0.7274
+  loss_action_default_equiv = 0.0920
+  aqr_same_role_support_overlap_max = 0.4103
+  aqr_same_role_local_jaccard_max = 0.4853
+  posterior_identity_switch_rate = 0.8778
 ```
 
 Mathematical interpretation:
@@ -3822,4 +3822,22 @@ Expected resolution:
   If stable switch high:
     do not move to long-run; inspect binding assignment compatibility and
     support-signature/address coefficients.
+```
+
+Launched confirmation run:
+
+```text
+machine: A5
+tmux: a5_stableid_253c9be
+run: picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be
+code: 253c9be
+resume: model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b
+num_train_steps: 650
+local_refinement_topk: 8
+local_refinement_weight: 0.10
+purpose: collect stable-slot identity metrics under the constrained-local
+  setting that reduced overlap without adding any new loss.
+
+Tail:
+  tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_stableid_localk8w01_burnin4_650new_20260512_253c9be.train_tmux.log
 ```
