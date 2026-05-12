@@ -1285,3 +1285,131 @@ Purpose:
   pressure was the missing cause. If both collapse, ordinary support-diversity
   is insufficient regardless of action.
 ```
+
+### Third-stage isolation launch, 2026-05-12 12:30 CST
+
+The next-stage experiments were launched as no-action counterfactuals. These
+runs are not intended to optimize policy quality. They isolate whether the
+current anti-collapse objective can move same-role supports when action
+gradients are removed.
+
+```text
+A5 running:
+  exp:
+    picf_a5_anchoronly_noaction_supportonly_sdiv1_300new_20260512_95ea69b
+  purpose:
+    pure objective test for the support-diversity implementation
+  resume:
+    model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b
+  training window:
+    step 450 -> 750
+  core flags:
+    picf_trainable_scope = anchor_only
+    unroll_steps = 2
+    burnin_steps = 2
+    burnin_mode = state_only
+    lambda_action_pos/rot/gripper = 0
+    lambda_anchor_pv = 0
+    lambda_pv_weak = 0
+    lambda_mapg_cycle = 0
+    lambda_mapg_support_diversity = 1.0
+    lambda_mapg_geometry_diversity = 0.1
+    lambda_slot_jepa/support_pred/binding_consistency = 0
+
+A7 running:
+  exp:
+    picf_a7_anchoronly_noaction_anchorpv_sdiv1_300new_20260512_95ea69b
+  purpose:
+    tests whether PV/anchor alignment, without action, is enough to re-collapse
+    same-role supports
+  resume:
+    model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b
+  training window:
+    step 450 -> 750
+  core flags:
+    picf_trainable_scope = anchor_only
+    unroll_steps = 2
+    burnin_steps = 2
+    burnin_mode = state_only
+    lambda_action_pos/rot/gripper = 0
+    lambda_anchor_pv = 0.25
+    lambda_pv_weak = 0.05
+    lambda_mapg_cycle = 0.05
+    lambda_mapg_support_diversity = 1.0
+    lambda_mapg_geometry_diversity = 0.1
+    lambda_slot_jepa/support_pred/binding_consistency = 0
+```
+
+Decision logic:
+
+```text
+Case 1: A5 overlap stays high, A7 overlap stays high
+  Conclusion:
+    the current support-diversity loss does not sufficiently optimize the
+    observed health metric. This is a loss-formulation problem, not an action
+    cotrain problem.
+  Next action:
+    implement a direct same-role overlap-max or role-wise assignment competition
+    loss aligned to `aqr_same_role_support_overlap_max`, then rerun the same
+    no-action isolation before reintroducing action.
+
+Case 2: A5 overlap improves, A7 overlap stays high
+  Conclusion:
+    support-diversity can work in isolation, but PV/anchor alignment pulls
+    same-role anchors back to the same salient evidence.
+  Next action:
+    keep the current diversity objective but add a staged schedule:
+    support-only warmup -> PV/alignment reintroduction -> action reintroduction.
+    Do not open full cotrain from step 0.
+
+Case 3: A5 overlap improves, A7 overlap improves
+  Conclusion:
+    action gradients are the dominant cause of the support collapse seen in the
+    earlier windows.
+  Next action:
+    use a staged action schedule. Reintroduce action with a small coefficient
+    after support specialization is established, and monitor whether overlap
+    rebounds.
+
+Case 4: A5 overlap high, A7 overlap improves
+  Conclusion:
+    unlikely but possible. It would mean the pure support loss lacks a useful
+    anchor reference and needs PV/anchor structure to define what should be
+    separated.
+  Next action:
+    keep PV/anchor terms but do not add action until overlap remains healthy for
+    a longer window.
+```
+
+Primary acceptance metrics for this isolation stage:
+
+```text
+aqr_same_role_support_overlap_max:
+  must fall materially below the previous 0.98-0.999 band. A useful short-window
+  target is <0.85, with <0.75 preferred.
+
+aqr_same_role_local_jaccard_max:
+  should also fall if anchors stop reusing the same local candidate set. If
+  global overlap falls but Jaccard remains near 1, the model is only reweighting
+  the same local supports.
+
+aqr_effective_anchor_count:
+  should remain above ~20. A drop in overlap caused by dead anchors is not a
+  valid improvement.
+
+posterior_recycle_rate:
+  should remain low. If overlap improves only by increasing recycle, the identity
+  mechanism is not actually healthier.
+
+loss_mapg_support_diversity:
+  should move consistently with the health metric. If the loss decreases while
+  the health metric stays collapsed, the loss is misaligned with the metric.
+
+loss_anchor_pv / loss_pv_weak in A7:
+  should not dominate the no-action run. If they improve while overlap collapses,
+  PV/alignment is competing with object separation.
+```
+
+The expected time to a useful readout is about 100-200 new steps after resume.
+Full 300-step windows are kept only to verify whether early improvements persist
+or rebound.

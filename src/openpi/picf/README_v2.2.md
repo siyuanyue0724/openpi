@@ -591,6 +591,16 @@ Current training profiles:
   with anchor/PV retained. If both still collapse, ordinary support-diversity
   is not enough and the next implementation should directly optimize the
   same-role overlap health metric or add role-wise assignment competition.
+- 2026-05-12 third-stage launch: the next two diagnostic runs are now the
+  canonical branch point. A5 is `anchor_only/no-action/support-only` with
+  `lambda_mapg_support_diversity=1.0`, `lambda_mapg_geometry_diversity=0.1`, and
+  all action/PV/cycle/predictive losses disabled. A7 is `anchor_only/no-action`
+  with anchor/PV retained (`lambda_anchor_pv=0.25`, `lambda_pv_weak=0.05`,
+  `lambda_mapg_cycle=0.05`) plus the same strong diversity weights. The target
+  is not policy quality; it is isolating whether same-role support collapse is a
+  loss-formulation issue, PV/alignment conflict, or action-gradient conflict.
+  See `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md` for the detailed
+  decision table.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
