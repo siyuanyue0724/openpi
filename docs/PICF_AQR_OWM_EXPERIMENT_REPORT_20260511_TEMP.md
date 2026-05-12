@@ -929,6 +929,27 @@ checkpoint directories while preserving logs, metrics, and the shared
 model_only_resume checkpoint.
 ```
 
+### Storage cleanup ledger
+
+Cleanup policy used on the shared training `/mnt`:
+
+```text
+delete:
+  May-2026 numeric checkpoint subdirectories and model-only freeze artifacts
+  that are not active and are not needed for resume.
+
+preserve:
+  April 4-22 ablation baseline.
+  April full-PICF baseline.
+  Current active A5/A7 2026-05-12 diagnostic run directories.
+  model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b.
+  Logs, train_tmux logs, metrics JSONL, and launch records.
+```
+
+The cleanup does not alter any training conclusion. It only removes replayable
+checkpoint payloads after the diagnostic metrics have already been written.
+The live-run record below remains authoritative for the current A5/A7 matrix.
+
 ### Why same-role support overlap reappeared
 
 The earlier "same-role support fixed" conclusion was only true for short

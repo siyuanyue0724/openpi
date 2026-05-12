@@ -492,9 +492,11 @@ Current training profiles:
   uses `hidden + geometry + support-overlap + binding-subspace + gated-address`.
   This is a structural binding term, not a new high-risk loss. It is intended to
   protect same-object slot identity without requiring dataset relabeling.
-- 2026-05-11 cloud report update:
+- 2026-05-11 cloud report update, historical snapshot:
   [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md)
-  is the current live experiment ledger. A5 has no active tmux and its completed
+  is the current live experiment ledger. This paragraph records the now-closed
+  2026-05-11 diagnostic state before the 2026-05-12 burn-in/support-collapse
+  matrix replaced it. A5 had no active tmux and its completed
   `picf_a5_prefixstopgrad_a025_bindsub_diag300_20260511_95ea69b` diagnosis
   ended at step `600` with `posterior_recycle_rate=0.000469`,
   `posterior_recycle_logit_mean=-11.6767`, and
@@ -554,6 +556,26 @@ Current training profiles:
   The purpose is to decide whether the production long run should move from
   direct `unroll_steps=2` to burnin4/state-only before any predictive aux
   warmup.
+- 2026-05-12 burn-in/support-collapse matrix supersedes the earlier A5/A7
+  active-run notes. The live matrix currently runs four bounded diagnostics from
+  the shared `model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b` resume:
+  A5 compares `burnin_steps=1` vs `burnin_steps=2` under all-scope PaliGemma
+  cotrain, and A7 compares the same `burnin_steps=2`/strong-diversity setting
+  under all-scope vs `anchor_only`. The matrix is explicitly diagnostic: it
+  tests whether short state-only burn-in prevents recycle saturation and whether
+  stronger diversity prevents same-role support collapse. Do not infer
+  production readiness from `loss_action_default_equiv` alone. The acceptance
+  metrics are `posterior_recycle_rate`, `posterior_address_update_rate_mean`,
+  `aqr_same_role_support_overlap_max`,
+  `aqr_same_role_local_true_overlap_max`, `posterior_identity_switch_rate`,
+  `loss_anchor_pv`, and `loss_mapg_routing`.
+- 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
+  subdirectories are disposable once their logs and JSON metrics are preserved.
+  Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
+  current active A5/A7 run directories, and the shared
+  `model_only_resume_a5_prefixstopgrad_450_for_all_95ea69b` resume checkpoint.
+  The cleanup is intentionally storage hygiene only; it is not a change to the
+  mathematical training contract.
 
 Default recommendation:
 
