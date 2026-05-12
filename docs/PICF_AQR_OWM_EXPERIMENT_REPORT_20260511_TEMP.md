@@ -4256,3 +4256,185 @@ look partially healthy while same-role overlap reappeared: the slots can be
 stable and high-margin, but stable around the same candidate. That is a
 coverage/differentiation failure, not a gradient explosion, recycle saturation,
 or action-loss-only failure.
+
+### Next Test Matrix After Overlay Evidence
+
+The next tests must distinguish three mechanisms. They should not add losses
+until the mechanism is identified.
+
+#### Test A: Stable-Coverage Continuation
+
+Already running on A7:
+
+```text
+run:
+  picf_a7_stabcov_localk8w01_burnin4_1050new_20260512_83cf6df
+
+what it tests:
+  whether the current clean local-refinement setting can increase the number
+  of reliable slots by simply training longer from step 750 to 1050.
+
+why it is mathematically coherent:
+  It keeps the same belief update and assignment objective. It tests convergence
+  of the existing objective before adding a new force.
+
+accept:
+  stable_slot_fraction > 0.20..0.30
+  stable identity_switch < 0.10
+  same_role_support_overlap < 0.70
+  overlay shows more than one same-role object/candidate is represented.
+
+reject:
+  stable_slot_fraction remains near 0.10..0.12
+  same-role slots 1..7 remain spatially identical in overlay
+  action loss improves while anchor coverage remains collapsed.
+```
+
+If Test A passes, the next run can be controlled action-pressure continuation.
+If Test A fails, do not continue action cotrain; move to Test B.
+
+#### Test B: Offline IsSameObject Probe
+
+This is the most direct test implied by the object-binding paper.
+
+```text
+inputs:
+  saved V-JEPA static/wrist tokens
+  PG support tokens
+  point/projective neighborhoods
+  high-confidence posterior supports
+  optional tracklet continuity when data is available
+
+weak positive pairs:
+  same tracklet ID across nearby frames
+  same high-confidence posterior slot with low recycle and high binding margin
+  same point-neighborhood / projection cluster
+  same PG/V-JEPA support peak under low entropy
+
+weak negative pairs:
+  far apart in image/projected 3D
+  different high-confidence posterior slots with low overlap
+  different tracklet IDs
+
+probe:
+  score(i, j) = z_i^T W z_j
+  or projected cosine in binding_signature_proj space.
+
+metrics:
+  AUC
+  same-minus-different margin
+  per-view and per-modality separability
+  layer/modality where object binding is strongest.
+```
+
+Acceptance:
+
+```text
+If AUC/margin is high:
+  the tokens contain object-binding information; the correct structural fix is
+  to strengthen support-signature assignment or feed real tracklet/proposal
+  evidence.
+
+If AUC/margin is low:
+  the evidence representation itself does not separate same-role objects enough;
+  more AQR loss tuning is unlikely to solve fourth-object/fine-instance binding.
+  The next useful investment is better evidence: tracklets, proposals, higher
+  local resolution, or dataset-level signals.
+```
+
+This probe is not a new training loss. It is a measurement of the information
+available in `Z_{\le t}`. It directly tests the information-theoretic condition:
+
+```math
+I(Y; A_t \mid \ell) \le I(Y; Z_{\le t} \mid \ell)
+```
+
+If the weak same-object relation is not decodable from the tokens, the action
+policy cannot reliably choose the fourth fine-grained object through routing
+alone.
+
+#### Test C: Support-Signature Coefficient Audit
+
+Only run this if Test B or overlay evidence indicates that same-object evidence
+exists but AQR is not using it enough.
+
+```text
+sweep:
+  bind_support_signature_weight: current -> 0.75
+  bind_embedding_signature_weight: current -> 0.35
+  bind_address_weight: unchanged
+  local_refinement_topk: 8
+  local_refinement_weight: 0.10
+  predictive losses: 0
+
+why support first:
+  support/signature overlap is current evidence compatibility.
+  address is inertia. Increasing address first can lock the wrong object.
+
+accept:
+  same-role slots occupy different candidates in overlay;
+  stable_slot_fraction rises;
+  stable identity_switch remains low;
+  same_role_support_overlap does not rebound.
+
+reject:
+  stronger signature raises overlap or makes slots share the same candidate
+  more confidently.
+```
+
+#### Test D: Tracklet/Proposal Dataflow Activation
+
+This is the cleanest long-term fix if the overlay confirms insufficient
+same-role differentiation.
+
+```text
+why:
+  TrackVLA and visual-trace style work suggest temporal correspondence is a
+  first-class object-binding signal. Current CALVIN dataflow still often has
+  owm_tracklet_tokens=0 and owm_proposal_tokens=0, so the runtime branch exists
+  but does not yet supply evidence.
+
+implementation:
+  preprocess static and gripper videos into tracklet arrays;
+  feed tracklet_* episode fields through the existing optional adapters;
+  keep missing-tracklet no-op behavior;
+  do not let tracklets overwrite posterior truth.
+
+accept:
+  owm_tracklet_tokens > 0 in training metrics;
+  aqr_tracklet_support_entropy finite/nonzero;
+  same-role slots differentiate in overlay;
+  action loss does not regress.
+```
+
+#### Tests Not To Run Yet
+
+```text
+Do not open slot-JEPA/support-pred/binding-consistency:
+  they supervise future slots and should wait until stable slots cover enough
+  distinct candidates.
+
+Do not add raw identity-switch penalty:
+  stable-switch and overlay evidence show raw switch is partly an ambiguous-slot
+  metric, not a direct training target.
+
+Do not raise address/cache weight first:
+  address/cache are historical inertia. They can preserve correct identity only
+  after current evidence separates identities.
+
+Do not use action-loss improvement as proof:
+  action_default_equiv can improve while same-role slots remain collapsed.
+```
+
+The rigorous ordering is:
+
+```text
+1. finish A7 stable-coverage continuation;
+2. read A5 overlays/videos;
+3. if coverage fails, run offline IsSameObject probe;
+4. if same-object signal exists, run support-signature coefficient audit;
+5. if same-object signal is weak or absent, activate real tracklet/proposal
+   dataflow rather than tuning losses;
+6. only after anchor health passes, test controlled action cotrain;
+7. only after anchor/action coexistence is stable, consider predictive aux.
+```

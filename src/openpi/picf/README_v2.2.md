@@ -762,7 +762,10 @@ Current training profiles:
   identical in pixel/xyz coordinates. This means stable-switch near zero is not
   sufficient as acceptance: same-role slots can be stable while sharing the same
   candidate. The next gate is stable coverage plus visual/3D differentiation,
-  not raw identity-switch suppression.
+  not raw identity-switch suppression. The immediate test order is A7
+  stable-coverage continuation, A5 overlay reading, offline IsSameObject probe
+  if coverage fails, then support-signature audit or real tracklet/proposal
+  dataflow depending on whether same-object evidence is decodable.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
