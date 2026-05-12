@@ -1111,3 +1111,65 @@ Neither A7 run fixes overlap:
 matrix. The current failure is visible without predictive aux pressure. Opening
 these losses now would confound the diagnosis and could reintroduce
 permutation-index pressure before support assignment is healthy.
+
+### Mid-run decision, 2026-05-12 11:10 CST
+
+The first two matrix runs produced enough evidence before step 950, so they
+should be stopped and archived rather than allowed to consume another 1-2
+hours:
+
+```text
+A5 picf_a5_u2_b1_semtrain_aux0_500new_20260512_95ea69b
+  latest inspected step: 740
+  posterior_recycle_rate: ~0
+  posterior_address_update_rate_mean: 0.0338
+  aqr_same_role_support_overlap_max: 0.9987
+  posterior_identity_switch_rate: 0.778
+  loss_anchor_pv: 4.752
+  loss_action_default_equiv: 0.0641
+
+Interpretation:
+  burnin=1 is enough to avoid recycle saturation in this sample, but it is not
+  enough to prevent same-role support collapse. Action loss improves while the
+  anchor assignment remains unhealthy.
+
+A7 picf_a7_u2_b2_divstrong_semtrain_aux0_500new_20260512_95ea69b
+  latest inspected step: 720
+  posterior_recycle_rate: 1.0
+  posterior_address_update_rate_mean: 0.0
+  aqr_same_role_support_overlap_max: 0.9948
+  posterior_identity_switch_rate: 0.806
+  loss_anchor_pv: 4.607
+  loss_action_default_equiv: 0.0850
+
+Interpretation:
+  burnin=2 plus stronger support/geometry diversity is not a production
+  candidate under all-scope cotrain. It still finds the recycle shortcut and
+  same-role support collapse.
+```
+
+This is now enough to answer two questions:
+
+```text
+Q1. burnin=1 can suppress recycle in one all-scope sample, but it does not solve
+    assignment collapse.
+Q3. stronger support/geometry diversity alone is not sufficient under all-scope
+    cotrain.
+```
+
+The useful next runs are therefore the queued counterfactuals:
+
+```text
+1. A5 burnin=2 with the normal diversity setting:
+   tests whether burnin=2 is more stable than burnin=1 on the same A5 path.
+
+2. A7 anchor_only with burnin=2 and strong diversity:
+   tests whether the same support-diversity formulation can work when action
+   and all-scope cotrain pressure are removed.
+```
+
+If A7 anchor-only is healthy while A7 all-scope failed, the problem is
+action/all-scope cotrain pressure dominating assignment. If A7 anchor-only also
+collapses, the support-diversity formulation itself is insufficient and should
+be replaced by a direct same-role overlap-max or role-wise assignment
+competition term before any long run.

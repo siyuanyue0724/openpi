@@ -569,6 +569,18 @@ Current training profiles:
   `aqr_same_role_support_overlap_max`,
   `aqr_same_role_local_true_overlap_max`, `posterior_identity_switch_rate`,
   `loss_anchor_pv`, and `loss_mapg_routing`.
+- 2026-05-12 mid-run matrix update: the first two all-scope diagnostics already
+  exposed their failure modes before step 950. A5 `burnin_steps=1` kept
+  `posterior_recycle_rate≈0` but still reached
+  `aqr_same_role_support_overlap_max≈0.999`; A7 `burnin_steps=2` with strong
+  support/geometry diversity reached `posterior_recycle_rate=1.0` and
+  `aqr_same_role_support_overlap_max≈0.995`. These runs should be archived and
+  replaced by their queued counterfactuals: A5 `burnin_steps=2` normal-diversity
+  and A7 `anchor_only` strong-diversity. If A7 anchor-only is healthy while
+  all-scope failed, action/all-scope cotrain pressure is the cause. If
+  anchor-only also collapses, the current support-diversity loss form is
+  insufficient and the next code change should be a direct same-role overlap-max
+  or role-wise assignment-competition objective.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
