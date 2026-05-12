@@ -1413,3 +1413,169 @@ loss_anchor_pv / loss_pv_weak in A7:
 The expected time to a useful readout is about 100-200 new steps after resume.
 Full 300-step windows are kept only to verify whether early improvements persist
 or rebound.
+
+### Third-stage audit result, 2026-05-12 13:35 CST
+
+Both no-action isolation runs completed. The branch outcome is closer to
+`Case 1` with an extra PV-conflict warning:
+
+```text
+A5 picf_a5_anchoronly_noaction_supportonly_sdiv1_300new_20260512_95ea69b
+  final step: 750
+  loss_action: 0.0
+  aqr_same_role_support_overlap_max:
+    step 460: 0.5252
+    step 520: 0.9911
+    step 540: 0.9955
+    step 640: 0.9996
+    step 750: 0.9912
+  aqr_same_role_local_jaccard_max:
+    step 460: 0.8260
+    step 520: 0.9992
+    step 750: 1.0000
+  aqr_effective_anchor_count:
+    step 750: 22.97
+  posterior_recycle_rate:
+    step 750: ~0
+  posterior_address_update_rate_mean:
+    step 750: 0.0357
+  posterior_identity_switch_rate:
+    step 750: 0.8333
+  loss_mapg_support_diversity:
+    step 750: 0.5308
+  preclip_grad_norm:
+    step 750: 418.0, clipping active
+
+A7 picf_a7_anchoronly_noaction_anchorpv_sdiv1_300new_20260512_95ea69b
+  final step: 750
+  loss_action: 0.0
+  aqr_same_role_support_overlap_max:
+    step 540: 0.9523
+    step 560: 0.9081
+    step 580: 0.9849
+    step 600: 0.9971
+    step 750: 0.9998
+  aqr_same_role_local_jaccard_max:
+    step 750: 1.0000
+  aqr_effective_anchor_count:
+    step 750: 23.02
+  posterior_recycle_rate:
+    step 750: ~0
+  posterior_address_update_rate_mean:
+    step 750: 0.0369
+  posterior_identity_switch_rate:
+    step 750: 0.7444
+  loss_anchor_pv:
+    step 750: 4.7299
+  loss_pv_weak:
+    step 750: 3.2636
+  loss_mapg_support_diversity:
+    step 750: 0.6490
+  preclip_grad_norm:
+    step 750: 89.6, clipping active
+```
+
+Important correction to the experiment label:
+
+```text
+`no-action/support-only` disables action, anchor-PV, PV-weak, and cycle losses,
+but it does not disable every base alignment / physical auxiliary term in the
+trainer. It is therefore a no-action anti-collapse isolation, not a mathematically
+pure single-loss optimization.
+```
+
+Interpretation:
+
+```text
+1. Action gradients are not the sole cause.
+   A5 had all action weights at 0 and still ended at overlap ~0.991.
+
+2. PV/anchor alignment is a conflict amplifier.
+   A7 briefly improved to 0.908 at step 560 but returned to ~0.999 after PV and
+   cycle terms remained active. PV-weak decreased, yet same-role supports
+   collapsed, so PV improvement is not equivalent to object separation.
+
+3. Recycle is not the current failure mode.
+   Both runs kept posterior_recycle_rate near 0. The anchors are active and the
+   address pathway updates, but same-role anchors still reuse the same support.
+
+4. The effective anchor count is not a sufficient health signal.
+   Both runs kept ~23 effective anchors. The failure is not dead anchors; it is
+   non-specialized active anchors.
+
+5. Local candidate reuse is the smoking gun.
+   `aqr_same_role_local_jaccard_max=1.0` means same-role anchors are using the
+   same local candidate sets. The lower true local overlap only means the weights
+   within that same candidate set differ; it does not mean the slots have distinct
+   object evidence.
+
+6. Simply increasing the existing diversity weight is unlikely to be the clean
+   solution.
+   The support-diversity loss remains nonzero and gradients are already clipped.
+   Raising the scalar weight further risks larger unstable gradients without
+   necessarily optimizing the actual health metric.
+```
+
+Loss-formulation audit:
+
+```text
+Current `_mapg_support_overlap_loss` is real and not a placeholder. It includes:
+  same-role pair masking;
+  usage weighting;
+  a confidence floor so low confidence cannot opt out;
+  modality-specific margins;
+  active-pair mean pressure;
+  top-k worst-pair tail pressure.
+
+However, the observed failure shows that this objective is still not sufficiently
+aligned with the runtime health metrics:
+  health metric:
+    normalized same-role visual prior overlap and local candidate-set Jaccard.
+  current loss:
+    averaged modality penalties using kernel overlaps and margins.
+
+The code detects collapse but does not force durable specialization of same-role
+visual/local supports under the current training distribution.
+```
+
+Next required implementation:
+
+```text
+Do not start another schedule-only run before changing the anti-collapse
+objective. The next version should add a health-metric-aligned role-wise
+competition term:
+
+1. direct same-role visual overlap-tail penalty
+   Use the same normalized `visual_priors @ visual_priors.T` overlap family that
+   produces `aqr_same_role_support_overlap_max`, with top-k same-role tail
+   pressure rather than only averaged kernel overlap.
+
+2. soft local candidate-set competition
+   Penalize same-role anchors reusing the same local candidate set. The debug
+   Jaccard is top-k and non-differentiable, so the training term should use a
+   differentiable soft proxy over local support mass or selected priors.
+
+3. role-wise assignment competition
+   Add a same-role competition term that encourages same-role anchors to claim
+   different high-confidence evidence, while preserving all-role/shared scene
+   evidence where appropriate.
+
+4. keep action/PV off for the first validation of this new loss
+   Rerun the A5-style no-action isolation first. Only if overlap stays healthy
+   should PV and then action be reintroduced.
+```
+
+Updated decision:
+
+```text
+The previous hypothesis "burn-in plus stronger ordinary diversity may be enough"
+is rejected.
+
+The hypothesis "action is the only cause" is rejected.
+
+The hypothesis "PV/anchor terms can amplify collapse" is supported.
+
+The current supported root cause is:
+  same-role specialization requires a health-metric-aligned role-wise competition
+  objective; current support-diversity is a useful but insufficient proxy.
+```

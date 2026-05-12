@@ -601,6 +601,14 @@ Current training profiles:
   loss-formulation issue, PV/alignment conflict, or action-gradient conflict.
   See `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md` for the detailed
   decision table.
+- 2026-05-12 third-stage audit: both no-action runs completed. A5 briefly
+  reached `aqr_same_role_support_overlap_max≈0.525` at step 460 but rebounded to
+  `≈0.991` by step 750; A7 with anchor/PV retained ended at `≈0.9998`. Recycle
+  stayed near zero and effective anchors stayed around 23, so the failure is not
+  dead anchors or recycle saturation. The current conclusion is that ordinary
+  support-diversity is a useful but insufficient proxy; the next implementation
+  should directly optimize same-role visual overlap tails and soft local
+  candidate-set competition before action/PV cotrain is reintroduced.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the
