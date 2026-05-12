@@ -2089,3 +2089,109 @@ Both fail:
   anchors under this setup. Treat this as an evidence identifiability problem,
   not a loss-weight tuning problem.
 ```
+
+### Ownerfix step-520 result, 2026-05-12 15:59 CST
+
+The ownerfix runs were stopped at step 520 because the primary acceptance gate
+failed on both machines.
+
+```text
+A5 ownerfix, support-only:
+  step 460:
+    same_role_support_overlap = 0.6008
+    same_role_local_jaccard   = 0.7529
+    posterior_recycle_rate    = 0.9100
+    preclip_grad_norm         = 1047.1
+
+  step 480:
+    same_role_support_overlap = 0.9830
+    same_role_local_jaccard   = 0.9921
+    posterior_recycle_rate    = 1.0000
+
+  step 520:
+    same_role_support_overlap = 0.9992
+    same_role_local_jaccard   = 1.0000
+    posterior_recycle_rate    = 1.0000
+    preclip_grad_norm         = 512.9
+
+A7 ownerfix, anchor/PV retained:
+  step 460:
+    same_role_support_overlap = 0.6566
+    same_role_local_jaccard   = 0.7680
+    posterior_recycle_rate    = 0.9100
+    preclip_grad_norm         = 798.3
+
+  step 480:
+    same_role_support_overlap = 0.9668
+    same_role_local_jaccard   = 0.9909
+    posterior_recycle_rate    = 1.0000
+
+  step 520:
+    same_role_support_overlap = 0.9987
+    same_role_local_jaccard   = 1.0000
+    posterior_recycle_rate    = 1.0000
+    preclip_grad_norm         = 1098.3
+```
+
+Conclusion:
+
+```text
+Rejected:
+  soft role-wise candidate competition alone is sufficient.
+
+Supported:
+  the failure is deeper than PV/action pressure and deeper than scalar support
+  diversity loss. Even in the support-only A5 isolation run, same-role local
+  candidate sets return to exact reuse by step 500.
+
+Important nuance:
+  step 460 shows the mechanism can temporarily reduce candidate overlap. The
+  later rebound means the evidence rows or anchor seeds do not provide stable
+  enough asymmetry for the competition to preserve.
+```
+
+Mathematical diagnosis:
+
+```text
+The ownerfix score was:
+
+  score_ji =
+    p_ji * max(floor, |R_j| * p_ji / sum_{k in same-role} p_ki)^gamma
+
+This only amplifies existing differences in p_ji. If same-role rows converge
+to p_1i ~= p_2i ~= ... over the relevant local candidates, then:
+
+  |R| * p_ji / sum_k p_ki ~= 1
+
+and the competition becomes a row-wise rescaling that cannot change top-k
+membership. Therefore, once upstream AQR support rows collapse, role-wise
+competition has no independent source of identity evidence.
+```
+
+Next repair must not be "increase gamma" or "increase diversity lambda." Those
+would be scalar pressure on an already-identifiability-limited signal. The next
+repair should introduce a principled source of anchor-specific evidence before
+local top-k truncation:
+
+```text
+1. coverage/proposal seeded local candidates:
+   use the existing aqr_coverage_codes, geometry bins, view/time bins, and
+   projective candidates to seed distinct candidate neighborhoods per same-role
+   anchor before support rows collapse.
+
+2. offline IsSameObject audit:
+   verify whether V-JEPA/PaliGemma/static/wrist tokens contain separable
+   same-object subspace on weak robot labels. If the probe fails, local
+   candidate separation cannot be expected from AQR alone.
+
+3. real tracklet/proposal dataflow:
+   if weak track/proposal evidence is available, feed it into training rather
+   than leaving owm_tracklet_tokens=0 and owm_proposal_tokens=0.
+```
+
+Immediate action:
+
+```text
+Both ownerfix runs were stopped at step 520 to save GPU time.
+Do not continue this branch as a long run.
+```
