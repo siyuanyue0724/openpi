@@ -851,6 +851,58 @@ def test_mapg_support_diversity_penalizes_same_local_candidate_reuse() -> None:
     assert reused_loss > disjoint_loss + 0.1
 
 
+def test_mapg_support_diversity_local_candidate_reuse_has_finite_grad_at_zero_mass() -> None:
+    dtype = torch.float32
+    visual_priors = torch.tensor(
+        [
+            [1.00, 0.00, 0.00, 0.00],
+            [0.00, 1.00, 0.00, 0.00],
+        ],
+        dtype=dtype,
+    )
+    local_priors = torch.tensor(
+        [
+            [1.00, 0.00],
+            [0.00, 1.00],
+        ],
+        dtype=dtype,
+        requires_grad=True,
+    )
+    graph = PicfAnchorPriorGraphState(
+        pg_priors=None,
+        visual_priors=visual_priors,
+        point_priors=None,
+        tactile_priors=None,
+        posterior_priors=None,
+        anchor_tokens=torch.zeros((2, 4), dtype=dtype),
+        anchor_roles=torch.zeros((2,), dtype=torch.long),
+        anchor_scores=torch.ones((2,), dtype=dtype),
+        anchor_confidence=torch.ones((2,), dtype=dtype),
+        anchor_x=torch.zeros((2, 3), dtype=dtype),
+        anchor_S=torch.eye(3, dtype=dtype).repeat(2, 1, 1),
+        geometry_valid=torch.ones((2,), dtype=torch.bool),
+        obs_slot_assignment=torch.eye(2, dtype=dtype),
+        task_assignment=None,
+        modality_confidence=torch.ones((2, 5), dtype=dtype),
+        valid=torch.ones((2,), dtype=torch.bool),
+        local_priors=local_priors,
+        local_token_indices=torch.tensor([[10, 11], [10, 11]], dtype=torch.long),
+    )
+    state = SimpleNamespace(anchor_prior_graph=graph, token_field=SimpleNamespace(projective_geometry=None, point_projectable_mask=None))
+    config = PicfTransitionLossConfig(
+        mapg_support_div_direct_visual_weight=0.0,
+        mapg_support_div_local_candidate_weight=1.0,
+        mapg_support_div_local_margin=0.0,
+    )
+
+    loss = _mapg_support_overlap_loss(state, config=config, reference=torch.zeros((), dtype=dtype), eps=1e-6)
+    loss.backward()
+
+    assert torch.isfinite(loss)
+    assert local_priors.grad is not None
+    assert torch.isfinite(local_priors.grad).all()
+
+
 def test_transition_loss_keeps_point_head_in_graph_when_future_point_target_is_unavailable(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]

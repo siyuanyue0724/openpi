@@ -616,6 +616,20 @@ Current training profiles:
   new loss family; it aligns the existing anti-collapse objective with the
   observed failure. The first validation remains no-action isolation before
   PV/action are reintroduced.
+- 2026-05-12 finite-gradient hardening: the local-candidate reuse penalty now
+  uses `sqrt(clamp(mass_product, min=eps))` rather than `sqrt(clamp(..., min=0))`.
+  This fixes a real boundary-gradient issue exposed by the first supportfix
+  remote run, where exact-zero sparse local priors produced non-finite gradients
+  despite finite forward losses. The corresponding test backpropagates through
+  exact-zero local priors and asserts finite gradients. The restarted A5/A7
+  supportfix runs are the active acceptance tests. Step 480 already shows the
+  intended causal split: A5 support-only remains below the old 0.99 collapse
+  zone, while A7 with anchor/PV pressure drifts back toward high local-candidate
+  reuse. Step 500 is stricter: A5 support-only rebounds to
+  `aqr_same_role_support_overlap_max≈0.982` with
+  `aqr_same_role_local_jaccard_max≈0.988`, proving the remaining issue is local
+  candidate-set reuse inside AQR/local refinement, not action or PV alone. See
+  `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

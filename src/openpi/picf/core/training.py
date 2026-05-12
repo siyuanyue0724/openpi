@@ -1404,7 +1404,7 @@ def _mapg_support_overlap_loss(
                 # remains high when two anchors reuse the same local candidates
                 # with slightly different weights.
                 overlap = (
-                    torch.sqrt(torch.clamp(priors_ref[i, :, None] * priors_ref[j, None, :], min=0.0))
+                    torch.sqrt(torch.clamp(priors_ref[i, :, None] * priors_ref[j, None, :], min=eps))
                     * same.to(dtype=reference.dtype)
                 ).sum()
                 penalties.append(fn.relu(overlap - float(config.mapg_support_div_local_margin)).pow(2))

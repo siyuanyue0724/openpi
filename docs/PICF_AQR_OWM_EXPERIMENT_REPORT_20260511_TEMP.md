@@ -1689,3 +1689,219 @@ E-fix-2:
     conflict and needs staged reintroduction.
     if both are healthy, proceed to small-action reintroduction.
 ```
+
+### Finite-gradient hardening for local candidate overlap, 2026-05-12 14:10 CST
+
+The first remote validation of the health-aligned support patch exposed a real
+numerical issue before any health conclusion could be drawn. A5 failed at the
+first optimizer step with a non-finite gradient in the FSDP flat parameter. The
+failure happened in a no-action/support-only configuration, so it was not an
+action-loss conflict.
+
+Root cause:
+
+```text
+The local-candidate reuse term used:
+
+  sqrt(max(l_i[a] l_j[b], 0))
+
+The value is finite at zero, but the derivative of sqrt(x) is singular at
+x=0. Sparse local priors commonly contain exact zeros, so a pair with zero
+mass on one candidate can produce NaN/Inf gradients even though the forward
+loss is finite.
+```
+
+Fix:
+
+```text
+Use the same epsilon convention as the other normalized overlap terms:
+
+  sqrt(clamp(l_i[a] l_j[b], min=eps))
+
+This is a numerical hardening only. It does not change the loss family, the
+belief-state structure, or the intended same-candidate overlap pressure.
+```
+
+Why this is mathematically consistent:
+
+```text
+The local overlap is a Bhattacharyya-style coefficient over a sparse local
+candidate support. The epsilon floor is a smooth finite-gradient extension at
+the boundary of the simplex. It prevents undefined boundary derivatives while
+preserving the ordering of nonzero overlaps in the operating region.
+```
+
+Additional local validation:
+
+```text
+PYTHONPATH=src pytest -q src/openpi/picf/core/training_test.py -k support_diversity
+  4 passed
+
+New test:
+  test_mapg_support_diversity_local_candidate_reuse_has_finite_grad_at_zero_mass
+
+The test constructs exact-zero local priors, backpropagates through the local
+candidate reuse penalty, and asserts finite gradients.
+```
+
+Remote validation after the finite-gradient fix:
+
+```text
+A5:
+  picf_a5_anchoronly_noaction_supportfix_sdiv1_300new_20260512_81811b4
+
+A7:
+  picf_a7_anchoronly_noaction_anchorpv_supportfix_sdiv1_300new_20260512_81811b4
+
+Both machines passed the same targeted support-diversity pytest through uv
+before restart.
+```
+
+Early restarted-run observation at step 460:
+
+```text
+A5 support-only:
+  aqr_same_role_support_overlap_max = 0.4879
+  aqr_same_role_local_jaccard_max = 0.7577
+  aqr_same_role_local_overlap_max = 0.9892
+  aqr_same_role_local_true_overlap_max = 0.0403
+  aqr_effective_anchor_count = 23.17
+  posterior_recycle_rate = 0.0100
+  preclip_grad_norm = 21457.33, clipped to 5.0
+
+A7 anchor/PV no-action:
+  aqr_same_role_support_overlap_max = 0.6945
+  aqr_same_role_local_jaccard_max = 0.8454
+  aqr_same_role_local_overlap_max = 0.9871
+  aqr_same_role_local_true_overlap_max = 0.0490
+  aqr_effective_anchor_count = 23.09
+  posterior_recycle_rate = 0.0100
+  preclip_grad_norm = 23763.46, clipped to 5.0
+```
+
+Interpretation:
+
+```text
+The early step is not acceptance. It does show the finite-gradient issue is
+removed and the direct same-role support overlap is initially below the prior
+failure zone (>0.95). The remaining risk is whether local candidate reuse and
+support overlap rebound by steps 520/600/750. The very large preclip gradient
+is expected for the first step after adding a tail pressure term from a migrated
+checkpoint, but it means this run must be judged by stability after several
+logging intervals, not by step 460 alone.
+```
+
+Step-480 monitor update:
+
+```text
+A5 support-only:
+  aqr_same_role_support_overlap_max = 0.6996
+  aqr_same_role_local_jaccard_max = 0.8823
+  aqr_same_role_local_overlap_max = 0.9868
+  aqr_same_role_local_true_overlap_max = 0.0418
+  aqr_effective_anchor_count = 23.21
+  posterior_recycle_rate = 3.5e-17
+  preclip_grad_norm = 26017.06, clipped to 5.0
+
+A7 anchor/PV no-action:
+  aqr_same_role_support_overlap_max = 0.8501
+  aqr_same_role_local_jaccard_max = 0.9572
+  aqr_same_role_local_overlap_max = 0.9889
+  aqr_same_role_local_true_overlap_max = 0.0576
+  aqr_effective_anchor_count = 22.86
+  posterior_recycle_rate = 3.7e-19
+  preclip_grad_norm = 1276.15, clipped to 5.0
+```
+
+Step-480 interpretation:
+
+```text
+The supportfix objective is not numerically broken and the direct support
+overlap is lower than the previous 0.99 collapse in both runs. However, A7 is
+already drifting back toward the high-overlap regime while A5 remains only
+moderately separated. This is exactly the causal split the experiment was meant
+to expose:
+
+  A5 isolates the support objective.
+  A7 keeps anchor/PV pressure.
+
+The step-480 gap suggests the PV/anchor terms still pull anchors toward reused
+local candidates unless the local-candidate health term remains strong enough.
+The high local_overlap_max near 0.99 in both runs means the local candidate
+sets are still almost identical; the lower local_true_overlap shows that the
+new true-intersection term is not the only failure mode. The remaining issue is
+candidate-set reuse/Jaccard pressure, not simple dense support dot-product
+overlap.
+
+Acceptance remains pending. The decisive checks are step 520/600/750:
+
+  if A5 and A7 both stay below 0.90, the health-aligned support objective is
+  probably sufficient for no-action anchor stabilization;
+  if A5 stays moderate but A7 rebounds above 0.95, PV/anchor terms require
+  staged reintroduction or stronger anti-reuse pressure;
+  if both rebound above 0.95, the loss still does not control the local
+  assignment degeneracy and AQR-side candidate construction must be changed.
+```
+
+Step-500 monitor update:
+
+```text
+A5 support-only:
+  aqr_same_role_support_overlap_max = 0.9820
+  aqr_same_role_local_jaccard_max = 0.9877
+  aqr_same_role_local_overlap_max = 0.9895
+  aqr_same_role_local_true_overlap_max = 0.0651
+  posterior_recycle_rate = 7.2e-24
+  preclip_grad_norm = 4009.14, clipped to 5.0
+  loss_total = 4.4493
+
+A7 anchor/PV no-action:
+  aqr_same_role_support_overlap_max = 0.8966
+  aqr_same_role_local_jaccard_max = 0.9921
+  aqr_same_role_local_overlap_max = 0.9920
+  aqr_same_role_local_true_overlap_max = 0.0637
+  posterior_recycle_rate = 4.6e-26
+  preclip_grad_norm = 983.65, clipped to 5.0
+  loss_total = 4.8922
+```
+
+Step-500 conclusion:
+
+```text
+The finite-gradient fix is correct, but the health-aligned support objective is
+not sufficient. A5 has no action, no anchor/PV, no cycle, and no predictive
+losses, yet same-role support overlap still rebounds to 0.982 by step 500.
+Therefore the remaining failure cannot be attributed primarily to action
+gradients or PV/cycle pressure.
+
+The decisive common signal is local candidate-set reuse:
+
+  A5 local_jaccard_max = 0.9877
+  A7 local_jaccard_max = 0.9921
+
+The true-overlap term remains small, so the anchors are not merely sharing exact
+intersecting geometric tokens. They are selecting nearly identical local
+candidate sets and then assigning similar dense support inside those sets. The
+current support loss penalizes the symptom after candidate construction, but it
+does not create enough role-wise competition at the candidate-construction
+stage itself.
+
+Mathematically, the failed assumption is:
+
+  penalizing pairwise support overlap after local top-k construction
+  is enough to change the top-k candidate sets.
+
+The observed counterexample is:
+
+  top-k candidate sets remain almost identical, so the optimizer can satisfy
+  other alignment terms while staying in a high-Jaccard candidate basin.
+
+Next repair should not add another unrelated auxiliary. It should move the same
+anti-collapse principle one step earlier into the AQR/local candidate
+assignment contract:
+
+  role-wise candidate competition or exclusion during local candidate selection;
+  or a direct same-role Jaccard/top-k anti-reuse objective with stronger tail
+  pressure and a warm-start-safe gradient;
+  then rerun the no-action/support-only isolation before reintroducing PV/action.
+```
