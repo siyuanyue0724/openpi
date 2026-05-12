@@ -4689,3 +4689,173 @@ Current decision:
   and run Offline IsSameObject Probe v0 before any new loss or action-pressure
   sweep.
 ```
+
+### A5 IsSameObject Probe Result And A7 Step-970 Decision Update
+
+The offline same-object probe was run on the completed A5 anchor-debug bundle:
+
+```text
+input:
+  /mnt/calvin_eval_logs/picf_a5_stableid_anchor_253c9be/anchor_debug/anchor_debug.jsonl
+
+output:
+  /mnt/calvin_eval_logs/picf_a5_stableid_anchor_253c9be/same_object_probe.json
+```
+
+Probe summary:
+
+```text
+frames: 720
+positive weak pairs: 97792
+negative weak pairs: 22334
+ambiguous weak pairs: 42142
+
+combined_auc: 0.8929
+combined_pos_mean: 0.2724
+combined_neg_mean: 0.0700
+
+geometry_auc: 1.0000
+geometry_pos_mean: 0.6797
+geometry_neg_mean: 0.0399
+
+visual_cos_auc: 0.5176
+point_cos_auc: 0.5250
+support_mean_auc: 0.5227
+
+duplicate_candidate_fraction_within_frame: 0.8268
+duplicate_candidate_pairs_within_frame: 62509 / 75600 same-role pairs
+
+decision:
+  same_object_signal_decodable_but_assignment_duplicates_candidates
+```
+
+Interpretation:
+
+```text
+The probe is not evidence that the current visual/point/support signatures
+already separate objects well. The high combined AUC is mainly geometry-driven;
+single-modality support/visual/point cosine signals are close to random. This
+matches the anchor-overlay reading: role-0 can separate an effector-like region,
+while same-role scene slots frequently share one spatial candidate.
+
+Therefore the next repair should not be another raw identity inertia, address,
+cache, JEPA, or action-pressure sweep. Those would preserve or optimize over
+the duplicated assignment. The next scientific question is coverage/competition:
+can the router be made to allocate distinct same-role scene slots before
+identity inertia and predictive losses are trusted?
+```
+
+The A7 stable-coverage continuation is still not an acceptance run. Latest
+checked row:
+
+```text
+step: 970
+loss_total: 0.7159
+loss_action_default_equiv: 0.0548
+loss_action_active7: 0.2499
+same_role_support_overlap: 0.3113
+local_jaccard: 0.4892
+local_true_overlap: 0.0354
+raw_identity_switch: 0.8056
+stable_identity_switch: 0.0
+stable_slot_fraction: 0.1111
+recycle_rate: 0.4038
+stable_binding_margin: 0.9688
+speed: ~18.9 s/step
+```
+
+Tail mean through the latest inspected window:
+
+```text
+loss_total: 0.7215
+loss_action_default_equiv: 0.0665
+same_role_support_overlap: 0.4797
+local_jaccard: 0.5081
+local_true_overlap: 0.0426
+raw_identity_switch: 0.8003
+stable_identity_switch: 0.0075
+stable_slot_fraction: 0.1158
+recycle_rate: 0.3596
+stable_binding_margin: 0.9547
+```
+
+Updated decision:
+
+```text
+A7 is not a dead run in the sense of 0.99 support collapse. It has low local
+true overlap and stable slots have high binding margins. However, it has not
+expanded stable coverage: stable_slot_fraction remains near 0.11 from step
+880 to step 970.
+
+Continue only to the planned step-1050 endpoint because it is close. Unless
+stable_slot_fraction rises materially above 0.20 and overlays show separated
+same-role scene slots, do not extend A7. Move to the coverage/competition
+diagnostic stage below.
+```
+
+### Next 12-Hour Experiment Design
+
+The next stage should answer one causal question:
+
+```text
+Is the remaining failure caused by missing same-object evidence, or by AQR
+assignment/competition failing to use available evidence?
+```
+
+The A5 probe says:
+
+```text
+geometry contains a strong weak same-object signal;
+exported visual/point/support signatures alone do not separate enough;
+same-role duplicate candidates are common.
+```
+
+So the next 12 hours should not be spent on larger action cotrain, cache
+inertia, or predictive auxiliary losses. Those are downstream of assignment.
+The disciplined plan is:
+
+```text
+0. Finish A7 to step 1050.
+   Acceptance only if stable_slot_fraction > 0.20 and same-role scene slots are
+   separated in overlays. Otherwise archive as "partial non-collapse, low
+   coverage".
+
+1. Run a coverage/competition audit.
+   Keep action-prefix stopgrad, OWM predictive losses at 0, cache small, and
+   do not increase address inertia. Test whether a support-competition objective
+   aligned to same-role coverage can raise stable_slot_fraction without driving
+   same_role_support_overlap back to 0.99.
+
+2. Run a token-level IsSameObject probe if step 1 does not improve coverage.
+   The current probe used exported anchor-debug supports, not raw V-JEPA/PG
+   token embeddings. If token-level ViT/V-JEPA features have pairwise object
+   separability, the binding reader should use that subspace. If they do not,
+   tracklet/proposal evidence must be activated before more loss tuning.
+
+3. Activate optional tracklet/proposal dataflow only if token-level probe or
+   overlays confirm that current per-frame evidence is insufficient.
+   This follows the TrackVLA-style temporal correspondence route and is a data
+   evidence upgrade, not a scalar regularizer patch.
+```
+
+Guardrails:
+
+```text
+Do not open slot_jepa/support_pred/binding_consistency yet.
+Do not add raw identity-switch loss.
+Do not increase cache/address inertia before coverage improves.
+Do not treat loss_action_default_equiv as anchor acceptance.
+Do not continue A7 just because action loss is low.
+```
+
+Mathematical reason:
+
+```math
+I(Y; A_t \mid \ell) \le I(Y; Z_{\le t} \mid \ell)
+```
+
+The current evidence says the model has enough geometry to maintain one stable
+candidate, but not enough assignment diversity to allocate several same-role
+object slots. Losses that preserve identity (`address`, `cache`, JEPA) should
+only be trusted after the assignment stage can produce multiple differentiated
+same-role candidates.

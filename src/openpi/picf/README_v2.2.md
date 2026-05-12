@@ -68,6 +68,17 @@ does not imply CALVIN/video behavior completion. SAM/DINO proposal generation is
 intentionally not part of this maintained pass; proposal tensors are consumed
 only if an upstream source provides them.
 
+2026-05-13 experiment-gate update: the live anchor diagnosis is tracked in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+The A5 offline same-object probe shows a strong geometry-driven weak
+same-object signal (`combined_auc=0.893`) but weak exported visual/point/support
+signature separability (`AUC≈0.52`) and high same-role duplicate-candidate
+fraction (`0.827`). A7 is healthier than the earlier 0.99-overlap collapse run,
+but as of step 970 stable slot coverage remains low (`stable_slot_fraction≈0.11`).
+The next experiment gate is therefore coverage/competition, not stronger cache,
+address inertia, JEPA, or action pressure. This is a probe-level result, not
+behavior acceptance.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

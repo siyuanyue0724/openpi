@@ -67,15 +67,22 @@ def _topk_jaccard(a: dict[int, float], b: dict[int, float]) -> float:
 def _auc(pos: list[float], neg: list[float]) -> float | None:
     if not pos or not neg:
         return None
-    wins = 0.0
-    total = len(pos) * len(neg)
-    for p in pos:
-        for n in neg:
-            if p > n:
-                wins += 1.0
-            elif p == n:
-                wins += 0.5
-    return wins / total
+    labeled = [(x, 1) for x in pos] + [(x, 0) for x in neg]
+    labeled.sort(key=lambda item: item[0])
+    rank_sum_pos = 0.0
+    rank = 1
+    idx = 0
+    while idx < len(labeled):
+        j = idx + 1
+        while j < len(labeled) and labeled[j][0] == labeled[idx][0]:
+            j += 1
+        avg_rank = 0.5 * (rank + rank + (j - idx) - 1)
+        rank_sum_pos += avg_rank * sum(label for _score, label in labeled[idx:j])
+        rank += j - idx
+        idx = j
+    n_pos = len(pos)
+    n_neg = len(neg)
+    return (rank_sum_pos - (n_pos * (n_pos + 1) / 2.0)) / (n_pos * n_neg)
 
 
 def _anchor_rows(row: dict[str, Any]) -> list[dict[str, Any]]:
