@@ -630,6 +630,7 @@ Current training profiles:
   `aqr_same_role_local_jaccard_max≈0.988`, proving the remaining issue is local
   candidate-set reuse inside AQR/local refinement, not action or PV alone.
   Step 520 is decisive: A5 reaches `overlap≈0.999` and `local_jaccard=1.0`,
+  and A7 also reaches `overlap≈0.954` with `local_jaccard=1.0`,
   so the next repair must move anti-collapse pressure into role-wise local
   candidate selection/ownership before support aggregation. See
   `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.

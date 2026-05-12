@@ -1935,3 +1935,27 @@ correct repair is structural but still minimal:
   penalize overlap after they have already selected the same candidates;
   keep the no-action/support-only isolation as the first acceptance gate.
 ```
+
+Step-520 A7 confirmation:
+
+```text
+A7 anchor/PV no-action:
+  aqr_same_role_support_overlap_max = 0.9541
+  aqr_same_role_local_jaccard_max = 1.0000
+  posterior_recycle_rate = 5.8e-27
+  loss_total = 6.1488
+```
+
+Interpretation:
+
+```text
+A7 confirms the same failure mode. PV/anchor terms are not required for the
+collapse because A5 already failed without them, but they are still unsafe to
+reintroduce until candidate ownership is fixed. Both branches now agree on the
+root issue:
+
+  same-role anchors converge to the same local candidate set.
+
+This should be treated as an AQR/local-refinement assignment-contract problem,
+not a learning-rate, action-loss, or recycle-gate problem.
+```
