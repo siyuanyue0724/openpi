@@ -96,14 +96,14 @@ NODES: tuple[TraceNode, ...] = (
         needles=("def _build_aqr_anchor_graph", "visual_priors", "point_priors", "tactile_priors", "posterior_priors"),
     ),
     TraceNode(
-        name="Role-wise local candidate competition",
-        formula="score_{j,i}=p_{j,i}*((p_{j,i}/sum_{k:role_k=role_j}p_{k,i})*|role|)^gamma; local read still uses p_{j,i}",
-        invariant="Same-role anchors compete before local top-k candidate selection; this is structural evidence routing, not an extra posterior truth or auxiliary loss.",
+        name="Seeded local candidate proposal",
+        formula="score_{j,i}=p_{j,i}(1+w exp(-||coverage_j-xy_i||^2/(2sigma^2))); local read still uses p_{j,i}",
+        invariant="Coverage seeds can propose distinct local neighborhoods before top-k truncation; this is structural evidence routing, not posterior truth or an auxiliary loss.",
         sources=("src/openpi/picf/core/pipeline.py", "src/openpi/picf/core/config.py", "src/openpi/picf/core/pipeline_test.py"),
         needles=(
-            "_role_competitive_selection_scores",
-            "local_refinement_role_competition_enabled",
-            "test_role_competitive_selection_amplifies_same_role_preference",
+            "_coverage_seed_selection_scores",
+            "local_refinement_coverage_seed_enabled",
+            "test_coverage_seed_selection_breaks_identical_rows_by_anchor_seed",
         ),
     ),
     TraceNode(

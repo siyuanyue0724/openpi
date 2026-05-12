@@ -547,6 +547,46 @@ def _role_competitive_selection_scores(
     return _normalize_rows(out, eps=eps)
 
 
+def _coverage_seed_selection_scores(
+    weights: torch.Tensor,
+    coverage: torch.Tensor,
+    token_xy_norm: torch.Tensor | None,
+    *,
+    enabled: bool,
+    strength: float,
+    sigma: float,
+    eps: float,
+) -> torch.Tensor:
+    """Bias local candidate selection toward deterministic anchor coverage.
+
+    This is a proposal prior over candidate neighborhoods, not a posterior
+    assignment. The local read still uses the original support weights after
+    top-k selection.
+    """
+    if not enabled or strength <= 0.0 or token_xy_norm is None:
+        return weights
+    if weights.ndim != 2 or weights.numel() == 0:
+        return weights
+    if coverage.shape != (weights.shape[0], 2) or token_xy_norm.shape != (weights.shape[1], 2):
+        return weights
+    coords = torch.clamp(
+        torch.nan_to_num(token_xy_norm.to(device=weights.device, dtype=weights.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+        min=-1.0,
+        max=1.0,
+    )
+    anchor_xy = torch.clamp(
+        torch.nan_to_num(coverage.to(device=weights.device, dtype=weights.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+        min=-1.0,
+        max=1.0,
+    )
+    sigma_value = max(float(sigma), eps)
+    dist2 = torch.sum((anchor_xy[:, None, :] - coords[None, :, :]) ** 2, dim=-1)
+    prior = torch.exp(-dist2 / (2.0 * sigma_value * sigma_value))
+    scores = torch.clamp(torch.nan_to_num(weights, nan=0.0, posinf=0.0, neginf=0.0), min=0.0)
+    scores = scores * (1.0 + (float(strength) * prior))
+    return _normalize_rows(scores, eps=eps)
+
+
 def _row_has_mass(values: torch.Tensor, *, eps: float) -> torch.Tensor:
     if values.ndim == 1:
         return values.sum()[None] > eps
@@ -3104,7 +3144,12 @@ class PicfFullCore(nn.Module):
                 local_source_rows: list[torch.Tensor] = []
                 local_token_offset = 0
 
-                def _add_local_component(priors: torch.Tensor | None, tokens: torch.Tensor | None, source_id: int) -> None:
+                def _add_local_component(
+                    priors: torch.Tensor | None,
+                    tokens: torch.Tensor | None,
+                    source_id: int,
+                    token_xy_norm: torch.Tensor | None = None,
+                ) -> None:
                     nonlocal local_token_offset
                     if priors is None or tokens is None or priors.numel() == 0 or tokens.numel() == 0:
                         return
@@ -3112,8 +3157,17 @@ class PicfFullCore(nn.Module):
                         return
                     weights = _normalize_rows(torch.clamp(priors.to(device=self.device, dtype=self.dtype), min=0.0), eps=self.config.epsilon_a)
                     topk = min(max(int(self.config.local_refinement_topk), 1), int(weights.shape[-1]))
-                    selection_scores = _role_competitive_selection_scores(
+                    selection_scores = _coverage_seed_selection_scores(
                         weights,
+                        coverage,
+                        token_xy_norm,
+                        enabled=bool(self.config.local_refinement_coverage_seed_enabled),
+                        strength=float(self.config.local_refinement_coverage_seed_strength),
+                        sigma=float(self.config.local_refinement_coverage_seed_sigma),
+                        eps=self.config.epsilon_a,
+                    )
+                    selection_scores = _role_competitive_selection_scores(
+                        selection_scores,
                         roles,
                         enabled=bool(self.config.local_refinement_role_competition_enabled),
                         strength=float(self.config.local_refinement_role_competition_strength),
@@ -3131,15 +3185,48 @@ class PicfFullCore(nn.Module):
                     local_source_rows.append(torch.full_like(top_indices, int(source_id), dtype=torch.long, device=self.device))
                     local_token_offset += int(tokens.shape[0])
 
-                _add_local_component(visual_priors, token_field.visual_tokens, 1)
+                visual_xy = (
+                    token_field.projective_geometry.visual_grid_norm
+                    if token_field.projective_geometry is not None
+                    and token_field.projective_geometry.visual_grid_norm.shape == (visual_count, 2)
+                    else None
+                )
+                temporal_xy = None
+                if token_field.temporal_visual is not None and token_field.temporal_visual.grid_index.numel() > 0:
+                    temporal_hw = token_field.temporal_visual.grid_hw.reshape(-1)
+                    if temporal_hw.numel() >= 2:
+                        temporal_xy = _grid_index_to_norm(
+                            token_field.temporal_visual.grid_index.to(device=self.device, dtype=self.dtype),
+                            height=int(temporal_hw[0].item()),
+                            width=int(temporal_hw[1].item()),
+                        )
+                point_xy = (
+                    token_field.projective_geometry.point_proj_grid_norm
+                    if token_field.projective_geometry is not None
+                    and token_field.projective_geometry.point_proj_grid_norm.shape == (point_count, 2)
+                    else None
+                )
+                tracklet_xy = (
+                    ((torch.clamp(token_field.tracklet.xy_norm.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0) * 2.0) - 1.0)
+                    if token_field.tracklet is not None and token_field.tracklet.xy_norm.numel() > 0
+                    else None
+                )
+                proposal_xy = (
+                    ((torch.clamp(token_field.proposal.centers_xy.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0) * 2.0) - 1.0)
+                    if token_field.proposal is not None and token_field.proposal.centers_xy.numel() > 0
+                    else None
+                )
+
+                _add_local_component(visual_priors, token_field.visual_tokens, 1, visual_xy)
                 _add_local_component(
                     vjepa_temporal_priors,
                     None if token_field.temporal_visual is None else token_field.temporal_visual.tokens,
                     2,
+                    temporal_xy,
                 )
-                _add_local_component(point_priors, token_field.point_tokens, 3)
-                _add_local_component(tracklet_priors, None if token_field.tracklet is None else token_field.tracklet.tokens, 4)
-                _add_local_component(proposal_priors, None if token_field.proposal is None else token_field.proposal.tokens, 5)
+                _add_local_component(point_priors, token_field.point_tokens, 3, point_xy)
+                _add_local_component(tracklet_priors, None if token_field.tracklet is None else token_field.tracklet.tokens, 4, tracklet_xy)
+                _add_local_component(proposal_priors, None if token_field.proposal is None else token_field.proposal.tokens, 5, proposal_xy)
                 if local_vectors:
                     local_read = torch.stack(local_vectors, dim=0).sum(dim=0)
                     local_mass = torch.stack(local_masses, dim=0).sum(dim=0)
@@ -6727,6 +6814,11 @@ class PicfFullCore(nn.Module):
                 self.config.local_refinement_role_competition_strength
             )
             debug["aqr_local_role_competition_floor"] = float(self.config.local_refinement_role_competition_floor)
+            debug["aqr_local_coverage_seed_enabled"] = (
+                1.0 if bool(self.config.local_refinement_coverage_seed_enabled) else 0.0
+            )
+            debug["aqr_local_coverage_seed_strength"] = float(self.config.local_refinement_coverage_seed_strength)
+            debug["aqr_local_coverage_seed_sigma"] = float(self.config.local_refinement_coverage_seed_sigma)
             if graph.vjepa_temporal_priors is not None and graph.vjepa_temporal_priors.numel() > 0:
                 temporal = _normalize_rows(
                     torch.clamp(graph.vjepa_temporal_priors.to(device=self.device, dtype=self.dtype), min=0.0),

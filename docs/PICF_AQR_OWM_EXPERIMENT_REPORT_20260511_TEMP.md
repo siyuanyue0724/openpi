@@ -2195,3 +2195,193 @@ Immediate action:
 Both ownerfix runs were stopped at step 520 to save GPU time.
 Do not continue this branch as a long run.
 ```
+
+## Coverage-Seeded Local Proposal, 2026-05-12
+
+### Why this is the next test
+
+The ownerfix failure rules out a purely scalar or purely competitive repair.
+The failed mechanism can only amplify differences that already exist in
+`p_ji`. Once same-role support rows become nearly identical, the role-wise
+capacity factor becomes constant and cannot change the local top-k set.
+
+The next intervention therefore moves one level earlier in the belief-state
+pipeline: candidate proposal before local top-k truncation. This is not a new
+posterior truth, not a hard tiling rule, and not an auxiliary loss. It supplies
+a weak, deterministic, anchor-specific reference prior using the existing
+low-discrepancy `aqr_coverage_codes`.
+
+This matches three independent principles:
+
+```text
+1. Pairwise object-binding papers show object membership is separable in a
+   low-dimensional same-object subspace, but the grouping signal is fragile and
+   should be audited/probed rather than assumed from raw cosine similarity.
+
+2. Deformable/anchor-query detection designs use reference points or denoising
+   anchors because query-based routing needs stable candidate domains before
+   global attention or action gradients can shape the final representation.
+
+3. V-JEPA/TraceVLA-style temporal evidence can improve state awareness only if
+   the router preserves candidate diversity long enough for the posterior to
+   compare evidence. If all same-role anchors reread the same local candidates,
+   the downstream belief filter cannot recover object identity.
+```
+
+### Mathematical definition
+
+For anchor `j` and typed-memory token `i`, let:
+
+```text
+p_ji:
+  original AQR support probability for local refinement.
+
+u_j in [-1, 1]^2:
+  deterministic anchor coverage coordinate from `aqr_coverage_codes`.
+
+x_i in [-1, 1]^2:
+  token coordinate in its own local view/grid frame.
+```
+
+The proposal score is:
+
+```text
+seed_ji = exp(-||u_j - x_i||^2 / (2 sigma^2))
+select_ji = normalize_i p_ji * (1 + w_seed * seed_ji)
+```
+
+The local read remains:
+
+```text
+local_j = sum_{i in TopK(select_j)} p_ji * token_i
+```
+
+The important invariant is:
+
+```text
+selection uses the seeded proposal score;
+value aggregation uses the original support weights.
+```
+
+So the seed can break identical local candidate sets, but it cannot directly
+overwrite posterior evidence. If the original support assigns no mass to a
+candidate, local read still receives no useful value from that candidate.
+
+### Why this is not a hard patch
+
+This is structurally different from increasing diversity loss:
+
+```text
+diversity loss:
+  tries to punish collapse after it has already happened.
+
+role competition:
+  amplifies existing row differences, but has no independent anchor signal.
+
+coverage-seeded proposal:
+  gives each anchor a weak reference domain before top-k truncation, while
+  preserving evidence-weighted local read.
+```
+
+The test is falsifiable. If this fails, the diagnosis becomes:
+
+```text
+local candidate identity cannot be recovered from current AQR support rows plus
+weak anchor coverage. The next step must be an offline IsSameObject probe or
+real tracklet/proposal dataflow, not more scalar loss tuning.
+```
+
+### Code contract
+
+```text
+Default production:
+  local_refinement_role_competition_enabled = False
+  local_refinement_coverage_seed_enabled = False
+
+Coverage-seed diagnostic:
+  local_refinement_role_competition_enabled = False
+  local_refinement_coverage_seed_enabled = True
+  local_refinement_coverage_seed_strength = 0.75
+  local_refinement_coverage_seed_sigma = 0.75
+```
+
+The default stays off because the ownerfix result proved this family still
+requires acceptance evidence. The diagnostic run explicitly enables it.
+
+### Two-machine diagnostic plan
+
+Run both diagnostics from the shared step-450 prefix-stopgrad checkpoint:
+
+```text
+A5 / support-only:
+  exp_name:
+    picf_a5_anchoronly_noaction_covseed_sdiv1_300new_20260512_<sha>
+  purpose:
+    isolate whether seeded local candidates can preserve same-role candidate
+    diversity without anchor/PV pressure.
+
+A7 / anchor/PV retained:
+  exp_name:
+    picf_a7_anchoronly_noaction_anchorpv_covseed_sdiv1_300new_20260512_<sha>
+  purpose:
+    test whether the same candidate fix survives the PV/anchor terms that were
+    present in the previous A7 diagnostic.
+```
+
+Both runs should continue to step 750 unless the early failure gate triggers.
+The first actionable signal should appear by step 520, usually within 10-15
+minutes from launch on the current A100 nodes.
+
+### Acceptance gates
+
+Primary:
+
+```text
+aqr_same_role_local_jaccard_max:
+  must not return to 1.0 by step 520.
+  target <= 0.90; strong pass <= 0.80.
+```
+
+Secondary:
+
+```text
+aqr_same_role_support_overlap_max:
+  A5 target < 0.90 by step 520.
+  A7 target < 0.95 by step 520.
+
+posterior_recycle_rate:
+  must not saturate near 1.0 after step 480.
+
+preclip_grad_norm:
+  must not repeatedly exceed 100 or show clip-dominated dynamics.
+```
+
+Instrumentation gates:
+
+```text
+aqr_local_coverage_seed_enabled must log as 1.0.
+aqr_local_role_competition_enabled must log as 0.0.
+aqr_local_coverage_seed_strength must log as 0.75.
+aqr_local_coverage_seed_sigma must log as 0.75.
+```
+
+### Decision table after 520-750
+
+```text
+A5 pass, A7 pass:
+  Candidate proposal was the missing mechanism. Proceed to staged cotrain with
+  action/PV pressure reintroduced slowly.
+
+A5 pass, A7 fail:
+  Candidate proposal works in isolation, but PV/anchor terms still pull anchors
+  together. Stage PV/action pressure or lower anchor/PV terms before cotrain.
+
+A5 fail:
+  Candidate proposal is not enough. Stop scalar tuning. Run offline
+  IsSameObject probe and/or feed real tracklet/proposal evidence into CALVIN.
+
+Both fail with recycle saturation:
+  The posterior update/recycle gate is reacting to unstable local evidence.
+  Do not open predictive losses or action cotrain until identity/recycle
+  instrumentation is corrected.
+```

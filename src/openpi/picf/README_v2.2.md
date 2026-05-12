@@ -644,6 +644,19 @@ Current training profiles:
   evidence over all tokens, this mechanism will not invent asymmetry; that is
   the correct information-theoretic behavior. Its purpose is to amplify real
   per-anchor preferences before top-k truncation erases them.
+- 2026-05-12 ownerfix rejection and coverage-seed diagnostic: the role-wise
+  competition mechanism was rejected by A5/A7 step-520 evidence. Both runs
+  returned to `aqr_same_role_local_jaccard_max=1.0` and high same-role support
+  overlap, proving that soft competition cannot create candidate asymmetry
+  after same-role AQR rows have already become identical. The next guarded
+  diagnostic is `local_refinement_coverage_seed_enabled`: local top-k candidate
+  proposal is weakly biased by deterministic `aqr_coverage_codes`, while the
+  local value read still uses the original support weights. This is a proposal
+  prior only, not a new posterior truth and not a new loss family. Production
+  default keeps both role competition and coverage seed disabled until the
+  diagnostic passes. The experiment design, mathematical definition, and
+  acceptance gates are in
+  `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`.
 - 2026-05-12 storage cleanup policy: `/mnt` May-2026 numeric checkpoint
   subdirectories are disposable once their logs and JSON metrics are preserved.
   Keep the April 4-22 ablation baseline, the April full-PICF baseline, the

@@ -2751,6 +2751,9 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_local_role_competition_enabled",
     "aqr_local_role_competition_strength",
     "aqr_local_role_competition_floor",
+    "aqr_local_coverage_seed_enabled",
+    "aqr_local_coverage_seed_strength",
+    "aqr_local_coverage_seed_sigma",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
     "posterior_identity_switch_rate",
@@ -4799,6 +4802,24 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 _SPEC_DEFAULTS.local_refinement_role_competition_floor,
             )
         ),
+        local_refinement_coverage_seed_enabled=bool(
+            _arg_or_default(
+                "local_refinement_coverage_seed_enabled",
+                _SPEC_DEFAULTS.local_refinement_coverage_seed_enabled,
+            )
+        ),
+        local_refinement_coverage_seed_strength=float(
+            _arg_or_default(
+                "local_refinement_coverage_seed_strength",
+                _SPEC_DEFAULTS.local_refinement_coverage_seed_strength,
+            )
+        ),
+        local_refinement_coverage_seed_sigma=float(
+            _arg_or_default(
+                "local_refinement_coverage_seed_sigma",
+                _SPEC_DEFAULTS.local_refinement_coverage_seed_sigma,
+            )
+        ),
         slot_jepa_enabled=bool(_arg_or_default("slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
         support_prediction_enabled=bool(
             _arg_or_default("support_prediction_enabled", _SPEC_DEFAULTS.support_prediction_enabled)
@@ -5883,7 +5904,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s local_refinement_enabled=%s local_role_competition=%s local_role_competition_strength=%s local_role_competition_floor=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s local_refinement_enabled=%s local_role_competition=%s local_role_competition_strength=%s local_role_competition_floor=%s local_coverage_seed=%s local_coverage_seed_strength=%s local_coverage_seed_sigma=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -5938,6 +5959,27 @@ def train(args: argparse.Namespace) -> None:
                         args,
                         "local_refinement_role_competition_floor",
                         _SPEC_DEFAULTS.local_refinement_role_competition_floor,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "local_refinement_coverage_seed_enabled",
+                        _SPEC_DEFAULTS.local_refinement_coverage_seed_enabled,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "local_refinement_coverage_seed_strength",
+                        _SPEC_DEFAULTS.local_refinement_coverage_seed_strength,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "local_refinement_coverage_seed_sigma",
+                        _SPEC_DEFAULTS.local_refinement_coverage_seed_sigma,
                     )
                 ),
                 bool(getattr(args, "slot_jepa_enabled", _SPEC_DEFAULTS.slot_jepa_enabled)),
@@ -6945,6 +6987,25 @@ def main() -> None:
         "--local-refinement-role-competition-floor",
         type=float,
         default=_SPEC_DEFAULTS.local_refinement_role_competition_floor,
+    )
+    parser.add_argument(
+        "--local-refinement-coverage-seed-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.local_refinement_coverage_seed_enabled,
+        help=(
+            "Bias local-refinement candidate selection toward deterministic anchor coverage coordinates. "
+            "This is a proposal prior only; local reads still use original support weights."
+        ),
+    )
+    parser.add_argument(
+        "--local-refinement-coverage-seed-strength",
+        type=float,
+        default=_SPEC_DEFAULTS.local_refinement_coverage_seed_strength,
+    )
+    parser.add_argument(
+        "--local-refinement-coverage-seed-sigma",
+        type=float,
+        default=_SPEC_DEFAULTS.local_refinement_coverage_seed_sigma,
     )
     parser.add_argument(
         "--slot-jepa-enabled",

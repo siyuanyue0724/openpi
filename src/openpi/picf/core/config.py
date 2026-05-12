@@ -196,9 +196,12 @@ class PicfCoreConfig:
     local_refinement_enabled: bool = True
     local_refinement_topk: int = 32
     local_refinement_weight: float = 0.25
-    local_refinement_role_competition_enabled: bool = True
+    local_refinement_role_competition_enabled: bool = False
     local_refinement_role_competition_strength: float = 2.0
     local_refinement_role_competition_floor: float = 0.05
+    local_refinement_coverage_seed_enabled: bool = False
+    local_refinement_coverage_seed_strength: float = 0.75
+    local_refinement_coverage_seed_sigma: float = 0.75
     slot_jepa_enabled: bool = True
     support_prediction_enabled: bool = True
     ordinal_relation_enabled: bool = True

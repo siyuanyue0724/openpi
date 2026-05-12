@@ -16,6 +16,7 @@ from openpi.picf.core.contracts import PicfObservationAnchorState
 from openpi.picf.core.contracts import PicfVLGroundingState
 from openpi.picf.core import pipeline as pipeline_module
 from openpi.picf.core.pipeline import PicfFullCore
+from openpi.picf.core.pipeline import _coverage_seed_selection_scores
 from openpi.picf.core.pipeline import _role_competitive_selection_scores
 from openpi.picf.core.pipeline import _variance_from_logvar
 from openpi.picf.core.training import compute_alignment_loss
@@ -146,6 +147,49 @@ def test_role_competitive_selection_does_not_invent_asymmetry() -> None:
     )
     assert torch.allclose(competitive[0], competitive[1])
     assert torch.topk(competitive, k=1, dim=-1).indices.squeeze(-1).tolist() == [0, 0]
+
+
+def test_coverage_seed_selection_breaks_identical_rows_by_anchor_seed() -> None:
+    weights = torch.full((2, 4), 0.25, dtype=torch.float32)
+    coverage = torch.tensor([[-1.0, -1.0], [1.0, 1.0]], dtype=torch.float32)
+    coords = torch.tensor(
+        [
+            [-1.0, -1.0],
+            [-0.8, -0.8],
+            [0.8, 0.8],
+            [1.0, 1.0],
+        ],
+        dtype=torch.float32,
+    )
+    seeded = _coverage_seed_selection_scores(
+        weights,
+        coverage,
+        coords,
+        enabled=True,
+        strength=1.0,
+        sigma=0.5,
+        eps=1e-6,
+    )
+
+    assert torch.topk(seeded, k=1, dim=-1).indices.squeeze(-1).tolist() == [0, 3]
+    assert torch.allclose(seeded.sum(dim=-1), torch.ones(2), atol=1e-5)
+
+
+def test_coverage_seed_selection_preserves_original_when_disabled() -> None:
+    weights = torch.tensor([[0.7, 0.3], [0.7, 0.3]], dtype=torch.float32)
+    coverage = torch.tensor([[-1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+    coords = torch.tensor([[-1.0, 0.0], [1.0, 0.0]], dtype=torch.float32)
+    seeded = _coverage_seed_selection_scores(
+        weights,
+        coverage,
+        coords,
+        enabled=False,
+        strength=1.0,
+        sigma=0.5,
+        eps=1e-6,
+    )
+
+    assert torch.allclose(seeded, weights)
 
 
 class _FeatureMapFromClip:
