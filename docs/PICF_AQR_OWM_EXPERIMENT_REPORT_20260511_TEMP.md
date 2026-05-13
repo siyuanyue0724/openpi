@@ -8314,3 +8314,83 @@ being slower. Recycle remains non-saturated, so the previous recycle-collapse
 failure is not the active bottleneck. If step 100 confirms this trend, the next
 root-cause item is not more recurrent context but a stronger object-ownership
 assignment signal.
+
+### 2026-05-14 Remote Ownership-Prior Launch
+
+After the schedule-only task-pressure warmup failed on both A5 and A7, commit
+`33dd330` deployed the assignment-level ownership prior as the maintained
+root-cause repair. The local validation gate before remote launch was:
+
+```text
+python -m py_compile src/openpi/picf/core/pipeline.py
+python scripts/verify_picf_owm_contract.py                  # 32/32 PASS
+python scripts/picf_owm_strict_diagnose.py --fail-on-fail   # PASS, no metrics input
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail    # PASS
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail# PASS
+uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py -k ownership_prior
+uv run --no-sync pytest -q src/openpi/picf/core/training_test.py -k support_diversity
+```
+
+Remote sync used the China GitHub mirror and fast-forwarded both runtime
+worktrees to `33dd330`.
+
+Checkpoint cleanup was intentionally conservative: only May-2026 checkpoint
+weight files were deleted, while run directories, metrics, args, overlays, and
+logs were preserved.
+
+```text
+A5 cleanup log:
+  /mnt/checkpoints/picf_core/cleanup_logs/removed_may_ckpt_weights_20260514_004224.txt
+  removed weight files: 52
+
+A7 cleanup log:
+  /mnt/checkpoints/picf_core/cleanup_logs/removed_may_ckpt_weights_20260514_004225.txt
+  removed weight files: 36
+```
+
+Launched diagnostics:
+
+```text
+A5 tmux:
+  picf_a5_ownership_u1
+  exp: picf_a5_ownership_prior_taskwarm_u1_300_20260514_33dd330
+  unroll_steps=1, burnin_steps=4, anchor_only, action pressure enabled,
+  local_refinement disabled, OWM predictive losses disabled,
+  ownership prior enabled with visual=0.35 temporal=0.20 uniform_mix=0.05.
+
+A7 tmux:
+  picf_a7_ownership_u2
+  exp: picf_a7_ownership_prior_taskwarm_u2_300_20260514_33dd330
+  same as A5 except unroll_steps=2.
+```
+
+Tail commands:
+
+```bash
+# A5
+ssh -p 29776 root@px-cloud2.matpool.com
+tail -f /mnt/picf_run_logs/picf_a5_ownership_prior_taskwarm_u1_300_20260514_33dd330.log
+
+# A7
+ssh -p 28060 root@px-cloud2.matpool.com
+tail -f /mnt/picf_run_logs/picf_a7_ownership_prior_taskwarm_u2_300_20260514_33dd330.log
+```
+
+Acceptance gate:
+
+```text
+step 25: early signal only, not decisive.
+step 100: first decisive scalar + anchor overlay gate.
+step 300: endpoint gate.
+
+Pass if:
+  aqr_same_role_support_overlap_max does not stay in/rebound to 0.95-0.99,
+  posterior_recycle_rate does not saturate,
+  action_default_equiv remains comparable to failed task-pressure runs,
+  overlays show distinct physical ownership rather than scalar-only improvement.
+
+Fail interpretation if both A5 and A7 remain >0.95 overlap:
+  ownership priors are too weak or current typed evidence cannot support role-local
+  ownership; the next repair must feed real object-correspondence evidence
+  (tracklet/proposal/pseudo target), not another schedule-only change.
+```
