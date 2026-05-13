@@ -4329,3 +4329,16 @@ dynamics; continue the queued A7 lower-action/no-prefix and max6 branches
 before making the next architecture change. Detailed numbers and the overlay
 audit are in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
+2026-05-14 06:16 stability gate: A7 automatically completed the full-action
+prefix branch and entered the queued lower-action/no-prefix branch, so the
+10-hour matrix driver is working as intended. The completed A7 branch is a
+clear negative for posterior identity health (`posterior_recycle_rate=0.9979`,
+`posterior_address_update_rate_mean=7.9e-5`) despite good action loss
+(`loss_action_default_equiv=0.0676`). A5 max6 reached step100 with the best
+early structural row so far: raw overlap `0.2327`, active overlap `0.2168`,
+active count `20.0`, recycle `0.2623`, and nonzero address update. This does
+not prove production readiness because it is anchor-only, but it strongly
+supports testing larger active capacity together with controlled action
+pressure. Continue A5 max6 to 200/300/600 and A7 lower-action/no-prefix to
+50/100/200 before changing code.

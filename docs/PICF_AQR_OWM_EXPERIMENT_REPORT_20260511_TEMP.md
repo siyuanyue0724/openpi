@@ -9627,3 +9627,69 @@ Reject even if action loss is low:
   posterior role duplicates remain exactly co-located
   raw duplicates are only hidden by inactive demotion
 ```
+
+06:16 stability re-check after the extra 12-minute window:
+
+```text
+A5:
+  current max6 branch produced first metrics row at step100:
+    run:
+      picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2
+    loss_total                         = 0.1053
+    loss_action_default_equiv           = 0.1425
+    loss_anchor_pv                      = 3.3292
+    loss_mapg_routing                   = 0.9392
+    loss_mapg_cycle                     = 0.3888
+    raw same_role_support_overlap_max   = 0.2327
+    active same_role_support_overlap_max= 0.2168
+    active same_role_support_overlap_mean=0.0310
+    active_anchor_count                 = 20.0
+    inactive_anchor_fraction            = 0.1667
+    posterior_recycle_rate              = 0.2623
+    posterior_recycle_logit_mean        = -1.19
+    posterior_address_update_rate_mean  = 0.0323
+    posterior_identity_switch_rate      = 0.7950
+    posterior_binding_top1_margin_mean  = 0.1100
+    speed                               = 8.9 sec/step
+
+A7:
+  first full-action prefix branch completed at step600:
+    loss_total                         = 0.1213
+    loss_action_default_equiv           = 0.0676
+    raw same_role_support_overlap_max   = 0.9901
+    active same_role_support_overlap_max= 0.6168
+    active_anchor_count                 = 12.91
+    posterior_recycle_rate              = 0.9979
+    posterior_recycle_logit_mean        = 6.20
+    posterior_address_update_rate_mean  = 7.9e-5
+    posterior_identity_switch_rate      = 0.8056
+
+  queued lower-action/no-prefix branch started automatically:
+    run:
+      picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2
+    step:
+      advancing, before first metrics row
+```
+
+Interpretation:
+
+```text
+1. Runtime is confirmed stable after branch transition. No manual restart was
+   needed.
+2. A7 full-action prefix is rejected for posterior identity health despite good
+   action loss. This is now a clear negative result, not an inconclusive row.
+3. A5 max6 step100 is the first branch in this matrix that satisfies all early
+   structural gates simultaneously:
+     raw overlap low
+     active overlap low
+     active capacity high
+     recycle moderate
+     address update nonzero
+   It is still anchor-only, so it cannot be accepted as production, but it
+   strongly supports the hypothesis that max4 was too restrictive.
+4. The remaining decisive checks are A5 max6 at step200/300/600 and the A7
+   lower-action/no-prefix branch at step50/100/200. If A7 lower action still
+   saturates recycle, action cotrain needs a staged or lower-gradient interface.
+   If it stays moderate, the production recipe should combine max6 active
+   capacity with lower action gradient pressure before full action weight.
+```
