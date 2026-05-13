@@ -9269,4 +9269,43 @@ A7 is the scientifically useful first branch: it has enough active capacity and
 low action loss, but recycle is too high. The matrix must therefore continue to
 the lower-action/no-prefix and max6-capacity branches before any architecture
 decision is made.
+
+03:52 third liveness poll after the requested 10-minute wait:
+
+```text
+A5:
+  tmux alive.
+  GPU: both ranks resident, about 17.2GB each.
+  latest metrics:
+    run: picf_a5_activecap_anchor_u1b4_a025_600_ac273a2
+    step: 450
+    loss_total: 0.1042
+    loss_action_default_equiv: 0.1335
+    loss_anchor_pv: 4.7550
+    loss_mapg_cycle: 0.4699
+    loss_mapg_routing: 0.6711
+    raw same_role_support_overlap_max: 0.99997
+    active same_role_support_overlap_max: 0.0959
+    active same_role_support_overlap_mean: 0.0619
+    active_anchor_count: 4.60
+    inactive_anchor_fraction: 0.8083
+    posterior_recycle_rate: 0.9961
+    grad_norm: 8.02
+  train tail:
+    advancing beyond step 460.
+
+A7:
+  tmux alive.
+  GPU: both ranks resident and near full utilization.
+  latest metrics:
+    still step 200 because log_interval=50 and the run is about 22.5s/step.
+  train tail:
+    advancing beyond step 239, so the run is not stuck.
+```
+
+This confirms normal runtime after the 10-minute wait. It also strengthens the
+scientific interpretation: A5 first branch is an over-pruning/dustbin-capacity
+isolation result. A7 first branch is alive and production-relevant, but the
+next accepted/rejected decision needs the next metrics rows and the queued
+lower-action/max6 branches.
 ```
