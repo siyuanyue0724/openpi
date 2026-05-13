@@ -4312,3 +4312,20 @@ overlap below the provisional gate, but recycle is saturated near one. The
 remaining live question is now posterior identity/recycle dynamics under
 cotrain, not whether the active/dustbin support filter can separate an active
 subset. Continue the queued lower-action/no-prefix and max6-capacity branches.
+
+2026-05-14 06:00 post-sleep gate: local verifier, strict diagnose, dataflow
+trace, MVTrack deep audit, and Python compilation pass. A7 full-action
+prefix-stopgrad reached step550 with `loss_action_default_equiv=0.0618`,
+dual-view temporal mass active, and plausible active capacity
+(`aqr_active_anchor_count=13.0`), but it is still not accepted because
+`posterior_recycle_rate=0.9976`, recycle gates have near-zero variance, and
+address update is effectively starved. A5 u1/b4 and u2/b1 overlays confirm
+physical same-role duplicate anchors in the raw graph/posterior: by step600
+several same-role graph pairs are separated by less than one pixel, and one
+posterior role pair is exactly co-located. The active-slot filter is therefore
+a useful discriminator/demotion mechanism, not a full identity solution. The
+remaining blocker is the joint object-count plus posterior identity-continuity
+dynamics; continue the queued A7 lower-action/no-prefix and max6 branches
+before making the next architecture change. Detailed numbers and the overlay
+audit are in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).

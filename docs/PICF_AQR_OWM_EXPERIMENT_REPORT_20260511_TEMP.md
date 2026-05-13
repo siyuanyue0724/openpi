@@ -9417,4 +9417,213 @@ still required:
 Do not stop the matrix yet. The one-hour poll confirms that the experiment is
 working as a discriminator, but the production answer depends on the queued A7
 lower-action/no-prefix and max6-capacity branches.
+
+06:00 post-sleep requested poll and overlay audit:
+
+```text
+Local verification:
+  python scripts/verify_picf_owm_contract.py:
+    PASS
+  python scripts/picf_owm_strict_diagnose.py --fail-on-fail:
+    PASS
+  python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+    PASS
+  python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+    PASS
+  py_compile on Python sources:
+    PASS
+
+A5:
+  tmux alive:
+    picf_a5_activecap_matrix
+    picf_a5_activecap_monitor
+  current run:
+    picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2
+    advancing at about 8.9 sec/step, before first metrics row
+
+  completed u1/b4 final step 600:
+    loss_total                         = 0.1055
+    loss_action_default_equiv           = 0.1439
+    raw same_role_support_overlap_max   = 0.99998
+    active same_role_support_overlap_max= 0.1064
+    active_anchor_count                 = 4.74
+    inactive_anchor_fraction            = 0.8025
+    posterior_recycle_rate              = 0.9366
+    posterior_recycle_logit_mean        = 2.73
+    posterior_address_update_rate_mean  = 0.00218
+
+  completed u2/b1 final step 600:
+    loss_total                         = 0.1067
+    loss_action_default_equiv           = 0.1533
+    raw same_role_support_overlap_max   = 0.99996
+    active same_role_support_overlap_max= 0.2304
+    active same_role_support_overlap_mean=0.1811
+    active_anchor_count                 = 5.21
+    inactive_anchor_fraction            = 0.7829
+    posterior_recycle_rate              = 0.0021
+    posterior_recycle_logit_mean        = -6.30
+    posterior_address_update_rate_mean  = 0.0336
+    posterior_identity_switch_rate      = 0.8011
+    posterior_binding_top1_margin_mean  = 0.1109
+
+A7:
+  tmux alive:
+    picf_a7_activecap_matrix
+    picf_a7_activecap_monitor
+  current run:
+    picf_a7_activecap_cotrain_prefix_u2b1_a1_600_ac273a2
+    advancing beyond step 570 at about 22.7 sec/step
+
+  latest scalar row, step 550:
+    loss_total                         = 0.1184
+    loss_action_default_equiv           = 0.0618
+    loss_action_active7                 = 0.2809
+    loss_anchor_pv                      = 4.6347
+    loss_mapg_routing                   = 0.9767
+    loss_mapg_cycle                     = 0.4713
+    raw same_role_support_overlap_max   = 0.9837
+    active same_role_support_overlap_max= 0.5950
+    active same_role_support_overlap_mean=0.1512
+    active_anchor_count                 = 13.01
+    inactive_anchor_fraction            = 0.4577
+    posterior_recycle_rate              = 0.9976
+    posterior_recycle_logit_mean        = 6.09
+    posterior_recycle_gate_std          = 6.6e-6
+    posterior_stable_slot_fraction      = 0.1072
+    posterior_address_update_rate_mean  = 8.9e-5
+    posterior_identity_switch_rate      = 0.7994
+    posterior_binding_top1_margin_mean  = 0.1094
+
+  useful positive signals:
+    action_default_equiv improved from about 0.1707 at step 50 to 0.0618.
+    temporal view mass uses both views:
+      temporal_view_mass_0 = 0.456
+      temporal_view_mass_1 = 0.544
+    active same-role overlap is near, but not safely below, the 0.60 gate.
+
+  hard negative signals:
+    recycle is saturated high and nearly constant across slots.
+    address update is effectively starved.
+    binding margin remains low.
+```
+
+Overlay audit from JSON diagnostics:
+
+```text
+A5 u2/b1:
+  step 100 graph same-role min pixel distances:
+    role0=2.34, role1=0.77, role2=1.82, role3=2.13
+  step 400 graph same-role min pixel distances:
+    role0=10.98, role1=0.002, role2=0.002, role3=0.001
+  step 600 graph same-role min pixel distances:
+    role0=3.01, role1=0.004, role2=0.237, role3=0.099
+  posterior role1 min pixel distance:
+    0.0 at every sampled overlay
+
+A5 u1/b4:
+  step 100 graph same-role min pixel distances:
+    role0=4.03, role1=1.01, role2=0.95, role3=0.07
+  step 300 graph same-role min pixel distances:
+    role0=8.16, role1=0.018, role2=0.019, role3=0.014
+  step 600 graph same-role min pixel distances:
+    role0=6.84, role1=0.005, role2=0.002, role3=0.002
+  posterior role1 min pixel distance:
+    0.0 at every sampled overlay
+```
+
+Interpretation of the overlay audit:
+
+```text
+1. The raw graph anchors do physically duplicate same-role slots. This is not
+   just an overlap metric artifact.
+2. The active-slot filter is doing a real job: it can demote many duplicates,
+   which is why active overlap can look healthy while raw overlap is 1.0.
+3. A5 anchor-only is not a production proxy. It either over-prunes with high
+   recycle or keeps recycle near zero with high identity switching.
+4. A7 is the better production proxy because it includes task/action/semantic
+   pressure, but it still fails the posterior identity criterion: recycle
+   saturation starves address update and prior memory.
+```
+
+Theoretical implication:
+
+```text
+The current failure is not "all anchors are one object" in the active readout.
+The more precise failure is:
+
+  fixed query capacity creates redundant same-role proposals
+  -> active filter can select a plausible subset
+  -> action can still improve
+  -> posterior recycle can saturate
+  -> address update is multiplied by (1 - recycle)
+  -> identity continuity is not learned
+  -> overlays show repeated physical duplicate proposals
+
+Therefore the remaining blocker is a joint object-count / identity-continuity
+problem, not a single scalar loss problem.
+```
+
+Connection to 2025+ object-binding literature:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  shows that IsSameObject is a pairwise/quadratic, low-dimensional binding
+  subspace in ViT activations. Our binding_signature path follows this idea:
+  it adds a projected pairwise same-object term, not a new hard loss.
+
+STORM:
+  argues for multi-phase adaptation: stabilize object-centric slots with
+  visual/semantic structure before joint manipulation cotrain. The A7 result
+  supports this: action loss falls, but object identity/recycle is not yet
+  accepted.
+
+MetaSlot / adaptive-slot methods:
+  warn that fixed slot counts create duplicate parts when object count varies.
+  Our active-slot filter is a runtime analog of this idea, but the overlay
+  audit shows that demotion alone is not enough; posterior identity must also
+  remain stable.
+
+SLOT-CONTRAST:
+  emphasizes temporal consistency and active slot sparsity. This aligns with
+  the acceptance gates here: recycle must be moderate, address updates nonzero,
+  binding margins healthy, and active anchors must remain physically distinct.
+```
+
+Next decision:
+
+```text
+Do not stop the matrix before the queued branches. The first A5/A7 rows have
+already exposed useful failure modes, but the queued branches are exactly the
+causal tests we need:
+
+  A7 lower-action/no-prefix:
+    If recycle improves, action scale or prefix boundary is the trigger.
+    If recycle remains saturated, recycle calibration/object-count dynamics are
+    the trigger.
+
+  A7 max6:
+    If active count and recycle improve, max4 over-prunes production slots.
+    If raw duplicate overlays remain and recycle stays bad, capacity alone is
+    not enough.
+
+  A5 max6:
+    If anchor-only still collapses/duplicates, then the issue is not action
+    alone; the anchor objective still lacks a clean object-count/merge prior.
+```
+
+Acceptance after queued branches:
+
+```text
+Required:
+  active same-role overlap max < 0.60
+  active_anchor_count plausible, not <= 4 by over-pruning
+  posterior_recycle_rate not saturated high or low
+  posterior_address_update_rate_mean nonzero
+  posterior_binding_top1_margin_mean improves materially
+  overlays show active anchors on distinct physical regions
+
+Reject even if action loss is low:
+  recycle > 0.95 or < 0.01 for long windows
+  posterior role duplicates remain exactly co-located
+  raw duplicates are only hidden by inactive demotion
 ```
