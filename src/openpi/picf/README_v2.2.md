@@ -217,6 +217,25 @@ high-risk predictive/denoising losses still zero. This closes the diagnosed
 recycle/address failure chain enough to move to a longer guarded production run;
 it does not replace CALVIN/video/anchor-overlay behavior acceptance.
 
+2026-05-13 30k guarded long-run launch contract: the next maintained training
+run is a fresh 30000-step production-candidate run, not a direct resume from
+any April/May diagnostic checkpoint. The maintained fast/stable recurrent
+profile is `burnin_steps=4`, `burnin_mode=state_only`, `unroll_steps=1`.
+Do not replace it with direct `unroll_steps=2` for this acceptance run: the
+recent diagnostics found that the burn-in state path provides the necessary
+posterior context while keeping the suffix transition fast enough for 2x40GB.
+If "warmup" refers to the optimizer schedule, keep the established
+`warmup_steps=100`; if it refers to recurrent burn-in, do not use 1 for the
+main run. A7 is the production candidate with frozen Sonata/V-JEPA/AnyTouch,
+trainable PICF/PI0.5/PaliGemma, `semantic_lr_scale=0.25`,
+`picf_action_prefix_stopgrad=True`, `recycle_residual_norm_mode=layernorm`,
+legacy local refinement archived/off, cache residual read at `0.05`, and
+slot-JEPA/support-pred/binding-consistency/denoising losses at zero. A5 is a
+conservative long-test control with the same contract but lower semantic LR
+(`semantic_lr_scale=0.1`) to check whether PaliGemma cotrain pressure affects
+anchor/recycle health. Both runs use `save_interval=2500` and
+`keep_last_checkpoints=3`.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

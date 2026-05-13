@@ -7387,3 +7387,152 @@ stable-slot coverage under longer action cotrain." That must be answered by a
 longer run plus CALVIN/video/anchor overlays, not by adding another auxiliary
 loss in this stage.
 ```
+
+### 2026-05-13 30k Guarded Long-Run Launch Plan
+
+This section records the planned long-run deployment after the recycle
+normalization closure. It is subordinate to
+[`src/openpi/picf/README_v2.2.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_v2.2.md).
+
+#### Question
+
+Can the maintained PICF-AQR-OWM/MVTrack belief router train for a real 30000
+step horizon with action cotrain active, frozen pretrained perception
+backbones, trainable PaliGemma/semantic-action stack, stable support
+competition, and no recycle/address collapse?
+
+This run is not designed to prove ordinal/fourth-object grounding, tracklet
+benefit, or proposal benefit. Current CALVIN training does not feed
+tracklet/proposal tensors. Those branches remain no-op unless upstream data
+provides them.
+
+#### Why `burnin_steps=4`, `burnin_mode=state_only`, `unroll_steps=1`
+
+The short diagnostics exposed a consistent distinction:
+
+```text
+direct unroll=2:
+  faster credit assignment in principle, but historically coupled to unstable
+  recycle/overlap episodes when the posterior lacked enough no-grad context.
+
+burnin4/state_only + unroll1:
+  four no-grad AQR posterior updates build the recurrent physical belief;
+  the suffix transition receives gradients and action/alignment losses.
+```
+
+Mathematically this is the cleaner production compromise for 2x40GB:
+
+```math
+b_{t-4:t-1} = U_{AQR}^{no\ grad}(o, P(b,a)),
+\qquad
+b_t = U_{AQR}^{grad}(o_t, P(b_{t-1},a_{t-1}))
+```
+
+The burn-in is not an auxiliary trick. It approximates the inference-time
+belief filter state before applying trainable suffix losses. It also preserves
+the faster profile that previously ran around the 17-18 sec/step range when
+pretrained perception backbones were frozen.
+
+If "warmup" refers to recurrent warmup, use `burnin_steps=4`, not `1`. If it
+refers to optimizer LR warmup, keep the already-tested `warmup_steps=100`
+rather than introducing a new schedule in the acceptance run.
+
+#### A7 Production Candidate
+
+```text
+machine: A7
+ssh: ssh -p 28060 root@36.139.225.68
+purpose: main production-candidate 30000-step guarded run
+start: fresh from base checkpoint/config, not resume from diagnostic checkpoint
+num_train_steps: 30000
+save_interval: 2500
+keep_last_checkpoints: 3
+progress: enabled
+training_strategy: fsdp_full_shard
+optimizer_sharding: none
+perception_finetune_mode: frozen
+frozen pretraining modules: Sonata, V-JEPA, AnyTouch
+trainable: PICF, PI0.5 action/semantic stack, PaliGemma with semantic_lr_scale=0.25
+unroll_steps: 1
+burnin_steps: 4
+burnin_mode: state_only
+action_horizon: 16
+action_normalization: quantile
+picf_action_prefix_stopgrad: true
+recycle_normalize_residual_summary: true
+recycle_residual_norm_mode: layernorm
+legacy_local_refinement_opt_in: false
+local_refinement_enabled: false
+local_refinement_topk: 0
+local_refinement_weight: 0.0
+local_refinement_binding_weight: 0.0
+evidence_cache_read_weight: 0.05
+lambda_slot_jepa: 0.0
+lambda_support_pred: 0.0
+lambda_binding_consistency: 0.0
+lambda_aqr_denoising: 0.0
+```
+
+#### A5 Conservative Long-Test Control
+
+```text
+machine: A5
+ssh: ssh -p 29776 root@36.139.225.68
+purpose: conservative control for semantic cotrain pressure
+same as A7 except:
+  semantic_lr_scale: 0.1
+```
+
+This is not the preferred production profile. It answers whether reducing
+PaliGemma/semantic update pressure materially improves recycle/support health.
+If A7 and A5 are both healthy, prefer A7 because previous action-ready tests
+showed PaliGemma cotrain is useful. If A7 degrades and A5 remains healthy,
+semantic LR pressure becomes the next controlled variable.
+
+#### Hard Gates
+
+```text
+1. Startup log must show visual_mode=encoder and use_foundation_backbones=True.
+2. Startup log must show Sonata/V-JEPA/AnyTouch frozen and PaliGemma trainable.
+3. loss_action_default_equiv should be used for comparison to old 4-22 style
+   action curves, not raw active-horizon action loss.
+4. posterior_recycle_rate must not saturate near 0.95+ or collapse to a
+   degenerate always-off state hiding assignment errors.
+5. posterior_address_update_rate_mean must remain nonzero.
+6. aqr_same_role_support_overlap_max should stay far from the old 0.99 collapse
+   zone in tail windows.
+7. posterior_identity_switch_rate_stable should remain near zero.
+8. stable_slot_fraction is expected to remain a bottleneck; improvement is a
+   positive sign, but low stable coverage alone is not an immediate stop unless
+   recycle/overlap/action also degrade.
+9. First real behavior acceptance starts at the 2500-step checkpoint:
+   metrics, CALVIN/video, anchor overlays, and support health must be checked.
+```
+
+#### Tail Commands After Launch
+
+```bash
+# A7
+ssh -p 28060 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_30k_recyclenorm_layernorm_burnin4_sem025_20260513_76db17d.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_30k_recyclenorm_layernorm_burnin4_sem025_20260513_76db17d/metrics.jsonl
+
+# A5
+ssh -p 29776 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_30k_recyclenorm_layernorm_burnin4_sem010_20260513_76db17d.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_30k_recyclenorm_layernorm_burnin4_sem010_20260513_76db17d/metrics.jsonl
+```
+
+#### Expected Timing
+
+At the observed frozen-perception/PaliGemma-cotrain speed of roughly
+17-18 sec/step:
+
+```text
+first metrics row: usually after startup and the first log interval;
+first checkpoint at 2500 steps: about 12-13 hours;
+30000 steps: about 6 days.
+```
+
+The first 2500-step checkpoint is the next serious acceptance point. Earlier
+tail rows are useful for failure detection, not for final behavior claims.
