@@ -4378,3 +4378,15 @@ JSON shows seven role-1 posterior slots exactly co-located at pixel
 `[107.2, 120.3]`. The current causal interpretation is: active capacity helps
 early, but capacity alone does not fix posterior identity; the A7 flow branch is
 now the decisive test for controlled action pressure without prefix-stopgrad.
+
+2026-05-14 07:45 one-hour audit: A5 completed and is now idle; its max6 branch
+ended as a negative anchor-only result (`raw_overlap=0.9997`,
+`active_count=7.5`, `recycle=0.0004`). A7 flow is still running and reached
+step200; it improves recycle versus the rejected full-action prefix branch
+(`0.6148` instead of near `0.998`) but still fails the structural gate:
+`raw_overlap=0.9912`, `active_overlap=0.5573`, `active_count=10.1`. The A7
+step200 overlay shows the same physical failure pattern as A5: graph candidates
+remain spatially spread, but seven role-1 posterior slots are exactly co-located
+at pixel `[90.2, 108.4]`. Current conclusion: this is no longer an active-cap
+or action-scale-only problem; the remaining root cause is posterior
+binding/correction coalescing same-role candidates into one physical state.

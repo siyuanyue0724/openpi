@@ -9995,3 +9995,94 @@ Interpretation:
    also collapses after step100, the root cause is posterior binding dynamics
    rather than only action scale or active-capacity selection.
 ```
+
+07:45 one-hour audit:
+
+```text
+A7 flow branch:
+  run:
+    picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2
+  state:
+    still running normally
+    progress log reached about step238
+    structured metrics reached step200
+  step50 -> step200:
+    loss_action_default_equiv:
+      0.126334 -> 0.102355 -> 0.160800 -> 0.118942
+    raw same_role_support_overlap_max:
+      0.363132 -> 0.420756 -> 0.641526 -> 0.991242
+    active same_role_support_overlap_max:
+      0.182056 -> 0.261390 -> 0.361490 -> 0.557258
+    active_anchor_count:
+      14.0 -> 14.0 -> 13.675 -> 10.085
+    posterior_recycle_rate:
+      0.634925 -> 0.829716 -> 0.789538 -> 0.614845
+    posterior_address_update_rate_mean:
+      0.016516 -> 0.007266 -> 0.007560 -> 0.015441
+
+A5 matrix:
+  state:
+    completed its queued branches
+    GPUs are idle after completion
+  final max6 row at step600:
+    raw same_role_support_overlap_max    = 0.999686
+    active same_role_support_overlap_max = 0.470589
+    active_anchor_count                  = 7.505
+    posterior_recycle_rate               = 0.000400
+    posterior_address_update_rate_mean   = 0.036996
+```
+
+A7 step200 overlay audit:
+
+```text
+Artifact:
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2/
+      anchor_overlays/step_000200.png
+      anchor_overlays/step_000200.json
+
+Image/geometry result:
+  graph role 1:
+    min pixel distance 0.67, mean 15.41, max 32.99
+  graph role 2:
+    min pixel distance 0.08, mean 11.36, max 24.04
+  graph role 3:
+    min pixel distance 0.54, mean 13.05, max 25.29
+  posterior role 1:
+    min pixel distance 0.00, mean 0.00, max 0.00
+    all seven visible role-1 posterior slots are at pixel [90.2, 108.4]
+```
+
+Interpretation:
+
+```text
+1. The lower-action/no-prefix A7 branch is better than the rejected full-action
+   prefix branch with respect to recycle saturation: recycle remains around
+   0.61 at step200 instead of saturating near 0.998, and address update remains
+   nonzero.
+2. It still fails the structural acceptance test by step200. Raw overlap climbs
+   back to 0.991, active count drops to about 10, and the overlay shows exact
+   posterior co-location for seven same-role slots.
+3. This rules out three simpler explanations:
+     capacity-only fix:
+       false; A5 max6 completed with raw collapse and low active count.
+     full-action pressure only:
+       incomplete; lowering action pressure helps recycle but not posterior
+       co-location.
+     metric-only false positive:
+       false; overlay geometry shows exact same-pixel posterior duplicates.
+4. The remaining root cause is now narrower:
+     the graph stage can create multiple local candidates,
+     but posterior binding/correction maps same-role candidates back onto one
+     physical posterior state.
+   That points to the posterior assignment/update interface, not just support
+   diversity or active demotion.
+5. Next experiment should target posterior binding/correction directly rather
+   than adding another outer diversity penalty. Candidate causal knobs should
+   be limited to mathematically consistent mechanisms:
+     stronger per-slot posterior anti-coalescence during correction,
+     role-aware object-count prior before posterior fusion,
+     assignment entropy/temperature schedule at the posterior binding step,
+     or a posterior matching penalty that operates on physical posterior
+     geometry rather than graph supports alone.
+```
