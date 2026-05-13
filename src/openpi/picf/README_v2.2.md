@@ -4367,3 +4367,14 @@ shows seven role-1 posterior slots exactly co-located at pixel `[105.2, 114.1]`.
 This confirms a real posterior identity/binding collapse after candidate
 generation, not just a metric artifact. Continue to A5 step300 and A7 step50/100
 before changing code; active-slot demotion is useful but is not yet a full cure.
+
+2026-05-14 06:40 causal gate: A7 lower-action/no-prefix reached step50 with a
+healthy first structural row: raw overlap `0.3631`, active overlap `0.1821`,
+active count `14.0`, recycle `0.6349`, and address update `0.0165`. This is not
+acceptance yet, but it is materially better than the rejected full-action prefix
+row. A5 max6 reached step300 and is now rejected as a standalone anchor-only
+cure: raw overlap `0.9996`, active count `6.46`, recycle `0.0037`, and overlay
+JSON shows seven role-1 posterior slots exactly co-located at pixel
+`[107.2, 120.3]`. The current causal interpretation is: active capacity helps
+early, but capacity alone does not fix posterior identity; the A7 flow branch is
+now the decisive test for controlled action pressure without prefix-stopgrad.

@@ -9892,3 +9892,106 @@ Interpretation:
    reaches step300. Those two gates separate action-pressure effects from
    anchor-only posterior collapse.
 ```
+
+06:40 causal gate:
+
+```text
+A7 flow branch:
+  run:
+    picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2
+  state:
+    running normally
+    reached structured metrics gate at step50
+  step50:
+    loss_total                          = 0.103292
+    loss_action_default_equiv            = 0.126334
+    loss_action_active7                  = 0.465151
+    loss_anchor_pv                       = 2.851656
+    loss_mapg_routing                    = 0.837551
+    loss_mapg_cycle                      = 0.371206
+    loss_mapg_support_diversity          = 0.367256
+    raw same_role_support_overlap_max    = 0.363132
+    active same_role_support_overlap_max = 0.182056
+    active same_role_support_overlap_mean= 0.030686
+    active_anchor_count                  = 14.0
+    inactive_anchor_fraction             = 0.416667
+    posterior_recycle_rate               = 0.634925
+    posterior_recycle_logit_mean         = 0.584528
+    posterior_recycle_gate_std           = 0.000502
+    posterior_address_update_rate_mean   = 0.016516
+    posterior_identity_switch_rate       = 0.785556
+    posterior_binding_top1_margin_mean   = 0.109429
+    speed                                = about 22.6 sec/step
+
+A5 max6 branch:
+  run:
+    picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2
+  state:
+    running normally
+    reached step300
+  step300:
+    loss_total                          = 0.102821
+    loss_action_default_equiv            = 0.122571
+    loss_action_active7                  = 0.438201
+    loss_anchor_pv                       = 4.704764
+    loss_mapg_routing                    = 0.777597
+    loss_mapg_cycle                      = 0.481435
+    loss_mapg_support_diversity          = 0.321377
+    raw same_role_support_overlap_max    = 0.999587
+    active same_role_support_overlap_max = 0.349169
+    active same_role_support_overlap_mean= 0.215113
+    active_anchor_count                  = 6.46
+    inactive_anchor_fraction             = 0.730833
+    posterior_recycle_rate               = 0.003663
+    posterior_recycle_logit_mean         = -5.920321
+    posterior_recycle_gate_std           = 0.000035
+    posterior_address_update_rate_mean   = 0.037308
+    posterior_identity_switch_rate       = 0.786111
+    posterior_binding_top1_margin_mean   = 0.111016
+    speed                                = about 8.95 sec/step
+```
+
+A5 step300 overlay:
+
+```text
+Artifact:
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2/
+      anchor_overlays/step_000300.png
+      anchor_overlays/step_000300.json
+
+Image/geometry result:
+  graph role 1:
+    min pixel distance 0.62, mean 2.32, max 5.33
+  graph role 2:
+    min pixel distance 0.11, mean 0.81, max 1.58
+  graph role 3:
+    min pixel distance 0.19, mean 1.18, max 2.74
+  posterior role 1:
+    min pixel distance 0.00, mean 0.00, max 0.00
+    all seven visible role-1 posterior slots are at pixel [107.2, 120.3]
+```
+
+Interpretation:
+
+```text
+1. A7 flow step50 is the first cotrain row in this matrix that looks structurally
+   plausible at the first gate: raw overlap is low, active overlap is low,
+   active count is exactly 14, recycle is high but not saturated, and address
+   update is nonzero. It directly improves over the rejected A7 full-action
+   prefix row at the same action family boundary.
+2. A5 max6 is now rejected as a standalone anchor-only cure. It looked clean at
+   step100, started degrading at step200, and at step300 raw graph/posterior
+   collapse is again visible. The active filter keeps the reported active
+   overlap low only by demoting most same-role duplicates; active count has
+   collapsed to 6.46.
+3. The current evidence argues against "capacity alone fixes anchor collapse".
+   It supports the more specific hypothesis that controlled action pressure
+   without prefix-stopgrad is needed to keep the active subset task-grounded
+   while avoiding the full-action recycle saturation seen in the rejected A7
+   branch.
+4. The next decisive A7 checks are step100/200. If A7 flow keeps raw overlap low
+   and recycle below saturation, use it as the base for the next long run. If it
+   also collapses after step100, the root cause is posterior binding dynamics
+   rather than only action scale or active-capacity selection.
+```
