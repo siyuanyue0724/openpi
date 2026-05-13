@@ -7514,13 +7514,13 @@ semantic LR pressure becomes the next controlled variable.
 ```bash
 # A7
 ssh -p 28060 root@36.139.225.68
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_30k_recyclenorm_layernorm_burnin4_sem025_20260513_76db17d.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_30k_recyclenorm_layernorm_burnin4_sem025_20260513_76db17d/metrics.jsonl
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_30k_recyclenorm_layernorm_burnin4_sem025_20260513_6c58f46.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_30k_recyclenorm_layernorm_burnin4_sem025_20260513_6c58f46/metrics.jsonl
 
 # A5
 ssh -p 29776 root@36.139.225.68
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_30k_recyclenorm_layernorm_burnin4_sem010_20260513_76db17d.train_tmux.log
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_30k_recyclenorm_layernorm_burnin4_sem010_20260513_76db17d/metrics.jsonl
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_30k_recyclenorm_layernorm_burnin4_sem010_20260513_6c58f46.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_30k_recyclenorm_layernorm_burnin4_sem010_20260513_6c58f46/metrics.jsonl
 ```
 
 #### Expected Timing
