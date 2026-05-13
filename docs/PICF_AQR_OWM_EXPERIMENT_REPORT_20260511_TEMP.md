@@ -8058,6 +8058,71 @@ print(_load_sonata_runtime()[0], _load_sonata_runtime()[1])
 PY
 ```
 
+#### Live Read: Step 50-75
+
+The first reads do not yet validate task-pressure warmup. They are useful
+because they separate two failure modes:
+
+```text
+A5 / unroll=1:
+  step 25:
+    same_role_overlap=0.9484
+    recycle_rate=0.5233
+    address_update_rate_mean=0.0217
+    action_default_equiv=0.1410
+
+  step 50:
+    same_role_overlap=0.9534
+    recycle_rate=0.5019
+    address_update_rate_mean=0.0227
+    action_default_equiv=0.1524
+
+  step 75:
+    same_role_overlap=0.9151
+    recycle_rate=0.1511
+    address_update_rate_mean=0.0379
+    action_default_equiv=0.1386
+
+A7 / unroll=2:
+  step 25:
+    same_role_overlap=0.9532
+    recycle_rate=0.5349
+    address_update_rate_mean=0.0211
+    action_default_equiv=0.1499
+
+  step 50:
+    same_role_overlap=0.9769
+    recycle_rate=0.5370
+    address_update_rate_mean=0.0210
+    action_default_equiv=0.1416
+```
+
+Interpretation:
+
+```text
+1. Task pressure is not causing the old immediate recycle saturation. A5
+   recycle falls to 0.151 by step 75, so recycle normalization remains active.
+
+2. Task pressure has not yet solved same-role ownership. A5 is better than the
+   pure action-off collapse band but still above the desired <0.75 threshold;
+   A7 is worse at step 50.
+
+3. Unroll=2 is not currently the explanation for early support separation. It
+   is slower and has worse overlap in the matched counterfactual.
+
+4. If step 100 remains above 0.90 overlap, the root problem is likely object
+   ownership/assignment evidence, not warmup length. The next design should
+   target the binding assignment itself rather than only changing schedules.
+```
+
+Decision rule:
+
+```text
+Do not restart before step 100 unless the run crashes. If step 100 still shows
+same_role_overlap > 0.90 on both A5 and A7, archive this as a negative result
+for schedule-only task-pressure warmup and move to an assignment-level fix.
+```
+
 The smoke test passed on both A5 and A7, loading `spconv` and `torch_scatter`
 from `/root/openpi/.venv/lib/python3.11/site-packages` while keeping the active
 worktree `src` first in `PYTHONPATH`. The task-pressure tmux launches therefore
