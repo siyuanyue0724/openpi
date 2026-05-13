@@ -8435,3 +8435,153 @@ Interpretation:
    collapse was not caused by insufficient recurrent window alone.
 4. The decisive gates remain step100 and step300 plus overlay inspection.
 ```
+
+#### Ownership-Prior Endpoint: Early Fix, Late Collapse
+
+The ownership prior fixed the initial same-role symmetry failure, but it did not
+survive training pressure. The runs were stopped/archived because the failure
+was already visible before the planned endpoint.
+
+```text
+A5 / unroll=1 endpoint:
+  exp:
+    /mnt/checkpoints/picf_core/picf_core/picf_a5_ownership_prior_taskwarm_u1_300_20260514_33dd330
+  log:
+    /mnt/picf_run_logs/picf_a5_ownership_prior_taskwarm_u1_300_20260514_33dd330.log
+  overlays:
+    anchor_overlays/step_000100.png
+    anchor_overlays/step_000200.png
+    anchor_overlays/step_000300.png
+
+  same_role_overlap:
+    25: 0.2298
+    50: 0.2280
+    75: 0.2530
+    100: 0.3009
+    125: 0.7871
+    150: 0.9481
+    175: 0.9890
+    200: 0.9949
+    225: 0.9992
+    250: 0.9994
+    275: 0.9998
+    300: 0.9998
+
+  posterior_recycle_rate:
+    25: 0.4848
+    100: 0.6624
+    150: 0.7177
+    225: 0.9169
+    300: 0.9853
+
+  slot_address_update_rate_mean:
+    25: 0.0234
+    100: 0.0142
+    150: 0.0099
+    225: 0.0033
+    300: 0.0006
+```
+
+```text
+A7 / unroll=2 endpoint:
+  exp:
+    /mnt/checkpoints/picf_core/picf_core/picf_a7_ownership_prior_taskwarm_u2_300_20260514_33dd330
+  log:
+    /mnt/picf_run_logs/picf_a7_ownership_prior_taskwarm_u2_300_20260514_33dd330.log
+  overlays:
+    anchor_overlays/step_000100.png
+    anchor_overlays/step_000200.png
+
+  same_role_overlap:
+    25: 0.2176
+    50: 0.2615
+    75: 0.3265
+    100: 0.3102
+    125: 0.5065
+    150: 0.7597
+    175: 0.7301
+    200: 0.8971
+    225: 0.9827
+    250: 0.9843
+
+  posterior_recycle_rate:
+    25: 0.4997
+    75: 0.1261
+    100: 0.4643
+    150: 0.2120
+    175: 0.0208
+    200: 0.0156
+    250: 0.0124
+
+  slot_address_update_rate_mean:
+    25: 0.0234
+    100: 0.0299
+    150: 0.0464
+    200: 0.0396
+    250: 0.0403
+```
+
+Critical interpretation:
+
+```text
+1. The ownership prior is a real improvement, not a false positive:
+   both A5 and A7 start around 0.22 overlap instead of 0.95+.
+
+2. The repair is not sufficient:
+   after step100/125 the shared support attractor reappears and same-role
+   overlap returns to the 0.98-1.00 failure regime.
+
+3. Action loss is not the primary direct cause:
+   loss_action_default_equiv stays in the same band while overlap worsens.
+   The strongest common signals correlated with collapse are raw graph/PV
+   structure terms, especially loss_anchor_pv, loss_mapg_cycle,
+   loss_mapg_support_diversity, and loss_mapg_routing.
+
+4. Recycle is not the sole root cause:
+   A5 collapses with recycle rising to 0.98, while A7 collapses after recycle
+   falls near zero. Recycle is a coupled symptom, not a universal explanation.
+
+5. Unroll=2 helps delay the failure but does not solve it:
+   A7 reaches the same high-overlap regime later than A5, so recurrence length
+   matters, but the assignment geometry remains unstable.
+
+6. The scalar effective_anchor_count is misleading:
+   it stays near 22-23 even when same-role supports are almost identical.
+   It measures nonzero mass, not distinct object ownership.
+```
+
+The consistent mathematical root cause is now sharper than before:
+
+```text
+The AQR rows can be made distinct initially, but the trainable readers and
+task/PV/routing objectives still have a shared high-salience support attractor.
+The static coordinate ownership prior is too weak to remain an ownership
+constraint after the model starts optimizing toward common task-relevant
+regions. The support-diversity term observes the overlap after it happens, but
+does not impose an assignment-level capacity or dustbin/no-object structure.
+
+In addition, the alignment objective is budget/cap scaled in these diagnostics:
+  loss_alignment = 0.0125
+  loss_total_minus_action = 0.0875
+so raw graph losses can worsen substantially without dominating total loss.
+This prevents total loss from being a reliable health metric for object
+ownership.
+```
+
+This result changes the next repair target:
+
+```text
+Do not proceed to 30k from this ownership-prior run.
+Do not treat a stronger static prior, longer warmup, or unroll-only change as
+the root fix.
+
+The next coherent repair must make same-role object ownership adaptive and
+capacity-aware:
+  1. distinguish active object slots from inactive/background/dustbin slots;
+  2. apply same-role diversity only to active high-confidence slots;
+  3. avoid forcing all physical slots onto a scene with fewer useful objects;
+  4. move ownership pressure closer to assignment/logit construction instead
+     of relying only on a downstream capped auxiliary loss;
+  5. continue using posterior authority and avoid hard-locking identity by
+     static address.
+```
