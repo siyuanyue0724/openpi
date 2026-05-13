@@ -3835,13 +3835,20 @@ Storage cleanup:
   the exact cleanup policy and caveats.
 
 Next causal check:
-  run a 2-3 hour paired experiment from the preserved full PICF 10000-step
-  checkpoint. A5 disables local signature reranking
+  the initial attempt to run the paired test from the preserved April full-PICF
+  10000-step checkpoint was invalidated before training because the current
+  MVTrack/AQR architecture has many new reader/query/signature parameters and a
+  widened visual prediction head. The strict FSDP compatibility guard correctly
+  refused a broad migration. This is a checkpoint-architecture mismatch, not a
+  local-rerank training result.
+
+  The active replacement is a 2-3 hour fresh paired experiment from the same
+  current MVTrack args and seed. A5 disables local signature reranking
   (`local_refinement_binding_weight=0.0`); A7 enables the moderate setting
-  (`0.25`). All other guarded MVTrack settings match. This directly tests
-  whether the projected same-object subspace should be used inside local
-  refinement, without adding a new loss or changing the posterior/action
-  contract.
+  (`0.25`). `resume_checkpoint=null`, guarded predictive losses remain zero,
+  and all other settings match. This tests whether the projected same-object
+  subspace helps early local candidate separation without adding a new loss or
+  changing the posterior/action contract.
 
 Important guard:
   this is not a new loss, not a hard cross-anchor ownership rule, and not a

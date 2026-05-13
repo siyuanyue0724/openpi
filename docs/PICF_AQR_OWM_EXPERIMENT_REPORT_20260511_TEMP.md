@@ -6139,3 +6139,101 @@ the 0.25 structural prior is already too strong from this checkpoint; keep the
 binding-signature term in posterior binding only and disable it inside local
 refinement by default.
 ```
+
+### 2026-05-13 10:50 Status: Full10000 Resume Invalidated
+
+The first paired launch from the preserved April full-PICF checkpoint did not
+reach training:
+
+```text
+A5:
+  picf_a5_siglocal000_full10000_to10300_20260513_2a09b12
+
+A7:
+  picf_a7_siglocal025_full10000_to10300_20260513_2a09b12
+
+status:
+  both failed during FSDP checkpoint load before metrics.jsonl was created.
+```
+
+This is not evidence against local signature reranking. It is a checkpoint
+architecture mismatch:
+
+```text
+old checkpoint:
+  April full-PICF architecture.
+
+current code:
+  MVTrack/AQR architecture with many new AQR readers, query tokens,
+  binding_signature_proj, tracklet/proposal projections, temporal view
+  embeddings, and a widened visual prediction head.
+```
+
+The loader correctly refused a broad migration. The failure included many
+missing AQR/MVTrack parameters and shape mismatches such as:
+
+```text
+core.binding_signature_proj.*
+core.aqr_*_reader.*
+core.aqr_physical_query_tokens
+core.aqr_task_query_tokens
+core.tracklet_token_proj.*
+core.proposal_token_proj.*
+core.temporal_visual_view_embedding.weight
+core.visual_real_head: checkpoint [48, 512] vs model [12288, 512]
+core.visual_real_error_encoder: checkpoint [128, 144] vs model [128, 36864]
+```
+
+Mathematically, allowing this with a loose compatibility rule would not be a
+clean experiment: the action backbone would be restored, but the AQR/MVTrack
+router under test would be mostly random-initialized. That would mix
+architecture migration, initialization shock, and local reranking into one
+confounded run.
+
+### Replacement 2-3 Hour Causal Check
+
+Because May checkpoint payloads were intentionally pruned to free `/mnt`, no
+same-architecture resume checkpoint remains available. The clean replacement is
+a fresh paired run from the same current MVTrack args and seed:
+
+```text
+A5 control:
+  run = picf_a5_siglocal000_fresh300_20260513_2a09b12
+  local_refinement_binding_weight = 0.0
+
+A7 test:
+  run = picf_a7_siglocal025_fresh300_20260513_2a09b12
+  local_refinement_binding_weight = 0.25
+
+shared:
+  resume_checkpoint = null
+  num_train_steps = 300
+  burnin_steps = 4
+  unroll_steps = 1
+  action_prefix_stopgrad = true
+  local_refinement_topk = 8
+  local_refinement_weight = 0.10
+  lambda_slot_jepa = 0
+  lambda_support_pred = 0
+  lambda_binding_consistency = 0
+  lambda_aqr_denoising = 0
+```
+
+This replacement answers a narrower but still useful question:
+
+```text
+Does the local signature rerank term produce better early local candidate
+separation than the same fresh MVTrack profile with the term disabled?
+```
+
+It does not answer:
+
+```text
+Can current MVTrack safely resume from the old April full-PICF 10000-step
+checkpoint?
+```
+
+That would require either a deliberately engineered one-time migration path or
+a new same-architecture warm checkpoint. The former is not appropriate for this
+diagnostic unless we explicitly accept that most AQR/MVTrack parameters are
+newly initialized.
