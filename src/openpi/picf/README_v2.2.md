@@ -152,6 +152,18 @@ typed-memory local refiner is necessary, too strong, or not the active
 bottleneck. The plan is recorded in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
 
+2026-05-13 local-refinement attribution midpoint: both A5 and A7 reached
+step 175. A7 local-off has `loss_total=0.771`,
+`loss_action_default_equiv=0.082`, `same_role_support_overlap=0.563`,
+`posterior_recycle_rate=0.515`, and no gradient clipping. A5 local-light has
+slightly lower `loss_total=0.765` and `loss_anchor_pv=2.333`, but higher
+`posterior_recycle_rate=0.540`, higher identity switch, lower address update,
+and one fixed-threshold clipping event from `preclip_grad_norm=9.48`. This
+does not yet decide the attribution question. It does show that local
+refinement is not required for early non-collapse and may add gradient/recycle
+pressure. Both runs should continue to step 300 before finalizing the next
+maintained profile.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

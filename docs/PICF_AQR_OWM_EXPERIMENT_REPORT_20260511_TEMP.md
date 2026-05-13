@@ -6721,3 +6721,91 @@ Interpretation:
 Do not stop either run on the step-25 row. The next causal discriminator is
 whether local-light separates from local-off by step 125-150 in action loss,
 support overlap, recycle trend, or local true overlap.
+
+#### Step-175 Midpoint Readout
+
+Both machines are still running and have written seven scalar rows through
+step 175. The attribution signal is now stronger than at step 25, but it is
+not yet a final decision.
+
+```text
+A7 local-off:
+  step=175
+  loss_total=0.7710
+  loss_action_default_equiv=0.0821
+  loss_alignment=0.7607
+  loss_anchor_pv=2.3783
+  loss_pv_weak=2.5045
+  loss_mapg_routing=1.0795
+  loss_mapg_support_diversity=0.3748
+  aqr_same_role_support_overlap_max=0.5633
+  aqr_same_role_local_jaccard_max=0.0
+  aqr_same_role_local_true_overlap_max=0.0
+  aqr_effective_anchor_count=23.10
+  posterior_recycle_rate=0.5152
+  posterior_recycle_logit_mean=0.0607
+  posterior_address_update_rate_mean=0.0215
+  posterior_identity_switch_rate=0.7356
+  preclip_grad_norm=0.4712
+  grad_clip_applied=false
+
+A5 local-light:
+  step=175
+  loss_total=0.7646
+  loss_action_default_equiv=0.0840
+  loss_alignment=0.7541
+  loss_anchor_pv=2.3332
+  loss_pv_weak=2.5735
+  loss_mapg_routing=1.0535
+  loss_mapg_support_diversity=0.4024
+  aqr_same_role_support_overlap_max=0.5164
+  aqr_same_role_local_jaccard_max=0.2106
+  aqr_same_role_local_true_overlap_max=0.0212
+  aqr_local_source_mass_visual=0.5015
+  aqr_local_source_mass_point=0.2795
+  aqr_local_source_mass_temporal=0.2190
+  aqr_effective_anchor_count=23.24
+  posterior_recycle_rate=0.5405
+  posterior_recycle_logit_mean=0.1623
+  posterior_address_update_rate_mean=0.0186
+  posterior_identity_switch_rate=0.8200
+  preclip_grad_norm=9.4832
+  grad_clip_applied=true
+```
+
+Interpretation:
+
+```text
+1. Local-off remains viable. A7 has no local refinement residual and still
+   reaches lower recycle rate and higher address-update rate than A5 by
+   step 175. This means the local refiner is not necessary for early
+   non-collapse after normalized recycle repair.
+
+2. Local-light has slightly better loss_total, alignment, anchor_pv, and
+   routing at the same step, but it pays for this with higher recycle,
+   lower address update, higher identity switch, and one fixed-threshold
+   gradient clipping event. This is not a catastrophic failure, but it is
+   evidence that the residual is heavier than local-off.
+
+3. A5 local true-overlap is still low even when local Jaccard is nonzero.
+   The local refiner is not simply putting all same-role mass on exactly
+   the same local evidence. The remaining issue is broader assignment /
+   identity stability, not just local mass collapse.
+
+4. Same-role support overlap is no longer in the old 0.99 collapse regime,
+   but it has rebounded from the A7 step-100 low point. Do not finalize from
+   step 175; step 300 is needed to see whether the rebound stabilizes or
+   keeps increasing.
+```
+
+Current decision:
+
+```text
+continue both runs to step 300.
+
+If A7 stays comparable in loss and better in recycle/address/overlap, the
+maintained training profile should keep local refinement disabled or delayed.
+
+If A5 keeps a clear action/alignment advantage without further overlap or
+gradient deterioration, local-light can remain an optional evidence residual.
+```
