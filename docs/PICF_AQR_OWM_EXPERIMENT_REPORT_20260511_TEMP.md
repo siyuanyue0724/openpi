@@ -9011,3 +9011,34 @@ hypothesis that task/semantic/action context helps select useful active slots,
 whereas pure anchor-only isolation lacks enough task pressure to maintain a
 stable useful active set.
 ```
+
+Additional A5 step-250 observation:
+
+```text
+A5 step 250:
+  raw overlap: 0.999996
+  active overlap max/mean: 0.1023 / 0.0717
+  active_anchor_count: 4.57
+  inactive_anchor_fraction: 0.8096
+  posterior_recycle_rate: 0.9474
+  posterior_residual_summary_norm: 1375.03
+  loss_anchor_pv: 4.7546
+  loss_slot_jepa_raw_logged_only: 321.07
+  loss_total: 0.1028
+```
+
+Interpretation:
+
+```text
+This confirms that the A5 anchor-only line is not reproducing the old active
+collapse. Instead, it is over-pruning active capacity: active overlap is low
+because the selector has demoted most slots to inactive/dustbin. That is useful
+diagnostically, but it is not a production profile by itself. The remaining A5
+u2/b1 and max6 runs are still needed to separate three causes:
+
+  1. u1/b4 state-only burn-in makes isolated anchor training over-prune;
+  2. max_per_role=4 is too restrictive for anchor-only isolation;
+  3. anchor-only lacks task/action context and is therefore the wrong proxy.
+
+The A7 cotrain line remains the primary production signal.
+```
