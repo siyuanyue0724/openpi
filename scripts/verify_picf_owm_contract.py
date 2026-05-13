@@ -124,6 +124,7 @@ def run_checks() -> list[Check]:
                 "binding_signature_dim",
                 "local_refinement_binding_weight",
                 "recycle_normalize_residual_summary",
+                "recycle_residual_norm_mode",
                 "action_prefix_stopgrad",
                 "evidence_cache_address_weight",
             ),

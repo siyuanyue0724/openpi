@@ -1125,6 +1125,8 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
             setattr(args, _name, int(getattr(_SPEC_DEFAULTS, _name)))
     if getattr(args, "aqr_vjepa_temporal_mode", None) is None:
         args.aqr_vjepa_temporal_mode = str(_SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
+    if getattr(args, "recycle_residual_norm_mode", None) is None:
+        args.recycle_residual_norm_mode = str(_SPEC_DEFAULTS.recycle_residual_norm_mode)
     for _name in (
         "aqr_vjepa_temporal_include_delta",
         "vjepa_multiview_enabled",
@@ -4789,6 +4791,9 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 _SPEC_DEFAULTS.recycle_normalize_residual_summary,
             )
         ),
+        recycle_residual_norm_mode=str(
+            _arg_or_default("recycle_residual_norm_mode", _SPEC_DEFAULTS.recycle_residual_norm_mode)
+        ),
         recycle_logit_clamp=float(_arg_or_default("recycle_logit_clamp", _SPEC_DEFAULTS.recycle_logit_clamp)),
         legacy_local_refinement_opt_in=bool(
             _arg_or_default(
@@ -5890,7 +5895,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s recycle_residual_norm_mode=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -5925,6 +5930,7 @@ def train(args: argparse.Namespace) -> None:
                 ),
                 bool(getattr(args, "tracklet_memory_enabled", _SPEC_DEFAULTS.tracklet_memory_enabled)),
                 bool(getattr(args, "proposal_memory_enabled", _SPEC_DEFAULTS.proposal_memory_enabled)),
+                str(getattr(args, "recycle_residual_norm_mode", _SPEC_DEFAULTS.recycle_residual_norm_mode)),
                 bool(
                     getattr(
                         args,
@@ -6927,6 +6933,15 @@ def main() -> None:
         help=(
             "Normalize the dustbin residual summary before the recycle gate. "
             "This keeps reset probability from being driven by unbounded residual magnitude."
+        ),
+    )
+    parser.add_argument(
+        "--recycle-residual-norm-mode",
+        choices=("layernorm", "rmsnorm", "none"),
+        default=_SPEC_DEFAULTS.recycle_residual_norm_mode,
+        help=(
+            "Recycle residual-summary normalization family. layernorm is the verified default; "
+            "rmsnorm is the conservative ablation that preserves residual mean/DC; none is diagnostic only."
         ),
     )
     parser.add_argument("--recycle-logit-clamp", type=float, default=_SPEC_DEFAULTS.recycle_logit_clamp)

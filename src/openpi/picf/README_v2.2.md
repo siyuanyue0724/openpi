@@ -188,6 +188,16 @@ with cleaner recycle/address dynamics (`posterior_recycle_rate=0.503`,
 `posterior_address_update_rate=0.022`) and no clipping. Therefore local
 refinement remains reproducible but is archived out of the production default.
 
+2026-05-13 recycle-normalization closure: the next two-machine check isolates
+the trust-gate normalization family rather than adding modules. A7 runs the
+production candidate `recycle_residual_norm_mode=layernorm`; A5 runs the
+conservative ablation `recycle_residual_norm_mode=rmsnorm`. Both keep local
+refinement archived/off, action-prefix stop-gradient on, and high-risk
+predictive/denoising losses at zero. Quantile normalization is intentionally
+not used in forward because it is a distribution-level rank transform that can
+collapse extreme evidence and introduce batch/history dependence; it remains
+only an offline diagnostic option.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

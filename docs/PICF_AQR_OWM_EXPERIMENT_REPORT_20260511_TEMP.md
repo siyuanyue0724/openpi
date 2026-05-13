@@ -6951,3 +6951,149 @@ Next production-style long run should use:
   action_prefix_stopgrad=true
   high-risk predictive/denoising losses still zero
 ```
+
+### 2026-05-13 Recycle-Normalization Closure Plan
+
+#### Question
+
+The previous diagnosis identified normalized dustbin residual input as the
+root repair for recycle/address saturation. The remaining closure question is
+not whether to add another module. The remaining question is:
+
+```text
+Which causal, per-sample scale anchor should the recycle trust gate use?
+```
+
+The code now exposes:
+
+```text
+recycle_residual_norm_mode:
+  layernorm
+  rmsnorm
+  none
+```
+
+while retaining the compatibility switch:
+
+```text
+recycle_normalize_residual_summary=true
+```
+
+#### Mathematical Contract
+
+The recycle gate sees:
+
+```math
+z_j = [h^-_j,\ m_j,\ \bar S^-_j,\ N(r),\ \alpha^-_j]
+```
+
+where:
+
+```math
+r = \sum_i d_i o_i
+```
+
+is the dustbin-weighted residual evidence. The production failure was:
+
+```text
+||r|| became a magnitude shortcut for recycle/reset.
+```
+
+The maintained fix is to remove that radial shortcut:
+
+```math
+N_{LN}(r) = (r-\mu(r)) / \sqrt{\sigma^2(r)+\epsilon}
+```
+
+The ablation asks whether preserving the residual mean/DC component is useful:
+
+```math
+N_{RMS}(r) = r / \sqrt{mean(r^2)+\epsilon}
+```
+
+No quantile normalization is used in forward. Quantile transforms are
+distribution-level, non-linear rank maps; they are useful for offline
+diagnostics but inappropriate for an online per-step belief gate because they
+would introduce batch/history dependence or collapse extreme evidence to
+saturation boundaries.
+
+#### Experimental Matrix
+
+A7 is the production-candidate closure run:
+
+```text
+name:
+  picf_a7_recyclenorm_layernorm_closure300_20260513
+
+purpose:
+  validate the current maintained default after local-refinement archival.
+
+key settings:
+  recycle_normalize_residual_summary=true
+  recycle_residual_norm_mode=layernorm
+  legacy_local_refinement_opt_in=false
+  local_refinement_enabled=false
+  local_refinement_weight=0.0
+  action_prefix_stopgrad=true
+  lambda_slot_jepa=0.0
+  lambda_support_pred=0.0
+  lambda_binding_consistency=0.0
+  lambda_aqr_denoising=0.0
+```
+
+A5 is the conservative normalization ablation:
+
+```text
+name:
+  picf_a5_recyclenorm_rmsnorm_closure300_20260513
+
+purpose:
+  test whether preserving residual mean/DC through RMSNorm improves identity
+  stability without returning to norm-driven recycle saturation.
+
+key settings:
+  same as A7, except recycle_residual_norm_mode=rmsnorm.
+```
+
+#### Acceptance Criteria
+
+LayerNorm remains the maintained default if it has:
+
+```text
+posterior_recycle_rate <= RMSNorm + 0.03
+posterior_address_update_rate >= RMSNorm - 0.003
+same_role_support_overlap comparable or better
+no persistent grad clipping
+action_default_equiv comparable
+```
+
+RMSNorm becomes the next candidate only if it improves at least two identity
+stability metrics without increasing recycle saturation:
+
+```text
+lower identity_switch
+lower same_role_support_overlap
+higher address_update
+same or lower posterior_recycle_rate
+same or lower action_default_equiv
+```
+
+`none` is not part of this two-hour closure run because the old failure already
+showed unnormalized residual magnitude can dominate the trust gate.
+
+#### Self-Critique
+
+This is not a patch-on-patch repair:
+
+```text
+1. The module topology is unchanged.
+2. Local refinement stays archived/off.
+3. No predictive/denoising loss is enabled.
+4. No hard ownership rule, quantile map, or dataset-specific heuristic is added.
+5. The only tested variable is the scale anchor for one known failure point:
+   recycle trust-gate residual evidence.
+```
+
+If both LayerNorm and RMSNorm remain healthy, the next phase can move from
+diagnostic closure to a longer production-style run. If RMSNorm is unstable,
+the current LayerNorm repair is accepted as the clean default.

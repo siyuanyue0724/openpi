@@ -104,6 +104,7 @@ OWM_ARG_KEYS: tuple[str, ...] = (
     "proposal_read_weight",
     "bind_support_signature_weight",
     "bind_address_weight",
+    "recycle_residual_norm_mode",
     "legacy_local_refinement_opt_in",
     "local_refinement_enabled",
     "local_refinement_topk",

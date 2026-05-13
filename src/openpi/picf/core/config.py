@@ -193,6 +193,7 @@ class PicfCoreConfig:
     address_update_rate: float = 0.05
     address_update_max_rate: float = 0.20
     recycle_normalize_residual_summary: bool = True
+    recycle_residual_norm_mode: str = "layernorm"
     recycle_logit_clamp: float = 0.0
     # Legacy archived local top-k reread. The 2026-05-13 diagnostics showed the
     # normalized recycle fix is the root repair, while this residual adds

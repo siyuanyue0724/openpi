@@ -5814,10 +5814,19 @@ class PicfFullCore(nn.Module):
             # Recycle is a trust/reset probability; it should depend on the
             # residual evidence direction and context, not the unbounded norm of
             # the aggregated dustbin residual.
-            recycle_residual_summary = fn.layer_norm(
-                residual_summary,
-                normalized_shape=(int(residual_summary.shape[-1]),),
-            )
+            recycle_norm_mode = str(getattr(self.config, "recycle_residual_norm_mode", "layernorm")).lower()
+            if recycle_norm_mode in ("layernorm", "layer_norm"):
+                recycle_residual_summary = fn.layer_norm(
+                    residual_summary,
+                    normalized_shape=(int(residual_summary.shape[-1]),),
+                )
+            elif recycle_norm_mode in ("rmsnorm", "rms_norm"):
+                rms = torch.sqrt(torch.mean(residual_summary * residual_summary) + self.config.epsilon_residual)
+                recycle_residual_summary = residual_summary / torch.clamp(rms, min=self.config.epsilon_residual)
+            elif recycle_norm_mode in ("none", "off", "identity"):
+                recycle_residual_summary = residual_summary
+            else:
+                raise ValueError(f"Unsupported recycle_residual_norm_mode={recycle_norm_mode!r}")
         recycle_in = torch.cat(
             [
                 h_prior,

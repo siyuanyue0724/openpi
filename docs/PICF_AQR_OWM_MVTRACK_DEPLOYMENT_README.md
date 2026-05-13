@@ -90,6 +90,26 @@ Reason:
   extra recycle/gradient pressure in the A5/A7 attribution matrix.
 ```
 
+Recycle trust-gate normalization:
+
+```text
+Default:
+  recycle_normalize_residual_summary=true
+  recycle_residual_norm_mode=layernorm
+
+Ablation:
+  recycle_residual_norm_mode=rmsnorm
+
+Diagnostic only:
+  recycle_residual_norm_mode=none
+```
+
+LayerNorm removes the residual norm shortcut that previously saturated recycle.
+RMSNorm preserves the residual mean/DC component and is useful as a conservative
+ablation. Quantile normalization is not a production forward-path option because
+it is non-causal unless estimated from history, can be batch/distribution
+dependent, and can saturate extreme residual evidence into rank boundaries.
+
 Anchor-only probe contract:
 
 ```text
