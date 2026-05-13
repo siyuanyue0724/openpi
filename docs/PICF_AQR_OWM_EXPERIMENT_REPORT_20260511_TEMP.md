@@ -8394,3 +8394,44 @@ Fail interpretation if both A5 and A7 remain >0.95 overlap:
   ownership; the next repair must feed real object-correspondence evidence
   (tracklet/proposal/pseudo target), not another schedule-only change.
 ```
+
+#### First Ownership-Prior Scalar Read
+
+The first metrics point is already qualitatively different from the failed
+schedule-only task-pressure runs:
+
+```text
+Failed schedule-only reference:
+  A5 step25 same_role_overlap=0.9484
+  A7 step25 same_role_overlap=0.9532
+
+Ownership-prior run:
+  A5 step25 same_role_overlap=0.2298
+              recycle=0.4848
+              action_default_equiv=0.1397
+              temporal_view_mass_static=0.5721
+              temporal_view_mass_gripper=0.4279
+
+  A5 step50 same_role_overlap=0.2280
+              recycle=0.4588
+              action_default_equiv=0.1342
+
+  A7 step25 same_role_overlap=0.2176
+              recycle=0.4997
+              action_default_equiv=0.1530
+              temporal_view_mass_static=0.5930
+              temporal_view_mass_gripper=0.4070
+```
+
+Interpretation:
+
+```text
+1. The ownership prior is not merely changing a scalar loss. It changes the
+   support assignment geometry before Sinkhorn, exactly where the failure was
+   mathematically located.
+2. A5 held the low-overlap regime through step50, so this is not just a one-step
+   initialization artifact.
+3. A7 also starts in the low-overlap regime despite unroll=2, so the previous
+   collapse was not caused by insufficient recurrent window alone.
+4. The decisive gates remain step100 and step300 plus overlay inspection.
+```
