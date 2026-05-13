@@ -3980,3 +3980,45 @@ Important guard:
 For the exact mathematical derivation, experiment matrix, commands, and
 acceptance criteria, read the "2026-05-13 10-Hour Plan: Signature-Guided Local
 Candidate Repair" section in the experiment report above.
+
+## 2026-05-13 Training Anchor Overlay Diagnostic
+
+The live trainer now supports a low-frequency static-camera anchor overlay:
+
+```bash
+--anchor-overlay-interval 100 \
+--anchor-overlay-max-anchors 64
+```
+
+When enabled on the main rank, the trainer reuses the real training forward for
+that optimizer step and writes:
+
+```text
+<run_dir>/anchor_overlays/step_000100.png
+<run_dir>/anchor_overlays/step_000100.json
+```
+
+The PNG draws graph anchors as squares and posterior anchors as circles on the
+main static RGB image. The JSON keeps projected and non-projected anchors with
+world coordinates, pixel coordinates when visible, role id, confidence, support
+mass, recycle gate, geometry validity, and address-update rate.
+
+This diagnostic is intentionally not a model change. It adds no loss, runs no
+extra forward pass, and does not advance V-JEPA/tactile buffers outside the
+actual training step. Its purpose is to separate two different failure
+hypotheses:
+
+```text
+H_support:
+  aqr_same_role_support_overlap_max is high because visual support rows reuse
+  the same evidence, but 3D posterior anchors may still be spatially separated.
+
+H_physical:
+  same-role support overlap is high because actual 3D anchors/posterior slots
+  project into the same static-camera region.
+```
+
+Acceptance still requires metrics plus overlay inspection. A falling action
+loss alone is not sufficient if overlays show same-role posterior anchors
+occupying the same visible region or if JSON shows invisible/off-camera anchors
+absorbing most roles.

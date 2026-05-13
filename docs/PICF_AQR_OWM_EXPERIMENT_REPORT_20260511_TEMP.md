@@ -7536,3 +7536,89 @@ first checkpoint at 2500 steps: about 12-13 hours;
 
 The first 2500-step checkpoint is the next serious acceptance point. Earlier
 tail rows are useful for failure detection, not for final behavior claims.
+
+## 2026-05-13 A5 Overlay Warmup-To-Cotrain Diagnostic
+
+This section supersedes the older purely scalar anchor diagnostics for the next
+A5 run. The unresolved question is not just whether
+`aqr_same_role_support_overlap_max` is high; it is whether that high visual
+support overlap corresponds to actual physical/posterior anchor collapse in the
+main camera.
+
+### Code-Level Diagnostic
+
+The trainer now exposes:
+
+```bash
+--anchor-overlay-interval 100
+--anchor-overlay-max-anchors 64
+```
+
+Every enabled interval writes:
+
+```text
+anchor_overlays/step_XXXXXX.png
+anchor_overlays/step_XXXXXX.json
+```
+
+The implementation reuses the real training forward output. It does not do an
+extra no-grad forward because that would push the same frame through the
+V-JEPA/tactile buffers a second time and could perturb the recurrent evidence
+state. It snapshots detached CPU copies of graph and posterior anchor state from
+the actual step, then projects their 3D positions through the static camera
+model for visualization.
+
+Mathematical purpose:
+
+```math
+support\ overlap(i,j) \approx \langle p_i^{visual}, p_j^{visual}\rangle
+```
+
+is a support-space statistic. It does not by itself prove:
+
+```math
+\mu_i \approx \mu_j
+```
+
+where `mu/x` is the posterior/anchor 3D location. The overlay tests whether the
+support-space collapse is also a physical projected-location collapse.
+
+### A5 Staged Run Design
+
+The next A5 run is a two-stage diagnostic:
+
+```text
+Stage 1: quick anchor warmup
+  action losses off
+  predictive/high-risk aux losses off
+  foundation perception frozen
+  AQR/MVTrack anchor, support, binding, recycle/address path trainable
+  anchor overlays every 100 steps
+
+Stage 2: cotrain continuation
+  resume from the warmup checkpoint
+  tested burnin4/state_only recurrent warmup
+  PaliGemma cotrain enabled
+  prefix-stopgrad retained
+  predictive/high-risk aux losses still zero
+  anchor overlays every 100 steps
+```
+
+This is not a new architecture claim. It tests the old hypothesis that a brief
+anchor separation phase can move the system away from the degenerate all-support
+basin before scalar action pressure is reintroduced.
+
+### Acceptance Criteria
+
+```text
+1. Overlay PNG/JSON exists at step 100, 200, 300 and cotrain step 400+.
+2. posterior_recycle_rate stays below the old saturation zone.
+3. posterior_address_update_rate_mean remains nonzero.
+4. aqr_same_role_support_overlap_max is interpreted with overlay evidence:
+   high overlap is worse if the projected posterior anchors also co-locate.
+5. loss_action_default_equiv is used for old 4-22/ablation comparability.
+6. If action improves but overlays show physical co-location, the recipe is not
+   accepted as healthy even if scalar loss falls.
+```
+
+Tail commands and exact run ids must be updated after launch.

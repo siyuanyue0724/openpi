@@ -27,6 +27,7 @@ import numpy as np
 import torch
 import torch.distributed as dist
 from PIL import Image
+from PIL import ImageDraw
 from torch.nn.parallel import DistributedDataParallel
 from torch.nn.parameter import UninitializedParameter
 import tqdm.auto as tqdm
@@ -735,6 +736,274 @@ def _save_visual_diagnostics(
         "frames": records,
     }
     (diag_dir / "metadata.json").write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
+
+
+_ANCHOR_OVERLAY_ROLE_COLORS: tuple[tuple[int, int, int], ...] = (
+    (36, 137, 255),
+    (255, 149, 0),
+    (23, 190, 80),
+    (220, 80, 255),
+    (255, 64, 64),
+    (48, 220, 220),
+)
+
+
+def _to_cpu_tensor_or_none(value: torch.Tensor | None) -> torch.Tensor | None:
+    if value is None:
+        return None
+    return value.detach().to(device="cpu")
+
+
+def _json_scalar(value: Any) -> float | int | bool | str | None:
+    if value is None:
+        return None
+    if isinstance(value, (bool, int, float, str)):
+        return value
+    if isinstance(value, torch.Tensor):
+        detached = value.detach().to(device="cpu")
+        if detached.numel() == 1:
+            return _json_scalar(detached.item())
+        return None
+    if isinstance(value, np.generic):
+        return value.item()
+    return None
+
+
+def _anchor_source_snapshot(
+    *,
+    name: str,
+    x: torch.Tensor | None,
+    role_ids: torch.Tensor | None = None,
+    confidence: torch.Tensor | None = None,
+    support_mass: torch.Tensor | None = None,
+    recycle_gate: torch.Tensor | None = None,
+    geometry_valid: torch.Tensor | None = None,
+    address_update_rate: torch.Tensor | None = None,
+) -> dict[str, Any] | None:
+    x_cpu = _to_cpu_tensor_or_none(x)
+    if x_cpu is None or x_cpu.ndim != 2 or x_cpu.shape[-1] < 3 or x_cpu.shape[0] == 0:
+        return None
+    count = int(x_cpu.shape[0])
+
+    def _aligned(value: torch.Tensor | None, *, dtype: torch.dtype | None = None) -> torch.Tensor | None:
+        value_cpu = _to_cpu_tensor_or_none(value)
+        if value_cpu is None or value_cpu.numel() == 0:
+            return None
+        value_cpu = value_cpu.reshape(-1)
+        if value_cpu.shape[0] != count:
+            return None
+        if dtype is not None:
+            value_cpu = value_cpu.to(dtype=dtype)
+        return value_cpu
+
+    return {
+        "name": str(name),
+        "x": x_cpu[:, :3].to(dtype=torch.float32),
+        "role_ids": _aligned(role_ids, dtype=torch.long),
+        "confidence": _aligned(confidence, dtype=torch.float32),
+        "support_mass": _aligned(support_mass, dtype=torch.float32),
+        "recycle_gate": _aligned(recycle_gate, dtype=torch.float32),
+        "geometry_valid": _aligned(geometry_valid, dtype=torch.bool),
+        "address_update_rate": _aligned(address_update_rate, dtype=torch.float32),
+    }
+
+
+def _anchor_overlay_snapshot_from_output(output: Any, observation: PicfObservation) -> dict[str, Any] | None:
+    state = getattr(output, "state", None)
+    if state is None:
+        return None
+    sources: list[dict[str, Any]] = []
+    graph = getattr(state, "anchor_prior_graph", None)
+    if graph is not None:
+        graph_source = _anchor_source_snapshot(
+            name="graph",
+            x=getattr(graph, "anchor_x", None),
+            role_ids=getattr(graph, "anchor_roles", None),
+            confidence=getattr(graph, "anchor_confidence", None),
+            geometry_valid=getattr(graph, "geometry_valid", None),
+        )
+        if graph_source is not None:
+            sources.append(graph_source)
+    posterior = getattr(state, "posterior", None)
+    if posterior is not None:
+        posterior_source = _anchor_source_snapshot(
+            name="posterior",
+            x=getattr(posterior, "x", None),
+            role_ids=getattr(posterior, "role_ids", None),
+            confidence=getattr(posterior, "alpha", None),
+            support_mass=getattr(posterior, "support_mass", None),
+            recycle_gate=getattr(posterior, "recycle_gate", None),
+            address_update_rate=getattr(posterior, "address_update_rate", None),
+        )
+        if posterior_source is not None:
+            sources.append(posterior_source)
+    if not sources:
+        return None
+    debug = {}
+    debug_map = getattr(output, "debug", {}) or {}
+    for key in (
+        "aqr_same_role_support_overlap_max",
+        "aqr_effective_anchor_count",
+        "posterior_recycle_rate",
+        "posterior_identity_switch_rate",
+        "aqr_temporal_view_mass_0",
+        "aqr_temporal_view_mass_1",
+    ):
+        value = _json_scalar(debug_map.get(key))
+        if value is not None:
+            debug[key] = value
+    return {
+        "image": _rgb_uint8(observation.rgb_static),
+        "segment_id": int(observation.segment_id),
+        "step_id": int(observation.step_id),
+        "timestamp_s": float(observation.timestamp_s),
+        "prompt": str(observation.prompt or ""),
+        "sources": sources,
+        "debug": debug,
+    }
+
+
+def _camera_model_to_static_projection(core: PicfFullCore, points: torch.Tensor, image_shape: tuple[int, ...]) -> tuple[np.ndarray, np.ndarray]:
+    height = int(image_shape[0])
+    width = int(image_shape[1])
+    points_np = np.asarray(points.detach().to(device="cpu", dtype=torch.float32), dtype=np.float32)
+    if points_np.ndim != 2 or points_np.shape[-1] < 3 or points_np.shape[0] == 0:
+        return np.zeros((0, 2), dtype=np.float32), np.zeros((0,), dtype=bool)
+    camera = getattr(core, "camera_model", None)
+    if camera is None:
+        return np.zeros((points_np.shape[0], 2), dtype=np.float32), np.zeros((points_np.shape[0],), dtype=bool)
+    C_T_W = getattr(camera, "C_T_W", None)
+    if C_T_W is None:
+        W_T_C = getattr(camera, "W_T_C", None)
+        if W_T_C is None:
+            return np.zeros((points_np.shape[0], 2), dtype=np.float32), np.zeros((points_np.shape[0],), dtype=bool)
+        C_T_W = np.linalg.inv(np.asarray(W_T_C, dtype=np.float32))
+    C_T_W_np = np.asarray(C_T_W, dtype=np.float32)
+    if C_T_W_np.shape != (4, 4):
+        return np.zeros((points_np.shape[0], 2), dtype=np.float32), np.zeros((points_np.shape[0],), dtype=bool)
+
+    fx = getattr(camera, "fx", None)
+    fy = getattr(camera, "fy", None)
+    cx = getattr(camera, "cx", None)
+    cy = getattr(camera, "cy", None)
+    if fx is None or fy is None or cx is None or cy is None:
+        K = getattr(camera, "K", None)
+        if K is None:
+            return np.zeros((points_np.shape[0], 2), dtype=np.float32), np.zeros((points_np.shape[0],), dtype=bool)
+        K_np = np.asarray(K, dtype=np.float32)
+        fx, fy, cx, cy = K_np[0, 0], K_np[1, 1], K_np[0, 2], K_np[1, 2]
+
+    homo = np.concatenate([points_np[:, :3], np.ones((points_np.shape[0], 1), dtype=np.float32)], axis=-1)
+    points_cam = (C_T_W_np @ homo.T).T[:, :3]
+    z = points_cam[:, 2]
+    denom = np.maximum(z, 1e-6)
+    uv = np.zeros((points_np.shape[0], 2), dtype=np.float32)
+    uv[:, 0] = (float(fx) * points_cam[:, 0] / denom) + float(cx)
+    uv[:, 1] = (float(fy) * points_cam[:, 1] / denom) + float(cy)
+    visible = (
+        np.isfinite(uv[:, 0])
+        & np.isfinite(uv[:, 1])
+        & (z > 0.0)
+        & (uv[:, 0] >= 0.0)
+        & (uv[:, 0] <= float(width - 1))
+        & (uv[:, 1] >= 0.0)
+        & (uv[:, 1] <= float(height - 1))
+    )
+    return uv, visible
+
+
+def _save_anchor_overlay_diagnostic(
+    *,
+    output_dir: Path,
+    step: int,
+    snapshot: dict[str, Any] | None,
+    core: PicfFullCore,
+    max_anchors: int,
+) -> None:
+    if snapshot is None:
+        return
+    overlay_dir = output_dir / "anchor_overlays"
+    overlay_dir.mkdir(parents=True, exist_ok=True)
+    image = np.asarray(snapshot["image"], dtype=np.uint8)
+    pil = Image.fromarray(image.copy())
+    draw = ImageDraw.Draw(pil)
+    records: list[dict[str, Any]] = []
+    radius_by_source = {"graph": 4, "posterior": 6}
+    total_drawn = 0
+
+    for source_index, source in enumerate(snapshot.get("sources", [])):
+        name = str(source.get("name", f"source{source_index}"))
+        x = source.get("x")
+        if not isinstance(x, torch.Tensor):
+            continue
+        uv, visible = _camera_model_to_static_projection(core, x, image.shape)
+        count = min(int(x.shape[0]), max(int(max_anchors), 0))
+        roles = source.get("role_ids")
+        confidence = source.get("confidence")
+        support_mass = source.get("support_mass")
+        recycle_gate = source.get("recycle_gate")
+        geometry_valid = source.get("geometry_valid")
+        address_update_rate = source.get("address_update_rate")
+        for idx in range(count):
+            role = int(roles[idx].item()) if isinstance(roles, torch.Tensor) else -1
+            color = _ANCHOR_OVERLAY_ROLE_COLORS[role % len(_ANCHOR_OVERLAY_ROLE_COLORS)] if role >= 0 else (245, 245, 245)
+            px = float(uv[idx, 0]) if idx < uv.shape[0] else float("nan")
+            py = float(uv[idx, 1]) if idx < uv.shape[0] else float("nan")
+            is_visible = bool(visible[idx]) if idx < visible.shape[0] else False
+            rec = {
+                "source": name,
+                "index": int(idx),
+                "role": int(role),
+                "world_xyz": [float(v) for v in x[idx, :3].tolist()],
+                "pixel_xy": [px, py] if np.isfinite(px) and np.isfinite(py) else None,
+                "visible": is_visible,
+                "confidence": float(confidence[idx].item()) if isinstance(confidence, torch.Tensor) else None,
+                "support_mass": float(support_mass[idx].item()) if isinstance(support_mass, torch.Tensor) else None,
+                "recycle_gate": float(recycle_gate[idx].item()) if isinstance(recycle_gate, torch.Tensor) else None,
+                "geometry_valid": bool(geometry_valid[idx].item()) if isinstance(geometry_valid, torch.Tensor) else None,
+                "address_update_rate": (
+                    float(address_update_rate[idx].item()) if isinstance(address_update_rate, torch.Tensor) else None
+                ),
+            }
+            records.append(rec)
+            if not is_visible:
+                continue
+            radius = int(radius_by_source.get(name, 5))
+            x0, y0 = int(round(px)), int(round(py))
+            outline = color
+            if name == "posterior":
+                draw.ellipse((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=2)
+                draw.line((x0 - radius, y0, x0 + radius, y0), fill=outline, width=1)
+                draw.line((x0, y0 - radius, x0, y0 + radius), fill=outline, width=1)
+            else:
+                draw.rectangle((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=2)
+            label = ("p" if name == "posterior" else "g") + str(idx)
+            draw.text((x0 + radius + 2, y0 - radius - 2), label, fill=outline)
+            total_drawn += 1
+
+    header = f"step {int(step)} | visible anchors {total_drawn} | graph square, posterior circle"
+    draw.rectangle((0, 0, min(pil.width, max(420, 8 * len(header))), 18), fill=(0, 0, 0))
+    draw.text((4, 3), header, fill=(255, 255, 255))
+    image_path = overlay_dir / f"step_{int(step):06d}.png"
+    metadata_path = overlay_dir / f"step_{int(step):06d}.json"
+    pil.save(image_path)
+    metadata = {
+        "step": int(step),
+        "segment_id": int(snapshot.get("segment_id", -1)),
+        "step_id": int(snapshot.get("step_id", -1)),
+        "timestamp_s": float(snapshot.get("timestamp_s", 0.0)),
+        "prompt": str(snapshot.get("prompt", "")),
+        "image_shape": [int(v) for v in image.shape],
+        "max_anchors_per_source": int(max_anchors),
+        "debug": dict(snapshot.get("debug", {})),
+        "anchors": records,
+        "note": (
+            "Static-view projection of graph and posterior 3D anchors. "
+            "Invisible anchors are retained in JSON but not drawn. "
+            "This is a training diagnostic only and does not change the loss or forward path."
+        ),
+    }
+    metadata_path.write_text(json.dumps(metadata, indent=2, sort_keys=True), encoding="utf-8")
 
 
 def _default_vjepa_checkpoint(model_name: str) -> str | None:
@@ -1497,6 +1766,12 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(f"point_focus_sigma_m must be > 0, got {args.point_focus_sigma_m}.")
     if int(args.diagnostic_interval) < 0:
         raise ValueError(f"diagnostic_interval must be >= 0, got {args.diagnostic_interval}.")
+    if int(getattr(args, "anchor_overlay_interval", 0)) < 0:
+        raise ValueError(f"anchor_overlay_interval must be >= 0, got {getattr(args, 'anchor_overlay_interval', None)}.")
+    if int(getattr(args, "anchor_overlay_max_anchors", 64)) < 0:
+        raise ValueError(
+            f"anchor_overlay_max_anchors must be >= 0, got {getattr(args, 'anchor_overlay_max_anchors', None)}."
+        )
     for name in ("point_backbone_lr_scale", "visual_lr_scale", "tactile_lr_scale", "semantic_lr_scale"):
         value = float(getattr(args, name))
         if value <= 0.0:
@@ -3157,6 +3432,7 @@ class _PicfWindowTrainer(torch.nn.Module):
         window: _TransitionWindow,
         *,
         capture_visual_diagnostics: bool = False,
+        capture_anchor_overlay: bool = False,
         debug_phase_label: str | None = None,
     ) -> dict[str, Any]:
         totals: list[torch.Tensor] = []
@@ -3263,6 +3539,8 @@ class _PicfWindowTrainer(torch.nn.Module):
         if capture_visual_diagnostics:
             result["diagnostic_physical_visual_real_seq"] = []
             result["diagnostic_semantic_visual_real_seq"] = []
+        if capture_anchor_overlay:
+            result["diagnostic_anchor_overlay"] = None
         return result
 
     def forward(
@@ -3270,12 +3548,14 @@ class _PicfWindowTrainer(torch.nn.Module):
         window: _TransitionWindow,
         *,
         capture_visual_diagnostics: bool = False,
+        capture_anchor_overlay: bool = False,
         debug_phase_label: str | None = None,
     ) -> dict[str, Any]:
         if not bool(getattr(self.policy, "picf_enabled", True)):
             return self._forward_action_only_window(
                 window,
                 capture_visual_diagnostics=capture_visual_diagnostics,
+                capture_anchor_overlay=capture_anchor_overlay,
                 debug_phase_label=debug_phase_label,
             )
         previous = None
@@ -3283,6 +3563,7 @@ class _PicfWindowTrainer(torch.nn.Module):
         totals: list[torch.Tensor] = []
         physical_visual_real_seq: list[torch.Tensor | None] = []
         semantic_visual_real_seq: list[torch.Tensor | None] = []
+        anchor_overlay_snapshot: dict[str, Any] | None = None
         pending: _PendingTransitionLoss | None = None
         transition_count = len(window.frames) - 1
         train_start_index = min(max(int(self.burnin_steps), 0), transition_count - 1)
@@ -3348,6 +3629,8 @@ class _PicfWindowTrainer(torch.nn.Module):
                 action_chunk_target=action_chunk_target,
             )
             output = policy_forward.output
+            if capture_anchor_overlay:
+                anchor_overlay_snapshot = _anchor_overlay_snapshot_from_output(output, current)
             flow_override = policy_forward.flow_override
             policy_forward_sec = time.perf_counter() - step_start
             if debug_phase_label is not None:
@@ -3733,6 +4016,8 @@ class _PicfWindowTrainer(torch.nn.Module):
         if capture_visual_diagnostics:
             result["diagnostic_physical_visual_real_seq"] = physical_visual_real_seq
             result["diagnostic_semantic_visual_real_seq"] = semantic_visual_real_seq
+        if capture_anchor_overlay:
+            result["diagnostic_anchor_overlay"] = anchor_overlay_snapshot
         return result
 
 
@@ -5755,7 +6040,7 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s wandb=%s",
                 world_size,
                 args.training_strategy,
                 args.picf_mode,
@@ -5776,6 +6061,8 @@ def train(args: argparse.Namespace) -> None:
                 args.optimizer_sharding,
                 args.optimizer_checkpoint_mode,
                 bool(getattr(args, "window_activation_checkpointing", False)),
+                int(getattr(args, "anchor_overlay_interval", 0)),
+                int(getattr(args, "anchor_overlay_max_anchors", 64)),
                 bool(args.wandb_enabled and args.wandb_mode != "disabled"),
             )
             logging.info(
@@ -6064,13 +6351,23 @@ def train(args: argparse.Namespace) -> None:
             capture_visual_diagnostics = bool(
                 args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0)
             )
+            capture_anchor_overlay_step = bool(
+                is_main
+                and int(getattr(args, "anchor_overlay_interval", 0)) > 0
+                and ((step + 1) % int(getattr(args, "anchor_overlay_interval", 0)) == 0)
+            )
             if not trainer_module.policy.picf_enabled:
                 capture_visual_diagnostics = False
+                capture_anchor_overlay_step = False
             use_window_activation_checkpointing = bool(
                 getattr(args, "window_activation_checkpointing", False)
                 and not capture_visual_diagnostics
+                and not capture_anchor_overlay_step
             )
             for micro_step in range(args.accum_steps):
+                capture_anchor_overlay = bool(
+                    capture_anchor_overlay_step and micro_step == int(args.accum_steps) - 1
+                )
                 sample_start = time.perf_counter()
                 retry_count = 0
                 if debug_phase_enabled:
@@ -6206,6 +6503,7 @@ def train(args: argparse.Namespace) -> None:
                                 outputs = model(
                                     window,
                                     capture_visual_diagnostics=False,
+                                    capture_anchor_overlay=False,
                                     debug_phase_label=None,
                                 )
                                 outputs = dict(outputs)
@@ -6226,6 +6524,7 @@ def train(args: argparse.Namespace) -> None:
                             outputs = model(
                                 window,
                                 capture_visual_diagnostics=capture_visual_diagnostics,
+                                capture_anchor_overlay=capture_anchor_overlay,
                                 debug_phase_label=forward_label,
                             )
                         if debug_phase_enabled:
@@ -6355,6 +6654,25 @@ def train(args: argparse.Namespace) -> None:
                 if debug_phase_enabled:
                     logging.info("phase step=%s rank=%s visual_diagnostics_done", int(step + 1), rank)
 
+            if is_main and capture_anchor_overlay_step:
+                if debug_phase_enabled:
+                    logging.info("phase step=%s rank=%s anchor_overlay_begin", int(step + 1), rank)
+                try:
+                    _save_anchor_overlay_diagnostic(
+                        output_dir=output_dir,
+                        step=step + 1,
+                        snapshot=outputs.get("diagnostic_anchor_overlay"),
+                        core=trainer_module.core,
+                        max_anchors=int(getattr(args, "anchor_overlay_max_anchors", 64)),
+                    )
+                except Exception:
+                    logging.exception(
+                        "Failed to write anchor overlay diagnostic at step=%s; continuing training.",
+                        int(step + 1),
+                    )
+                if debug_phase_enabled:
+                    logging.info("phase step=%s rank=%s anchor_overlay_done", int(step + 1), rank)
+
             should_save = ((step + 1) % args.save_interval == 0) or ((step + 1) == args.num_train_steps)
             if should_save:
                 save_optimizer_state = _should_save_optimizer_state(args=args)
@@ -6428,6 +6746,22 @@ def main() -> None:
     )
     parser.add_argument("--diagnostic-interval", type=int, default=500)
     parser.add_argument("--diagnostic-visual-upscale", type=int, default=64)
+    parser.add_argument(
+        "--anchor-overlay-interval",
+        type=int,
+        default=0,
+        help=(
+            "Write static-camera anchor position overlays every N optimizer steps. "
+            "0 disables the diagnostic. The overlay reuses the real training forward "
+            "and saves PNG/JSON under anchor_overlays/ without changing losses."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-overlay-max-anchors",
+        type=int,
+        default=64,
+        help="Maximum graph/posterior anchors per source to draw in each anchor overlay image.",
+    )
     parser.add_argument("--accum-steps", type=int, default=1)
     parser.add_argument("--max-empty-window-retries", type=int, default=32)
     parser.add_argument("--unroll-steps", type=int, default=2)

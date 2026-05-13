@@ -144,6 +144,20 @@ def run_checks() -> list[Check]:
             "Trainer CLI and fallback loss construction must inherit the same production defaults as the dataclass contracts.",
         ),
         Check(
+            "trainer_anchor_overlay_diagnostic_is_side_effect_safe",
+            _contains(
+                trainer,
+                "--anchor-overlay-interval",
+                "_save_anchor_overlay_diagnostic",
+                "_anchor_overlay_snapshot_from_output(output, current)",
+                "capture_anchor_overlay_step",
+                "anchor_overlays",
+                "This is a training diagnostic only and does not change the loss or forward path.",
+                "and not capture_anchor_overlay_step",
+            ),
+            "Anchor position overlays must reuse the real training forward rather than run an extra buffer-mutating diagnostic forward.",
+        ),
+        Check(
             "pipeline_builds_temporal_tokens_and_priors",
             _contains(pipeline, "def _visual_maps", "PicfTemporalVisualSupportState", "vjepa_temporal_priors", "temporal_visual_reader", "view_ids"),
             "Pipeline must construct temporal support and route AQR over it.",
