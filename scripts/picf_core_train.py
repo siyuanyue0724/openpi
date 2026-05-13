@@ -1399,6 +1399,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
     for _name in (
         "aqr_vjepa_temporal_include_delta",
         "vjepa_multiview_enabled",
+        "aqr_ownership_prior_enabled",
         "evidence_cache_enabled",
         "tracklet_memory_enabled",
         "proposal_memory_enabled",
@@ -1419,6 +1420,9 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_pg_peak_threshold",
         "aqr_pg_bias_weight",
         "aqr_support_bias_clip",
+        "aqr_ownership_prior_weight",
+        "aqr_ownership_temporal_prior_weight",
+        "aqr_ownership_prior_uniform_mix",
         "evidence_cache_read_weight",
         "evidence_cache_innovation_downweight",
         "evidence_cache_address_weight",
@@ -3033,6 +3037,9 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_local_source_mass_proposal",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
+    "aqr_ownership_prior_enabled",
+    "aqr_ownership_prior_weight",
+    "aqr_ownership_temporal_prior_weight",
     "posterior_identity_switch_rate",
     "posterior_identity_switch_rate_stable",
     "posterior_identity_switch_rate_nonrecycled",
@@ -4992,6 +4999,18 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         aqr_support_bias_clip=float(
             _arg_or_default("aqr_support_bias_clip", _SPEC_DEFAULTS.aqr_support_bias_clip)
         ),
+        aqr_ownership_prior_enabled=bool(
+            _arg_or_default("aqr_ownership_prior_enabled", _SPEC_DEFAULTS.aqr_ownership_prior_enabled)
+        ),
+        aqr_ownership_prior_weight=float(
+            _arg_or_default("aqr_ownership_prior_weight", _SPEC_DEFAULTS.aqr_ownership_prior_weight)
+        ),
+        aqr_ownership_temporal_prior_weight=float(
+            _arg_or_default("aqr_ownership_temporal_prior_weight", _SPEC_DEFAULTS.aqr_ownership_temporal_prior_weight)
+        ),
+        aqr_ownership_prior_uniform_mix=float(
+            _arg_or_default("aqr_ownership_prior_uniform_mix", _SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix)
+        ),
         aqr_vjepa_temporal_mode=str(
             _arg_or_default("aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
         ),
@@ -6182,7 +6201,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s recycle_residual_norm_mode=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s recycle_residual_norm_mode=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -6196,6 +6215,22 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "aqr_pg_peak_threshold", _SPEC_DEFAULTS.aqr_pg_peak_threshold)),
                 float(getattr(args, "aqr_pg_bias_weight", _SPEC_DEFAULTS.aqr_pg_bias_weight)),
                 float(getattr(args, "aqr_support_bias_clip", _SPEC_DEFAULTS.aqr_support_bias_clip)),
+                bool(getattr(args, "aqr_ownership_prior_enabled", _SPEC_DEFAULTS.aqr_ownership_prior_enabled)),
+                float(getattr(args, "aqr_ownership_prior_weight", _SPEC_DEFAULTS.aqr_ownership_prior_weight)),
+                float(
+                    getattr(
+                        args,
+                        "aqr_ownership_temporal_prior_weight",
+                        _SPEC_DEFAULTS.aqr_ownership_temporal_prior_weight,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "aqr_ownership_prior_uniform_mix",
+                        _SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix,
+                    )
+                ),
                 str(getattr(args, "aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)),
                 int(getattr(args, "aqr_vjepa_temporal_tokens", _SPEC_DEFAULTS.aqr_vjepa_temporal_tokens)),
                 bool(
@@ -7196,6 +7231,26 @@ def main() -> None:
     parser.add_argument("--aqr-pg-peak-threshold", type=float, default=_SPEC_DEFAULTS.aqr_pg_peak_threshold)
     parser.add_argument("--aqr-pg-bias-weight", type=float, default=_SPEC_DEFAULTS.aqr_pg_bias_weight)
     parser.add_argument("--aqr-support-bias-clip", type=float, default=_SPEC_DEFAULTS.aqr_support_bias_clip)
+    parser.add_argument(
+        "--aqr-ownership-prior-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_ownership_prior_enabled,
+        help=(
+            "Enable low-amplitude role-local ownership priors for AQR support reads. "
+            "This breaks identical same-role assignment rows before Sinkhorn; it is not an auxiliary loss."
+        ),
+    )
+    parser.add_argument("--aqr-ownership-prior-weight", type=float, default=_SPEC_DEFAULTS.aqr_ownership_prior_weight)
+    parser.add_argument(
+        "--aqr-ownership-temporal-prior-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_ownership_temporal_prior_weight,
+    )
+    parser.add_argument(
+        "--aqr-ownership-prior-uniform-mix",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix,
+    )
     parser.add_argument(
         "--aqr-vjepa-temporal-mode",
         default=_SPEC_DEFAULTS.aqr_vjepa_temporal_mode,

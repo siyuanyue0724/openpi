@@ -13,6 +13,7 @@ from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
+from openpi.picf.core.contracts import PicfTemporalVisualSupportState
 from openpi.picf.core.contracts import PicfVLGroundingState
 from openpi.picf.core import pipeline as pipeline_module
 from openpi.picf.core.pipeline import PicfFullCore
@@ -276,6 +277,58 @@ def _make_tactile_packet(step_id: int, *, pose_shift: float = 0.0, contact_shift
         ),
         background_rgb_by_sensor={"digit": left_bg, "gelsight_mini": right_bg},
     )
+
+
+def test_aqr_ownership_prior_breaks_same_role_visual_symmetry(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_ownership_prior_weight=1.0,
+        aqr_ownership_prior_uniform_mix=0.05,
+    )
+    xs, ys = torch.meshgrid(torch.arange(4, dtype=torch.float32), torch.arange(4, dtype=torch.float32), indexing="xy")
+    grid = torch.stack([xs, ys], dim=-1).reshape(-1, 2)
+    roles = torch.zeros((4,), dtype=torch.long)
+
+    bias = core._aqr_visual_ownership_bias(
+        roles=roles,
+        visual_count=int(grid.shape[0]),
+        visual_grid_index=grid,
+        vl_grounding=None,
+    )
+
+    assert bias is not None
+    assert bias.shape == (4, 16)
+    assert not torch.allclose(bias[0], bias[1])
+    assert torch.unique(torch.argmax(bias, dim=-1)).numel() > 1
+
+
+def test_aqr_ownership_prior_breaks_temporal_multiview_symmetry(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_ownership_temporal_prior_weight=1.0,
+        aqr_ownership_prior_uniform_mix=0.05,
+    )
+    grid = torch.tensor([[0.0, 0.0], [3.0, 0.0], [0.0, 3.0], [3.0, 3.0]])
+    grid = grid.repeat(4, 1)
+    temporal = PicfTemporalVisualSupportState(
+        tokens=torch.zeros((16, 8), dtype=torch.float32),
+        time_ids=torch.arange(4, dtype=torch.long).repeat_interleave(4),
+        view_ids=torch.tensor([0, 0, 0, 0, 1, 1, 1, 1] * 2, dtype=torch.long),
+        grid_index=grid,
+        grid_hw=torch.tensor([4, 4], dtype=torch.long),
+        current_token_count=torch.tensor(4, dtype=torch.long),
+        valid=torch.ones((16,), dtype=torch.bool),
+    )
+    roles = torch.zeros((4,), dtype=torch.long)
+
+    bias = core._aqr_temporal_ownership_bias(roles=roles, temporal=temporal)
+
+    assert bias is not None
+    assert bias.shape == (4, 16)
+    assert not torch.allclose(bias[0], bias[1])
+    assert torch.unique(torch.argmax(bias, dim=-1)).numel() > 1
 
 
 def _visual_override(value: float) -> np.ndarray:

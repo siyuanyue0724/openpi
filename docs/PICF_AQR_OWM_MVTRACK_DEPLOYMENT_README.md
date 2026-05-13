@@ -110,6 +110,28 @@ ablation. Quantile normalization is not a production forward-path option because
 it is non-causal unless estimated from history, can be batch/distribution
 dependent, and can saturate extreme residual evidence into rank boundaries.
 
+2026-05-14 ownership-prior update:
+
+```text
+Default:
+  aqr_ownership_prior_enabled=true
+  aqr_ownership_prior_weight=0.35
+  aqr_ownership_temporal_prior_weight=0.20
+  aqr_ownership_prior_uniform_mix=0.05
+```
+
+Reason:
+  A5/A7 task-pressure warmup showed that schedule-only fixes do not solve
+  same-role ownership. The failure mode is mathematical: if two same-role AQR
+  rows enter Sinkhorn with identical support logits, Sinkhorn preserves that
+  equality and cannot create object ownership. The maintained fix is a
+  low-amplitude role-local coverage prior added directly to visual/temporal
+  support logits before AQR reads memory. This is an assignment prior, not a
+  new loss or a local-refinement residual. It seeds distinct object ownership
+  while preserving evidence dominance and then lets support-signature binding
+  and posterior correction stabilize the result.
+```
+
 Anchor-only probe contract:
 
 ```text

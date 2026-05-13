@@ -160,6 +160,14 @@ class PicfCoreConfig:
     aqr_pg_peak_threshold: float = 1.50
     aqr_pg_bias_weight: float = 0.0
     aqr_support_bias_clip: float = 4.0
+    # Low-amplitude ownership prior that breaks same-role assignment symmetry
+    # before AQR reads visual/temporal memory. This is an assignment prior, not
+    # an auxiliary loss: if raw attention rows are identical, Sinkhorn cannot
+    # create object ownership by itself.
+    aqr_ownership_prior_enabled: bool = True
+    aqr_ownership_prior_weight: float = 0.35
+    aqr_ownership_temporal_prior_weight: float = 0.20
+    aqr_ownership_prior_uniform_mix: float = 0.05
     aqr_vjepa_temporal_mode: str = "last_two_tokens"
     aqr_vjepa_temporal_tokens: int = 2
     aqr_vjepa_temporal_include_delta: bool = True

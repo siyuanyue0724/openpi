@@ -8123,6 +8123,139 @@ same_role_overlap > 0.90 on both A5 and A7, archive this as a negative result
 for schedule-only task-pressure warmup and move to an assignment-level fix.
 ```
 
+#### Final Read: Schedule-Only Task Pressure Fails Ownership
+
+The step-100/125 reads crossed the failure threshold and the A5/A7 tmux runs
+were stopped:
+
+```text
+A5 / unroll=1:
+  step 100:
+    same_role_overlap=0.9640
+    recycle_rate=0.0779
+    action_default_equiv=0.1338
+
+  step 125:
+    same_role_overlap=0.9960
+    recycle_rate=0.5223
+    action_default_equiv=0.1468
+
+A7 / unroll=2:
+  step 100:
+    same_role_overlap=0.9374
+    recycle_rate=0.6398
+    action_default_equiv=0.1356
+```
+
+Conclusion:
+
+```text
+1. Low task pressure is not sufficient to create stable same-role ownership.
+2. Unroll=2 is not the root fix; it is slower and still over the 0.90 overlap
+   failure threshold.
+3. Recycle normalization is no longer the only bottleneck. A5 can reach low
+   recycle while support ownership still collapses.
+4. The next fix must enter the AQR assignment model itself.
+```
+
+Mathematical root cause:
+
+```math
+W_{j,i}=\operatorname{softmax}_i(\ell_{j,i})
+```
+
+If two same-role query rows are already identical, then Sinkhorn or column
+balancing cannot create identity:
+
+```math
+\ell_{j,:}=\ell_{k,:}
+\Rightarrow
+\operatorname{Sinkhorn}(W)_{j,:}
+=
+\operatorname{Sinkhorn}(W)_{k,:}
+```
+
+The previous fixes were valid but incomplete:
+
+```text
+support-diversity loss:
+  penalizes overlap after the graph exists, but cannot reliably break a fully
+  symmetric assignment basin.
+
+task-pressure warmup:
+  gives action relevance, but the gradient is downstream and weak relative to
+  the identical support rows.
+
+binding-signature subspace:
+  reads same-object information once signatures differ, but identical support
+  rows produce nearly identical signatures.
+```
+
+The coherent root repair is an assignment-level ownership prior. It is not a
+new loss and not a local-refinement residual. It adds a low-amplitude role-local
+coverage prior directly to AQR support logits:
+
+```math
+\ell'_{j,i}
+=
+\ell_{j,i}
++
+\lambda_{own}
+\left(
+\log \pi^{own}_{j,i}
+-
+\frac{1}{N}\sum_i\log \pi^{own}_{j,i}
+\right)
+```
+
+where `pi_own` is built by farthest-point / mode coverage within each role over
+the typed visual or temporal support coordinates. This gives identical same-role
+queries distinct initial ownership while preserving current evidence dominance:
+
+```text
+lambda_own_visual = 0.35
+lambda_own_temporal = 0.20
+uniform_mix = 0.05
+```
+
+The design follows the object-binding probe evidence: pretrained ViTs can encode
+same-object structure, but a downstream policy should explicitly read and route
+that subspace instead of assuming it will remain stable under action gradients.
+The ownership prior provides the missing object-file / slot ownership seed; the
+existing binding-signature term then has non-identical supports to stabilize.
+
+Implementation:
+
+```text
+src/openpi/picf/core/config.py:
+  aqr_ownership_prior_enabled
+  aqr_ownership_prior_weight
+  aqr_ownership_temporal_prior_weight
+  aqr_ownership_prior_uniform_mix
+
+src/openpi/picf/core/pipeline.py:
+  _aqr_ownership_priors_from_coords
+  _aqr_visual_ownership_bias
+  _aqr_temporal_ownership_bias
+
+scripts/picf_core_train.py:
+  CLI flags and startup log entries for ownership prior settings.
+
+tests:
+  test_aqr_ownership_prior_breaks_same_role_visual_symmetry
+  test_aqr_ownership_prior_breaks_temporal_multiview_symmetry
+```
+
+This is the next A5/A7 experiment family. Acceptance at 100-300 steps:
+
+```text
+same_role_overlap should stay below 0.75, not briefly dip and recover to >0.9;
+recycle should not saturate at 0 or 1;
+action_default_equiv should remain comparable to the failed task-pressure runs;
+anchor overlays should show distinct physical ownership rather than only scalar
+improvement.
+```
+
 The smoke test passed on both A5 and A7, loading `spconv` and `torch_scatter`
 from `/root/openpi/.venv/lib/python3.11/site-packages` while keeping the active
 worktree `src` first in `PYTHONPATH`. The task-pressure tmux launches therefore

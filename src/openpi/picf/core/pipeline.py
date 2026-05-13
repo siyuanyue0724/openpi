@@ -2081,6 +2081,115 @@ class PicfFullCore(nn.Module):
             centered = torch.clamp(centered, min=-clip, max=clip)
         return centered
 
+    def _aqr_centered_log_prior_bias(self, priors: torch.Tensor) -> torch.Tensor:
+        if priors.numel() == 0:
+            return priors
+        prior = torch.clamp(priors.to(device=self.device, dtype=self.dtype), min=0.0)
+        prior = prior / torch.clamp(prior.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+        log_prior = torch.log(torch.clamp(prior, min=self.config.epsilon_a))
+        centered = log_prior - log_prior.mean(dim=-1, keepdim=True)
+        clip = max(float(self.config.aqr_support_bias_clip), 0.0)
+        if clip > 0.0:
+            centered = torch.clamp(centered, min=-clip, max=clip)
+        return centered
+
+    def _aqr_ownership_priors_from_coords(
+        self,
+        *,
+        roles: torch.Tensor,
+        coords: torch.Tensor,
+        source: torch.Tensor | None = None,
+        sigma: float | None = None,
+    ) -> torch.Tensor:
+        count = int(roles.numel())
+        support_count = int(coords.shape[0])
+        if count == 0 or support_count == 0:
+            return torch.zeros((count, support_count), device=self.device, dtype=self.dtype)
+        coords_t = coords.to(device=self.device, dtype=self.dtype)
+        uniform = torch.full((support_count,), 1.0 / max(support_count, 1), device=self.device, dtype=self.dtype)
+        if source is None:
+            source_t = uniform
+        else:
+            source_t = source.to(device=self.device, dtype=self.dtype)
+            if source_t.ndim > 1:
+                source_t = source_t.reshape(-1, support_count).mean(dim=0)
+            source_t = _normalize_rows(source_t, eps=self.config.epsilon_a)
+        priors = torch.zeros((count, support_count), device=self.device, dtype=self.dtype)
+        sigma_v = max(
+            float(self.config.mapg_visual_sigma_patches if sigma is None else sigma),
+            self.config.epsilon_a,
+        )
+        roles_t = roles.to(device=self.device, dtype=torch.long)
+        for role in torch.unique(roles_t).tolist():
+            indices = torch.nonzero(roles_t == int(role), as_tuple=False).squeeze(-1)
+            if indices.numel() == 0:
+                continue
+            mode_priors = self._mapg_mode_priors(
+                source_t,
+                coords_t,
+                count=int(indices.numel()),
+                sigma=sigma_v,
+            )
+            priors[indices] = mode_priors
+        mix = float(getattr(self.config, "aqr_ownership_prior_uniform_mix", 0.0))
+        if mix > 0.0:
+            mix = max(0.0, min(mix, 1.0))
+            priors = ((1.0 - mix) * priors) + (mix * uniform[None, :])
+        return _normalize_rows(priors, eps=self.config.epsilon_a)
+
+    def _aqr_visual_ownership_bias(
+        self,
+        *,
+        roles: torch.Tensor,
+        visual_count: int,
+        visual_grid_index: torch.Tensor,
+        vl_grounding: PicfVLGroundingState | None,
+    ) -> torch.Tensor | None:
+        if (
+            not bool(getattr(self.config, "aqr_ownership_prior_enabled", True))
+            or float(getattr(self.config, "aqr_ownership_prior_weight", 0.0)) == 0.0
+            or visual_count <= 0
+            or roles.numel() == 0
+            or visual_grid_index.numel() == 0
+        ):
+            return None
+        priors = self._mapg_visual_seed_priors(
+            vl_grounding,
+            roles=roles,
+            visual_count=visual_count,
+            visual_grid_index=visual_grid_index.to(device=self.device, dtype=self.dtype),
+        )
+        mix = float(getattr(self.config, "aqr_ownership_prior_uniform_mix", 0.0))
+        if mix > 0.0 and priors.numel() > 0:
+            mix = max(0.0, min(mix, 1.0))
+            uniform = torch.full_like(priors, 1.0 / max(int(priors.shape[-1]), 1))
+            priors = ((1.0 - mix) * priors) + (mix * uniform)
+        return float(self.config.aqr_ownership_prior_weight) * self._aqr_centered_log_prior_bias(priors)
+
+    def _aqr_temporal_ownership_bias(
+        self,
+        *,
+        roles: torch.Tensor,
+        temporal: PicfTemporalVisualSupportState | None,
+    ) -> torch.Tensor | None:
+        if (
+            temporal is None
+            or not bool(getattr(self.config, "aqr_ownership_prior_enabled", True))
+            or float(getattr(self.config, "aqr_ownership_temporal_prior_weight", 0.0)) == 0.0
+            or roles.numel() == 0
+            or temporal.tokens.numel() == 0
+            or temporal.grid_index.numel() == 0
+        ):
+            return None
+        grid = temporal.grid_index.to(device=self.device, dtype=self.dtype)
+        grid_hw_max = int(temporal.grid_hw.max().item()) if temporal.grid_hw.numel() > 0 else 1
+        scale = torch.as_tensor(float(max(grid_hw_max, 1)), device=self.device, dtype=self.dtype)
+        view = temporal.view_ids.to(device=self.device, dtype=self.dtype)[:, None] * scale
+        time = temporal.time_ids.to(device=self.device, dtype=self.dtype)[:, None] * (0.25 * scale)
+        coords = torch.cat([grid, view, time], dim=-1)
+        priors = self._aqr_ownership_priors_from_coords(roles=roles, coords=coords)
+        return float(self.config.aqr_ownership_temporal_prior_weight) * self._aqr_centered_log_prior_bias(priors)
+
     def _vl_slot_point_priors(
         self,
         grounding: PicfVLGroundingState | None,
@@ -2929,6 +3038,22 @@ class PicfFullCore(nn.Module):
             query_types=query_types,
             visual_count=visual_count,
         )
+        visual_grid_index = (
+            token_field.projective_geometry.visual_grid_index
+            if token_field.projective_geometry is not None
+            and token_field.projective_geometry.visual_grid_index.shape[0] == visual_count
+            else None
+        )
+        if visual_grid_index is not None:
+            ownership_bias = self._aqr_visual_ownership_bias(
+                roles=roles,
+                visual_count=visual_count,
+                visual_grid_index=visual_grid_index,
+                vl_grounding=vl_grounding,
+            )
+            if ownership_bias is not None:
+                visual_bias = ownership_bias if visual_bias is None else (visual_bias + ownership_bias)
+        temporal_bias = self._aqr_temporal_ownership_bias(roles=roles, temporal=token_field.temporal_visual)
         point_bias = self._aqr_point_bias(token_field, roles)
         posterior_bias = self._aqr_posterior_bias(previous, roles)
         cache_bias = None
@@ -3000,6 +3125,7 @@ class PicfFullCore(nn.Module):
                 q, temporal_weights = self.aqr_temporal_visual_reader(
                     q,
                     token_field.temporal_visual.tokens.to(device=self.device, dtype=self.dtype)[None, :],
+                    attn_bias=temporal_bias,
                 )
                 vjepa_temporal_priors = self._aqr_competitive_support(temporal_weights, eps=self.config.epsilon_a)
             if self.aqr_point_reader is not None and point_count > 0:
@@ -6869,6 +6995,11 @@ class PicfFullCore(nn.Module):
             debug["mapg_point_available"] = 1.0 if graph.point_priors is not None else 0.0
             debug["mapg_tactile_available"] = 1.0 if graph.tactile_priors is not None else 0.0
             debug["mapg_posterior_available"] = 1.0 if graph.posterior_priors is not None else 0.0
+            debug["aqr_ownership_prior_enabled"] = 1.0 if bool(getattr(self.config, "aqr_ownership_prior_enabled", True)) else 0.0
+            debug["aqr_ownership_prior_weight"] = float(getattr(self.config, "aqr_ownership_prior_weight", 0.0))
+            debug["aqr_ownership_temporal_prior_weight"] = float(
+                getattr(self.config, "aqr_ownership_temporal_prior_weight", 0.0)
+            )
             usage = torch.zeros((graph.anchor_tokens.shape[0],), device=self.device, dtype=self.dtype)
             for assignment in (graph.obs_slot_assignment, graph.task_assignment):
                 if assignment is not None and assignment.numel() > 0 and assignment.shape[-1] == usage.shape[0]:

@@ -4158,3 +4158,52 @@ training path and requires unavailable FFmpeg development libraries.
 They inherit `/root/openpi/.venv/lib/python3.11/site-packages` after `src` in
 `PYTHONPATH` to reuse the server's existing Sonata `spconv`/`torch_scatter`
 runtime without changing the active source checkout.
+
+### 2026-05-14 Assignment-Level Ownership Prior
+
+The A5/A7 task-pressure warmups are now archived as a negative result for
+schedule-only fixes:
+
+```text
+A5 step 125:
+  same_role_overlap=0.9960
+  recycle_rate=0.5223
+
+A7 step 100:
+  same_role_overlap=0.9374
+  recycle_rate=0.6398
+```
+
+This means the remaining bottleneck is not simply action warmup length or
+unroll length. The mathematical issue is that same-role AQR support rows can be
+identical before Sinkhorn/diversity losses see them:
+
+```math
+\ell_{j,:}=\ell_{k,:}
+\Rightarrow
+\operatorname{Sinkhorn}(W)_{j,:}
+=
+\operatorname{Sinkhorn}(W)_{k,:}
+```
+
+The maintained fix is an assignment-level ownership prior, not another
+auxiliary loss:
+
+```text
+aqr_ownership_prior_enabled = true
+aqr_ownership_prior_weight = 0.35
+aqr_ownership_temporal_prior_weight = 0.20
+aqr_ownership_prior_uniform_mix = 0.05
+```
+
+It adds a low-amplitude, role-local coverage prior to visual and temporal AQR
+support logits before support reads. This breaks exact same-role symmetry while
+leaving current evidence dominant. It is the coherent partner to the existing
+projected binding-signature subspace inspired by the IsSameObject/object-binding
+probe literature: first seed distinct object ownership, then stabilize it with
+binding signatures and posterior correction.
+
+See
+`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`, section
+`Final Read: Schedule-Only Task Pressure Fails Ownership`, for the failed
+warmup evidence, derivation, implementation files, and acceptance criteria.
