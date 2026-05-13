@@ -4022,3 +4022,58 @@ Acceptance still requires metrics plus overlay inspection. A falling action
 loss alone is not sufficient if overlays show same-role posterior anchors
 occupying the same visible region or if JSON shows invisible/off-camera anchors
 absorbing most roles.
+
+### 2026-05-13 A7 Unroll=2 Overlay Counterfactual
+
+The active A5 overlay run tests the fast candidate:
+
+```text
+burnin_steps=4
+burnin_mode=state_only
+unroll_steps=1
+effective_window_steps=5
+```
+
+A7 now runs the direct counterfactual with the same staged warmup/cotrain
+recipe and the same anchor-overlay diagnostic, but with:
+
+```text
+burnin_steps=4
+burnin_mode=state_only
+unroll_steps=2
+effective_window_steps=6
+```
+
+This is not expected to be faster in wall-clock time. It may provide stronger
+recurrent credit per optimizer step because two trainable suffix transitions
+receive gradient:
+
+```math
+L_{unroll2}=\frac{1}{2}(L_t+L_{t+1})
+```
+
+The acceptance question is whether this extra suffix transition improves
+anchor health, not just scalar action fitting. Promote it only if
+`aqr_same_role_support_overlap_max`, `posterior_recycle_rate`, address-update
+rate, and the overlay PNG/JSON are all healthier than A5. If action loss falls
+but overlays show physical co-location, the unroll=2 recipe is not accepted as
+a binding fix.
+
+Active A7 run ids:
+
+```text
+warmup:
+  picf_a7_overlay_unroll2_warm300_20260513_b9ad838
+cotrain:
+  picf_a7_overlay_unroll2_cotrain_from300_to900_20260513_b9ad838
+tmux:
+  picf_a7_overlay_unroll2_warmcotrain
+```
+
+Tail:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warmcotrain_20260513_b9ad838.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warm300_20260513_b9ad838/metrics.jsonl
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_cotrain_from300_to900_20260513_b9ad838/metrics.jsonl
+```

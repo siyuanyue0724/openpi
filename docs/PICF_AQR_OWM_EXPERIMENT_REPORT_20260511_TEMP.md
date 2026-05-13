@@ -7622,3 +7622,105 @@ basin before scalar action pressure is reintroduced.
 ```
 
 Tail commands and exact run ids must be updated after launch.
+
+### 2026-05-13 A7 Unroll=2 Overlay Counterfactual
+
+The earlier A7 30k layernorm run was archived and stopped because its scalar
+action diagnostics were improving while anchor-health metrics remained in the
+same-risk region:
+
+```text
+step 500..700:
+  loss_action_default_equiv ~= 0.062..0.069
+  aqr_same_role_support_overlap_max ~= 0.98..0.998
+  posterior_recycle_rate ~= 0.53..0.55
+```
+
+Continuing that run would mostly repeat the old failure mode: action loss can
+fall while same-role support reuse and recycle remain high. It also lacked the
+new per-100-step training anchor overlays, so it could not answer whether the
+support overlap corresponds to physical co-location in the main static view.
+
+The replacement A7 run is the strict unroll counterfactual to the active A5
+overlay run:
+
+```text
+machine: A7 / ssh -p 28060 root@36.139.225.68
+commit: b9ad838
+clean worktree: /root/openpi_a7_overlay_unroll2_b9ad838
+tmux: picf_a7_overlay_unroll2_warmcotrain
+
+warmup run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warm300_20260513_b9ad838
+
+cotrain run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_cotrain_from300_to900_20260513_b9ad838
+
+shared log:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warmcotrain_20260513_b9ad838.train_tmux.log
+```
+
+The controlled difference from A5 is:
+
+```text
+A5:
+  burnin_steps=4
+  burnin_mode=state_only
+  unroll_steps=1
+  effective_window_steps=5
+
+A7:
+  burnin_steps=4
+  burnin_mode=state_only
+  unroll_steps=2
+  effective_window_steps=6
+```
+
+All other important guards match the A5 overlay run: frozen Sonata/V-JEPA/
+AnyTouch, foundation visual mode, local refinement disabled, high-risk
+predictive losses zero, prefix-stopgrad retained, and anchor overlays every
+100 steps.
+
+The mathematical question is whether adding one more trainable suffix
+transition improves recurrent credit assignment:
+
+```math
+L_{unroll1}=L(b_t)
+```
+
+versus:
+
+```math
+L_{unroll2}=\frac{1}{2}\left[L(b_t)+L(b_{t+1})\right]
+```
+
+where both are preceded by the same no-grad state-only burn-in:
+
+```math
+b_{t-4:t-1}=U_{AQR}(o_{\le t-1}, b_{t-5})\quad\text{without gradient}
+```
+
+Possible outcomes:
+
+```text
+1. A7 unroll2 improves overlap/recycle and overlays show spatial separation:
+   recurrent suffix credit was helpful; consider unroll2 for the next longer
+   candidate despite slower step time.
+
+2. A7 unroll2 has similar or worse overlap/recycle than A5:
+   the bottleneck is not suffix length; keep burnin4/unroll1 for speed and
+   diagnose support evidence / physical anchor geometry instead.
+
+3. A7 action proxy improves faster but overlays co-locate:
+   unroll2 helps scalar action fitting but not healthy binding; do not promote
+   it as the production recipe.
+```
+
+Tail commands:
+
+```bash
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warmcotrain_20260513_b9ad838.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warm300_20260513_b9ad838/metrics.jsonl
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_cotrain_from300_to900_20260513_b9ad838/metrics.jsonl
+ls -lh /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warm300_20260513_b9ad838/anchor_overlays
+```
