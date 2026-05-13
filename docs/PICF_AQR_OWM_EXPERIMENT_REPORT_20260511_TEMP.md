@@ -6671,3 +6671,53 @@ step 25: first logged scalar sanity check
 step 125-150: early causal direction
 step 300: full two-hour attribution result
 ```
+
+#### Step-25 Sanity Readout
+
+The first scalar row was written by both machines. It is too early for an
+acceptance conclusion, but it rules out one simplistic explanation.
+
+```text
+A7 local-off:
+  step=25
+  loss_total=1.1109
+  loss_action_default_equiv=0.1995
+  aqr_same_role_support_overlap_max=0.9082
+  aqr_same_role_local_jaccard_max=0.0
+  aqr_same_role_local_true_overlap_max=0.0
+  aqr_effective_anchor_count=23.31
+  posterior_recycle_rate=0.5580
+  posterior_recycle_logit_mean=0.2333
+  posterior_address_update_rate_mean=0.0202
+
+A5 local-light:
+  step=25
+  loss_total=1.1164
+  loss_action_default_equiv=0.2151
+  aqr_same_role_support_overlap_max=0.8986
+  aqr_same_role_local_jaccard_max=0.4867
+  aqr_same_role_local_true_overlap_max=0.0253
+  aqr_effective_anchor_count=23.30
+  posterior_recycle_rate=0.5575
+  posterior_recycle_logit_mean=0.2310
+  posterior_address_update_rate_mean=0.0202
+```
+
+Interpretation:
+
+```text
+1. Early same-role support overlap is high in both local-off and local-light.
+   Therefore the step-25 overlap cannot be attributed to local refinement alone.
+2. A5 local-light has overlapping local top-k sets, but its weighted local true
+   overlap remains low. This means local candidate reuse and local mass reuse
+   must be separated; high Jaccard by itself is not collapse.
+3. Recycle is around 0.56 on both machines, matching the previous normalized
+   recycle diagnostic's early/tail level. This is not the old recycle=0.99
+   saturation, but it is still high enough that the step-125/150 trend matters.
+4. No gradient instability is visible at the first row: grad_norm is 0.87 on A7
+   and 1.58 on A5, both below the fixed clip threshold.
+```
+
+Do not stop either run on the step-25 row. The next causal discriminator is
+whether local-light separates from local-off by step 125-150 in action loss,
+support overlap, recycle trend, or local true overlap.
