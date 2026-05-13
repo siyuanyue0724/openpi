@@ -6371,3 +6371,43 @@ first comparable metrics: ~25 steps after launch;
 useful decision: ~125-200 steps;
 full 300-step check: about 1.5-2.5 hours depending on current I/O.
 ```
+
+Actual A7 deployment:
+
+```text
+machine:
+  A7 / ssh -p 28060 root@36.139.225.68
+
+commit:
+  b286c3e Refresh dataflow audit line refs
+
+tmux:
+  recyclenorm_a7
+
+run:
+  picf_a7_recyclenorm000_fresh300_20260513_b286c3e
+
+log base:
+  /mnt/calvin_eval_logs/picf_a7_recyclenorm000_fresh300_20260513_b286c3e
+
+checkpoint dir:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_recyclenorm000_fresh300_20260513_b286c3e
+```
+
+Live inspection:
+
+```bash
+ssh -p 28060 root@36.139.225.68
+BASE=$(cat /tmp/a7_recyclenorm_base.txt)
+tail -f "$BASE/train.log"
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_recyclenorm000_fresh300_20260513_b286c3e/metrics.jsonl
+```
+
+A5 control remains active for comparison:
+
+```bash
+ssh -p 29776 root@36.139.225.68
+BASE=$(cat /tmp/a5_sigcausal_base.txt)
+tail -f "$BASE/train.log"
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_siglocal000_fresh300_20260513_2a09b12/metrics.jsonl
+```
