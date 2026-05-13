@@ -143,6 +143,15 @@ close behavior acceptance or fine-instance grounding. The 300-step checkpoint
 payload was deleted to free `/mnt`; metrics, args, and train logs are retained
 in the experiment report paths.
 
+2026-05-13 next-stage attribution: do not reintroduce the previously rejected
+hard role competition or deterministic coverage-seeded local proposal. The next
+two-hour A5/A7 matrix isolates the existing local refinement residual instead:
+A7 disables local refinement, while A5 keeps the same normalized-recycle
+contract with `local_refinement_weight=0.05`. This tests whether the current
+typed-memory local refiner is necessary, too strong, or not the active
+bottleneck. The plan is recorded in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

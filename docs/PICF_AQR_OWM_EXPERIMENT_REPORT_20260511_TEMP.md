@@ -6486,3 +6486,155 @@ retained:
   /mnt/calvin_eval_logs/
     picf_a7_recyclenorm000_fresh300_20260513_b286c3e/train.log
 ```
+
+### 2026-05-13 Next-Stage Local-Refinement Attribution Plan
+
+#### Question
+
+After normalized recycle input fixed the recycle/address failure chain, the
+remaining question is not "how do we force stronger object ownership?" The
+remaining question is:
+
+```text
+Does the local refinement residual help coverage, or does it reintroduce
+same-role local-candidate reuse after AQR has already produced usable support?
+```
+
+This must be answered before adding any new loss, stronger address/cache
+inertia, or new proposal source.
+
+#### Self-critique Against Rejected Repairs
+
+The 2026-05-12 experiments already rejected hard role-wise local competition and
+deterministic coverage-seeded local proposals. Those failures are not ignored.
+Therefore the next experiment deliberately does not add a new coverage seed,
+ownership rule, IsSameObject loss, SAM/DINO proposal, or tracklet dependency.
+
+The only tested variables are existing residual strength and existence of local
+refinement:
+
+```text
+local refinement off:
+  tests whether the local refiner itself is currently necessary.
+
+local refinement light:
+  tests whether the existing typed-memory refiner is useful but too strong.
+```
+
+This is a module-attribution experiment, not a new architecture patch.
+
+#### Mathematical Contract
+
+Current local refinement applies:
+
+```math
+q'_j = q_j + \lambda_{local}(\bar m_j - q_j)
+```
+
+where `\bar m_j` is the top-k aggregation over existing typed evidence:
+
+```text
+visual, temporal, point, tracklet, proposal
+```
+
+The experiment varies only `\lambda_{local}` and the presence of this residual.
+It preserves:
+
+```text
+posterior authority
+normalized recycle gate
+action path
+cache residual gate
+no future leakage
+no additional loss pressure
+no hard object ownership
+```
+
+Acceptance should be judged by the joint vector:
+
+```text
+aqr_same_role_support_overlap_max
+aqr_same_role_local_jaccard_max
+aqr_same_role_local_true_overlap_max
+aqr_effective_anchor_count
+posterior_recycle_rate
+posterior_recycle_logit_mean
+posterior_address_update_rate_mean
+loss_action_default_equiv
+loss_total
+```
+
+If local-off is as healthy as local-on, local refinement is not justified for
+the current training profile and should remain disabled or delayed. If
+local-light keeps action/alignment benefits while lowering local Jaccard, the
+next maintained profile should reduce local residual strength rather than add a
+new module.
+
+#### Relation To 2025 Object-Binding Evidence
+
+The 2025 object-binding ViT result argues that pretrained ViTs can encode
+same-object pairwise relations in a low-dimensional subspace and that those
+relations guide attention. It does not imply that downstream training should
+add hard ownership or deterministic spatial seeds. For PICF, the consistent
+interpretation is:
+
+```text
+use the binding subspace as diagnostic/support evidence;
+do not let it override posterior correction;
+first verify whether the existing local residual preserves or destroys that
+subspace during cotrain.
+```
+
+#### Two-Hour Deployment Matrix
+
+A7 runs the strongest ablation:
+
+```text
+name:
+  picf_a7_recyclenorm_localoff_fresh300_20260513_6871e69
+
+overrides:
+  num_train_steps=300
+  save_interval=100000
+  burnin_steps=4
+  unroll_steps=1
+  action_prefix_stopgrad=true
+  local_refinement_enabled=false
+  local_refinement_weight=0.0
+  local_refinement_binding_weight=0.0
+  recycle_normalize_residual_summary=true
+  lambda_slot_jepa=0.0
+  lambda_support_pred=0.0
+  lambda_binding_consistency=0.0
+  lambda_aqr_denoising=0.0
+```
+
+A5 runs the light-residual variant:
+
+```text
+name:
+  picf_a5_recyclenorm_locallight_fresh300_20260513_6871e69
+
+overrides:
+  num_train_steps=300
+  save_interval=100000
+  burnin_steps=4
+  unroll_steps=1
+  action_prefix_stopgrad=true
+  local_refinement_enabled=true
+  local_refinement_topk=8
+  local_refinement_weight=0.05
+  local_refinement_binding_weight=0.0
+  recycle_normalize_residual_summary=true
+  lambda_slot_jepa=0.0
+  lambda_support_pred=0.0
+  lambda_binding_consistency=0.0
+  lambda_aqr_denoising=0.0
+```
+
+Expected first useful readout:
+
+```text
+step 125-150: early causal direction
+step 300: full two-hour attribution result
+```
