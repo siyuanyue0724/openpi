@@ -5799,12 +5799,21 @@ class PicfFullCore(nn.Module):
             dim=-1,
         )
         alpha = torch.sigmoid(self.activity_head(alpha_in)).squeeze(-1)
+        recycle_residual_summary = residual_summary
+        if bool(getattr(self.config, "recycle_normalize_residual_summary", True)):
+            # Recycle is a trust/reset probability; it should depend on the
+            # residual evidence direction and context, not the unbounded norm of
+            # the aggregated dustbin residual.
+            recycle_residual_summary = fn.layer_norm(
+                residual_summary,
+                normalized_shape=(int(residual_summary.shape[-1]),),
+            )
         recycle_in = torch.cat(
             [
                 h_prior,
                 support_mass_raw[:, None],
                 var_prior.mean(dim=-1, keepdim=True),
-                residual_summary[None, :].expand(h_prior.shape[0], -1),
+                recycle_residual_summary[None, :].expand(h_prior.shape[0], -1),
                 alpha_prior[:, None],
             ],
             dim=-1,

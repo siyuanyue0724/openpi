@@ -6237,3 +6237,137 @@ That would require either a deliberately engineered one-time migration path or
 a new same-architecture warm checkpoint. The former is not appropriate for this
 diagnostic unless we explicitly accept that most AQR/MVTrack parameters are
 newly initialized.
+
+### 2026-05-13 11:05 Fresh Local-Signature Causal Check: Early Result
+
+The fresh paired check is already sufficient to reject stronger local signature
+reranking as the next default.
+
+Observed A5 control, `local_refinement_binding_weight=0.0`:
+
+```text
+step 100:
+  loss_action_default_equiv = 0.08214
+  aqr_same_role_support_overlap_max = 0.33274
+  aqr_same_role_local_jaccard_max = 0.04121
+  aqr_same_role_local_true_overlap_max = 0.00388
+  aqr_effective_anchor_count = 23.16
+  posterior_recycle_rate = 0.81983
+  posterior_recycle_logit_mean = 1.5387
+  posterior_residual_summary_norm = 230.37
+  posterior_address_update_rate_mean = 0.00790
+
+step 150:
+  loss_action_default_equiv = 0.06677
+  aqr_same_role_support_overlap_max = 0.28883
+  aqr_same_role_local_jaccard_max = 0.12883
+  aqr_same_role_local_true_overlap_max = 0.00825
+  aqr_effective_anchor_count = 23.35
+  posterior_recycle_rate = 0.92052
+  posterior_recycle_logit_mean = 2.5168
+  posterior_residual_summary_norm = 239.57
+  posterior_address_update_rate_mean = 0.00341
+```
+
+Observed A7 test, `local_refinement_binding_weight=0.25`:
+
+```text
+step 100:
+  loss_action_default_equiv = 0.08891
+  aqr_same_role_support_overlap_max = 0.50247
+  aqr_same_role_local_jaccard_max = 0.16337
+  aqr_same_role_local_true_overlap_max = 0.04555
+  aqr_effective_anchor_count = 19.97
+  posterior_recycle_rate = 0.99037
+  posterior_recycle_logit_mean = 4.6980
+  posterior_residual_summary_norm = 261.89
+  posterior_address_update_rate_mean = 0.00042
+
+step 125:
+  loss_action_default_equiv = 0.07492
+  aqr_same_role_support_overlap_max = 0.68613
+  aqr_same_role_local_jaccard_max = 0.29834
+  aqr_same_role_local_true_overlap_max = 0.05239
+  aqr_effective_anchor_count = 21.70
+  posterior_recycle_rate = 0.99535
+  posterior_recycle_logit_mean = 5.4812
+  posterior_residual_summary_norm = 248.70
+  posterior_address_update_rate_mean = 0.00020
+```
+
+Interpretation:
+
+```text
+1. A5 proves the no-rerank profile can already reduce same-role support overlap
+   and local duplicate metrics early.
+2. A7 proves moderate local signature reranking worsens recycle saturation,
+   address-update starvation, effective anchor count, and local duplicate
+   metrics under the same fresh profile.
+3. Therefore the issue is not "the representation lacks same-object signal" and
+   not "local rerank weight should be increased." The immediate root is that
+   recycle probability can still saturate from the residual path.
+```
+
+This is mathematically consistent with the posterior update:
+
+```math
+bar h_j = (1-recycle_j)h_j^- + recycle_j h_{res}
+```
+
+When `recycle_j -> 1` for most slots, the prior identity path is erased, the
+address update rate collapses because it is gated by `(1-recycle_j)`, and
+multiple slots can be reset toward the same residual evidence. This is a reset
+dominance failure, not a missing-loss problem.
+
+### 2026-05-13 11:15 Root-Cause Repair And Two-Hour Deployment
+
+The next deployed repair is:
+
+```text
+recycle_normalize_residual_summary = true
+local_refinement_binding_weight = 0.0
+```
+
+Implementation:
+
+```math
+r = sum_i d_i o_i
+hat r = LayerNorm(r)
+recycle_j = sigma(f(h_j^-, support_j, var_j, hat r, alpha_j^-))
+```
+
+Only the recycle gate sees `hat r`. The residual heads still consume the
+original `r`, so the model does not lose residual content. The repair is
+therefore a trust-gate scale normalization, not a new supervision term and not
+a hand-coded ownership rule.
+
+Acceptance for the first A7 run:
+
+```text
+posterior_recycle_rate should stay well below the A7 0.99 saturation zone;
+posterior_address_update_rate_mean should not collapse toward 0;
+aqr_effective_anchor_count should stay close to A5 control;
+aqr_same_role_support_overlap_max should not rebound above 0.7 early;
+local_jaccard/local_true should not worsen versus A5 control;
+loss_action_default_equiv should remain comparable to A5 control.
+```
+
+Deployment order:
+
+```text
+1. Stop A7 local-rerank run because it has already failed the causal gate.
+2. Sync the recycle-normalization patch to A7.
+3. Start fresh 300-step A7 normalized-recycle run.
+4. Let A5 no-rerank control finish to 300 unless the GPU is needed.
+5. If A7 normalized-recycle passes the early gates, repeat on A5 or extend to
+   600/1200; if not, do not add losses. Inspect recycle feature scaling and
+   support-mass/dustbin evidence next.
+```
+
+Expected readout window:
+
+```text
+first comparable metrics: ~25 steps after launch;
+useful decision: ~125-200 steps;
+full 300-step check: about 1.5-2.5 hours depending on current I/O.
+```

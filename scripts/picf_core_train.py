@@ -4782,6 +4782,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         address_update_max_rate=float(
             _arg_or_default("address_update_max_rate", _SPEC_DEFAULTS.address_update_max_rate)
         ),
+        recycle_normalize_residual_summary=bool(
+            _arg_or_default(
+                "recycle_normalize_residual_summary",
+                _SPEC_DEFAULTS.recycle_normalize_residual_summary,
+            )
+        ),
         recycle_logit_clamp=float(_arg_or_default("recycle_logit_clamp", _SPEC_DEFAULTS.recycle_logit_clamp)),
         local_refinement_enabled=bool(
             _arg_or_default("local_refinement_enabled", _SPEC_DEFAULTS.local_refinement_enabled)
@@ -6899,6 +6905,15 @@ def main() -> None:
     )
     parser.add_argument("--address-update-rate", type=float, default=_SPEC_DEFAULTS.address_update_rate)
     parser.add_argument("--address-update-max-rate", type=float, default=_SPEC_DEFAULTS.address_update_max_rate)
+    parser.add_argument(
+        "--recycle-normalize-residual-summary",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.recycle_normalize_residual_summary,
+        help=(
+            "Normalize the dustbin residual summary before the recycle gate. "
+            "This keeps reset probability from being driven by unbounded residual magnitude."
+        ),
+    )
     parser.add_argument("--recycle-logit-clamp", type=float, default=_SPEC_DEFAULTS.recycle_logit_clamp)
     parser.add_argument(
         "--local-refinement-enabled",

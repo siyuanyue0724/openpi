@@ -676,7 +676,40 @@ a_j^+
 normalize(a_{role(j)}^{learned} + eta sum_i B_{j,i} a_i^{obs})
 ```
 
-### 8.4 Diagnostics
+### 8.4 Recycle gate scale invariant
+
+The recycle gate is a belief-filter trust/reset probability. It must not be
+driven by the unbounded norm of the aggregated dustbin residual:
+
+```math
+r = sum_i d_i o_i
+```
+
+because larger residual magnitude can saturate:
+
+```math
+recycle_j = sigma(f(h_j^-, support_j, var_j, r, alpha_j^-))
+```
+
+and then force:
+
+```math
+bar h_j = (1-recycle_j)h_j^- + recycle_j h_{res}
+```
+
+for many slots at once. That is not identity correction; it is reset
+dominance. The maintained gate input therefore uses:
+
+```math
+hat r = LayerNorm(r)
+recycle_j = sigma(f(h_j^-, support_j, var_j, hat r, alpha_j^-))
+```
+
+The residual heads still consume the original residual summary. Only the
+probability gate is normalized. This preserves residual content while making
+the reset decision scale-stable.
+
+### 8.5 Diagnostics
 
 Add:
 

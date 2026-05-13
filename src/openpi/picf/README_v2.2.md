@@ -115,6 +115,22 @@ available. The next repair must audit binding-signature scale and local top-k
 candidate selection before any new loss, stronger cache/address inertia, or
 slot-JEPA/support-prediction pressure is enabled.
 
+2026-05-13 root-cause recycle update: the fresh A5/A7 local-signature causal
+check invalidates stronger local reranking as the next default. A5
+`local_refinement_binding_weight=0.0` reached step 150 with
+`aqr_same_role_support_overlap_max≈0.289`, `local_jaccard≈0.129`, and healthy
+effective anchors, while A7 `local_refinement_binding_weight=0.25` reached
+`posterior_recycle_rate≈0.995`, near-zero address update, and lower effective
+anchor count by step 125. This points to recycle-gate scale sensitivity, not
+absence of a pairwise binding subspace. The maintained repair is
+`recycle_normalize_residual_summary=True`: normalize the dustbin residual
+summary before `recycle_head` so reset probability depends on evidence
+direction/context, not unbounded residual magnitude. This is a belief-filter
+trust-gate fix, not a new loss or heuristic ownership rule. A7 is assigned to
+the first fresh normalized-recycle run; A5 remains the no-rerank control until
+its current 300-step check finishes. Details and tail commands are in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)
