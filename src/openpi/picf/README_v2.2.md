@@ -4287,5 +4287,7 @@ uv run --no-sync pytest -q src/openpi/picf/core/training_test.py \
 
 The next 10-hour A5/A7 matrix is recorded in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+It is launched by
+[`scripts/run_picf_active_slot_matrix.sh`](/home/siyuanyue/Documents/openpi/scripts/run_picf_active_slot_matrix.sh).
 Its purpose is to test whether the active-object subset stays separated under
 task pressure and cotrain, not to claim CALVIN behavior acceptance.

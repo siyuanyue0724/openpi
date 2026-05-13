@@ -8754,6 +8754,7 @@ pressure.
 A5 primary isolation line:
   run 1: active/dustbin anchor_only, burnin=4, unroll=1, low task pressure
   run 2: same profile with unroll=2, burnin=1 or 2
+  run 3: same unroll=2/burnin=1 with a wider active cap for capacity sensitivity
 
 Purpose:
   isolate whether capacity-aware assignment stabilizes active object ownership
@@ -8762,12 +8763,49 @@ Purpose:
 A7 cotrain line:
   run 1: active/dustbin all-scope cotrain, frozen Sonata/V-JEPA/AnyTouch,
          PaliGemma trainable, unroll=2, burnin=1, prefix-stopgrad action path.
-  run 2: same cotrain line with a stricter active max-per-role or overlap
-         threshold if run 1 keeps too many active duplicates.
+  run 2: all-scope cotrain with low action weight and direct action-flow
+         gradients into PICF, to test whether action pressure itself destroys
+         the active subset.
+  run 3: prefix-stopgrad cotrain with a wider active cap for capacity
+         sensitivity.
 
 Purpose:
   test whether the repair survives realistic action/semantic pressure and
   whether the raw overlap can be safely reinterpreted through active metrics.
+```
+
+Launch script:
+
+```text
+scripts/run_picf_active_slot_matrix.sh
+```
+
+Remote launch commands:
+
+```bash
+# A5
+cd /root/openpi_recyclenorm_4ec25ae
+tmux new-session -d -s picf_a5_activecap_matrix \
+  'PICF_REPO_ROOT=/root/openpi_recyclenorm_4ec25ae scripts/run_picf_active_slot_matrix.sh a5'
+
+# A7
+cd /root/openpi_a7_overlay_unroll2_b9ad838
+tmux new-session -d -s picf_a7_activecap_matrix \
+  'PICF_REPO_ROOT=/root/openpi_a7_overlay_unroll2_b9ad838 scripts/run_picf_active_slot_matrix.sh a7'
+```
+
+Tail commands:
+
+```bash
+# A5 current matrix log directory
+tail -f /mnt/picf_run_logs/picf_a5_activecap_anchor_u1b4_a025_600_ac273a2.log
+tail -f /mnt/picf_run_logs/picf_a5_activecap_anchor_u2b1_a025_600_ac273a2.log
+tail -f /mnt/picf_run_logs/picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2.log
+
+# A7 current matrix log directory
+tail -f /mnt/picf_run_logs/picf_a7_activecap_cotrain_prefix_u2b1_a1_600_ac273a2.log
+tail -f /mnt/picf_run_logs/picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2.log
+tail -f /mnt/picf_run_logs/picf_a7_activecap_cotrain_prefix_u2b1_max6_a1_600_ac273a2.log
 ```
 
 Important negative criteria:
