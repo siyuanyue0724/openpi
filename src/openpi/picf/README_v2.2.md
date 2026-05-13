@@ -131,6 +131,18 @@ the first fresh normalized-recycle run; A5 remains the no-rerank control until
 its current 300-step check finishes. Details and tail commands are in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
 
+2026-05-13 A7 normalized-recycle completion: the fresh 300-step diagnostic
+reached `posterior_recycle_rate=0.540`, `posterior_recycle_logit_mean=0.161`,
+`posterior_address_update_rate_mean=0.0196`,
+`aqr_effective_anchor_count=23.25`, and
+`aqr_same_role_support_overlap_max=0.388` on the final row. The tail-5 averages
+were `recycle_rate=0.537`, `address_update=0.0197`, and
+`same_role_support_overlap=0.495`. This is sufficient to archive the
+recycle-saturation failure as fixed by normalized recycle inputs. It does not
+close behavior acceptance or fine-instance grounding. The 300-step checkpoint
+payload was deleted to free `/mnt`; metrics, args, and train logs are retained
+in the experiment report paths.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

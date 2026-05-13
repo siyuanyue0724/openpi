@@ -6411,3 +6411,78 @@ BASE=$(cat /tmp/a5_sigcausal_base.txt)
 tail -f "$BASE/train.log"
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_siglocal000_fresh300_20260513_2a09b12/metrics.jsonl
 ```
+
+#### A7 Normalized-Recycle Result
+
+The A7 normalized-recycle diagnostic completed the planned 300-step run.
+
+Final metrics at step 300:
+
+```text
+loss_total: 0.735033
+loss_action_default_equiv: 0.064488
+aqr_same_role_support_overlap_max: 0.387882
+aqr_same_role_local_jaccard_max: 0.268997
+aqr_same_role_local_true_overlap_max: 0.024479
+aqr_effective_anchor_count: 23.247017
+posterior_recycle_rate: 0.540068
+posterior_recycle_logit_mean: 0.160628
+posterior_address_update_rate_mean: 0.019599
+posterior_stable_slot_fraction: 0.111111
+```
+
+Tail-5 metric averages:
+
+```text
+loss_action_default_equiv: 0.065913
+aqr_same_role_support_overlap_max: 0.495418
+aqr_same_role_local_jaccard_max: 0.309623
+aqr_same_role_local_true_overlap_max: 0.028179
+aqr_effective_anchor_count: 23.208909
+posterior_recycle_rate: 0.537484
+posterior_recycle_logit_mean: 0.150239
+posterior_address_update_rate_mean: 0.019662
+posterior_stable_slot_fraction: 0.111111
+```
+
+Interpretation:
+
+```text
+1. The recycle-gate scale repair is validated for the diagnosed failure mode.
+   The previous failed A7 local-rerank trial saturated at recycle≈0.99 with
+   near-zero address update. With residual-summary normalization, A7 stays near
+   recycle≈0.54, recycle_logit≈0.15, and address_update≈0.02.
+
+2. The repair does not rely on a new loss, action suppression, or heuristic
+   ownership rule. It keeps the belief-filter semantics intact: recycle is a
+   trust/reset gate over normalized evidence direction rather than a proxy for
+   unbounded residual magnitude.
+
+3. Same-role support overlap no longer shows the 0.99 collapse pattern in this
+   run. The final row is 0.388 and the tail-5 average is 0.495. Local Jaccard
+   remains moderate, so the next theoretical stage should focus on coverage
+   and local-candidate distribution rather than recycle saturation.
+
+4. This is a diagnostic run, not a behavior checkpoint. The 300-step checkpoint
+   payload was deleted after metrics/log capture to free /mnt space. Preserved
+   evidence files are args.json, metrics.jsonl, stackdump files, and the train
+   log under /mnt/calvin_eval_logs.
+```
+
+Storage status after cleanup:
+
+```text
+deleted:
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a7_recyclenorm000_fresh300_20260513_b286c3e/300
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a7_recyclenorm000_fresh300_20260513_b286c3e/latest.pt
+
+retained:
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a7_recyclenorm000_fresh300_20260513_b286c3e/args.json
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a7_recyclenorm000_fresh300_20260513_b286c3e/metrics.jsonl
+  /mnt/calvin_eval_logs/
+    picf_a7_recyclenorm000_fresh300_20260513_b286c3e/train.log
+```
