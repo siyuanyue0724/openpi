@@ -198,6 +198,25 @@ not used in forward because it is a distribution-level rank transform that can
 collapse extreme evidence and introduce batch/history dependence; it remains
 only an offline diagnostic option.
 
+2026-05-13 recycle-normalization closure result: both 300-step closure runs
+completed cleanly. A7 LayerNorm ended with
+`loss_action_default_equiv=0.0653`,
+`aqr_same_role_support_overlap_max=0.3167`,
+`posterior_recycle_rate=0.5056`,
+`posterior_address_update_rate_mean=0.0213`, stable-slot switch `0.0`, and no
+gradient clipping; its tail-5 recycle/overlap were `0.5104` and `0.4731`. A5
+RMSNorm ended with `loss_action_default_equiv=0.0651`,
+`aqr_same_role_support_overlap_max=0.2863`,
+`posterior_recycle_rate=0.5187`,
+`posterior_address_update_rate_mean=0.0207`, stable-slot switch `0.0`, and no
+gradient clipping; its tail-5 recycle/overlap were `0.5212` and `0.4422`.
+RMSNorm is a healthy ablation but does not decisively improve identity
+stability. The maintained default remains
+`recycle_residual_norm_mode=layernorm`, with local refinement archived/off and
+high-risk predictive/denoising losses still zero. This closes the diagnosed
+recycle/address failure chain enough to move to a longer guarded production run;
+it does not replace CALVIN/video/anchor-overlay behavior acceptance.
+
 ## Quick Navigation
 
 - [`README.md`](/home/siyuanyue/Documents/openpi/README.md)

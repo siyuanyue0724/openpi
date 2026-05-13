@@ -7097,3 +7097,293 @@ This is not a patch-on-patch repair:
 If both LayerNorm and RMSNorm remain healthy, the next phase can move from
 diagnostic closure to a longer production-style run. If RMSNorm is unstable,
 the current LayerNorm repair is accepted as the clean default.
+
+#### Live Observation Schedule
+
+The two closure runs were launched on 2026-05-13 after commit `4ec25ae`.
+
+```text
+A7:
+  run: picf_a7_recyclenorm_layernorm_closure300_20260513_4ec25ae
+  machine: px-cloud2 / A7
+  tmux: recyclenorm_layernorm_a7
+  norm: layernorm
+
+A5:
+  run: picf_a5_recyclenorm_rmsnorm_closure300_20260513_4ec25ae
+  machine: px-cloud1 / A5
+  tmux: recyclenorm_rmsnorm_a5
+  norm: rmsnorm
+```
+
+At the mid/late observation point, both runs were alive, used real
+`visual_mode=encoder`, kept local refinement archived/off, and had no gradient
+clipping. A7 had reached metrics row `step=225`; A5 had reached metrics row
+`step=250`. The remaining wall-clock time was estimated from observed speed:
+
+```text
+A7:
+  progress log around 246/300
+  observed speed ~= 17.7-18.0 sec/step
+  sleep window to final readout: 1100 sec
+
+A5:
+  progress log around 254/300
+  observed speed ~= 17.2-18.2 sec/step
+  sleep window to final readout: 1000 sec
+```
+
+Do not finalize from the midpoint rows. The accepted readout is the final row
+plus tail-3/tail-5 means, because same-role overlap and recycle rate have shown
+batch-level spikes in earlier diagnostics.
+
+#### Theory Check Before Final Readout
+
+The successful outcome of this run would close a specific failure chain:
+
+```text
+unbounded dustbin residual norm
+  -> recycle/reset shortcut
+  -> address-update suppression or unstable reset pressure
+  -> misleading action loss improvement with unhealthy belief state
+```
+
+It would not close every open scientific question. In particular, action loss is
+necessary but not sufficient. A valid next phase requires:
+
+```text
+action_default_equiv decreases
+posterior_recycle_rate stays away from 0/1 saturation
+posterior_address_update_rate_mean remains nonzero
+aqr_same_role_support_overlap_max does not rebound to the 0.95-0.99 collapse zone
+stable-slot identity switch remains near zero
+effective anchor count remains high
+temporal / PG supports remain non-empty and non-uniform
+```
+
+This interpretation is also aligned with the recent object-binding and video
+world-model literature:
+
+```text
+Object-binding ViT result:
+  Pretrained ViTs can encode IsSameObject in a low-dimensional quadratic
+  pairwise subspace, but the paper's implication is not "attention alone solves
+  binding for control." It supports our moderate binding-signature term and
+  offline IsSameObject probe; it does not justify adding hard ownership losses
+  or direct slot-JEPA pressure before identity is stable.
+
+V-JEPA 2 / video world-model result:
+  Predictive video representations are useful for physical planning and robot
+  world models, but future latent evidence must remain a target or diagnostic,
+  not a current-step shortcut. This supports the current choice to keep
+  slot-JEPA/support-prediction lambdas at zero during this closure run.
+
+Object-centric / geometry-grounded VLA result:
+  Explicit object-centric and geometry-aware grounding improves robustness in
+  clutter, but the evidence argues for clean typed evidence and belief-state
+  correction, not for piling residual modules into the action path.
+```
+
+References checked for this reasoning:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  arXiv:2510.24709 / NeurIPS 2025 Spotlight
+
+V-JEPA 2: Self-Supervised Video Models Enable Understanding, Prediction and Planning
+  arXiv:2506.09985
+
+Clutter-Resistant Vision-Language-Action Models through Object-Centric and Geometry Grounding
+  arXiv:2512.22519
+```
+
+#### Decision After Final Rows
+
+If LayerNorm and RMSNorm are both healthy:
+
+```text
+1. Keep LayerNorm as default unless RMSNorm has a clear identity-stability win.
+2. Do not re-enable local refinement by default.
+3. Do not enable slot-JEPA/support-pred/binding-consistency yet.
+4. Move to a longer production-style run with the same guarded profile.
+5. Use action loss as a major metric, but retain recycle/address/overlap/stable
+   identity as hard health gates.
+```
+
+If either run shows recycle or overlap regression:
+
+```text
+1. Do not add modules or losses.
+2. Inspect recycle feature scaling, support assignment tails, and stable-slot
+   coverage first.
+3. Treat action loss as non-diagnostic until belief-state health is restored.
+```
+
+#### Final Readout: LayerNorm vs RMSNorm Closure
+
+Both runs completed the planned 300 steps and exited their tmux sessions.
+
+```text
+A7 LayerNorm final row:
+  step=300
+  loss_total=0.739813
+  loss_action_default_equiv=0.065339
+  loss_anchor_pv=2.323036
+  loss_pv_weak=2.242894
+  loss_mapg_cycle=0.458378
+  loss_mapg_support_diversity=0.305271
+  loss_mapg_routing=1.068413
+  aqr_same_role_support_overlap_max=0.316708
+  aqr_effective_anchor_count=23.2881
+  posterior_recycle_rate=0.505580
+  posterior_recycle_logit_mean=0.022324
+  posterior_address_update_rate_mean=0.021289
+  posterior_identity_switch_rate=0.797778
+  posterior_identity_switch_rate_stable=0.0
+  posterior_stable_slot_fraction=0.111111
+  preclip_grad_norm=0.737325
+  grad_clip_applied=false
+
+A7 LayerNorm tail-5:
+  loss_total=0.746271
+  loss_action_default_equiv=0.066861
+  aqr_same_role_support_overlap_max=0.473148
+  aqr_effective_anchor_count=23.2192
+  posterior_recycle_rate=0.510424
+  posterior_recycle_logit_mean=0.041720
+  posterior_address_update_rate_mean=0.021164
+  posterior_identity_switch_rate=0.769333
+  posterior_identity_switch_rate_stable=0.0
+  posterior_stable_slot_fraction=0.111556
+  preclip_grad_norm=0.645776
+```
+
+```text
+A5 RMSNorm final row:
+  step=300
+  loss_total=0.737683
+  loss_action_default_equiv=0.065142
+  loss_anchor_pv=2.319191
+  loss_pv_weak=2.249437
+  loss_mapg_cycle=0.437790
+  loss_mapg_support_diversity=0.302989
+  loss_mapg_routing=1.082569
+  aqr_same_role_support_overlap_max=0.286274
+  aqr_effective_anchor_count=23.3169
+  posterior_recycle_rate=0.518672
+  posterior_recycle_logit_mean=0.074726
+  posterior_address_update_rate_mean=0.020734
+  posterior_identity_switch_rate=0.773333
+  posterior_identity_switch_rate_stable=0.0
+  posterior_stable_slot_fraction=0.111111
+  preclip_grad_norm=0.386549
+  grad_clip_applied=false
+
+A5 RMSNorm tail-5:
+  loss_total=0.744731
+  loss_action_default_equiv=0.066739
+  aqr_same_role_support_overlap_max=0.442238
+  aqr_effective_anchor_count=23.1342
+  posterior_recycle_rate=0.521212
+  posterior_recycle_logit_mean=0.084918
+  posterior_address_update_rate_mean=0.020584
+  posterior_identity_switch_rate=0.783111
+  posterior_identity_switch_rate_stable=0.0
+  posterior_stable_slot_fraction=0.111111
+  preclip_grad_norm=0.804348
+```
+
+Decision against the pre-registered criteria:
+
+```text
+posterior_recycle_rate:
+  LayerNorm tail5 0.5104 <= RMSNorm tail5 0.5212 + 0.03
+  pass for LayerNorm.
+
+posterior_address_update_rate_mean:
+  LayerNorm tail5 0.02116 >= RMSNorm tail5 0.02058 - 0.003
+  pass for LayerNorm.
+
+same-role support overlap:
+  RMSNorm final and tail5 are slightly lower, while LayerNorm tail3 is lower.
+  Difference is small and not enough to override recycle/address preference.
+
+action_default_equiv:
+  both are essentially tied at tail5 ~= 0.0667.
+
+gradient health:
+  no persistent clipping in either run.
+```
+
+Conclusion:
+
+```text
+1. The normalized-recycle repair is accepted for this failure chain.
+2. RMSNorm is a healthy ablation but does not show a decisive identity-stability
+   win over LayerNorm.
+3. Keep `recycle_residual_norm_mode=layernorm` as the maintained default.
+4. Keep legacy local refinement archived/off.
+5. Do not enable slot-JEPA, support prediction, binding consistency, denoising,
+   ordinal loss, tracklet/proposal assumptions, or extra ownership rules yet.
+```
+
+#### Next Experiment Recommendation
+
+The next run should be a longer guarded production-style run, not another
+module-addition pass:
+
+```text
+profile:
+  recycle_normalize_residual_summary=true
+  recycle_residual_norm_mode=layernorm
+  legacy_local_refinement_opt_in=false
+  local_refinement_enabled=false
+  local_refinement_weight=0.0
+  action_prefix_stopgrad=true
+  use_foundation_backbones=true
+  visual_mode=encoder
+  perception_finetune_mode=frozen
+  semantic_mode=paligemma
+  PaliGemma trainable with semantic_lr_scale=0.25
+  lambda_slot_jepa=0.0
+  lambda_support_pred=0.0
+  lambda_binding_consistency=0.0
+  lambda_aqr_denoising=0.0
+```
+
+Recommended scale:
+
+```text
+short confirmation:
+  1200 steps if the goal is to catch medium-horizon overlap/recycle rebound.
+
+acceptance checkpoint:
+  2500-5000 steps if the goal is to compare against old 4-22 ablation action
+  loss and produce the first video/anchor-debug evidence.
+```
+
+Hard gates for the next run:
+
+```text
+1. action_default_equiv should continue decreasing.
+2. posterior_recycle_rate should not drift toward 0.95+ or collapse to a
+   degenerate all-no-recycle state that hides assignment errors.
+3. posterior_address_update_rate_mean should remain nonzero.
+4. aqr_same_role_support_overlap_max tail should stay far from the old 0.99
+   collapse zone; transient spikes are acceptable only if the tail recovers.
+5. posterior_identity_switch_rate_stable should remain near zero.
+6. posterior_stable_slot_fraction should be watched as the next bottleneck:
+   current runs stabilize only about 11% of slots, so improving stable coverage
+   is the next scientific target after this closure.
+```
+
+Interpretation:
+
+```text
+The previously blocking recycle/address failure is now closed well enough to
+move on. The remaining issue is no longer "which emergency patch prevents
+recycle collapse"; it is "does the guarded belief router maintain support and
+stable-slot coverage under longer action cotrain." That must be answered by a
+longer run plus CALVIN/video/anchor overlays, not by adding another auxiliary
+loss in this stage.
+```
