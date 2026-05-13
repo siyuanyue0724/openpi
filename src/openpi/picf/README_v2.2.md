@@ -4090,3 +4090,71 @@ tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warmcotrain
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warm300_20260513_b9ad838/metrics.jsonl
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_cotrain_from300_to900_20260513_b9ad838/metrics.jsonl
 ```
+
+### 2026-05-13 Task-Pressure Warmup Clarification
+
+The pure action-off overlay warmup is now archived as a negative control. It
+showed that recycle normalization can recover while same-role supports still
+collapse back into the 0.95-0.99 overlap band. The current hypothesis is that
+anchor warmup should include low-weight task pressure, not full cotrain and not
+zero-action pretraining:
+
+```text
+trainable scope:
+  anchor_only
+
+frozen:
+  Sonata / V-JEPA / AnyTouch
+
+disabled:
+  slot-JEPA, support-pred, binding-consistency, AQR denoising, local refinement
+
+enabled:
+  lambda_action_pos/rot/gripper = 0.25
+  no_picf_action_prefix_stopgrad
+```
+
+This is a symmetry-breaking test. Without any task gradient, same-role anchors
+can read the same high-confidence evidence and still satisfy weak evidence
+objectives. A low action gradient tests whether action relevance can separate
+otherwise similar supports without letting the policy head dominate the belief
+router.
+
+Active task-pressure warmup runs:
+
+```text
+A5:
+  picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838
+  burnin_steps=4, unroll_steps=1
+
+A7:
+  picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838
+  burnin_steps=4, unroll_steps=2
+```
+
+Tail:
+
+```bash
+# A5
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838/metrics.jsonl
+ls -lh /mnt/checkpoints/picf_core/picf_core/picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838/anchor_overlays
+
+# A7
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838/metrics.jsonl
+ls -lh /mnt/checkpoints/picf_core/picf_core/picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838/anchor_overlays
+```
+
+See
+`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`, section
+`2026-05-13 23:45 Task-Pressure Warmup Restart`, for the full objective,
+acceptance criteria, and failure interpretation.
+
+Remote environment detail is also recorded there: the active A5/A7 worktrees
+use `uv sync --project . --frozen --no-install-package av` because `av` is a
+transitive `lerobot` video I/O dependency that is not used by the PICF CALVIN
+training path and requires unavailable FFmpeg development libraries.
+They inherit `/root/openpi/.venv/lib/python3.11/site-packages` after `src` in
+`PYTHONPATH` to reuse the server's existing Sonata `spconv`/`torch_scatter`
+runtime without changing the active source checkout.

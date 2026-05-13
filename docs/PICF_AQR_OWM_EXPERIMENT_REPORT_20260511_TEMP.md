@@ -7859,3 +7859,237 @@ A7 is still before its first scalar logging point. It remains the controlled
 counterfactual for burnin4/state_only plus unroll2. It must not be used yet to
 conclude whether recurrent suffix length fixes or fails the overlap problem.
 ```
+
+### 2026-05-13 23:45 Task-Pressure Warmup Restart
+
+The previous A5/A7 overlay warmups were intentionally conservative, but they
+used `lambda_action_{pos,rot,gripper}=0.0` while also retaining
+`picf_action_prefix_stopgrad`. That profile is now archived as an important
+negative control rather than a production warmup:
+
+```text
+Pure action-off warmup result:
+  recycle can recover, but same-role support overlap stays high.
+
+A5 examples:
+  step 50:  same_role_overlap=0.9508, recycle=0.5527
+  step 100: same_role_overlap=0.9918, recycle=0.0992
+  step 150: same_role_overlap=0.9987, recycle=0.0094
+  step 200: same_role_overlap=0.9996, recycle=0.0097
+```
+
+This is not just a low-step issue. With action loss removed, same-role anchors
+can minimize the remaining weak alignment/diversity objectives by repeatedly
+reading the same high-confidence evidence. The physical task provides the
+missing symmetry-breaking signal: two supports that look similarly plausible in
+PG/V-JEPA space can still differ in action relevance.
+
+The replacement warmup is therefore not full cotrain and not a patchy heuristic.
+It is a task-pressured anchor warmup:
+
+```math
+L_{\text{taskwarm}}
+=
+0.25 L_{\text{anchor-pv}}
++0.05 L_{\text{cycle}}
++0.05 L_{\text{support-div}}
++0.02 L_{\text{geom-div}}
++0.25 L_{\text{action,pos}}
++0.25 L_{\text{action,rot}}
++0.25 L_{\text{action,grip}}
+```
+
+The important contract is:
+
+```text
+1. trainable scope remains anchor_only;
+2. Sonata / V-JEPA / AnyTouch remain frozen;
+3. high-risk predictive losses remain 0;
+4. local refinement remains disabled / legacy opt-in only;
+5. recycle residual summary remains normalized with LayerNorm;
+6. action prefix stopgrad is disabled only for this task-pressure warmup.
+```
+
+Mathematically, the change is the smallest coherent way to test the missing
+causal factor. The pure anchor objective sees only evidence consistency:
+
+```math
+q_j \rightarrow \operatorname{Read}(M_t)
+```
+
+but same-role query permutation is still nearly symmetric. The task-pressure
+objective adds a low-weight downstream gradient:
+
+```math
+\nabla_{\theta_{anchor}}
+L_{action}
+=
+\frac{\partial L_{action}}{\partial a_t}
+\frac{\partial a_t}{\partial b_t}
+\frac{\partial b_t}{\partial q_j}
+\frac{\partial q_j}{\partial \theta_{anchor}}
+```
+
+This is deliberately weaker than full action cotrain. It tests whether the
+action-relevant object identity can break the support symmetry without allowing
+the action head to dominate the belief router.
+
+#### Active A5 Task-Pressure Run
+
+```text
+machine:
+  A5 / ssh -p 29776 root@36.139.225.68
+
+worktree:
+  /root/openpi_recyclenorm_4ec25ae
+
+tmux:
+  picf_a5_taskwarm_a025_unroll1
+
+run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838
+
+tmux log:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838.train_tmux.log
+
+controlled settings:
+  unroll_steps=1
+  burnin_steps=4
+  burnin_mode=state_only
+  picf_trainable_scope=anchor_only
+  lambda_action_pos/rot/gripper=0.25
+  no_picf_action_prefix_stopgrad
+```
+
+#### Active A7 Task-Pressure Counterfactual
+
+```text
+machine:
+  A7 / ssh -p 28060 root@36.139.225.68
+
+worktree:
+  /root/openpi_a7_overlay_unroll2_b9ad838
+
+tmux:
+  picf_a7_taskwarm_a025_unroll2
+
+run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838
+
+tmux log:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838.train_tmux.log
+
+controlled difference from A5:
+  unroll_steps=2
+```
+
+#### Acceptance Criteria
+
+At step 100 the task-pressure warmup must already separate itself from the
+pure action-off negative control:
+
+```text
+primary:
+  aqr_same_role_support_overlap_max should be clearly below the 0.95-0.99
+  collapse band seen in pure action-off warmup.
+
+secondary:
+  posterior_recycle_rate should not saturate at 0 or 1;
+  posterior_address_update_rate_mean should remain nonzero;
+  aqr_effective_anchor_count should stay near the previous healthy range;
+  loss_action_default_equiv should not spike while overlap improves.
+
+visual:
+  anchor_overlays/step_000100.png must show physical separation, not only a
+  lower scalar overlap.
+```
+
+If both A5 and A7 still return to `same_role_overlap > 0.95`, the conclusion is
+not "increase warmup length." It means task-pressure alone is insufficient and
+the next root-cause work should move to object ownership in the assignment
+mechanism: support competition, actual tracklet/proposal input plumbing, or a
+cleaner per-object weak target. If A7 improves materially over A5, unroll2 is
+worth carrying into the next short cotrain despite its slower step time. If A5
+matches A7, keep unroll1 for speed.
+
+Tail commands:
+
+```bash
+# A5
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838/metrics.jsonl
+ls -lh /mnt/checkpoints/picf_core/picf_core/picf_a5_taskwarm_a025_unroll1_300_20260513_b9ad838/anchor_overlays
+
+# A7
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838.train_tmux.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838/metrics.jsonl
+ls -lh /mnt/checkpoints/picf_core/picf_core/picf_a7_taskwarm_a025_unroll2_300_20260513_b9ad838/anchor_overlays
+```
+
+#### Remote Environment Note
+
+The fresh remote worktrees initially failed before training because `uv sync`
+attempted to build `av==14.4.0` through the transitive `lerobot` dependency.
+That package requires system FFmpeg development libraries and is not on the
+PICF CALVIN training path used by these runs. The remote environment was
+therefore restored with:
+
+```bash
+uv sync --project . --frozen --no-install-package av
+PYTHONPATH=src:. uv run --no-sync --project . python -m py_compile \
+  scripts/picf_core_train.py \
+  src/openpi/picf/core/pipeline.py \
+  src/openpi/picf/core/training.py
+```
+
+This keeps the locked `uv` environment and installs the training dependencies,
+including `transformers==4.53.2` and `numpydantic==1.6.9`, without pulling an
+unneeded video I/O build dependency into the training container. The training
+scripts still run through `uv run --no-sync --project . torchrun ...`.
+
+The remote Sonata sparse-convolution runtime is provided by the pre-existing
+server environment:
+
+```bash
+PYTHONPATH=src:/root/openpi/.venv/lib/python3.11/site-packages \
+  uv run --no-sync --project . python - <<'PY'
+from openpi.picf.sonata.wrapper import _load_sonata_runtime
+print(_load_sonata_runtime()[0], _load_sonata_runtime()[1])
+PY
+```
+
+The smoke test passed on both A5 and A7, loading `spconv` and `torch_scatter`
+from `/root/openpi/.venv/lib/python3.11/site-packages` while keeping the active
+worktree `src` first in `PYTHONPATH`. The task-pressure tmux launches therefore
+set the inherited `PYTHONPATH` to that site-packages directory, and the run
+script expands it to `src:/root/openpi/.venv/lib/python3.11/site-packages`.
+
+#### First Scalar Check
+
+Both task-pressure warmups reached the first metrics point:
+
+```text
+A5 step 25:
+  same_role_support_overlap_max = 0.9484
+  posterior_recycle_rate = 0.5233
+  posterior_address_update_rate_mean = 0.0217
+  loss_action_default_equiv = 0.1410
+  loss_total = 0.1051
+  steps_per_sec = 0.0876
+
+A7 step 25:
+  same_role_support_overlap_max = 0.9532
+  posterior_recycle_rate = 0.5349
+  posterior_address_update_rate_mean = 0.0211
+  loss_action_default_equiv = 0.1499
+  loss_total = 0.1062
+  steps_per_sec = 0.0706
+```
+
+This is not yet a pass. It is a valid early signal: recycle is no longer
+saturating and address updates are nonzero, but same-role overlap is still near
+the previous collapse boundary. The decisive read remains step 100 plus the
+anchor overlay image. If step 100 remains in the 0.95-0.99 band, the failure is
+not "insufficient warmup length"; it indicates that weak task pressure alone
+does not create object ownership and the next mechanism must address assignment
+competition or actual object-correspondence evidence.
