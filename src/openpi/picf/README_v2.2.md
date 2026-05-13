@@ -4291,3 +4291,15 @@ It is launched by
 [`scripts/run_picf_active_slot_matrix.sh`](/home/siyuanyue/Documents/openpi/scripts/run_picf_active_slot_matrix.sh).
 Its purpose is to test whether the active-object subset stays separated under
 task pressure and cotrain, not to claim CALVIN behavior acceptance.
+
+2026-05-14 03:40 runtime gate: the A5 and A7 active-slot matrices are both
+running normally in tmux with live GPU load and advancing metrics. The first A5
+anchor-only branch shows low active overlap but over-prunes to about four
+active anchors with high recycle; it is an isolation result, not production
+success. The first A7 cotrain branch keeps a plausible active-anchor count and
+competitive action loss, but recycle is still high at step 200; it is a warning
+row, not acceptance. The queued A5/A7 branches are therefore required to
+separate unroll/burn-in shape, action-pressure scale, prefix-stopgrad, and
+active-capacity threshold. The acceptance gate is active overlap plus active
+capacity plus non-saturated recycle, not raw overlap alone and not action loss
+alone.

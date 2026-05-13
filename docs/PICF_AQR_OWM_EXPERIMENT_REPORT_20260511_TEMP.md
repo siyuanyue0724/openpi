@@ -9041,4 +9041,232 @@ u2/b1 and max6 runs are still needed to separate three causes:
   3. anchor-only lacks task/action context and is therefore the wrong proxy.
 
 The A7 cotrain line remains the primary production signal.
+
+### 2026-05-14 03:40 Active-Slot Matrix Runtime Check And Theory Gate
+
+The A5/A7 active-slot matrix is running normally on both machines. This is a
+runtime check, not an acceptance claim.
+
+Remote liveness:
+
+```text
+A5:
+  tmux: picf_a5_activecap_matrix, picf_a5_activecap_monitor
+  current first run:
+    picf_a5_activecap_anchor_u1b4_a025_600_ac273a2
+  GPU:
+    both ranks resident, ~17.2GB each, active utilization
+  progress:
+    step 350 logged; train tail advancing through step 380+
+
+A7:
+  tmux: picf_a7_activecap_matrix, picf_a7_activecap_monitor
+  current first run:
+    picf_a7_activecap_cotrain_prefix_u2b1_a1_600_ac273a2
+  GPU:
+    both ranks resident, high memory residency, active utilization
+  progress:
+    step 200 logged; train tail advancing beyond step 200
+```
+
+Current A5 status:
+
+```text
+step: 350
+loss_total: 0.1049
+loss_action_default_equiv: 0.1389
+loss_action_active7: 0.4841
+loss_anchor_pv: 4.7557
+loss_mapg_cycle: 0.4688
+loss_mapg_routing: 0.6571
+loss_mapg_support_diversity: 0.0410
+
+raw same_role_support_overlap_max: 0.99998
+active same_role_support_overlap_max: 0.0320
+active same_role_support_overlap_mean: 0.0233
+active_anchor_count: 4.23
+inactive_anchor_fraction: 0.8238
+posterior_recycle_rate: 0.9568
+posterior_residual_summary_norm: 3420.17
+```
+
+A5 interpretation:
+
+```text
+This is not the old "all active anchors overlap" failure. Active overlap is
+low because the capacity-aware selector demotes most duplicate candidates.
+
+It is also not a production success. Anchor-only pressure is over-pruning:
+active_anchor_count has fallen to about one active object per role and recycle
+has returned to a high-reset regime. Therefore A5 first run is useful only as
+an isolation result:
+
+  active/dustbin routing works;
+  anchor-only without enough task/semantic/action context is too sparse;
+  the remaining A5 u2/b1 and max6 branches are required to test whether this
+  is caused by unroll/burn-in shape or by an active-capacity threshold.
+```
+
+Current A7 status:
+
+```text
+step: 200
+loss_total: 0.1246
+loss_action_default_equiv: 0.0742
+loss_action_active7: 0.3332
+loss_anchor_pv: 4.2988
+loss_mapg_cycle: 0.4225
+loss_mapg_routing: 0.9625
+loss_mapg_support_diversity: 0.4761
+
+raw same_role_support_overlap_max: 0.8016
+active same_role_support_overlap_max: 0.4958
+active same_role_support_overlap_mean: 0.1487
+active_anchor_count: 13.39
+inactive_anchor_fraction: 0.4421
+posterior_recycle_rate: 0.9286
+posterior_residual_summary_norm: 758.80
+```
+
+A7 interpretation:
+
+```text
+A7 remains the production-relevant branch because it includes task/action/
+semantic cotrain and keeps many active anchors. However, the step-200 row is a
+real warning: recycle has returned to a high-reset regime while action loss is
+falling. This means the first A7 configuration is not accepted yet.
+
+The important point is that this is exactly what the matrix is meant to
+separate. The first A7 run tests full action weight plus prefix-stopgrad with
+max 4 active slots per role. The queued A7 runs test:
+
+  1. lower action weight and no prefix-stopgrad,
+     picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2;
+
+  2. same full action weight and prefix-stopgrad, but wider active capacity,
+     picf_a7_activecap_cotrain_prefix_u2b1_max6_a1_600_ac273a2.
+
+If lower action weight reduces recycle without destroying active overlap, the
+failure is cotrain pressure scale. If max6 reduces recycle/over-pruning while
+keeping action loss competitive, the failure is capacity threshold. If both
+fail, active-slot filtering alone is not the final root repair and we must move
+to a differentiable merge/consolidation or better object-correspondence source.
+```
+
+Mathematical gate for this 10-hour matrix:
+
+```text
+Let A_j be the support distribution for slot j and M_j be its active mask.
+
+Raw overlap:
+  max_{same role i,j} overlap(A_i, A_j)
+
+Active overlap:
+  max_{same role i,j: M_i=M_j=1} overlap(A_i, A_j)
+
+The repair is acceptable only if it keeps active overlap low while preserving
+enough active capacity:
+
+  active_overlap_max <= 0.60 tail average
+  active_anchor_count in a plausible range, roughly 8-16 for current CALVIN
+  posterior_recycle_rate not saturating near 0 or 1
+  action_default_equiv decreases without forcing recycle back to saturation
+
+Low active overlap with active_anchor_count near 4 is over-pruning, not object
+binding. Low action loss with recycle near 1 is not belief-state success.
+```
+
+Paper-to-code consistency:
+
+```text
+Object Binding in pretrained ViTs / IsSameObject:
+  supports the pairwise same-object subspace interpretation. Our
+  binding_signature_proj and offline probes address representation
+  separability; the current active-slot matrix addresses assignment/capacity,
+  not representation absence.
+
+MetaSlot:
+  supports dynamic effective slot count rather than treating the fixed AQR
+  query budget as the true object count. Our active_anchor mask is the current
+  non-learned, guarded version of this principle.
+
+Slot Merging:
+  warns that pure pruning can discard useful duplicate evidence; when multiple
+  slots represent the same object, differentiable consolidation can be better
+  than deletion. If this matrix shows persistent over-pruning or recycle
+  rebound, the next principled repair should be merge/consolidation, not a new
+  unrelated loss.
+
+References:
+  https://arxiv.org/abs/2510.24709
+  https://arxiv.org/abs/2505.20772
+  https://arxiv.org/abs/2603.11246
+```
+
+Operational decision:
+
+```text
+Do not stop the matrix at the first warning row. The first A5/A7 rows have
+already exposed the two intended edge cases: A5 over-pruning under anchor-only
+pressure, and A7 recycle rebound under full cotrain pressure. The queued runs
+are required to identify whether the controlling variable is unroll/burnin,
+action pressure, prefix-stopgrad, or active capacity.
+
+The matrix should continue unattended unless:
+  - a process exits,
+  - CUDA OOM occurs,
+  - metrics stop advancing for more than one expected log interval,
+  - losses become NaN/Inf.
+```
+
+03:40 second liveness poll:
+
+```text
+A5:
+  hostname: ZWWQO6
+  tmux alive: picf_a5_activecap_matrix, picf_a5_activecap_monitor
+  GPU: both ranks resident, about 17.2GB each, active utilization
+  latest metrics:
+    run: picf_a5_activecap_anchor_u1b4_a025_600_ac273a2
+    step: 400
+    loss_total: 0.1043
+    loss_action_default_equiv: 0.1346
+    loss_anchor_pv: 4.7565
+    loss_mapg_cycle: 0.4731
+    loss_mapg_routing: 0.6585
+    raw same_role_support_overlap_max: 0.99999
+    active same_role_support_overlap_max: 0.0488
+    active same_role_support_overlap_mean: 0.0344
+    active_anchor_count: 4.28
+    inactive_anchor_fraction: 0.8217
+    posterior_recycle_rate: 0.9940
+    grad_norm: 1.55
+
+A7:
+  hostname: qgE72e
+  tmux alive: picf_a7_activecap_matrix, picf_a7_activecap_monitor
+  GPU: both ranks resident with active utilization
+  latest metrics:
+    run: picf_a7_activecap_cotrain_prefix_u2b1_a1_600_ac273a2
+    step: 200
+    loss_total: 0.1246
+    loss_action_default_equiv: 0.0742
+    loss_anchor_pv: 4.2988
+    loss_mapg_cycle: 0.4225
+    loss_mapg_routing: 0.9625
+    raw same_role_support_overlap_max: 0.8016
+    active same_role_support_overlap_max: 0.4958
+    active same_role_support_overlap_mean: 0.1487
+    active_anchor_count: 13.39
+    inactive_anchor_fraction: 0.4421
+    posterior_recycle_rate: 0.9286
+    grad_norm: 2.23
+```
+
+The second poll confirms normal runtime, but not success. A5 is a clear
+over-pruning branch: active overlap is low only because most slots are demoted.
+A7 is the scientifically useful first branch: it has enough active capacity and
+low action loss, but recycle is too high. The matrix must therefore continue to
+the lower-action/no-prefix and max6-capacity branches before any architecture
+decision is made.
 ```
