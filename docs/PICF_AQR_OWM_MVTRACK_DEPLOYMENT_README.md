@@ -57,7 +57,7 @@ Implemented in code:
   posterior-slot-address-first cache query addressing with learned-query fallback
   measurement-innovation-gated support/address inertia and gated slot_address update
   address/content/role-aware cache attention bias with residual scaling retained
-  top-k latent local refinement over existing typed visual/temporal/point/tracklet/proposal memory
+  archived top-k latent local refinement over existing typed memory, disabled by default
   optional pseudo-proposal typed memory and AQR proposal reader
   training-only support denoising auxiliary, default weight 0
   matched slot-JEPA/support prediction targets
@@ -69,6 +69,25 @@ Still external-data dependent:
   tracklet tensors require an upstream offline tracker/preprocessor source.
   proposal tensors require an upstream detector/proposal source; SAM/DINO is not required by the maintained runtime.
   CALVIN/video behavior acceptance requires a new run on this checkout.
+```
+
+2026-05-13 cleanup update:
+
+```text
+Local refinement is no longer part of the production-default MVTrack profile.
+It is retained only as a legacy ablation path requiring explicit
+legacy_local_refinement_opt_in plus positive top-k and residual weight.
+
+Default:
+  legacy_local_refinement_opt_in=false
+  local_refinement_enabled=false
+  local_refinement_topk=0
+  local_refinement_weight=0.0
+
+Reason:
+  normalized recycle input fixed the recycle/address saturation chain, while
+  local top-k reread was not necessary for early non-collapse and introduced
+  extra recycle/gradient pressure in the A5/A7 attribution matrix.
 ```
 
 Anchor-only probe contract:

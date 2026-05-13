@@ -96,11 +96,11 @@ NODES: tuple[TraceNode, ...] = (
         needles=("def _build_aqr_anchor_graph", "visual_priors", "point_priors", "tactile_priors", "posterior_priors"),
     ),
     TraceNode(
-        name="Local typed-memory refinement",
+        name="Archived local typed-memory refinement",
         formula="Omega_j=TopK(p_visual_j) U TopK(p_temporal_j) U TopK(p_point_j) U TopK(p_track_j) U TopK(p_prop_j)",
-        invariant="Local refinement rereads existing typed evidence only; rejected role-competition and coverage-seed heuristics are not production routing paths.",
+        invariant="Local refinement is a legacy opt-in ablation path; production routing keeps it disabled and never reintroduces rejected role-competition or coverage-seed heuristics.",
         sources=("src/openpi/picf/core/pipeline.py", "src/openpi/picf/core/contracts.py"),
-        needles=("local_priors", "local_token_indices", "local_refinement_weight", "local_read"),
+        needles=("legacy_local_refinement_opt_in", "local_refinement_active", "local_priors", "local_refinement_weight", "local_read"),
     ),
     TraceNode(
         name="Projective point-visual geometry",

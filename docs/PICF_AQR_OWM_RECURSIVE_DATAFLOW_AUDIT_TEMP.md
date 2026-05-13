@@ -42,7 +42,7 @@ The latest OWM profile must be the default path; legacy routers and risky auxili
 Evidence:
 
 - `src/openpi/picf/core/config.py:143: aqr_mapg_enabled: bool = True`
-- `scripts/picf_core_train.py:6731: default="paligemma",`
+- `scripts/picf_core_train.py:6724: default="paligemma",`
 - `src/openpi/picf/core/training.py:71: lambda_mapg_cycle: float = 0.02`
 - `src/openpi/picf/core/training.py:76: lambda_slot_jepa: float = 0.0`
 
@@ -172,7 +172,7 @@ Evidence:
 - `src/openpi/picf/core/pipeline.py:2716: tactile_priors: torch.Tensor | None,`
 - `src/openpi/picf/core/pipeline.py:2759: posterior_priors: torch.Tensor | None,`
 
-## 9. Local typed-memory refinement - PASS
+## 9. Archived local typed-memory refinement - PASS
 
 Formula:
 
@@ -183,14 +183,15 @@ Omega_j=TopK(p_visual_j) U TopK(p_temporal_j) U TopK(p_point_j) U TopK(p_track_j
 Invariant:
 
 ```text
-Local refinement rereads existing typed evidence only; rejected role-competition and coverage-seed heuristics are not production routing paths.
+Local refinement is a legacy opt-in ablation path; production routing keeps it disabled and never reintroduces rejected role-competition or coverage-seed heuristics.
 ```
 
 Evidence:
 
+- `src/openpi/picf/core/pipeline.py:3065: bool(getattr(self.config, "legacy_local_refinement_opt_in", False))`
+- `src/openpi/picf/core/pipeline.py:3064: local_refinement_active = (`
 - `src/openpi/picf/core/pipeline.py:2974: local_priors = None`
-- `src/openpi/picf/core/pipeline.py:2975: local_token_indices = None`
-- `src/openpi/picf/core/pipeline.py:3161: q = q + (float(self.config.local_refinement_weight) * (local_read[None, :, :] - q))`
+- `src/openpi/picf/core/pipeline.py:3067: and float(self.config.local_refinement_weight) != 0.0`
 - `src/openpi/picf/core/pipeline.py:3158: local_read = torch.stack(local_vectors, dim=0).sum(dim=0)`
 
 ## 10. Projective point-visual geometry - PASS
@@ -353,7 +354,7 @@ Evidence:
 
 - `src/openpi/picf/core/training.py:394: def _aqr_support_denoising_loss(`
 - `src/openpi/picf/core/training.py:79: lambda_aqr_denoising: float = 0.0`
-- `scripts/picf_core_train.py:6571: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
+- `scripts/picf_core_train.py:6564: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
 - `src/openpi/picf/core/training_test.py:461: def test_aqr_denoising_loss_is_training_only_and_guarded(tmp_path: Path) -> None:`
 
 ## 18. Evidence cache write - PASS
@@ -413,8 +414,8 @@ Removed dead knobs/loss-looking placeholders and stale metrics that could create
 
 Evidence:
 
-- `scripts/verify_picf_owm_contract.py:291: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
-- `scripts/verify_picf_owm_contract.py:291: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:289: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:289: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
 - `docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md:2177: 3. Do not expose placeholder losses for cross-modal alignment, ordinal rank, or`
 
 ## Final Interpretation

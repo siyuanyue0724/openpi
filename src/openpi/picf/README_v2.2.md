@@ -60,7 +60,7 @@ v2 architecture plan plus the deployed code pass for static+wrist V-JEPA typed
 memory, optional tracklet/proposal episode-field threading, support-signature
 identity binding, posterior-address-first cache retrieval, innovation-gated
 address inertia based on current measurement mismatch rather than predictive
-cache residuals, latent local refinement, matched predictive losses,
+cache residuals, archived legacy latent local refinement, matched predictive losses,
 permutation-tolerant binding consistency, gated weak ordinal diagnostics, and
 training-only support denoising. It explicitly separates code-level runtime
 completion from behavior-level CALVIN/video acceptance; code-level runtime completion
@@ -163,6 +163,30 @@ does not yet decide the attribution question. It does show that local
 refinement is not required for early non-collapse and may add gradient/recycle
 pressure. Both runs should continue to step 300 before finalizing the next
 maintained profile.
+
+2026-05-13 local-refinement archive decision: local refinement is no longer a
+production-default branch. It is now a legacy ablation path that requires all
+of the following to be non-default: `--legacy-local-refinement-opt-in`,
+`--local-refinement-enabled`, a positive `--local-refinement-topk`, and a
+positive `--local-refinement-weight`. The default maintained profile uses
+`legacy_local_refinement_opt_in=False`, `local_refinement_enabled=False`,
+`local_refinement_topk=0`, and `local_refinement_weight=0.0`. The rationale is
+mathematical rather than cosmetic: normalized recycle input is the root
+belief-filter repair, while local top-k reread adds a second residual evidence
+path whose short probes showed extra recycle/gradient pressure without being
+necessary for early non-collapse. The code remains only so archived experiments
+can be reproduced; future cleanup may remove it entirely if long-run evidence
+does not justify keeping the branch.
+
+The completed 300-step A5/A7 attribution confirms this cleanup direction.
+A5 local-light achieved slightly better short-window alignment
+(`loss_total=0.723`, `same_role_support_overlap=0.369`) but had worse
+belief-filter trust (`posterior_recycle_rate=0.536`,
+`posterior_address_update_rate=0.019`) and one earlier clipping event. A7
+local-off achieved nearly identical action scale (`loss_action_default_equiv=0.066`)
+with cleaner recycle/address dynamics (`posterior_recycle_rate=0.503`,
+`posterior_address_update_rate=0.022`) and no clipping. Therefore local
+refinement remains reproducible but is archived out of the production default.
 
 ## Quick Navigation
 

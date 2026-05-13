@@ -194,12 +194,17 @@ class PicfCoreConfig:
     address_update_max_rate: float = 0.20
     recycle_normalize_residual_summary: bool = True
     recycle_logit_clamp: float = 0.0
-    local_refinement_enabled: bool = True
-    local_refinement_topk: int = 32
-    local_refinement_weight: float = 0.25
-    # Optional same-object subspace reranking for local candidate selection.
-    # This keeps the local refiner inside the binding-signature geometry instead
-    # of adding a new loss or hand-coded cross-anchor ownership rule.
+    # Legacy archived local top-k reread. The 2026-05-13 diagnostics showed the
+    # normalized recycle fix is the root repair, while this residual adds
+    # recycle/gradient pressure. Keep the implementation for reproducible
+    # ablations only; production config requires an explicit legacy opt-in.
+    legacy_local_refinement_opt_in: bool = False
+    local_refinement_enabled: bool = False
+    local_refinement_topk: int = 0
+    local_refinement_weight: float = 0.0
+    # Optional same-object subspace reranking for the archived local refiner.
+    # This must not be used as a production ownership rule without a fresh
+    # explicit ablation and README update.
     local_refinement_binding_weight: float = 0.0
     slot_jepa_enabled: bool = True
     support_prediction_enabled: bool = True

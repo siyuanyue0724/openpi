@@ -1131,6 +1131,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "evidence_cache_enabled",
         "tracklet_memory_enabled",
         "proposal_memory_enabled",
+        "legacy_local_refinement_opt_in",
         "local_refinement_enabled",
         "slot_jepa_enabled",
         "support_prediction_enabled",
@@ -4789,6 +4790,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             )
         ),
         recycle_logit_clamp=float(_arg_or_default("recycle_logit_clamp", _SPEC_DEFAULTS.recycle_logit_clamp)),
+        legacy_local_refinement_opt_in=bool(
+            _arg_or_default(
+                "legacy_local_refinement_opt_in",
+                _SPEC_DEFAULTS.legacy_local_refinement_opt_in,
+            )
+        ),
         local_refinement_enabled=bool(
             _arg_or_default("local_refinement_enabled", _SPEC_DEFAULTS.local_refinement_enabled)
         ),
@@ -5883,7 +5890,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s local_refinement_enabled=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -5918,7 +5925,15 @@ def train(args: argparse.Namespace) -> None:
                 ),
                 bool(getattr(args, "tracklet_memory_enabled", _SPEC_DEFAULTS.tracklet_memory_enabled)),
                 bool(getattr(args, "proposal_memory_enabled", _SPEC_DEFAULTS.proposal_memory_enabled)),
+                bool(
+                    getattr(
+                        args,
+                        "legacy_local_refinement_opt_in",
+                        _SPEC_DEFAULTS.legacy_local_refinement_opt_in,
+                    )
+                ),
                 bool(getattr(args, "local_refinement_enabled", _SPEC_DEFAULTS.local_refinement_enabled)),
+                float(getattr(args, "local_refinement_weight", _SPEC_DEFAULTS.local_refinement_weight)),
                 float(
                     getattr(
                         args,
@@ -6916,18 +6931,36 @@ def main() -> None:
     )
     parser.add_argument("--recycle-logit-clamp", type=float, default=_SPEC_DEFAULTS.recycle_logit_clamp)
     parser.add_argument(
+        "--legacy-local-refinement-opt-in",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.legacy_local_refinement_opt_in,
+        help=(
+            "Archived ablation-only opt-in for the legacy local top-k reread. "
+            "Production ignores --local-refinement-enabled unless this flag is also true."
+        ),
+    )
+    parser.add_argument(
         "--local-refinement-enabled",
         action=argparse.BooleanOptionalAction,
         default=_SPEC_DEFAULTS.local_refinement_enabled,
+        help=(
+            "Legacy archived local top-k reread switch. It remains inactive unless "
+            "--legacy-local-refinement-opt-in is also set."
+        ),
     )
     parser.add_argument("--local-refinement-topk", type=int, default=_SPEC_DEFAULTS.local_refinement_topk)
-    parser.add_argument("--local-refinement-weight", type=float, default=_SPEC_DEFAULTS.local_refinement_weight)
+    parser.add_argument(
+        "--local-refinement-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.local_refinement_weight,
+        help="Legacy archived local top-k reread residual weight; production default is 0.0.",
+    )
     parser.add_argument(
         "--local-refinement-binding-weight",
         type=float,
         default=_SPEC_DEFAULTS.local_refinement_binding_weight,
         help=(
-            "Optional same-object subspace reranking strength for local refinement top-k. "
+            "Archived optional same-object subspace reranking strength for legacy local refinement top-k. "
             "This uses the existing binding_signature projection and does not add a new loss."
         ),
     )

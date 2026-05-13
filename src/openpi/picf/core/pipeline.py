@@ -3057,7 +3057,17 @@ class PicfFullCore(nn.Module):
                 )
                 q = q_before_prop + (float(self.config.proposal_read_weight) * (prop_read - q_before_prop))
                 proposal_priors = self._aqr_competitive_support(prop_weights, eps=self.config.epsilon_a)
-            if bool(self.config.local_refinement_enabled):
+            # Archived legacy path: this top-k reread is intentionally not part
+            # of the production belief update unless both flags are explicitly
+            # enabled. The maintained path relies on AQR supports plus normalized
+            # posterior recycle gating; local reread remains only for ablations.
+            local_refinement_active = (
+                bool(getattr(self.config, "legacy_local_refinement_opt_in", False))
+                and bool(self.config.local_refinement_enabled)
+                and float(self.config.local_refinement_weight) != 0.0
+                and int(self.config.local_refinement_topk) > 0
+            )
+            if local_refinement_active:
                 local_vectors: list[torch.Tensor] = []
                 local_masses: list[torch.Tensor] = []
                 local_weight_rows: list[torch.Tensor] = []

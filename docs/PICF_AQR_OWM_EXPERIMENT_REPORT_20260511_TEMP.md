@@ -6809,3 +6809,145 @@ maintained training profile should keep local refinement disabled or delayed.
 If A5 keeps a clear action/alignment advantage without further overlap or
 gradient deterioration, local-light can remain an optional evidence residual.
 ```
+
+#### Local-Refinement Archive Decision
+
+The maintained code path now treats local refinement as legacy/archived rather
+than production routing.
+
+```text
+default config:
+  legacy_local_refinement_opt_in=false
+  local_refinement_enabled=false
+  local_refinement_topk=0
+  local_refinement_weight=0.0
+
+to reproduce archived local-refinement ablations, an operator must set all:
+  --legacy-local-refinement-opt-in
+  --local-refinement-enabled
+  --local-refinement-topk > 0
+  --local-refinement-weight > 0
+```
+
+Reasoning:
+
+```text
+1. The root repair for the observed recycle/address failure chain is normalized
+   recycle input, not a stronger local reread.
+
+2. A7 local-off remains viable through step 250 with no gradient clipping and
+   with lower recycle / higher address update than A5 local-light.
+
+3. A5 local-light gives slightly lower alignment/anchor loss but adds recycle,
+   identity-switch, and gradient pressure. This is a poor default tradeoff for
+   a maintained belief-state router.
+
+4. Removing it from the default profile preserves mathematical consistency:
+   AQR typed supports remain the measurement router; posterior correction is
+   the belief update; cache is residual historical context; local top-k reread
+   is not a second unproven residual evidence path in production.
+```
+
+This is not a claim that local evidence can never be useful. It is a cleanup
+decision: keep the archived path behind an explicit opt-in until a future
+long-run ablation proves that its benefit exceeds the extra instability.
+
+#### Step-300 Final Readout For Local-Refinement Attribution
+
+Both attribution runs completed 300 steps.
+
+```text
+A7 local-off final:
+  loss_total=0.7315
+  loss_action_default_equiv=0.0657
+  loss_anchor_pv=2.2986
+  loss_mapg_routing=1.1015
+  loss_mapg_support_diversity=0.3182
+  aqr_same_role_support_overlap_max=0.4350
+  aqr_effective_anchor_count=23.38
+  posterior_recycle_rate=0.5034
+  posterior_recycle_logit_mean=0.0138
+  posterior_address_update_rate_mean=0.0218
+  posterior_identity_switch_rate=0.7644
+  preclip_grad_norm=0.4163
+  grad_clip_applied=false
+
+A5 local-light final:
+  loss_total=0.7232
+  loss_action_default_equiv=0.0670
+  loss_anchor_pv=2.2480
+  loss_mapg_routing=1.0575
+  loss_mapg_support_diversity=0.3335
+  aqr_same_role_support_overlap_max=0.3688
+  aqr_same_role_local_jaccard_max=0.2158
+  aqr_same_role_local_true_overlap_max=0.0190
+  aqr_effective_anchor_count=23.31
+  posterior_recycle_rate=0.5359
+  posterior_recycle_logit_mean=0.1440
+  posterior_address_update_rate_mean=0.0191
+  posterior_identity_switch_rate=0.7244
+  preclip_grad_norm=0.8227
+  grad_clip_applied=false
+```
+
+Tail-3 averages:
+
+```text
+A7 local-off:
+  loss_total=0.7352
+  action_default_equiv=0.0666
+  same_role_support_overlap=0.4606
+  recycle_rate=0.5026
+  recycle_logit_mean=0.0102
+  address_update_rate=0.0220
+  identity_switch_rate=0.7600
+  preclip_grad_norm=0.5184
+
+A5 local-light:
+  loss_total=0.7259
+  action_default_equiv=0.0668
+  same_role_support_overlap=0.3538
+  local_true_overlap=0.0181
+  recycle_rate=0.5350
+  recycle_logit_mean=0.1401
+  address_update_rate=0.0192
+  identity_switch_rate=0.7407
+  preclip_grad_norm=0.9147
+```
+
+Final attribution:
+
+```text
+1. Local-light is not a simple failure. It improves loss_total, anchor_pv,
+   routing, and final same-role support overlap in this 300-step window.
+
+2. Local-light still carries a worse belief-filter trust profile: higher
+   recycle rate, higher recycle logit, lower address-update rate, and a prior
+   clipping event at step 175. These are exactly the variables that caused the
+   previous recycle/address failure chain.
+
+3. Local-off reaches nearly identical action_default_equiv, maintains healthy
+   effective anchor count, avoids clipping, and preserves the cleaner
+   recycle/address dynamics. Since the long-run objective is stable belief
+   cotrain rather than a small 300-step anchor-PV advantage, local-off is the
+   better maintained default.
+```
+
+Decision:
+
+```text
+Archive local refinement as a legacy opt-in ablation path.
+Do not remove the implementation yet, because it produced a measurable
+short-window alignment benefit and may be useful for future controlled
+experiments. Do remove it from the production default and make activation
+deliberately explicit.
+
+Next production-style long run should use:
+  legacy_local_refinement_opt_in=false
+  local_refinement_enabled=false
+  local_refinement_topk=0
+  local_refinement_weight=0.0
+  recycle_normalize_residual_summary=true
+  action_prefix_stopgrad=true
+  high-risk predictive/denoising losses still zero
+```

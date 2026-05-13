@@ -207,7 +207,9 @@ def run_static_checks() -> list[Finding]:
                 "evidence_cache_read_weight: float = 0.05",
                 "tracklet_memory_enabled: bool = True",
                 "proposal_memory_enabled: bool = True",
-                "local_refinement_enabled: bool = True",
+                "legacy_local_refinement_opt_in: bool = False",
+                "local_refinement_enabled: bool = False",
+                "local_refinement_weight: float = 0.0",
                 "lambda_aqr_denoising: float = 0.0",
             )
             and training.contains(
@@ -217,7 +219,7 @@ def run_static_checks() -> list[Finding]:
                 "lambda_aqr_denoising: float = 0.0",
             ),
             severity="fail",
-            detail="Runtime evidence branches may default on, but high-risk OWM training losses must stay zero by default.",
+            detail="Runtime evidence branches may default on, archived local refinement must stay off, and high-risk OWM training losses must stay zero by default.",
             evidence=config.refs("aqr_mapg_enabled", "tracklet_memory_enabled", "proposal_memory_enabled", "lambda_aqr_denoising")
             + training.refs("lambda_slot_jepa", "lambda_aqr_denoising"),
         )
@@ -319,8 +321,11 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
-            "local_refinement_uses_existing_typed_memory_not_visual_only",
-            "_add_local_component(visual_priors, token_field.visual_tokens" in aqr_graph
+            "legacy_local_refinement_uses_existing_typed_memory_not_visual_only",
+            "legacy_local_refinement_opt_in" in aqr_graph
+            and "local_refinement_active" in aqr_graph
+            and "self.config.local_refinement_enabled" in aqr_graph
+            and "_add_local_component(visual_priors, token_field.visual_tokens" in aqr_graph
             and "_add_local_component(" in aqr_graph
             and "vjepa_temporal_priors" in aqr_graph
             and "point_priors" in aqr_graph
@@ -331,10 +336,11 @@ def run_static_checks() -> list[Finding]:
             and "local_read" in aqr_graph,
             severity="fail",
             detail=(
-                "Local refinement must aggregate top-k evidence from existing typed memories without "
-                "reintroducing rejected role-competition or coverage-seed candidate heuristics."
+                "The archived local-refinement ablation path must require explicit opt-in and, when enabled, "
+                "aggregate top-k evidence from existing typed memories without reintroducing rejected "
+                "role-competition or coverage-seed candidate heuristics."
             ),
-            evidence=pipeline.refs("_add_local_component", "local_refinement_weight", "local_read"),
+            evidence=pipeline.refs("legacy_local_refinement_opt_in", "local_refinement_active", "_add_local_component", "local_read"),
         )
     )
     checks.append(
@@ -493,12 +499,14 @@ def run_static_checks() -> list[Finding]:
             trainer.contains(
                 "--tracklet-memory-enabled",
                 "--proposal-memory-enabled",
+                "--legacy-local-refinement-opt-in",
                 "--local-refinement-enabled",
                 "--lambda-aqr-denoising",
                 "loss_aqr_denoising",
             )
             and evidence.contains(
                 "proposal_memory_enabled",
+                "legacy_local_refinement_opt_in",
                 "lambda_aqr_denoising",
                 "aqr_proposal_support_entropy_mean",
                 "loss_aqr_denoising",
