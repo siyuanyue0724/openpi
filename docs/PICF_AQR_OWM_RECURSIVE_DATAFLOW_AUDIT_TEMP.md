@@ -22,7 +22,7 @@ The current update must start from previous posterior/predictive carry, not from
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:6294: def observe_step(`
+- `src/openpi/picf/core/pipeline.py:6303: def observe_step(`
 - `src/openpi/picf/core/pipeline.py:967: previous: PicfPreviousState | None`
 
 ## 2. Production default profile - PASS
@@ -42,7 +42,7 @@ The latest OWM profile must be the default path; legacy routers and risky auxili
 Evidence:
 
 - `src/openpi/picf/core/config.py:143: aqr_mapg_enabled: bool = True`
-- `scripts/picf_core_train.py:6703: default="paligemma",`
+- `scripts/picf_core_train.py:6709: default="paligemma",`
 - `src/openpi/picf/core/training.py:71: lambda_mapg_cycle: float = 0.02`
 - `src/openpi/picf/core/training.py:76: lambda_slot_jepa: float = 0.0`
 
@@ -250,11 +250,11 @@ Posterior after correction is the authoritative current belief.
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:5934: lambda_prior = 1.0 / torch.clamp(bar_var, min=self.config.sigma_min2)`
-- `src/openpi/picf/core/pipeline.py:5935: eta_prior = lambda_prior * bar_mu`
-- `src/openpi/picf/core/pipeline.py:5936: lambda_meas = torch.sum(beta[:, :, None] / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
-- `src/openpi/picf/core/pipeline.py:5937: eta_meas = torch.sum(beta[:, :, None] * vote_mu_t / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
-- `src/openpi/picf/core/pipeline.py:5939: mu_post = var_post * (eta_prior + eta_meas)`
+- `src/openpi/picf/core/pipeline.py:5943: lambda_prior = 1.0 / torch.clamp(bar_var, min=self.config.sigma_min2)`
+- `src/openpi/picf/core/pipeline.py:5944: eta_prior = lambda_prior * bar_mu`
+- `src/openpi/picf/core/pipeline.py:5945: lambda_meas = torch.sum(beta[:, :, None] / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
+- `src/openpi/picf/core/pipeline.py:5946: eta_meas = torch.sum(beta[:, :, None] * vote_mu_t / torch.clamp(vote_var_t, min=self.config.sigma_min2), dim=0)`
+- `src/openpi/picf/core/pipeline.py:5948: mu_post = var_post * (eta_prior + eta_meas)`
 
 ## 13. State-only burn-in consistency - PASS
 
@@ -272,7 +272,7 @@ Burn-in and train suffix must use the same measurement model.
 
 Evidence:
 
-- `src/openpi/picf/core/pipeline.py:6521: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
+- `src/openpi/picf/core/pipeline.py:6530: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
 - `src/openpi/picf/core/pipeline.py:2835: def _build_aqr_anchor_graph(`
 - `src/openpi/picf/core/pipeline_test.py:1213: def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:`
 
@@ -353,7 +353,7 @@ Evidence:
 
 - `src/openpi/picf/core/training.py:394: def _aqr_support_denoising_loss(`
 - `src/openpi/picf/core/training.py:79: lambda_aqr_denoising: float = 0.0`
-- `scripts/picf_core_train.py:6543: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
+- `scripts/picf_core_train.py:6549: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
 - `src/openpi/picf/core/training_test.py:461: def test_aqr_denoising_loss_is_training_only_and_guarded(tmp_path: Path) -> None:`
 
 ## 18. Evidence cache write - PASS
@@ -413,8 +413,8 @@ Removed dead knobs/loss-looking placeholders and stale metrics that could create
 
 Evidence:
 
-- `scripts/verify_picf_owm_contract.py:286: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
-- `scripts/verify_picf_owm_contract.py:286: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:288: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:288: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
 - `docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md:2177: 3. Do not expose placeholder losses for cross-modal alignment, ordinal rank, or`
 
 ## Final Interpretation
