@@ -8957,3 +8957,57 @@ during warmup. This must improve or at least not corrupt active assignments
 after step 200/300. If active overlap stays low but recycle remains high, the
 next root issue is posterior identity carry, not support assignment capacity.
 ```
+
+Third live check:
+
+```text
+A5 step 150:
+  raw overlap: 0.9856
+  active overlap max/mean: 0.5973 / 0.2592
+  active_anchor_count: 11.27
+  inactive_anchor_fraction: 0.5304
+  posterior_recycle_rate: 0.6585
+  loss_anchor_pv: 3.3331
+  loss_mapg_routing: 0.8850
+  loss_total: 0.1069
+
+A5 step 200:
+  raw overlap: 0.9999
+  active overlap max/mean: 0.4020 / 0.2481
+  active_anchor_count: 6.88
+  inactive_anchor_fraction: 0.7133
+  posterior_recycle_rate: 0.8594
+  loss_anchor_pv: 4.7375
+  loss_mapg_routing: 0.7569
+  loss_total: 0.1049
+
+A7 step 100:
+  raw overlap: 0.3219
+  active overlap max/mean: 0.2121 / 0.0439
+  active_anchor_count: 14.0
+  inactive_anchor_fraction: 0.4167
+  posterior_recycle_rate: 0.4805
+  loss_action_default_equiv: 0.0936
+  loss_action_active7: 0.3758
+  loss_anchor_pv: 4.2699
+  loss_mapg_routing: 0.9096
+  loss_total: 0.1343
+```
+
+Interpretation:
+
+```text
+The A5 isolation run is no longer the preferred proxy for final behavior. It
+proves the active/dustbin path prevents all fixed queries from being treated as
+valid objects, but it also shows anchor-only pressure can become too sparse:
+active count fell from 14 to 6.88 while recycle rose to 0.86. This is not the
+old failure mode, because active overlap stayed far below 0.95, but it is an
+under-allocation / posterior carry warning.
+
+The A7 cotrain run is the more important signal for production. Through step
+100, it keeps active overlap low, keeps 14 active anchors, reduces action loss,
+and does not reproduce the old raw/active collapse. That supports the current
+hypothesis that task/semantic/action context helps select useful active slots,
+whereas pure anchor-only isolation lacks enough task pressure to maintain a
+stable useful active set.
+```
