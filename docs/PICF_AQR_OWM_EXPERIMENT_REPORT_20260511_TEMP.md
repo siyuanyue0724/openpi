@@ -9692,4 +9692,106 @@ Interpretation:
    saturates recycle, action cotrain needs a staged or lower-gradient interface.
    If it stays moderate, the production recipe should combine max6 active
    capacity with lower action gradient pressure before full action weight.
+
+06:22 unattended-watch gate:
+
+```text
+Both remote training matrices are live and using GPUs.
+
+A5:
+  tmux:
+    picf_a5_activecap_matrix
+    picf_a5_activecap_watch10h
+  current run:
+    picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2
+  process:
+    torchrun world_size=2 is alive
+  latest structured metrics:
+    step                               = 150
+    loss_total                         = 0.105153
+    loss_action_default_equiv           = 0.141223
+    loss_anchor_pv                      = 4.408022
+    loss_mapg_routing                   = 0.993615
+    raw same_role_support_overlap_max   = 0.659477
+    active same_role_support_overlap_max= 0.476170
+    active same_role_support_overlap_mean=0.129296
+    active_anchor_count                 = 18.69
+    inactive_anchor_fraction            = 0.22125
+    posterior_recycle_rate              = 0.182168
+    posterior_recycle_logit_mean        = -1.613870
+    posterior_recycle_gate_std          = 0.000185
+    posterior_address_update_rate_mean  = 0.028754
+    posterior_identity_switch_rate      = 0.796111
+    posterior_binding_top1_margin_mean  = 0.110327
+    speed                               = about 8.9 sec/step
+  watch log:
+    /mnt/picf_run_logs/picf_a5_activecap_watch10h.log
+
+A7:
+  tmux:
+    picf_a7_activecap_matrix
+    picf_a7_activecap_watch10h
+  current run:
+    picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2
+  process:
+    torchrun world_size=2 is alive
+  current branch parameters:
+    scope=all
+    unroll=2
+    burnin=1
+    action scale=0.25
+    active_max_per_role=4
+    prefix_stopgrad=no
+    PaliGemma trainable=true
+    Sonata/V-JEPA/AnyTouch frozen=true
+  latest structured metrics:
+    not yet emitted for the flow branch at this timestamp.
+    The completed full-action prefix branch remains a rejected negative row:
+      step600 action_default_equiv=0.067610
+      active overlap=0.616848
+      recycle=0.997863
+      address update=7.9e-5
+  watch log:
+    /mnt/picf_run_logs/picf_a7_activecap_watch10h.log
+```
+
+Interpretation:
+
+```text
+1. The matrix is running normally. No restart or code change is justified before
+   A5 max6 reaches step200/300 and A7 flow reaches its first metrics gate.
+2. A5 max6 remains the strongest structural candidate, but step150 is no longer
+   as clean as step100: raw overlap increased from 0.2327 to 0.6595 and
+   active overlap increased from 0.2168 to 0.4762. This is still within the
+   active acceptance gate, but it warns that max6 capacity is necessary, not
+   sufficient.
+3. A7 full-action prefix proves that action loss alone can look good while
+   posterior identity is broken. The current A7 flow branch is the causal test
+   for whether lower action pressure and removing prefix-stopgrad improve
+   recycle/address dynamics.
+4. Do not introduce a new architecture patch before these two causal branches
+   emit metrics. Otherwise we would lose the ability to separate active-cap
+   capacity, action-pressure scale, and recycle dynamics.
+```
+
+Next hard gates:
+
+```text
+A5 max6 step200/300:
+  accept as anchor-only structural candidate only if:
+    active overlap max stays < 0.60
+    active_anchor_count remains > 12
+    recycle stays between roughly 0.05 and 0.70
+    address update remains nonzero
+
+A7 flow step50/100:
+  if recycle drops materially below the rejected 0.997 row:
+    action pressure/prefix boundary is a real cause.
+  if recycle remains > 0.95:
+    recycle calibration or object-count dynamics remains unresolved.
+
+A7 max6:
+  only becomes decisive after the A7 flow branch because it tests capacity under
+  full action pressure.
+```
 ```

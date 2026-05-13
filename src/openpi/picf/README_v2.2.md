@@ -4342,3 +4342,17 @@ not prove production readiness because it is anchor-only, but it strongly
 supports testing larger active capacity together with controlled action
 pressure. Continue A5 max6 to 200/300/600 and A7 lower-action/no-prefix to
 50/100/200 before changing code.
+
+2026-05-14 06:22 unattended-watch gate: both remote matrices are still live and
+GPU-active. A5 is running `picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2`
+and has reached step150 with active overlap `0.4762`, active count `18.69`,
+recycle `0.1822`, and nonzero address update `0.0288`; this remains the best
+structural candidate but must be checked again at step200/300 because raw
+overlap rose to `0.6595`. A7 is running
+`picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2` with `scope=all`,
+`unroll=2`, `burnin=1`, action scale `0.25`, and PaliGemma trainable; it has not
+yet emitted its first metrics row. Ten-hour remote watch logs are active at
+`/mnt/picf_run_logs/picf_a5_activecap_watch10h.log` and
+`/mnt/picf_run_logs/picf_a7_activecap_watch10h.log`. Do not patch architecture
+before A5 step200/300 and A7 flow step50/100, because those branches are the
+causal tests for active capacity versus action-pressure/recycle dynamics.
