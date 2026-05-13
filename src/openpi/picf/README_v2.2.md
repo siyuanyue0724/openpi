@@ -4207,3 +4207,85 @@ See
 `docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`, section
 `Final Read: Schedule-Only Task Pressure Fails Ownership`, for the failed
 warmup evidence, derivation, implementation files, and acceptance criteria.
+
+### 2026-05-14 Capacity-Aware Active/Dustbin Slot Repair
+
+The ownership-prior runs fixed initial same-role symmetry but failed after
+step100/125 because the fixed physical slot set still forced every slot to
+compete for a scene with fewer useful object supports. The maintained repair is
+therefore capacity-aware assignment, not a stronger action warmup, stronger
+cache, slot-JEPA pressure, or another downstream overlap loss.
+
+New production-default controls:
+
+```text
+aqr_active_slot_filter_enabled = true
+aqr_active_slot_min_per_role = 1
+aqr_active_slot_max_per_role = 4
+aqr_active_slot_min_confidence = 0.05
+aqr_active_slot_overlap_threshold = 0.75
+```
+
+Semantics:
+
+```text
+active slot:
+  a high-confidence, role-local support owner allowed to participate in
+  observation/task assignment and active same-role diversity.
+
+inactive/dustbin slot:
+  a redundant same-role candidate retained as a recurrent/query carrier but
+  excluded from assignment pressure when an active same-role set exists.
+```
+
+This is the slot-capacity analogue of the `no-object`/dustbin mechanism used by
+set-prediction detectors, adapted to PICF's belief filter: extra slots should
+not be forced to explain the same object. It is also consistent with recent
+object-centric slot work on variable/effective slot count: fixed slots are a
+capacity budget, not a promise that every slot corresponds to a distinct
+physical object.
+
+The raw `aqr_same_role_support_overlap_max` remains logged for diagnosis, but
+the acceptance metric for this repair is now:
+
+```text
+aqr_active_same_role_support_overlap_max
+aqr_active_same_role_support_overlap_mean
+aqr_active_anchor_count
+aqr_inactive_anchor_fraction
+aqr_active_anchor_count_role_{0,1,2,3}
+```
+
+Do not treat high raw same-role overlap alone as failure after this change:
+inactive/dustbin duplicates may intentionally overlap. Failure is active
+same-role overlap returning to the old `0.95-0.99` band, active count collapsing
+to one slot, or action/recycle health degrading while active overlap improves.
+
+Local verification for this change:
+
+```text
+python scripts/verify_picf_owm_contract.py:
+  PASS, including active/dustbin capacity invariant.
+
+python scripts/picf_owm_strict_diagnose.py --fail-on-fail:
+  PASS.
+
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+  PASS.
+
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS.
+
+uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py \
+  -k "ownership_prior or active_slot_filter or slot_assignment_ignores":
+  4 passed.
+
+uv run --no-sync pytest -q src/openpi/picf/core/training_test.py \
+  -k support_diversity:
+  4 passed.
+```
+
+The next 10-hour A5/A7 matrix is recorded in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+Its purpose is to test whether the active-object subset stays separated under
+task pressure and cotrain, not to claim CALVIN behavior acceptance.

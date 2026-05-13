@@ -13,6 +13,7 @@ from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
+from openpi.picf.core.contracts import PicfAnchorPriorGraphState
 from openpi.picf.core.contracts import PicfTemporalVisualSupportState
 from openpi.picf.core.contracts import PicfVLGroundingState
 from openpi.picf.core import pipeline as pipeline_module
@@ -329,6 +330,79 @@ def test_aqr_ownership_prior_breaks_temporal_multiview_symmetry(tmp_path: Path) 
     assert bias.shape == (4, 16)
     assert not torch.allclose(bias[0], bias[1])
     assert torch.unique(torch.argmax(bias, dim=-1)).numel() > 1
+
+
+def test_aqr_active_slot_filter_deactivates_duplicate_same_role_support(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_active_slot_filter_enabled=True,
+        aqr_active_slot_min_per_role=1,
+        aqr_active_slot_max_per_role=4,
+        aqr_active_slot_overlap_threshold=0.75,
+    )
+    visual_priors = torch.tensor(
+        [
+            [0.95, 0.05, 0.00, 0.00],
+            [0.94, 0.06, 0.00, 0.00],
+            [0.00, 0.00, 0.05, 0.95],
+        ],
+        dtype=torch.float32,
+    )
+    active = core._aqr_active_slot_mask(
+        roles=torch.zeros((3,), dtype=torch.long),
+        visual_priors=visual_priors,
+        anchor_scores=torch.ones((3,), dtype=torch.float32),
+        anchor_confidence=torch.ones((3,), dtype=torch.float32),
+    )
+
+    assert active.shape == (3,)
+    assert int(active.sum().item()) == 2
+    assert bool(active[0].item())
+    assert not bool(active[1].item())
+    assert bool(active[2].item())
+
+
+def test_aqr_slot_assignment_ignores_inactive_duplicate_anchors(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_active_slot_filter_enabled=True,
+    )
+    dtype = torch.float32
+    graph = PicfAnchorPriorGraphState(
+        pg_priors=None,
+        visual_priors=torch.tensor(
+            [
+                [0.95, 0.05, 0.00, 0.00],
+                [0.94, 0.06, 0.00, 0.00],
+                [0.00, 0.00, 0.05, 0.95],
+            ],
+            dtype=dtype,
+        ),
+        point_priors=None,
+        tactile_priors=None,
+        posterior_priors=None,
+        anchor_tokens=torch.zeros((3, core.config.hidden_dim), dtype=dtype),
+        anchor_roles=torch.zeros((3,), dtype=torch.long),
+        anchor_scores=torch.ones((3,), dtype=dtype),
+        anchor_confidence=torch.ones((3,), dtype=dtype),
+        anchor_x=None,
+        anchor_S=None,
+        geometry_valid=torch.zeros((3,), dtype=torch.bool),
+        obs_slot_assignment=None,
+        task_assignment=None,
+        modality_confidence=torch.ones((3, 10), dtype=dtype),
+        valid=torch.tensor(True),
+        anchor_active=torch.tensor([1.0, 0.0, 1.0], dtype=dtype),
+    )
+
+    assignment = core._mapg_slot_assignment(graph, torch.zeros((2,), dtype=torch.long))
+
+    assert assignment is not None
+    assert assignment.shape == (2, 3)
+    assert torch.allclose(assignment[:, 1], torch.zeros((2,), device=assignment.device, dtype=dtype), atol=1e-6)
+    assert torch.allclose(assignment.sum(dim=-1), torch.ones((2,), device=assignment.device, dtype=dtype), atol=1e-5)
 
 
 def _visual_override(value: float) -> np.ndarray:

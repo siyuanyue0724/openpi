@@ -68,6 +68,7 @@ class PicfAnchorPriorGraphState:
     task_assignment: torch.Tensor | None
     modality_confidence: torch.Tensor
     valid: torch.Tensor
+    anchor_active: torch.Tensor | None = None
     vjepa_temporal_priors: torch.Tensor | None = None
     cache_priors: torch.Tensor | None = None
     tracklet_priors: torch.Tensor | None = None

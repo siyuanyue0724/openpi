@@ -168,6 +168,15 @@ class PicfCoreConfig:
     aqr_ownership_prior_weight: float = 0.35
     aqr_ownership_temporal_prior_weight: float = 0.20
     aqr_ownership_prior_uniform_mix: float = 0.05
+    # Capacity-aware active-slot selection. AQR keeps the fixed query set for
+    # compatibility, but only distinct high-confidence same-role anchors are
+    # eligible for downstream obs/task assignment; redundant anchors become
+    # inactive/dustbin candidates instead of duplicating the same object.
+    aqr_active_slot_filter_enabled: bool = True
+    aqr_active_slot_min_per_role: int = 1
+    aqr_active_slot_max_per_role: int = 4
+    aqr_active_slot_min_confidence: float = 0.05
+    aqr_active_slot_overlap_threshold: float = 0.75
     aqr_vjepa_temporal_mode: str = "last_two_tokens"
     aqr_vjepa_temporal_tokens: int = 2
     aqr_vjepa_temporal_include_delta: bool = True

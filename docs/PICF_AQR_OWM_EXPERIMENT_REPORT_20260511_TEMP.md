@@ -8585,3 +8585,200 @@ capacity-aware:
   5. continue using posterior authority and avoid hard-locking identity by
      static address.
 ```
+
+## 2026-05-14 Capacity-Aware Active/Dustbin Repair and 10-Hour Matrix
+
+Status: code deployed locally, verification passed, remote A5/A7 rollout
+pending after this commit is synchronized.
+
+### Root-Cause Restatement
+
+The ownership-prior runs proved two facts simultaneously:
+
+```text
+1. Same-role rows can be separated early:
+   A5/A7 start around 0.22 same-role support overlap instead of 0.95+.
+
+2. The separation is not durable:
+   fixed same-role physical slots still converge toward a shared high-salience
+   support attractor after task/PV/routing pressure starts shaping the reader.
+```
+
+The failure is not fully explained by action loss, recycle saturation, or
+unroll length. A5 collapses with high recycle, while A7 collapses after recycle
+falls near zero. Action-equivalent loss stays in the same band while overlap
+worsens. Unroll=2 delays but does not remove collapse.
+
+The sharper mathematical failure is a capacity mismatch. Let role `r` have
+`K_r` physical queries and a scene have only `M_r` useful supports for that role,
+with `K_r > M_r`. If every query must bind some support, the optimum can place
+multiple same-role rows on the same high-value support even when rows were
+initially distinct:
+
+```math
+\max_{P \in \Delta} \sum_{j=1}^{K_r} \sum_i P_{j,i} Q_i
+\quad \text{with} \quad K_r > M_r
+```
+
+Without a no-object/inactive state, redundant rows are penalized for staying
+uncommitted and are attracted to the best support. A downstream diversity loss
+observes the duplicate after it forms; it does not provide a valid assignment
+state for extra capacity.
+
+### Maintained Repair
+
+The new repair adds an active/inactive split before assignment:
+
+```text
+active anchors:
+  high-confidence role-local support owners, capped per role and filtered by
+  support overlap.
+
+inactive/dustbin anchors:
+  redundant same-role candidates kept as recurrent/query carriers but excluded
+  from observation/task assignment when active candidates exist.
+```
+
+Defaults:
+
+```text
+aqr_active_slot_filter_enabled=true
+aqr_active_slot_min_per_role=1
+aqr_active_slot_max_per_role=4
+aqr_active_slot_min_confidence=0.05
+aqr_active_slot_overlap_threshold=0.75
+```
+
+This is intentionally not a new loss. It changes the feasible assignment set so
+the belief router no longer has to hallucinate more objects than the evidence
+supports. It is the same design class as no-object/dustbin assignment in
+set-prediction detectors, adapted to recurrent PICF slots.
+
+Connection to recent papers:
+
+```text
+Object Binding in pretrained ViTs, NeurIPS 2025 / arXiv:2510.24709:
+  motivates pairwise same-object subspaces and IsSameObject probing. We already
+  added binding_signature_proj and support-weighted binding signatures. The
+  current repair is the complementary assignment-capacity step: if the same-
+  object signal exists but multiple same-role rows reuse the same candidate,
+  the issue is assignment/capacity rather than representation absence.
+
+MetaSlot, NeurIPS 2025 / arXiv:2505.20772:
+  highlights the fixed-slot-count limitation in object-centric learning. PICF
+  keeps a fixed parameter budget for engineering stability but adds an effective
+  active-slot count per role.
+
+When Slots Compete, arXiv:2603.11246:
+  studies slot competition/merging from overlap statistics. PICF does not merge
+  query parameters during training; instead it uses overlap statistics to make
+  redundant anchors inactive/dustbin candidates, preserving recurrent identity
+  state while avoiding duplicate object pressure.
+```
+
+### Code Verification
+
+Local verification completed before remote deployment:
+
+```text
+python -m py_compile:
+  contracts/config/pipeline/training/train/diagnosis/evidence scripts PASS.
+
+python scripts/verify_picf_owm_contract.py:
+  PASS, including pipeline_active_slot_filter_adds_capacity_aware_dustbin_path.
+
+python scripts/picf_owm_strict_diagnose.py --fail-on-fail:
+  PASS.
+
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+  PASS.
+
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS.
+
+uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py \
+  -k "ownership_prior or active_slot_filter or slot_assignment_ignores":
+  4 passed.
+
+uv run --no-sync pytest -q src/openpi/picf/core/training_test.py \
+  -k support_diversity:
+  4 passed.
+```
+
+### Acceptance Metrics
+
+Raw same-role overlap is no longer sufficient after active/dustbin filtering.
+Inactive duplicate anchors may intentionally overlap. The active subset is the
+real contract:
+
+```text
+Primary:
+  aqr_active_same_role_support_overlap_max
+  aqr_active_same_role_support_overlap_mean
+  aqr_active_anchor_count
+  aqr_inactive_anchor_fraction
+  aqr_active_anchor_count_role_0..3
+
+Secondary:
+  raw aqr_same_role_support_overlap_max
+  posterior_recycle_rate
+  posterior_address_update_rate_mean
+  posterior_identity_switch_rate
+  loss_action_default_equiv
+  loss_anchor_pv
+  loss_mapg_cycle
+  loss_mapg_routing
+  anchor overlay images
+```
+
+Pass condition for the repair:
+
+```text
+1. active_same_role_overlap stays far below the old 0.95-0.99 collapse band;
+2. active_anchor_count stays plausible, not one active slot and not all slots;
+3. action_default_equiv and recycle health do not degrade relative to the
+   recent prefix-stopgrad/all-scope diagnostics;
+4. overlays show active anchors on distinct useful regions, while inactive
+   anchors may duplicate or drift without controlling assignment.
+```
+
+### Ten-Hour A5/A7 Experiment Matrix
+
+This matrix is designed to run without intervention for roughly ten hours.
+Each machine runs bounded diagnostics sequentially under tmux. The goal is not
+to maximize CALVIN success yet; it is to determine whether active/dustbin
+capacity is the correct root repair under both anchor-isolated and cotrain
+pressure.
+
+```text
+A5 primary isolation line:
+  run 1: active/dustbin anchor_only, burnin=4, unroll=1, low task pressure
+  run 2: same profile with unroll=2, burnin=1 or 2
+
+Purpose:
+  isolate whether capacity-aware assignment stabilizes active object ownership
+  without full policy gradients dominating the reader.
+
+A7 cotrain line:
+  run 1: active/dustbin all-scope cotrain, frozen Sonata/V-JEPA/AnyTouch,
+         PaliGemma trainable, unroll=2, burnin=1, prefix-stopgrad action path.
+  run 2: same cotrain line with a stricter active max-per-role or overlap
+         threshold if run 1 keeps too many active duplicates.
+
+Purpose:
+  test whether the repair survives realistic action/semantic pressure and
+  whether the raw overlap can be safely reinterpreted through active metrics.
+```
+
+Important negative criteria:
+
+```text
+If active_same_role_overlap still goes above 0.95 on both isolation and cotrain,
+then the active/dustbin selector is not sufficient; the next root work must add
+real object-correspondence evidence, e.g. tracklets/proposals/IsSameObject
+probe supervision, not just more schedule tuning.
+
+If active_same_role_overlap is low but action_default_equiv worsens sharply,
+then the active cap is too restrictive or the active subset is not aligned with
+task-relevant objects. Adjust max_per_role/threshold before changing losses.
+```

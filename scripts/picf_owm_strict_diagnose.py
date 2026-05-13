@@ -495,6 +495,8 @@ def run_static_checks() -> list[Finding]:
             trainer.contains(
                 "OWM_DEBUG_METRIC_KEYS",
                 "aqr_same_role_support_overlap_max",
+                "aqr_active_same_role_support_overlap_max",
+                "aqr_inactive_anchor_fraction",
                 "posterior_identity_switch_rate",
                 "posterior_identity_switch_rate_stable",
                 "posterior_binding_top1_margin_mean",
@@ -508,6 +510,8 @@ def run_static_checks() -> list[Finding]:
             evidence=trainer.refs(
                 "OWM_DEBUG_METRIC_KEYS",
                 "aqr_same_role_support_overlap_max",
+                "aqr_active_same_role_support_overlap_max",
+                "aqr_inactive_anchor_fraction",
                 "posterior_identity_switch_rate",
                 "posterior_identity_switch_rate_stable",
                 "posterior_binding_top1_margin_mean",

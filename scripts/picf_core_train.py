@@ -1383,6 +1383,8 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_query_rounds",
         "aqr_sinkhorn_iters",
         "aqr_vjepa_temporal_tokens",
+        "aqr_active_slot_min_per_role",
+        "aqr_active_slot_max_per_role",
         "evidence_cache_len",
         "vjepa_max_views",
         "tracklet_max_tokens",
@@ -1400,6 +1402,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_vjepa_temporal_include_delta",
         "vjepa_multiview_enabled",
         "aqr_ownership_prior_enabled",
+        "aqr_active_slot_filter_enabled",
         "evidence_cache_enabled",
         "tracklet_memory_enabled",
         "proposal_memory_enabled",
@@ -1423,6 +1426,8 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_ownership_prior_weight",
         "aqr_ownership_temporal_prior_weight",
         "aqr_ownership_prior_uniform_mix",
+        "aqr_active_slot_min_confidence",
+        "aqr_active_slot_overlap_threshold",
         "evidence_cache_read_weight",
         "evidence_cache_innovation_downweight",
         "evidence_cache_address_weight",
@@ -3037,6 +3042,14 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_local_source_mass_proposal",
     "aqr_effective_anchor_count",
     "aqr_same_role_support_overlap_max",
+    "aqr_active_anchor_count",
+    "aqr_inactive_anchor_fraction",
+    "aqr_active_same_role_support_overlap_max",
+    "aqr_active_same_role_support_overlap_mean",
+    "aqr_active_anchor_count_role_0",
+    "aqr_active_anchor_count_role_1",
+    "aqr_active_anchor_count_role_2",
+    "aqr_active_anchor_count_role_3",
     "aqr_ownership_prior_enabled",
     "aqr_ownership_prior_weight",
     "aqr_ownership_temporal_prior_weight",
@@ -5011,6 +5024,21 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         aqr_ownership_prior_uniform_mix=float(
             _arg_or_default("aqr_ownership_prior_uniform_mix", _SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix)
         ),
+        aqr_active_slot_filter_enabled=bool(
+            _arg_or_default("aqr_active_slot_filter_enabled", _SPEC_DEFAULTS.aqr_active_slot_filter_enabled)
+        ),
+        aqr_active_slot_min_per_role=int(
+            _arg_or_default("aqr_active_slot_min_per_role", _SPEC_DEFAULTS.aqr_active_slot_min_per_role)
+        ),
+        aqr_active_slot_max_per_role=int(
+            _arg_or_default("aqr_active_slot_max_per_role", _SPEC_DEFAULTS.aqr_active_slot_max_per_role)
+        ),
+        aqr_active_slot_min_confidence=float(
+            _arg_or_default("aqr_active_slot_min_confidence", _SPEC_DEFAULTS.aqr_active_slot_min_confidence)
+        ),
+        aqr_active_slot_overlap_threshold=float(
+            _arg_or_default("aqr_active_slot_overlap_threshold", _SPEC_DEFAULTS.aqr_active_slot_overlap_threshold)
+        ),
         aqr_vjepa_temporal_mode=str(
             _arg_or_default("aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
         ),
@@ -6201,7 +6229,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s recycle_residual_norm_mode=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s recycle_residual_norm_mode=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -6229,6 +6257,17 @@ def train(args: argparse.Namespace) -> None:
                         args,
                         "aqr_ownership_prior_uniform_mix",
                         _SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix,
+                    )
+                ),
+                bool(getattr(args, "aqr_active_slot_filter_enabled", _SPEC_DEFAULTS.aqr_active_slot_filter_enabled)),
+                int(getattr(args, "aqr_active_slot_min_per_role", _SPEC_DEFAULTS.aqr_active_slot_min_per_role)),
+                int(getattr(args, "aqr_active_slot_max_per_role", _SPEC_DEFAULTS.aqr_active_slot_max_per_role)),
+                float(getattr(args, "aqr_active_slot_min_confidence", _SPEC_DEFAULTS.aqr_active_slot_min_confidence)),
+                float(
+                    getattr(
+                        args,
+                        "aqr_active_slot_overlap_threshold",
+                        _SPEC_DEFAULTS.aqr_active_slot_overlap_threshold,
                     )
                 ),
                 str(getattr(args, "aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)),
@@ -7250,6 +7289,23 @@ def main() -> None:
         "--aqr-ownership-prior-uniform-mix",
         type=float,
         default=_SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix,
+    )
+    parser.add_argument(
+        "--aqr-active-slot-filter-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_active_slot_filter_enabled,
+        help=(
+            "Allow only distinct high-confidence same-role AQR anchors to participate in obs/task "
+            "assignment; redundant anchors remain as inactive/dustbin candidates."
+        ),
+    )
+    parser.add_argument("--aqr-active-slot-min-per-role", type=int, default=_SPEC_DEFAULTS.aqr_active_slot_min_per_role)
+    parser.add_argument("--aqr-active-slot-max-per-role", type=int, default=_SPEC_DEFAULTS.aqr_active_slot_max_per_role)
+    parser.add_argument("--aqr-active-slot-min-confidence", type=float, default=_SPEC_DEFAULTS.aqr_active_slot_min_confidence)
+    parser.add_argument(
+        "--aqr-active-slot-overlap-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_active_slot_overlap_threshold,
     )
     parser.add_argument(
         "--aqr-vjepa-temporal-mode",

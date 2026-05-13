@@ -130,7 +130,50 @@ Reason:
   new loss or a local-refinement residual. It seeds distinct object ownership
   while preserving evidence dominance and then lets support-signature binding
   and posterior correction stabilize the result.
+
+2026-05-14 active/dustbin capacity update:
+
+```text
+Default:
+  aqr_active_slot_filter_enabled=true
+  aqr_active_slot_min_per_role=1
+  aqr_active_slot_max_per_role=4
+  aqr_active_slot_min_confidence=0.05
+  aqr_active_slot_overlap_threshold=0.75
 ```
+
+Reason:
+  The ownership prior fixes initial symmetry but not late collapse. The
+  remaining failure is capacity mismatch: a fixed physical slot budget can be
+  larger than the number of useful CALVIN scene objects, so redundant same-role
+  slots are forced toward the same high-salience support. The maintained fix is
+  to classify anchors into active object candidates and inactive/dustbin
+  candidates before observation/task assignment. Active anchors remain subject
+  to same-role diversity; inactive anchors remain recurrent/query carriers but
+  are not forced to bind duplicated objects. This preserves posterior authority
+  and the existing typed-evidence router while adding the missing effective-slot
+  capacity control. It is not a new loss and not a hard dataset-specific object
+  label.
+
+New acceptance metrics:
+
+```text
+aqr_active_anchor_count
+aqr_inactive_anchor_fraction
+aqr_active_same_role_support_overlap_max
+aqr_active_same_role_support_overlap_mean
+aqr_active_anchor_count_role_0
+aqr_active_anchor_count_role_1
+aqr_active_anchor_count_role_2
+aqr_active_anchor_count_role_3
+```
+
+Interpretation:
+  Raw `aqr_same_role_support_overlap_max` remains useful for diagnosis, but the
+  active subset is the behavioral contract. Inactive/dustbin anchors may overlap
+  by design. A run fails this repair if active overlap returns to the old
+  0.95-0.99 collapse band, active count collapses to one, or action/recycle
+  health deteriorates while active overlap improves.
 
 Anchor-only probe contract:
 

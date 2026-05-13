@@ -1325,6 +1325,13 @@ def _mapg_support_overlap_loss(
     roles = graph.anchor_roles.to(device=reference.device, dtype=torch.long)
     same_role = roles[:, None] == roles[None, :]
     pair_mask = torch.triu(same_role, diagonal=1)
+    if graph.anchor_active is not None and graph.anchor_active.numel() == graph.anchor_tokens.shape[0]:
+        active = graph.anchor_active.to(device=reference.device, dtype=reference.dtype).reshape(-1)
+        active_mask = active > 0.5
+        pair_mask = pair_mask & active_mask[:, None] & active_mask[None, :]
+        usage = usage * active
+        if not bool(pair_mask.any().item()) or not bool((usage.sum() > eps).item()):
+            return _zero_weight_sum(reference, graph.anchor_tokens, graph.visual_priors)
     confidence = torch.clamp(graph.anchor_confidence.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
     base_weight = usage[:, None] * usage[None, :] * confidence[:, None] * confidence[None, :]
     base_weight = torch.where(pair_mask, base_weight, torch.zeros_like(base_weight))

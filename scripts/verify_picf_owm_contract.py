@@ -125,6 +125,8 @@ def run_checks() -> list[Check]:
                 "aqr_ownership_prior_enabled",
                 "aqr_ownership_prior_weight",
                 "aqr_ownership_temporal_prior_weight",
+                "aqr_active_slot_filter_enabled",
+                "aqr_active_slot_overlap_threshold",
                 "local_refinement_binding_weight",
                 "recycle_normalize_residual_summary",
                 "recycle_residual_norm_mode",
@@ -186,6 +188,7 @@ def run_checks() -> list[Check]:
                 "bind_embedding_signature_weight",
                 "_aqr_visual_ownership_bias",
                 "_aqr_temporal_ownership_bias",
+                "_aqr_active_slot_mask",
                 "aqr_ownership_prior_weight",
                 "recycle_normalize_residual_summary",
             ),
@@ -206,9 +209,32 @@ def run_checks() -> list[Check]:
                 "--aqr-ownership-prior-enabled",
                 "--aqr-ownership-prior-weight",
                 "--aqr-ownership-temporal-prior-weight",
+                "--aqr-active-slot-filter-enabled",
+                "--aqr-active-slot-overlap-threshold",
                 "ownership_prior_enabled",
             ),
             "AQR must include a low-amplitude assignment prior that breaks identical same-role support rows before Sinkhorn/diversity losses.",
+        ),
+        Check(
+            "pipeline_active_slot_filter_adds_capacity_aware_dustbin_path",
+            _contains(
+                contracts,
+                "anchor_active",
+            )
+            and _contains(
+                pipeline,
+                "def _aqr_active_slot_mask",
+                "active_slot_filter_enabled",
+                "aqr_active_same_role_support_overlap_max",
+                "aqr_inactive_anchor_fraction",
+            )
+            and _contains(
+                trainer,
+                "--aqr-active-slot-filter-enabled",
+                "--aqr-active-slot-min-per-role",
+                "--aqr-active-slot-max-per-role",
+            ),
+            "AQR must distinguish active object slots from inactive/dustbin anchors instead of forcing all fixed queries to bind objects.",
         ),
         Check(
             "pipeline_uses_pairwise_binding_subspace",
@@ -289,6 +315,8 @@ def run_checks() -> list[Check]:
                 "aqr_same_role_obs_binding_signature_overlap_max",
                 "aqr_ownership_prior_enabled",
                 "aqr_ownership_prior_weight",
+                "aqr_active_anchor_count",
+                "aqr_active_same_role_support_overlap_max",
                 "evidence_cache_trust_mean",
                 "innovation_norm_visual",
                 "owm_ordinal_active",

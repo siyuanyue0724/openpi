@@ -2190,6 +2190,71 @@ class PicfFullCore(nn.Module):
         priors = self._aqr_ownership_priors_from_coords(roles=roles, coords=coords)
         return float(self.config.aqr_ownership_temporal_prior_weight) * self._aqr_centered_log_prior_bias(priors)
 
+    def _aqr_active_slot_mask(
+        self,
+        *,
+        roles: torch.Tensor,
+        visual_priors: torch.Tensor,
+        anchor_scores: torch.Tensor,
+        anchor_confidence: torch.Tensor,
+    ) -> torch.Tensor:
+        """Select distinct active anchors; redundant same-role anchors become dustbin candidates."""
+
+        count = int(roles.numel())
+        if count == 0:
+            return torch.zeros((0,), device=self.device, dtype=self.dtype)
+        if not bool(getattr(self.config, "aqr_active_slot_filter_enabled", True)):
+            return torch.ones((count,), device=self.device, dtype=self.dtype)
+        active = torch.zeros((count,), device=self.device, dtype=self.dtype)
+        min_per_role = max(int(getattr(self.config, "aqr_active_slot_min_per_role", 1)), 0)
+        max_per_role = max(int(getattr(self.config, "aqr_active_slot_max_per_role", 0)), 0)
+        min_conf = max(float(getattr(self.config, "aqr_active_slot_min_confidence", 0.0)), 0.0)
+        overlap_threshold = min(max(float(getattr(self.config, "aqr_active_slot_overlap_threshold", 1.0)), 0.0), 1.0)
+        priors = torch.clamp(
+            torch.nan_to_num(visual_priors.to(device=self.device, dtype=self.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+            min=0.0,
+        )
+        if priors.numel() == 0:
+            return torch.ones((count,), device=self.device, dtype=self.dtype)
+        priors = priors / torch.clamp(priors.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+        overlap = priors @ priors.T
+        diag = torch.clamp(torch.diag(overlap), min=self.config.epsilon_a)
+        overlap = overlap / torch.sqrt(torch.clamp(diag[:, None] * diag[None, :], min=self.config.epsilon_a))
+        score = torch.clamp(anchor_scores.to(device=self.device, dtype=self.dtype), min=0.0)
+        confidence = torch.clamp(anchor_confidence.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+        support_peak = priors.max(dim=-1).values
+        # Deterministic tie-breaks matter here: when two same-role anchors are
+        # near duplicates, keep the slightly more confident support owner and
+        # demote the redundant candidate to dustbin.
+        tie_break = torch.arange(count, device=self.device, dtype=self.dtype) * self.config.epsilon_a
+        score = (score * torch.clamp(confidence, min=float(self.config.mapg_confidence_floor))) + support_peak - tie_break
+        roles = roles.to(device=self.device, dtype=torch.long)
+        for role_value in torch.unique(roles, sorted=True).tolist():
+            role_indices = torch.nonzero(roles == int(role_value), as_tuple=False).squeeze(-1)
+            if role_indices.numel() == 0:
+                continue
+            local_score = score.index_select(0, role_indices)
+            order = torch.argsort(local_score, descending=True)
+            kept: list[int] = []
+            for local_rank in order.tolist():
+                idx = int(role_indices[int(local_rank)].item())
+                if max_per_role > 0 and len(kept) >= max_per_role:
+                    continue
+                if len(kept) >= min_per_role and float(score[idx].item()) < min_conf:
+                    continue
+                if kept:
+                    kept_t = torch.as_tensor(kept, device=self.device, dtype=torch.long)
+                    max_overlap = float(overlap[idx, kept_t].max().item())
+                    if max_overlap > overlap_threshold and len(kept) >= min_per_role:
+                        continue
+                kept.append(idx)
+            if not kept and role_indices.numel() > 0 and min_per_role > 0:
+                top = int(role_indices[int(order[0].item())].item())
+                kept.append(top)
+            if kept:
+                active[torch.as_tensor(kept, device=self.device, dtype=torch.long)] = 1.0
+        return active
+
     def _vl_slot_point_priors(
         self,
         grounding: PicfVLGroundingState | None,
@@ -3321,6 +3386,12 @@ class PicfFullCore(nn.Module):
         if point_priors is not None and point_priors.numel() > 0:
             anchor_scores = anchor_scores + torch.max(point_priors, dim=-1).values
         anchor_conf = torch.clamp(modality_conf.max(dim=-1).values, min=0.0, max=1.0)
+        anchor_active = self._aqr_active_slot_mask(
+            roles=roles,
+            visual_priors=visual_priors,
+            anchor_scores=anchor_scores,
+            anchor_confidence=anchor_conf,
+        )
         anchor_x = None
         anchor_S = None
         geometry_valid = torch.zeros((anchor_count,), device=self.device, dtype=torch.bool)
@@ -3350,6 +3421,7 @@ class PicfFullCore(nn.Module):
             task_assignment=None,
             modality_confidence=modality_conf,
             valid=torch.tensor(True, device=self.device),
+            anchor_active=anchor_active,
             vjepa_temporal_priors=vjepa_temporal_priors,
             cache_priors=cache_priors,
             tracklet_priors=tracklet_priors,
@@ -3393,6 +3465,9 @@ class PicfFullCore(nn.Module):
         scores = torch.clamp(graph.anchor_scores.to(device=self.device, dtype=self.dtype), min=self.config.epsilon_a)
         confidence = torch.clamp(graph.anchor_confidence.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
         scores = torch.clamp(scores * torch.clamp(confidence, min=float(self.config.mapg_confidence_floor)), min=self.config.epsilon_a)
+        active_mask = None
+        if graph.anchor_active is not None and graph.anchor_active.numel() == k:
+            active_mask = graph.anchor_active.to(device=self.device, dtype=self.dtype) > 0.5
         temperature = max(float(self.config.mapg_assignment_temperature), self.config.epsilon_a)
         mix = min(max(float(self.config.mapg_assignment_quality_uniform_mix), 0.0), 1.0)
         assignment = torch.zeros((slot_count, k), device=self.device, dtype=self.dtype)
@@ -3401,6 +3476,8 @@ class PicfFullCore(nn.Module):
             if rows.numel() == 0:
                 continue
             candidate_mask = allowed.index_select(0, rows).any(dim=0)
+            if active_mask is not None and bool((candidate_mask & active_mask).any().item()):
+                candidate_mask = candidate_mask & active_mask
             candidate_indices = torch.nonzero(candidate_mask, as_tuple=False).squeeze(-1)
             if candidate_indices.numel() == 0:
                 continue
@@ -7019,6 +7096,24 @@ class PicfFullCore(nn.Module):
                 if bool(pair_mask.any().item()):
                     debug["mapg_same_role_visual_overlap_max"] = float(overlap[pair_mask].max().item())
                     debug["aqr_same_role_support_overlap_max"] = debug["mapg_same_role_visual_overlap_max"]
+                if graph.anchor_active is not None and graph.anchor_active.numel() == graph.visual_priors.shape[0]:
+                    active = graph.anchor_active.to(device=self.device, dtype=self.dtype).reshape(-1)
+                    active_bool = active > 0.5
+                    debug["aqr_active_anchor_count"] = float(active.sum().item())
+                    debug["aqr_inactive_anchor_fraction"] = float((1.0 - active).mean().item())
+                    active_pair_mask = pair_mask & active_bool[:, None] & active_bool[None, :]
+                    if bool(active_pair_mask.any().item()):
+                        debug["aqr_active_same_role_support_overlap_max"] = float(overlap[active_pair_mask].max().item())
+                        debug["aqr_active_same_role_support_overlap_mean"] = float(overlap[active_pair_mask].mean().item())
+                    else:
+                        debug["aqr_active_same_role_support_overlap_max"] = 0.0
+                        debug["aqr_active_same_role_support_overlap_mean"] = 0.0
+                    if graph.anchor_roles.numel() == active.shape[0]:
+                        roles = graph.anchor_roles.to(device=self.device, dtype=torch.long)
+                        for role_value in tuple(torch.unique(roles, sorted=True).tolist()):
+                            role_mask = roles == int(role_value)
+                            if bool(role_mask.any().item()):
+                                debug[f"aqr_active_anchor_count_role_{int(role_value)}"] = float(active[role_mask].sum().item())
             if "mapg_assignment_effective_anchors" in debug:
                 debug["aqr_effective_anchor_count"] = debug["mapg_assignment_effective_anchors"]
         if observed.token_field.temporal_visual is not None:
