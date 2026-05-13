@@ -9308,4 +9308,113 @@ scientific interpretation: A5 first branch is an over-pruning/dustbin-capacity
 isolation result. A7 first branch is alive and production-relevant, but the
 next accepted/rejected decision needs the next metrics rows and the queued
 lower-action/max6 branches.
+
+04:55 one-hour requested poll:
+
+```text
+A5:
+  tmux alive.
+  current run:
+    picf_a5_activecap_anchor_u2b1_a025_600_ac273a2
+  first run completed:
+    picf_a5_activecap_anchor_u1b4_a025_600_ac273a2
+
+  first run final step 600:
+    loss_total: 0.1055
+    loss_action_default_equiv: 0.1439
+    loss_anchor_pv: 4.7555
+    raw same_role_support_overlap_max: 0.99998
+    active same_role_support_overlap_max: 0.1064
+    active_anchor_count: 4.74
+    inactive_anchor_fraction: 0.8025
+    posterior_recycle_rate: 0.9366
+
+  second run step 200:
+    loss_total: 0.1070
+    loss_action_default_equiv: 0.1561
+    loss_anchor_pv: 4.7233
+    raw same_role_support_overlap_max: 0.99974
+    active same_role_support_overlap_max: 0.5313
+    active same_role_support_overlap_mean: 0.3706
+    active_anchor_count: 7.72
+    inactive_anchor_fraction: 0.6781
+    posterior_recycle_rate: 0.0030
+    grad_norm: 37.28
+
+A7:
+  tmux alive.
+  current run:
+    picf_a7_activecap_cotrain_prefix_u2b1_a1_600_ac273a2
+  latest step 350:
+    loss_total: 0.1171
+    loss_action_default_equiv: 0.0591
+    loss_action_active7: 0.2678
+    loss_anchor_pv: 4.7224
+    loss_mapg_cycle: 0.4794
+    loss_mapg_routing: 0.8595
+    raw same_role_support_overlap_max: 0.9975
+    active same_role_support_overlap_max: 0.4446
+    active same_role_support_overlap_mean: 0.2478
+    active_anchor_count: 8.66
+    inactive_anchor_fraction: 0.6394
+    posterior_recycle_rate: 0.9981
+    posterior_residual_summary_norm: 2814.58
+```
+
+Interpretation:
+
+```text
+Runtime:
+  normal. Both matrices are still alive and metrics are advancing.
+
+A5 u1/b4:
+  rejected as a production proxy. It achieves low active overlap by over-
+  demoting slots and keeps recycle high.
+
+A5 u2/b1:
+  materially better capacity than u1/b4: active_anchor_count increases from
+  about 4.7 to about 7.7 and active overlap is near the acceptance threshold.
+  However recycle is now saturated in the opposite direction, near zero, and
+  this remains anchor-only. It is useful for isolating unroll/burn-in capacity,
+  not for production acceptance.
+
+A7 first branch:
+  action loss improves substantially, and active overlap stays under the
+  provisional 0.60 gate. This is the best action signal in the matrix so far.
+  But posterior_recycle_rate is saturated near 1.0, which means the belief
+  state is still not accepted. The first A7 branch therefore shows that active
+  capacity can preserve separated active supports under action pressure, but
+  the posterior reset/recycle dynamics are still unstable under full action
+  plus prefix-stopgrad.
+```
+
+Mathematical consequence:
+
+```text
+The old failure mode was:
+  all fixed same-role slots are forced to explain the same support.
+
+The current active-slot repair changes that to:
+  an active subset can remain separated, while redundant slots are demoted.
+
+The remaining failure is now posterior identity dynamics, not raw AQR support
+assignment alone. A low active-overlap value is necessary but not sufficient.
+The belief filter must also avoid recycle saturation:
+
+  0 << posterior_recycle_rate << 1
+
+with a non-trivial stable_slot_fraction. Therefore the queued A7 branches are
+still required:
+
+  lower action / no prefix-stopgrad:
+    tests whether recycle saturation is caused by action-gradient scale or the
+    prefix stop-gradient boundary.
+
+  max6 active capacity:
+    tests whether the max4 active cap makes posterior dynamics too brittle.
+```
+
+Do not stop the matrix yet. The one-hour poll confirms that the experiment is
+working as a discriminator, but the production answer depends on the queued A7
+lower-action/no-prefix and max6-capacity branches.
 ```

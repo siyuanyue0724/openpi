@@ -4303,3 +4303,12 @@ separate unroll/burn-in shape, action-pressure scale, prefix-stopgrad, and
 active-capacity threshold. The acceptance gate is active overlap plus active
 capacity plus non-saturated recycle, not raw overlap alone and not action loss
 alone.
+
+2026-05-14 04:55 one-hour gate: runtime remains normal. A5 completed the
+u1/b4 anchor-only branch and entered u2/b1; u2/b1 improves active capacity but
+pushes recycle near zero, so it is still diagnostic only. A7 full-action
+prefix-stopgrad reached step350 with strong action improvement and active
+overlap below the provisional gate, but recycle is saturated near one. The
+remaining live question is now posterior identity/recycle dynamics under
+cotrain, not whether the active/dustbin support filter can separate an active
+subset. Continue the queued lower-action/no-prefix and max6-capacity branches.
