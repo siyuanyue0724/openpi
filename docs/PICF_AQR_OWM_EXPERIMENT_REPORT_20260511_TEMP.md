@@ -9794,4 +9794,101 @@ A7 max6:
   only becomes decisive after the A7 flow branch because it tests capacity under
   full action pressure.
 ```
+
+06:29 tens-step and overlay gate:
+
+```text
+Remote port map was revalidated before reading metrics:
+  qgE72e / port 28060:
+    A7 matrix worktree /root/openpi_a7_overlay_unroll2_b9ad838
+  ZWWQO6 / port 29776:
+    A5 matrix worktree /root/openpi_recyclenorm_4ec25ae
+
+A7 current branch:
+  picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2
+  state:
+    running normally
+    progress bar reached at least step 35
+    no structured metrics row yet because the first metrics gate is step50
+  confirmed startup contract:
+    scope=all
+    unroll=2
+    burnin=1
+    action scale=0.25
+    active_max_per_role=4
+    PaliGemma trainable=true
+    Sonata/V-JEPA/AnyTouch frozen=true
+    local_refinement_enabled=false
+    recycle_residual_norm_mode=layernorm
+
+A5 current branch:
+  picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2
+  latest structured metrics:
+    step                                = 200
+    loss_total                          = 0.105700
+    loss_action_default_equiv            = 0.145600
+    loss_action_active7                  = 0.512589
+    loss_anchor_pv                       = 4.097566
+    loss_mapg_routing                    = 0.920289
+    loss_mapg_cycle                      = 0.453425
+    loss_mapg_support_diversity          = 0.528119
+    raw same_role_support_overlap_max    = 0.995910
+    active same_role_support_overlap_max = 0.573348
+    active same_role_support_overlap_mean= 0.208245
+    active_anchor_count                  = 12.16
+    inactive_anchor_fraction             = 0.493333
+    posterior_recycle_rate               = 0.138333
+    posterior_recycle_logit_mean         = -1.969415
+    posterior_recycle_gate_std           = 0.000246
+    posterior_address_update_rate_mean   = 0.031237
+    posterior_identity_switch_rate       = 0.805000
+    posterior_binding_top1_margin_mean   = 0.110352
+    speed                                = about 9.0 sec/step
+```
+
+Overlay audit for A5 step200:
+
+```text
+Artifact:
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2/
+      anchor_overlays/step_000200.png
+      anchor_overlays/step_000200.json
+
+Image-level result:
+  graph anchors still show local spatial spread around the scene and gripper
+  region, but posterior role-1 slots are exactly co-located at the same pixel:
+    posterior role 1 slots:
+      pixel_xy = [105.2, 114.1] for all seven visible role-1 posterior slots
+
+Pairwise geometry summary from the JSON:
+  graph role 1:
+    min pixel distance 0.65, mean 8.07, max 17.10
+  graph role 2:
+    min pixel distance 0.62, mean 4.16, max 8.04
+  graph role 3:
+    min pixel distance 0.65, mean 4.27, max 8.58
+  posterior role 1:
+    min pixel distance 0.00, mean 0.00, max 0.00
+```
+
+Interpretation:
+
+```text
+1. A7 has satisfied the "started and ran tens of steps" requirement, but the
+   flow branch has not yet produced step50 metrics. It must not be judged from
+   progress-bar loss alone.
+2. A5 max6 no longer supports a clean "capacity alone fixes it" conclusion.
+   The active filter keeps active overlap just below the provisional gate
+   (0.573 < 0.60), but raw overlap has already returned to near one and active
+   count has dropped from 20 at step100 to 12.16 at step200.
+3. The overlay proves that the high overlap is not a pure metric artifact:
+   posterior slots of the same role can become physically identical after the
+   graph-level anchors have already produced local candidates.
+4. Therefore the current unresolved mechanism is posterior identity/binding
+   collapse after candidate generation. Active-slot demotion is helpful, but it
+   is not a complete cure.
+5. No code patch should be made before A7 flow reaches step50/100 and A5 max6
+   reaches step300. Those two gates separate action-pressure effects from
+   anchor-only posterior collapse.
 ```

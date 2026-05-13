@@ -4356,3 +4356,14 @@ yet emitted its first metrics row. Ten-hour remote watch logs are active at
 `/mnt/picf_run_logs/picf_a7_activecap_watch10h.log`. Do not patch architecture
 before A5 step200/300 and A7 flow step50/100, because those branches are the
 causal tests for active capacity versus action-pressure/recycle dynamics.
+
+2026-05-14 06:29 tens-step gate: the remote port map was rechecked
+(`qgE72e:28060` for A7, `ZWWQO6:29776` for A5). A7 lower-action/no-prefix has
+run at least 35 progress-bar steps and is GPU-active; it has not emitted the
+first step50 metrics row yet. A5 max6 reached step200: active overlap is still
+barely below the provisional gate (`0.5733`), but raw same-role overlap has
+returned to `0.9959`, active count dropped to `12.16`, and the step200 overlay
+shows seven role-1 posterior slots exactly co-located at pixel `[105.2, 114.1]`.
+This confirms a real posterior identity/binding collapse after candidate
+generation, not just a metric artifact. Continue to A5 step300 and A7 step50/100
+before changing code; active-slot demotion is useful but is not yet a full cure.
