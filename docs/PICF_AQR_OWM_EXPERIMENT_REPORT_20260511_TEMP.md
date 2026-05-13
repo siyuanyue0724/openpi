@@ -8820,3 +8820,140 @@ If active_same_role_overlap is low but action_default_equiv worsens sharply,
 then the active cap is too restrictive or the active subset is not aligned with
 task-relevant objects. Adjust max_per_role/threshold before changing losses.
 ```
+
+### 2026-05-14 02:20 Live Deployment Check
+
+Local repository state:
+
+```text
+commit:
+  f09d18d Add active slot experiment matrix
+  ac273a2 Add capacity-aware AQR active slot filter
+
+local checks:
+  python py_compile on PICF core/train/audit files: PASS
+  bash -n scripts/run_picf_active_slot_matrix.sh: PASS
+  git diff --check: PASS
+  scripts/verify_picf_owm_contract.py: PASS
+  scripts/picf_owm_strict_diagnose.py --fail-on-fail: PASS
+  scripts/picf_owm_dataflow_trace.py --fail-on-fail: PASS
+  scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail: PASS
+  pipeline active-slot/ownership tests: 4 passed
+  training support-diversity tests: 4 passed
+```
+
+Remote launch state:
+
+```text
+A5:
+  tmux: picf_a5_activecap_matrix
+  first run: picf_a5_activecap_anchor_u1b4_a025_600_ac273a2
+  config: anchor_only, unroll=1, burnin=4, action_weight=0.25,
+          active_max_per_role=4, active_overlap=0.75
+  observed speed at step 50: ~11.5 sec/step
+
+A7:
+  tmux: picf_a7_activecap_matrix
+  first run: picf_a7_activecap_cotrain_prefix_u2b1_a1_600_ac273a2
+  config: all-scope cotrain, unroll=2, burnin=1, action_weight=1.0,
+          prefix-stopgrad enabled, PaliGemma trainable,
+          active_max_per_role=4, active_overlap=0.75
+  observed early speed: ~22.7 sec/step before first metrics point
+```
+
+First A5 step-50 result:
+
+```text
+loss_total: 0.1050
+loss_action_default_equiv: 0.1404
+loss_action_active7: 0.4624
+loss_anchor_pv: 2.8511
+loss_mapg_cycle: 0.3678
+loss_mapg_routing: 0.8109
+loss_mapg_support_diversity: 0.3670
+
+raw aqr_same_role_support_overlap_max: 0.2402
+aqr_active_same_role_support_overlap_max: 0.1621
+aqr_active_same_role_support_overlap_mean: 0.0305
+aqr_active_anchor_count: 14.0
+aqr_inactive_anchor_fraction: 0.4167
+active role counts: role0=2, role1=4, role2=4, role3=4
+
+posterior_recycle_rate: 0.4978
+posterior_stable_slot_fraction: 0.1111
+grad_norm: 8.3377
+```
+
+Interpretation:
+
+```text
+This is the first run where the acceptance metric is active overlap, not raw
+overlap. Step 50 is still warmup and cannot prove long-run stability, but it
+does prove the new active/dustbin path is live:
+
+  active slots are not all slots;
+  inactive fraction is nonzero and plausible;
+  active same-role overlap is far below the previous 0.95-0.99 collapse band;
+  the active role counts retain multiple candidate objects per semantic role.
+
+The posterior recycle rate is still high at step 50. That is not yet a failure,
+because the run is in LR warmup and active-slot selection operates before the
+posterior identity state has settled. It becomes a failure only if recycle
+remains high after the active subset stays stable through the 100/200/300-step
+checkpoints.
+```
+
+Second live check:
+
+```text
+A5 step 100:
+  loss_total: 0.1059
+  loss_action_default_equiv: 0.1473
+  loss_action_active7: 0.5009
+  loss_anchor_pv: 3.0886
+  loss_mapg_cycle: 0.3937
+  loss_mapg_routing: 0.8694
+  loss_mapg_support_diversity: 0.4076
+  raw aqr_same_role_support_overlap_max: 0.7943
+  aqr_active_same_role_support_overlap_max: 0.3166
+  aqr_active_same_role_support_overlap_mean: 0.0691
+  aqr_active_anchor_count: 14.0
+  aqr_inactive_anchor_fraction: 0.4167
+  posterior_recycle_rate: 0.4551
+  posterior_stable_slot_fraction: 0.1111
+  grad_norm: 13.6992
+  speed: 0.0867 steps/sec
+
+A7 step 50:
+  loss_total: 0.1740
+  loss_action_default_equiv: 0.1707
+  loss_action_active7: 0.5006
+  loss_anchor_pv: 2.8643
+  loss_mapg_cycle: 0.3799
+  loss_mapg_routing: 0.8403
+  loss_mapg_support_diversity: 0.3660
+  raw aqr_same_role_support_overlap_max: 0.2748
+  aqr_active_same_role_support_overlap_max: 0.1673
+  aqr_active_same_role_support_overlap_mean: 0.0294
+  aqr_active_anchor_count: 14.0
+  aqr_inactive_anchor_fraction: 0.4167
+  posterior_recycle_rate: 0.5737
+  posterior_stable_slot_fraction: 0.1094
+  grad_norm: 2.1651
+  speed: 0.0438 steps/sec
+```
+
+Interpretation:
+
+```text
+The key early signal is positive: active overlap remains far below the old
+collapse band in both anchor isolation and all-scope cotrain. A5 raw overlap
+rose from 0.24 to 0.79 by step 100, but active overlap stayed at 0.32. This is
+exactly the distinction the repair is meant to expose: inactive/dustbin slots
+may overlap because they are not allowed to dominate assignment.
+
+The remaining caution is posterior recycle. Recycle is still around 0.45-0.57
+during warmup. This must improve or at least not corrupt active assignments
+after step 200/300. If active overlap stays low but recycle remains high, the
+next root issue is posterior identity carry, not support assignment capacity.
+```
