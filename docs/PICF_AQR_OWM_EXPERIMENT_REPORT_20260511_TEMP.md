@@ -8093,3 +8093,26 @@ anchor overlay image. If step 100 remains in the 0.95-0.99 band, the failure is
 not "insufficient warmup length"; it indicates that weak task pressure alone
 does not create object ownership and the next mechanism must address assignment
 competition or actual object-correspondence evidence.
+
+At step 50 the first trend became less favorable:
+
+```text
+A5 step 50:
+  same_role_support_overlap_max = 0.9534
+  posterior_recycle_rate = 0.5019
+  loss_action_default_equiv = 0.1524
+  steps_per_sec = 0.0877
+
+A7 step 50:
+  same_role_support_overlap_max = 0.9769
+  posterior_recycle_rate = 0.5370
+  loss_action_default_equiv = 0.1416
+  steps_per_sec = 0.0713
+```
+
+The important interpretation is negative but useful: unroll2 did not improve
+early same-role support separation; it made overlap worse at this point while
+being slower. Recycle remains non-saturated, so the previous recycle-collapse
+failure is not the active bottleneck. If step 100 confirms this trend, the next
+root-cause item is not more recurrent context but a stronger object-ownership
+assignment signal.
