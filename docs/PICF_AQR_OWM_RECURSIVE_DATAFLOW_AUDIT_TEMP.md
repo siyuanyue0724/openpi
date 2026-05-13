@@ -414,8 +414,8 @@ Removed dead knobs/loss-looking placeholders and stale metrics that could create
 
 Evidence:
 
-- `scripts/verify_picf_owm_contract.py:290: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
-- `scripts/verify_picf_owm_contract.py:290: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:304: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:304: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
 - `docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md:2177: 3. Do not expose placeholder losses for cross-modal alignment, ordinal rank, or`
 
 ## Final Interpretation

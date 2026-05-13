@@ -7748,3 +7748,114 @@ tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warm300_202
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_cotrain_from300_to900_20260513_b9ad838/metrics.jsonl
 ls -lh /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warm300_20260513_b9ad838/anchor_overlays
 ```
+
+### 2026-05-13 23:25 Local Audit And Live A5/A7 Status
+
+Local verification was rerun after the A5/A7 overlay deployments:
+
+```text
+python -m py_compile:
+  scripts/picf_core_train.py
+  scripts/verify_picf_owm_contract.py
+  scripts/picf_owm_strict_diagnose.py
+  scripts/picf_owm_dataflow_trace.py
+  scripts/picf_owm_mvtrack_deep_audit.py
+  scripts/picf_owm_evidence_bundle.py
+
+python scripts/verify_picf_owm_contract.py:
+  31/31 PASS
+
+python scripts/picf_owm_strict_diagnose.py --fail-on-fail:
+  PASS
+
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+  PASS
+
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS
+
+uv run --no-sync pytest -q \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py:
+  4 passed
+```
+
+`picf_owm_strict_diagnose.py` still reports WARN entries for missing runtime
+metrics/eval files when no runtime paths are passed. This is expected for a
+local code audit and is not a code-contract failure.
+
+A5 live status:
+
+```text
+tmux:
+  picf_a5_overlay_warmcotrain
+
+warmup run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_overlay_warm300_20260513_b9ad838
+
+cotrain run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_overlay_cotrain_from300_to900_20260513_b9ad838
+
+step 50:
+  loss_total = 0.0875
+  loss_action_default_equiv = 0.1549
+  loss_action_active7 = 0.4967
+  loss_anchor_pv = 2.9131
+  loss_mapg_support_diversity = 0.8107
+  aqr_same_role_support_overlap_max = 0.9508
+  aqr_effective_anchor_count = 23.22
+  posterior_recycle_rate = 0.5527
+  posterior_address_update_rate_mean = 0.0203
+  steps_per_sec = 0.0847
+
+step 100:
+  loss_total = 0.0875
+  loss_action_default_equiv = 0.1757
+  loss_action_active7 = 0.5373
+  loss_anchor_pv = 3.5987
+  loss_mapg_support_diversity = 0.9444
+  aqr_same_role_support_overlap_max = 0.9918
+  aqr_effective_anchor_count = 22.83
+  posterior_recycle_rate = 0.0992
+  posterior_address_update_rate_mean = 0.0384
+  steps_per_sec = 0.0834
+
+anchor overlay:
+  anchor_overlays/step_000100.png exists
+```
+
+Interpretation:
+
+```text
+The A5 warmup has generated the requested per-100-step physical anchor overlay
+and the recurrent address/recycle machinery is active. The recycle rate improved
+sharply by step 100, but same-role support overlap remains very high. Therefore
+this run cannot yet be treated as evidence that the anchor supports are
+physically separated. The step-100 overlay and the step-200/300 metrics are the
+next acceptance gates.
+```
+
+A7 live status:
+
+```text
+tmux:
+  picf_a7_overlay_unroll2_warmcotrain
+
+warmup run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_warm300_20260513_b9ad838
+
+cotrain run:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_unroll2_cotrain_from300_to900_20260513_b9ad838
+
+current status:
+  no metrics.jsonl yet at the 23:25 check
+  GPUs active with the expected memory footprint
+```
+
+Interpretation:
+
+```text
+A7 is still before its first scalar logging point. It remains the controlled
+counterfactual for burnin4/state_only plus unroll2. It must not be used yet to
+conclude whether recurrent suffix length fixes or fails the overlap problem.
+```
