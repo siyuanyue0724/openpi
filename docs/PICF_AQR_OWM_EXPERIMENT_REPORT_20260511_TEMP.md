@@ -6587,11 +6587,34 @@ subspace during cotrain.
 
 #### Two-Hour Deployment Matrix
 
+Deployment revision:
+
+```text
+local/remote commit:
+  5241279
+
+code change:
+  none beyond the already committed normalized recycle-gate repair and docs.
+
+reason:
+  this is an attribution test over existing local-refinement residual strength,
+  not a new architecture patch.
+```
+
 A7 runs the strongest ablation:
 
 ```text
 name:
-  picf_a7_recyclenorm_localoff_fresh300_20260513_6871e69
+  picf_a7_recyclenorm_localoff_fresh300_20260513_5241279
+
+tmux:
+  localoff_a7
+
+metrics:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_recyclenorm_localoff_fresh300_20260513_5241279/metrics.jsonl
+
+train log:
+  /mnt/calvin_eval_logs/picf_a7_recyclenorm_localoff_fresh300_20260513_5241279/train.log
 
 overrides:
   num_train_steps=300
@@ -6613,7 +6636,16 @@ A5 runs the light-residual variant:
 
 ```text
 name:
-  picf_a5_recyclenorm_locallight_fresh300_20260513_6871e69
+  picf_a5_recyclenorm_locallight_fresh300_20260513_5241279
+
+tmux:
+  locallight_a5
+
+metrics:
+  /mnt/checkpoints/picf_core/picf_core/picf_a5_recyclenorm_locallight_fresh300_20260513_5241279/metrics.jsonl
+
+train log:
+  /mnt/calvin_eval_logs/picf_a5_recyclenorm_locallight_fresh300_20260513_5241279/train.log
 
 overrides:
   num_train_steps=300
@@ -6635,6 +6667,7 @@ overrides:
 Expected first useful readout:
 
 ```text
+step 25: first logged scalar sanity check
 step 125-150: early causal direction
 step 300: full two-hour attribution result
 ```
