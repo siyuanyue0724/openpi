@@ -7676,6 +7676,30 @@ A7:
   effective_window_steps=6
 ```
 
+Important speed caveat:
+
+```text
+direct unroll2:
+  burnin_steps=0
+  unroll_steps=2
+  effective_window_steps=2
+
+burnin4/unroll1:
+  burnin_steps=4
+  unroll_steps=1
+  effective_window_steps=5
+```
+
+The direct `burnin0/unroll2` profile can be faster in wall-clock time because it
+processes fewer recurrent transitions per optimizer step. It is not the same
+test as the current A7 counterfactual. The current A7 run intentionally keeps
+`burnin_steps=4` fixed and only changes the trainable suffix length from 1 to
+2, so it isolates recurrent suffix credit assignment while preserving the
+state distribution that was healthier in previous tests. If the question is
+"can direct unroll2 be the faster production profile?", run a separate
+`burnin0/unroll2` overlay ablation and compare both metrics and physical anchor
+overlays.
+
 All other important guards match the A5 overlay run: frozen Sonata/V-JEPA/
 AnyTouch, foundation visual mode, local refinement disabled, high-risk
 predictive losses zero, prefix-stopgrad retained, and anchor overlays every

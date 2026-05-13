@@ -4044,9 +4044,22 @@ unroll_steps=2
 effective_window_steps=6
 ```
 
-This is not expected to be faster in wall-clock time. It may provide stronger
-recurrent credit per optimizer step because two trainable suffix transitions
-receive gradient:
+This A7 run is not a direct speed test. A pure direct profile:
+
+```text
+burnin_steps=0
+unroll_steps=2
+effective_window_steps=2
+```
+
+can be faster than `burnin_steps=4, unroll_steps=1`, because it processes fewer
+recurrent transitions per optimizer step. The current A7 run deliberately keeps
+`burnin_steps=4` fixed and changes only the trainable suffix from 1 to 2. It is
+therefore a state-distribution-controlled test of recurrent suffix credit, not
+a claim that unroll2 is slower in general.
+
+It may provide stronger recurrent credit per optimizer step because two
+trainable suffix transitions receive gradient:
 
 ```math
 L_{unroll2}=\frac{1}{2}(L_t+L_{t+1})
