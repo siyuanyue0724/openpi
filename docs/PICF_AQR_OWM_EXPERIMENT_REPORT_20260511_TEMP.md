@@ -11813,6 +11813,29 @@ It is intentionally not SAM/DINO/proposal supervision and does not change the
 dataset. It tests whether the current typed evidence can support distinct
 same-role ownership when assignment capacity is not over-complete.
 
+Overlay interpretation fix:
+
+```text
+The anchor overlay previously drew every graph/posterior candidate up to
+anchor_overlay_max_anchors without distinguishing active object owners from
+inactive/dustbin graph candidates. That can create a visual false positive:
+twenty drawn markers does not mean twenty active objects. The maintained overlay
+JSON/PNG now records graph anchor_active. Inactive graph anchors are gray and
+labeled with an "i" suffix, while active graph anchors retain role colors.
+Posterior anchors are still drawn as posterior state because they do not carry
+the graph active mask one-to-one.
+```
+
+When reading overlays, use this order:
+
+```text
+1. active graph role-colored squares: current assignment owners;
+2. gray graph squares: retained candidate/dustbin/recurrent carriers;
+3. posterior circles: belief-state object files after correction;
+4. metrics: same-role support/object-core overlap decide collapse, not marker
+   count alone.
+```
+
 Deployed paired profiles:
 
 ```bash

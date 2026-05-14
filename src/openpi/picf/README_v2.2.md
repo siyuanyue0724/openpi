@@ -4938,3 +4938,10 @@ the NeurIPS 2025 IsSameObject paper shows that object binding is a pairwise
 subspace relation, not a per-token scalar category. If this profile still fails,
 the next repair should add real evidence such as tracklets/proposals rather
 than another scalar loss weight.
+
+Overlay reading note: the training anchor overlay now writes `active` for graph
+anchors. Inactive graph candidates are gray and labeled with an `i` suffix; they
+are retained candidate/dustbin carriers, not accepted object owners. Do not
+judge object count from marker count alone. Use role-colored active graph
+squares, posterior circles, same-role support overlap, object-core overlap, and
+effective-anchor metrics together.

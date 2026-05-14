@@ -775,6 +775,7 @@ def _anchor_source_snapshot(
     x: torch.Tensor | None,
     role_ids: torch.Tensor | None = None,
     confidence: torch.Tensor | None = None,
+    active: torch.Tensor | None = None,
     support_mass: torch.Tensor | None = None,
     recycle_gate: torch.Tensor | None = None,
     geometry_valid: torch.Tensor | None = None,
@@ -801,6 +802,7 @@ def _anchor_source_snapshot(
         "x": x_cpu[:, :3].to(dtype=torch.float32),
         "role_ids": _aligned(role_ids, dtype=torch.long),
         "confidence": _aligned(confidence, dtype=torch.float32),
+        "active": _aligned(active, dtype=torch.float32),
         "support_mass": _aligned(support_mass, dtype=torch.float32),
         "recycle_gate": _aligned(recycle_gate, dtype=torch.float32),
         "geometry_valid": _aligned(geometry_valid, dtype=torch.bool),
@@ -820,6 +822,7 @@ def _anchor_overlay_snapshot_from_output(output: Any, observation: PicfObservati
             x=getattr(graph, "anchor_x", None),
             role_ids=getattr(graph, "anchor_roles", None),
             confidence=getattr(graph, "anchor_confidence", None),
+            active=getattr(graph, "anchor_active", None),
             geometry_valid=getattr(graph, "geometry_valid", None),
         )
         if graph_source is not None:
@@ -940,6 +943,7 @@ def _save_anchor_overlay_diagnostic(
         count = min(int(x.shape[0]), max(int(max_anchors), 0))
         roles = source.get("role_ids")
         confidence = source.get("confidence")
+        active = source.get("active")
         support_mass = source.get("support_mass")
         recycle_gate = source.get("recycle_gate")
         geometry_valid = source.get("geometry_valid")
@@ -958,6 +962,7 @@ def _save_anchor_overlay_diagnostic(
                 "pixel_xy": [px, py] if np.isfinite(px) and np.isfinite(py) else None,
                 "visible": is_visible,
                 "confidence": float(confidence[idx].item()) if isinstance(confidence, torch.Tensor) else None,
+                "active": float(active[idx].item()) if isinstance(active, torch.Tensor) else None,
                 "support_mass": float(support_mass[idx].item()) if isinstance(support_mass, torch.Tensor) else None,
                 "recycle_gate": float(recycle_gate[idx].item()) if isinstance(recycle_gate, torch.Tensor) else None,
                 "geometry_valid": bool(geometry_valid[idx].item()) if isinstance(geometry_valid, torch.Tensor) else None,
@@ -970,14 +975,19 @@ def _save_anchor_overlay_diagnostic(
                 continue
             radius = int(radius_by_source.get(name, 5))
             x0, y0 = int(round(px)), int(round(py))
-            outline = color
+            active_value = float(active[idx].item()) if isinstance(active, torch.Tensor) else 1.0
+            is_active = active_value > 0.5
+            outline = color if (name != "graph" or is_active) else (130, 130, 130)
             if name == "posterior":
                 draw.ellipse((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=2)
                 draw.line((x0 - radius, y0, x0 + radius, y0), fill=outline, width=1)
                 draw.line((x0, y0 - radius, x0, y0 + radius), fill=outline, width=1)
             else:
-                draw.rectangle((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=2)
+                width = 2 if is_active else 1
+                draw.rectangle((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=width)
             label = ("p" if name == "posterior" else "g") + str(idx)
+            if name == "graph" and not is_active:
+                label += "i"
             draw.text((x0 + radius + 2, y0 - radius - 2), label, fill=outline)
             total_drawn += 1
 
@@ -999,7 +1009,7 @@ def _save_anchor_overlay_diagnostic(
         "anchors": records,
         "note": (
             "Static-view projection of graph and posterior 3D anchors. "
-            "Invisible anchors are retained in JSON but not drawn. "
+            "Invisible anchors are retained in JSON but not drawn. Inactive graph anchors are gray and labeled with an 'i' suffix. "
             "This is a training diagnostic only and does not change the loss or forward path."
         ),
     }
