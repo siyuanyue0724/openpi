@@ -4617,3 +4617,21 @@ This is the correct next diagnostic because it tests whether task/action/
 semantic gradients give object files enough utility to avoid the anchor-only
 support-reuse collapse. The startup gate passed: both A100s reached about
 39.6GB and 100% utilization, and the progress bar entered real training.
+
+A7 should be repurposed from its older `07bdf66` seed-coverage run to the
+current support-competition discriminator. The older A7 row reached step300
+with action improving but raw same-role support overlap back at `0.9624`,
+active overlap `0.5882`, and effective anchor count `13.66`. That is enough to
+reject the old candidate; finishing to 600 would mostly measure an outdated
+configuration. The maintained fast A7 profile is:
+
+```bash
+bash scripts/run_picf_posterior_birth_matrix.sh a7_fast
+```
+
+It runs two 300-step all-scope cotrain rows at action weights `0.25` and `0.50`
+with `unroll=2`, `burnin=1`, active max-per-role `6`, and the current same-role
+support competition. The purpose is not to chase a lower action loss in
+isolation; it is to test whether current measurement routing keeps
+`effective_anchor_count` healthy while action decreases under production-like
+cotrain pressure.

@@ -11127,3 +11127,57 @@ Fail signal:
   If that happens, the problem is upstream object-specific evidence extraction,
   not another missing scalar loss.
 ```
+
+Current A7 status and next use:
+
+```text
+Remote:
+  A7 / qgE72e / port 28060
+
+Current old run:
+  picf_a7_birth_cotrain_u2b1_a025_600_07bdf66
+  commit=07bdf66
+  scope=all, unroll=2, burnin=1, action_weight=0.25
+
+Latest checked row:
+  step300 raw same-role support overlap    = 0.9624
+  step300 active same-role support overlap = 0.5882
+  step300 effective anchor count           = 13.66
+  step300 posterior recycle rate           = 0.2005
+  step300 action default-equiv             = 0.0919
+```
+
+Interpretation:
+
+```text
+The old A7 run is not a crash and is not useless, but it is no longer the best
+use of A7. It predates same-role support competition and has already shown the
+same structural warning: action can decrease while raw same-role support reuse
+returns above 0.95. Continue-to-600 would mostly measure an outdated candidate.
+```
+
+Planned A7 fast discriminator:
+
+```text
+Profile:
+  scripts/run_picf_posterior_birth_matrix.sh a7_fast
+
+Rows:
+  1. picf_a7_birth_cotrain_u2b1_a025_300_<tag>
+     scope=all, unroll=2, burnin=1, action_weight=0.25
+
+  2. picf_a7_birth_cotrain_u2b1_a05_300_<tag>
+     scope=all, unroll=2, burnin=1, action_weight=0.50
+```
+
+Why this is the correct A7 use:
+
+```text
+A5 now tests whether latest support competition survives the hardest
+anchor-only negative control and a matching cotrain row. A7 should not repeat
+old seed-coverage; it should test whether the latest support-competition
+measurement routing survives the production-like all-scope setup on the machine
+that historically gave the best action-vs-anchor discriminator. Step100/200/300
+are sufficient gates for the specific failure because every rejected branch
+rebounded before or around that window.
+```

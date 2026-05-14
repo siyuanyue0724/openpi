@@ -134,6 +134,10 @@ case "${PROFILE}" in
     run_one "picf_a7_birth_cotrain_u2b1_a025_600_${RUN_TAG}" 600 all 2 1 0.25 6 0.70
     run_one "picf_a7_birth_cotrain_u2b1_a05_600_${RUN_TAG}" 600 all 2 1 0.50 6 0.70
     ;;
+  a7_fast)
+    run_one "picf_a7_birth_cotrain_u2b1_a025_300_${RUN_TAG}" 300 all 2 1 0.25 6 0.70
+    run_one "picf_a7_birth_cotrain_u2b1_a05_300_${RUN_TAG}" 300 all 2 1 0.50 6 0.70
+    ;;
   *)
     echo "unknown profile: ${PROFILE}" >&2
     exit 2
