@@ -2562,6 +2562,49 @@ def test_sinkhorn_dustbin_stays_finite_and_backward_stable(tmp_path: Path) -> No
     assert torch.isfinite(logits.grad).all()
 
 
+def test_posterior_occupancy_bias_breaks_same_role_centroid_symmetry(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        persistent_anchors=4,
+        effector_persistent_anchors=1,
+        posterior_occupancy_prior_enabled=True,
+        posterior_occupancy_prior_weight=1.0,
+        posterior_occupancy_prior_sigma_m=0.05,
+    )
+    tokens = torch.zeros((4, core.config.hidden_dim), device=core.device, dtype=core.dtype)
+    obs = PicfObservationAnchorState(
+        seed_indices=torch.arange(4, device=core.device),
+        tokens=tokens,
+        point_weights=torch.zeros((4, 0), device=core.device, dtype=core.dtype),
+        routing_mass_point=torch.zeros((4, 0), device=core.device, dtype=core.dtype),
+        routing_mass_visual=torch.zeros((4, 0), device=core.device, dtype=core.dtype),
+        routing_support_point=torch.zeros((4,), device=core.device, dtype=core.dtype),
+        routing_support_visual=torch.zeros((4,), device=core.device, dtype=core.dtype),
+        routing_gate_point=torch.zeros((4,), device=core.device, dtype=core.dtype),
+        routing_gate_visual=torch.zeros((4,), device=core.device, dtype=core.dtype),
+        x=torch.tensor(
+            [
+                [0.0, 0.0, 0.0],
+                [-0.08, 0.0, 0.0],
+                [0.08, 0.0, 0.0],
+                [0.0, 0.09, 0.0],
+            ],
+            device=core.device,
+            dtype=core.dtype,
+        ),
+        S=torch.eye(3, device=core.device, dtype=core.dtype)[None, :, :].expand(4, -1, -1),
+        a=torch.full((4, 3), 0.02, device=core.device, dtype=core.dtype),
+        role_ids=torch.tensor([0, 1, 1, 1], device=core.device, dtype=torch.long),
+    )
+    bias = core._posterior_occupancy_binding_bias(obs)
+    assert bias is not None
+    scene_bias = bias[1:, 1:]
+    preferred = torch.argmax(scene_bias, dim=1)
+    assert int(torch.unique(preferred).numel()) == 3
+    assert float(scene_bias.max().item()) > 0.0
+    assert float(scene_bias.min().item()) < 0.0
+
+
 def test_extract_targets_tactile_real_is_summary_head_not_per_sensor_reconstruction(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))

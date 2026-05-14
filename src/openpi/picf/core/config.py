@@ -22,6 +22,15 @@ class PicfCoreConfig:
     # using per-role farthest-point selection. This is not a label; it is the
     # initial object-file birth prior needed before recurrent identity exists.
     posterior_bootstrap_from_observation: bool = True
+    # Posterior data association needs a same-role occupancy prior, otherwise
+    # the doubly-normalized measurement routing can give every same-role object
+    # file the same broad observation mixture and collapse them to one centroid.
+    # This prior is label-free: it uses per-role farthest-point observation
+    # hypotheses only as a measurement coverage prior before correction.
+    posterior_occupancy_prior_enabled: bool = True
+    posterior_occupancy_prior_weight: float = 1.0
+    posterior_occupancy_prior_sigma_m: float = 0.04
+    posterior_occupancy_prior_clip: float = 4.0
     hidden_dim: int = 512
     posterior_hidden_dim: int = 512
     latent_dim: int = 112

@@ -409,6 +409,26 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
+            "posterior_occupancy_prior_breaks_object_file_centroid_collapse",
+            "_posterior_occupancy_binding_bias" in pipeline.text
+            and "posterior_occupancy_prior_enabled" in config.text
+            and "posterior_occupancy_prior_weight" in pipeline.text
+            and "posterior_occupancy_prior_sigma_m" in pipeline.text
+            and "_fps_indices(obs.x[obs_indices], take)" in pipeline.text
+            and "bind_logits = bind_logits + occupancy_bias" in posterior,
+            severity="fail",
+            detail=(
+                "Posterior correction must include a label-free same-role occupancy prior; "
+                "without it, fixed-row Sinkhorn measurement routing can collapse multiple object files "
+                "to one broad observation centroid even when AQR graph supports are spread."
+            ),
+            evidence=pipeline.node_refs("_posterior_occupancy_binding_bias")
+            + pipeline.node_refs("_posterior_update")
+            + config.refs("posterior_occupancy_prior"),
+        )
+    )
+    checks.append(
+        _finding(
             "posterior_updates_address_slowly_and_resets_through_recycle",
             "base_address" in posterior
             and "obs_address = binding_cond @ obs_anchors.anchor_address" in posterior

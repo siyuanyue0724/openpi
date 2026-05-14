@@ -5856,6 +5856,44 @@ class PicfFullCore(nn.Module):
         overlap = post_priors.T @ obs_assignment.T
         return self._vl_centered_log_prior_bias(overlap)
 
+    def _posterior_occupancy_binding_bias(self, obs: PicfObservationAnchorState) -> torch.Tensor | None:
+        if (
+            not bool(getattr(self.config, "posterior_occupancy_prior_enabled", True))
+            or obs.tokens.shape[0] == 0
+            or obs.role_ids is None
+            or obs.role_ids.numel() != obs.tokens.shape[0]
+            or obs.x.numel() == 0
+        ):
+            return None
+        posterior_roles = self._posterior_role_ids().to(device=self.device, dtype=torch.long)
+        obs_roles = obs.role_ids.to(device=self.device, dtype=torch.long)
+        bias = torch.zeros((int(posterior_roles.numel()), int(obs_roles.numel())), device=self.device, dtype=self.dtype)
+        sigma = max(float(getattr(self.config, "posterior_occupancy_prior_sigma_m", 0.04)), float(self.config.epsilon_s))
+        sigma2 = max(sigma * sigma, float(self.config.epsilon_s))
+        for role_value in torch.unique(posterior_roles).tolist():
+            slot_indices = torch.nonzero(posterior_roles == int(role_value), as_tuple=False).squeeze(-1)
+            obs_indices = torch.nonzero(obs_roles == int(role_value), as_tuple=False).squeeze(-1)
+            if slot_indices.numel() <= 1 or obs_indices.numel() <= 1:
+                continue
+            take = min(int(slot_indices.numel()), int(obs_indices.numel()))
+            selected_local = _fps_indices(obs.x[obs_indices], take)
+            if selected_local.numel() == 0:
+                continue
+            selected = obs_indices[selected_local]
+            slots = slot_indices[: int(selected.numel())]
+            centers = obs.x[selected].to(device=self.device, dtype=self.dtype)
+            candidates = obs.x[obs_indices].to(device=self.device, dtype=self.dtype)
+            dist2 = torch.sum((candidates[None, :, :] - centers[:, None, :]) ** 2, dim=-1)
+            role_bias = -0.5 * dist2 / sigma2
+            role_bias = role_bias - role_bias.mean(dim=-1, keepdim=True)
+            clip = float(getattr(self.config, "posterior_occupancy_prior_clip", 4.0))
+            if clip > 0.0:
+                role_bias = torch.clamp(role_bias, min=-clip, max=clip)
+            bias[slots[:, None], obs_indices[None, :]] = role_bias
+        if not bool((bias != 0.0).any().item()):
+            return None
+        return float(getattr(self.config, "posterior_occupancy_prior_weight", 1.0)) * bias
+
     def _posterior_role_ids(self) -> torch.Tensor:
         k = int(self.config.persistent_anchors)
         effector_count = self._effector_persistent_count()
@@ -5993,6 +6031,9 @@ class PicfFullCore(nn.Module):
         graph_bias = self._posterior_mapg_binding_bias(obs_anchors, anchor_graph)
         if graph_bias is not None:
             bind_logits = bind_logits + (self._mapg_gate(self.mapg_posterior_gate_logit, anchor_graph) * graph_bias)
+        occupancy_bias = self._posterior_occupancy_binding_bias(obs_anchors)
+        if occupancy_bias is not None:
+            bind_logits = bind_logits + occupancy_bias
         binding_raw = self._sinkhorn_dustbin(bind_logits)
         support_raw = binding_raw[:-1]
         dustbin_raw = binding_raw[-1]

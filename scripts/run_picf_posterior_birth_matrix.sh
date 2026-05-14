@@ -52,6 +52,10 @@ COMMON=(
   --posterior-slot-identity-std 0.02
   --task-slot-identity-std 0.02
   --posterior-bootstrap-from-observation
+  --posterior-occupancy-prior-enabled
+  --posterior-occupancy-prior-weight 1.0
+  --posterior-occupancy-prior-sigma-m 0.04
+  --posterior-occupancy-prior-clip 4.0
   --recycle-normalize-residual-summary
   --recycle-residual-norm-mode layernorm
   --posterior-slotwise-recycle-residual

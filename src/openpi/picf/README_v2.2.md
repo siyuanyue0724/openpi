@@ -4452,3 +4452,30 @@ still
 but run names now include the current git short SHA instead of the old fixed
 suffix. Detailed numbers, math, and acceptance gates are recorded in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
+2026-05-14 posterior occupancy prior update: the slot-local recycle run fixed
+the recycle/reset symmetry but still failed the overlay gate. A5 step100 had
+healthy graph support separation, but seven role-1 posterior files projected to
+the same pixel-level centroid. The failure is now localized to posterior
+measurement association: fixed-row Sinkhorn gives every same-role posterior row
+measurement mass, and without a coverage prior weak logits produce identical
+broad mixtures.
+
+The maintained runtime now adds a label-free same-role posterior occupancy prior
+inside `_posterior_update`. For each role, current observation-anchor hypotheses
+are farthest-point sampled and used as per-object-file measurement coverage
+centers. The bias is row-centered and clipped, so it breaks symmetry without
+becoming a hard pseudo-label or an action-side loss:
+
+```text
+posterior_occupancy_prior_enabled = True
+posterior_occupancy_prior_weight = 1.0
+posterior_occupancy_prior_sigma_m = 0.04
+posterior_occupancy_prior_clip = 4.0
+```
+
+This is the next accepted test candidate, not a completed behavior claim. The
+next A5/A7 matrix must show that posterior role-1 overlay points are no longer
+co-located at step100/200 before action loss is treated as meaningful. Full
+math, metrics, and acceptance gates are recorded in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).

@@ -10581,3 +10581,89 @@ Interpretation:
 Do not call `e4f0b91` accepted. Continue the A7 run to step100 overlay to check
 whether the same posterior co-location appears under all-scope cotrain; the A5
 anchor-only overlay already shows the current fix is incomplete.
+
+2026-05-14 posterior occupancy prior update: the slot-local recycle run exposed
+the next lower-level failure. A5 step50 and step100 had healthy AQR support
+overlap (`0.2578 -> 0.2861`) and non-saturated recycle (`0.5338 -> 0.3305`),
+but the step100 overlay showed graph role-1 candidates were separated while
+posterior role-1 object files were almost exactly co-located:
+
+```text
+A5 step100:
+  graph role-1 pairwise pixel distance:
+    min=2.58 px, mean=17.54 px, max=37.37 px
+  posterior role-1 pairwise pixel distance:
+    min=0.0009 px, mean=0.0928 px, max=0.2828 px
+
+A5 step200:
+  graph role-1 pairwise pixel distance:
+    min=0.38 px, mean=14.38 px, max=28.45 px
+  posterior role-1 pairwise pixel distance:
+    min=0.0004 px, mean=0.0052 px, max=0.0117 px
+  aqr_same_role_support_overlap_max = 0.9382
+  aqr_active_same_role_support_overlap_max = 0.6215
+```
+
+This falsifies the hypothesis that the remaining failure is only recycle/reset
+symmetry. The posterior association itself lacks an object-file occupancy prior:
+the current Sinkhorn has an observation dustbin row but no per-slot missed
+detection/coverage prior, so each same-role posterior row is forced to take
+measurement mass. When logits are not already identity-separated, each row uses
+a similar broad observation mixture and the posterior position becomes the same
+role-level centroid:
+
+```math
+B = Sinkhorn(L),\qquad
+x_j^{obs} =
+  { \sum_i B_{j,i} x_i \over \sum_i B_{j,i} }.
+```
+
+The maintained repair is now a label-free posterior occupancy binding prior:
+for each role, current observation-anchor hypotheses are farthest-point sampled
+and assigned to same-role object-file rows as a measurement coverage prior. The
+prior is centered per row and clipped, so it breaks same-role symmetry without
+becoming a hard label:
+
+```math
+\Delta L_{j,i}^{occ}
+=
+\lambda_{occ}
+\operatorname{clip}
+\left(
+- { \|x_i - c_j^{fps}\|^2 \over 2\sigma_{occ}^2}
+- mean_i(\cdot),
+-c_{max}, c_{max}
+\right).
+```
+
+This is not an extra loss and not an action-side patch. It is part of the
+posterior measurement model, matching the object-file interpretation of the
+belief filter: same-role files need separate measurement hypotheses before the
+precision-form correction step. Defaults:
+
+```text
+posterior_occupancy_prior_enabled = True
+posterior_occupancy_prior_weight = 1.0
+posterior_occupancy_prior_sigma_m = 0.04
+posterior_occupancy_prior_clip = 4.0
+```
+
+Local validation before remote redeploy:
+
+```text
+python -m py_compile config/pipeline/trainer/verifier/deep_audit: PASS
+uv run --no-sync pytest -q pipeline_test.py -k "posterior_occupancy ...": 4 passed
+python scripts/verify_picf_owm_contract.py: PASS
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail: PASS
+```
+
+Acceptance gate for the next A5/A7 run is stricter than loss decrease:
+
+```text
+1. posterior role-1 pairwise pixel mean should no longer be near zero at
+   step100/200 overlays.
+2. aqr_same_role_support_overlap_max should not rebound to 0.95+.
+3. posterior_recycle_rate should not pin to 0 or 1.
+4. action default-equivalent loss can be interpreted only after these structural
+   gates pass.
+```
