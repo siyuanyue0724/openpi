@@ -1163,6 +1163,7 @@ def test_mapg_observation_point_mix_floor_reaches_final_point_weights(tmp_path: 
         mapg_message_rounds=2,
         mapg_obs_gate_init=-20.0,
         mapg_obs_point_mix_floor=0.5,
+        observation_anchor_seed_point_mix=0.0,
     )
     frame = next(iter(replay))
     output = core.step(

@@ -127,7 +127,7 @@ Evidence:
 - `src/openpi/picf/core/contracts.py:116: class PicfPseudoProposalState:`
 - `src/openpi/picf/core/pipeline.py:1292: self.aqr_proposal_reader = CrossAttentionRead(`
 - `src/openpi/picf/core/contracts.py:75: proposal_priors: torch.Tensor | None = None`
-- `src/openpi/picf/core/pipeline_test.py:1485: def test_mvtrack_proposal_support_is_optional_and_guarded(tmp_path: Path) -> None:`
+- `src/openpi/picf/core/pipeline_test.py:1486: def test_mvtrack_proposal_support_is_optional_and_guarded(tmp_path: Path) -> None:`
 
 ## 7. Previous evidence cache read - PASS
 
@@ -275,7 +275,7 @@ Evidence:
 
 - `src/openpi/picf/core/pipeline.py:7054: # Keep state-only burn-in on the same AQR measurement model as the trainable suffix.`
 - `src/openpi/picf/core/pipeline.py:3206: def _build_aqr_anchor_graph(`
-- `src/openpi/picf/core/pipeline_test.py:1528: def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:`
+- `src/openpi/picf/core/pipeline_test.py:1529: def test_recurrent_burnin_uses_aqr_graph_when_aqr_enabled(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:`
 
 ## 14. Innovation - PASS
 

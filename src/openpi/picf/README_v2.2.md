@@ -360,6 +360,11 @@ anchor/recycle health. Both runs use `save_interval=2500` and
   Script-generated recursive dataflow audit. Use this to verify the exact
   observation/carry -> typed evidence -> AQR -> posterior -> prediction/cache
   -> action formulas and code evidence.
+- [`docs/PICF_AQR_OWM_STRICT_LOCAL_AUDIT_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_STRICT_LOCAL_AUDIT_20260515_TEMP.md)
+  2026-05-15 strict local audit requested after reviewer feedback. It records
+  the paper-to-math assumptions, the full data follow-through, the exact script
+  checks executed, the stale test isolation fix, and the boundary between
+  code-level proof and pending A7 30k behavior acceptance.
 - [`docs/PICF_AQR_OWM_REMOTE_CALVIN_AUDIT_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_REMOTE_CALVIN_AUDIT_TEMP.md)
   Remote audit of the older `8fdb16f` CALVIN run. It records why that checkpoint
   remains a failing anchor-quality baseline and why it cannot be used as proof
