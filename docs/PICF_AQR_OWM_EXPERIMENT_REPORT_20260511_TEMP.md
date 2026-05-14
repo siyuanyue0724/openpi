@@ -12902,3 +12902,97 @@ cotrain recipe. The conservative maintained recipe should still start at
 action=0.25 or ramp from 0.25 to 0.50, because recycle peak remains the only
 unresolved stability risk.
 ```
+
+2026-05-15 30k long-run launch plan
+-----------------------------------
+
+Purpose:
+
+```text
+Start the first long cotrain run after the active/dustbin repair passed the
+short gates. This run is not another local patch test; it is the behavioral
+stability run that checks whether the short-run structural repair survives
+30k steps of action optimization.
+```
+
+Chosen recipe:
+
+```text
+profile:
+  a7_dustbin_long30k
+
+machine:
+  A7, ssh -p 28060 root@36.139.225.68
+
+steps:
+  30000
+
+checkpointing:
+  save every 2500 steps
+  keep last 3 numeric checkpoints
+
+anchor overlays:
+  every 100 steps
+
+window:
+  unroll=2
+  burnin=1
+  burnin_mode=state_only
+
+trainable scope:
+  all PICF/action/PaliGemma-side trainable modules
+  frozen perception backbones:
+    Sonata
+    V-JEPA
+    AnyTouch
+
+action:
+  lambda_action_pos/rot/gripper = 0.50
+  picf_action_prefix_stopgrad = true
+```
+
+Why action weight 0.50:
+
+```text
+A5 stress at a0.50 passed the short active-owner gate through step300:
+  action_default_equiv 0.1252 -> 0.0614
+  active_support max ~= 0.225
+  active_core max ~= 0.310
+  recycle peak ~=0.796, step300 ~=0.455
+
+Therefore a0.50 is no longer an untested aggressive setting. It remains a
+long-run risk because recycle peaked high, so recycle is a first-class gate.
+Using a0.25 would be safer but would under-test whether the repaired binding
+can coexist with action pressure at a useful optimization strength.
+```
+
+Acceptance watchlist:
+
+```text
+Hard structural fail:
+  active same-role support overlap max >= 0.70 sustained
+  active same-role object-core overlap max >= 0.60 sustained
+  overlays show persistent same-role active co-location after the warmup region
+
+Recycle fail:
+  posterior_recycle_rate >= 0.70 sustained after step1000
+  address_update_rate collapses near zero while recycle stays high
+
+Action fail:
+  loss_action_default_equiv stops improving for thousands of steps while
+  structural metrics degrade
+
+Healthy pattern:
+  action_default_equiv trends down
+  active_support stays mostly <0.50
+  active_core stays mostly <0.45
+  recycle is noisy early but does not stay saturated
+```
+
+Tail commands:
+
+```bash
+ssh -p 28060 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d5e513b_long30k/metrics.jsonl
+tail -f /mnt/picf_run_logs/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d5e513b_long30k.log
+```

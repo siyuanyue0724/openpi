@@ -245,6 +245,27 @@ case "${PROFILE}" in
       --aqr-active-slot-geometry-duplicate-sigma-m 0.05 \
       --aqr-active-slot-geometry-duplicate-threshold 0.60
     ;;
+  a7_dustbin_long30k)
+    run_one "picf_a7_dustbin_router_cotrain_u2b1_a05_30000_${RUN_TAG}" 30000 all 2 1 0.50 4 0.55 \
+      --picf-action-prefix-stopgrad \
+      --aux-budget-alignment-ratio 1.0 \
+      --aux-budget-alignment-floor 2.0 \
+      --lambda-mapg-support-diversity 0.25 \
+      --lambda-mapg-geometry-diversity 0.05 \
+      --aqr-ownership-prior-weight 0.70 \
+      --aqr-ownership-point-prior-weight 0.70 \
+      --aqr-ownership-temporal-prior-weight 0.35 \
+      --aqr-ownership-prior-uniform-mix 0.02 \
+      --aqr-same-role-support-competition-weight 0.55 \
+      --aqr-same-role-support-competition-iters 3 \
+      --aqr-active-slot-relative-score-threshold 0.62 \
+      --aqr-active-slot-geometry-duplicate-enabled \
+      --aqr-active-slot-geometry-duplicate-sigma-m 0.05 \
+      --aqr-active-slot-geometry-duplicate-threshold 0.60 \
+      --anchor-overlay-interval 100 \
+      --save-interval 2500 \
+      --keep-last-checkpoints 3
+    ;;
   *)
     echo "unknown profile: ${PROFILE}" >&2
     exit 2

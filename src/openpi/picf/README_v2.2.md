@@ -5144,6 +5144,39 @@ Conclusion:
   The remaining caution is recycle, so longer runs should keep recycle and
   address-update metrics as first-class acceptance signals.
 ```
+
+2026-05-15 30k long-run launch contract:
+
+```text
+profile:
+  a7_dustbin_long30k
+
+machine:
+  A7
+
+steps:
+  30000
+
+checkpointing:
+  save interval = 2500
+  keep last checkpoints = 3
+
+anchor overlays:
+  every 100 steps
+
+window:
+  unroll=2, burnin=1
+
+action:
+  action weight = 0.50
+  prefix-stopgrad = enabled
+```
+
+This is the first long behavior-stability run after the active/dustbin repair
+passed A5 anchor-only, A7 a0.25 cotrain, and A5 a0.50 stress short gates. The
+main remaining risk is not immediate active collapse; it is long-run recycle
+saturation. Treat `posterior_recycle_rate`, `posterior_address_update_rate`,
+active overlap, and the 100-step anchor overlays as acceptance signals.
 ```
 
 Detailed numbers and tail commands are tracked in
