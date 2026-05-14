@@ -11760,3 +11760,106 @@ A7:
 Acceptance should remain strict: step300 active visual overlap `<0.50`, active
 object-core overlap `<0.45`, effective anchor count `>18`, and overlay spread
 must stay broad rather than merely improving scalar losses.
+
+## 2026-05-14 Object-Conditional Assignment Test
+
+The one-hour structure-budget follow-up rejects a weight-only explanation. The
+alignment budget starvation was real and is now fixed, but both A5 and A7 still
+missed the final same-role structure gates. The remaining failure is therefore
+inside object-conditioned measurement assignment:
+
+```math
+E_{j,i}
+=
+E_{\mathrm{evidence}}(j,i)
++ E_{\mathrm{geometry}}(j,i)
++ E_{\mathrm{ownership}}(j,i \mid role)
++ E_{\mathrm{competition}}(j,i \mid role).
+```
+
+The critical correction is not a new outer loss. It is a belief-filter
+capacity/assignment test: in CALVIN, a role may have fewer useful physical
+objects than fixed same-role query slots. Keeping all six same-role slots active
+forces several slots to explain the same high-salience evidence; demoting
+redundant same-role candidates to dustbin/recurrent carriers is mathematically
+closer to DETR-style no-object capacity than forcing every query to be an
+object.
+
+Paper basis:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  NeurIPS 2025 spotlight, arXiv:2510.24709.
+  It supports pairwise/quadratic IsSameObject binding subspaces rather than
+  purely linear per-token category features.
+
+Object-centric robotics / tracking work in 2025:
+  TrackVLA, SOFT-style object-centric ViT wrappers, and recent object-centric
+  VLA/robotics work all separate object recognition/ownership from action
+  execution rather than relying on action loss alone to discover all objects.
+```
+
+This test uses only existing PICF mechanisms:
+
+```text
+1. stronger object-conditioned ownership prior on visual/point/temporal support;
+2. stronger same-role competition over already object-conditioned rows;
+3. active same-role capacity max 4 with overlap threshold 0.55;
+4. alignment budget kept unstarved;
+5. no local refinement, no slot-JEPA, no support-pred, no binding-consistency.
+```
+
+It is intentionally not SAM/DINO/proposal supervision and does not change the
+dataset. It tests whether the current typed evidence can support distinct
+same-role ownership when assignment capacity is not over-complete.
+
+Deployed paired profiles:
+
+```bash
+bash scripts/run_picf_posterior_birth_matrix.sh a5_object_assign
+bash scripts/run_picf_posterior_birth_matrix.sh a7_object_assign
+```
+
+Profile contracts:
+
+```text
+A5:
+  anchor_only, action=0.0, unroll=2, burnin=1, active_max_per_role=4,
+  active_overlap=0.55, ownership visual/point=0.70, temporal=0.35,
+  same-role competition weight=0.55, iters=3.
+
+A7:
+  all-scope prefix-stopgrad cotrain, action=0.25, same assignment contract.
+```
+
+Acceptance at step 300/360:
+
+```text
+aqr_active_same_role_support_overlap_max       < 0.50
+aqr_active_same_role_object_core_overlap_max   < 0.45
+aqr_effective_anchor_count                     > 16
+posterior_recycle_rate                         not saturated
+loss_mapg_support_diversity                    not monotonically increasing
+anchor overlays                                not visually co-located
+```
+
+Interpretation matrix:
+
+```text
+A5 fails, A7 fails:
+  typed evidence still cannot sustain same-role object assignment; the next
+  repair must introduce real objectness/tracklet/proposal evidence rather than
+  schedule changes.
+
+A5 passes, A7 fails:
+  assignment can work, but action cotrain corrupts it; use longer prefix
+  stop-gradient or staged cotrain before action pressure.
+
+A5 fails, A7 passes:
+  task-conditioned gradients are necessary to select useful object files; use
+  cotrain with prefix-stopgrad, not anchor-only warmup, as the production
+  bootstrap.
+
+A5 passes, A7 passes:
+  this becomes the first acceptable candidate for a longer 2.5k/30k run.
+```

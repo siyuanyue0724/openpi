@@ -4903,3 +4903,38 @@ anchors in this profile and supplies a useful selection signal, but scalar
 budget/support-diversity changes alone are not a complete cure. The next repair
 must change the object-conditional assignment energy itself rather than only
 increasing the weight of the existing diversity term.
+
+2026-05-14 object-conditional assignment follow-up:
+
+The next paired diagnostic is documented in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md),
+section `2026-05-14 Object-Conditional Assignment Test`.
+
+This is the first test after the structure-budget rejection. It keeps the
+belief-filter invariants unchanged and changes only the assignment contract:
+
+```text
+A5:
+  bash scripts/run_picf_posterior_birth_matrix.sh a5_object_assign
+
+A7:
+  bash scripts/run_picf_posterior_birth_matrix.sh a7_object_assign
+```
+
+The mathematical intent is:
+
+```text
+1. do not force all six same-role query slots to be active objects;
+2. use stronger existing ownership priors on visual/point/temporal support;
+3. make same-role rows compete after object-conditioned evidence exists;
+4. keep action out of A5 and prefix-stopgrad-gated in A7;
+5. keep local refinement, slot-JEPA, support-prediction, and binding-consistency
+   off so the assignment result is attributable.
+```
+
+This is not a new detector and not a hand-written object rule. It is a
+capacity-aware set-assignment test aligned with the object-binding literature:
+the NeurIPS 2025 IsSameObject paper shows that object binding is a pairwise
+subspace relation, not a per-token scalar category. If this profile still fails,
+the next repair should add real evidence such as tracklets/proposals rather
+than another scalar loss weight.

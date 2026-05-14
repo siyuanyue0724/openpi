@@ -165,6 +165,33 @@ case "${PROFILE}" in
       --lambda-mapg-support-diversity 0.25 \
       --lambda-mapg-geometry-diversity 0.05
     ;;
+  a5_object_assign)
+    run_one "picf_a5_object_assign_anchor_u2b1_a0_360_${RUN_TAG}" 360 anchor_only 2 1 0.0 4 0.55 \
+      --aux-budget-alignment-ratio 1.0 \
+      --aux-budget-alignment-floor 2.0 \
+      --lambda-mapg-support-diversity 0.25 \
+      --lambda-mapg-geometry-diversity 0.05 \
+      --aqr-ownership-prior-weight 0.70 \
+      --aqr-ownership-point-prior-weight 0.70 \
+      --aqr-ownership-temporal-prior-weight 0.35 \
+      --aqr-ownership-prior-uniform-mix 0.02 \
+      --aqr-same-role-support-competition-weight 0.55 \
+      --aqr-same-role-support-competition-iters 3
+    ;;
+  a7_object_assign)
+    run_one "picf_a7_object_assign_cotrain_u2b1_a025_360_${RUN_TAG}" 360 all 2 1 0.25 4 0.55 \
+      --picf-action-prefix-stopgrad \
+      --aux-budget-alignment-ratio 1.0 \
+      --aux-budget-alignment-floor 2.0 \
+      --lambda-mapg-support-diversity 0.25 \
+      --lambda-mapg-geometry-diversity 0.05 \
+      --aqr-ownership-prior-weight 0.70 \
+      --aqr-ownership-point-prior-weight 0.70 \
+      --aqr-ownership-temporal-prior-weight 0.35 \
+      --aqr-ownership-prior-uniform-mix 0.02 \
+      --aqr-same-role-support-competition-weight 0.55 \
+      --aqr-same-role-support-competition-iters 3
+    ;;
   *)
     echo "unknown profile: ${PROFILE}" >&2
     exit 2
