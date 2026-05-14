@@ -4597,3 +4597,23 @@ if cotrain keeps `effective_anchor_count` healthy while action decreases, then
 anchor-only is the wrong acceptance environment; if cotrain also rebounds, the
 root cause moves upstream to weak object-specific evidence in token/probe
 extraction.
+
+The follow-up iteration is now an A5 cotrain-only matrix on commit `c119321`:
+
+```text
+tmux:
+  picf_a5_cotrain_iter_c119321
+
+row 1:
+  picf_a5_birth_cotrain_u2b1_a025_450_c119321_support_comp_cotrain
+  scope=all, unroll=2, burnin=1, action_weight=0.25
+
+row 2:
+  picf_a5_birth_cotrain_u2b1_a05_450_c119321_support_comp_cotrain
+  scope=all, unroll=2, burnin=1, action_weight=0.50
+```
+
+This is the correct next diagnostic because it tests whether task/action/
+semantic gradients give object files enough utility to avoid the anchor-only
+support-reuse collapse. The startup gate passed: both A100s reached about
+39.6GB and 100% utilization, and the progress bar entered real training.

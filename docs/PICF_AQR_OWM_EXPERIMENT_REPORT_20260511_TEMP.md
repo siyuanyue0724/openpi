@@ -11072,3 +11072,58 @@ also collapses, then the support rows lack sufficient object-specific evidence
 upstream and the next fix must target token/probe extraction rather than the
 loss surface.
 ```
+
+Iteration launched:
+
+```text
+Commit:
+  c119321
+
+Remote:
+  A5 / ZWWQO6 / port 29776
+
+Stopped:
+  picf_a5_support_competition_24c6cf7
+
+Started:
+  tmux: picf_a5_cotrain_iter_c119321
+
+Profile:
+  scripts/run_picf_posterior_birth_matrix.sh a5_cotrain
+
+Rows:
+  1. picf_a5_birth_cotrain_u2b1_a025_450_c119321_support_comp_cotrain
+     scope=all, unroll=2, burnin=1, action_weight=0.25
+
+  2. picf_a5_birth_cotrain_u2b1_a05_450_c119321_support_comp_cotrain
+     scope=all, unroll=2, burnin=1, action_weight=0.50
+```
+
+Runtime gate:
+
+```text
+Startup reached full training state.
+GPU memory: about 39.6GB on each A100.
+GPU utilization: 100% sampled during training.
+Progress: step 7/450 after startup.
+Observed throughput: about 20.7 sec/step for the first cotrain row.
+```
+
+Acceptance question for this iteration:
+
+```text
+Does production-like cotrain keep object-file capacity alive?
+
+Pass signal:
+  loss_action_default_equiv falls,
+  raw same-role overlap does not return to the 0.99 band,
+  active overlap stays below about 0.60,
+  effective anchor count does not collapse toward 4-8,
+  overlays show real spatial object-file spread.
+
+Fail signal:
+  cotrain repeats the A5 anchor-only pattern:
+  raw overlap near 1.0 plus effective K collapsing despite low recycle.
+  If that happens, the problem is upstream object-specific evidence extraction,
+  not another missing scalar loss.
+```
