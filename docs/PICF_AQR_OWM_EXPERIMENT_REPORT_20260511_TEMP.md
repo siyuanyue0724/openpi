@@ -10981,3 +10981,53 @@ If A5 still collapses, the next root cause is that the weak row-specific
 evidence is not present in the support rows and must be moved earlier into
 token/probe extraction, not solved by stronger losses.
 ```
+
+First A5 support-competition gate:
+
+```text
+Run:
+  picf_a5_birth_anchor_u2b1_a025_450_24c6cf7_support_comp
+
+step50:
+  raw same-role support overlap    = 0.2179
+  active same-role support overlap = 0.2035
+  effective anchor count           = 19.49
+  posterior recycle rate           = 0.2734
+  stable slot fraction             = 0.3128
+
+step100:
+  raw same-role support overlap    = 0.6874
+  active same-role support overlap = 0.5120
+  effective anchor count           = 18.18
+  posterior recycle rate           = 0.2811
+  stable slot fraction             = 0.3594
+```
+
+Step100 overlay:
+
+```text
+/mnt/checkpoints/picf_core/picf_core/picf_a5_birth_anchor_u2b1_a025_450_24c6cf7_support_comp/anchor_overlays/step_000100.png
+
+graph role-1 pairwise pixel distance:
+  min=2.41 px, mean=23.24 px, max=48.44 px
+graph role-2 pairwise pixel distance:
+  min=1.36 px, mean=24.28 px, max=50.57 px
+graph role-3 pairwise pixel distance:
+  min=3.48 px, mean=23.62 px, max=44.59 px
+posterior role-1 pairwise pixel distance:
+  min=0.60 px, mean=21.70 px, max=36.41 px
+```
+
+Interim interpretation:
+
+```text
+This is the first A5 anchor-only branch that directly targets the remaining
+support-reuse failure without adding a new loss. It has not solved the problem
+yet at step100 because raw overlap is above the preferred 0.60 gate, but it has
+not reproduced the old A5 rebound into 0.95+ overlap either. Active overlap is
+below the gate, effective anchor count is still high, and graph/posterior
+overlay distances are materially larger than the previous A5 step100/200
+candidate. Continue to step200 before deciding whether the role-local
+competition is sufficient or whether the support rows still lack enough
+row-specific evidence upstream.
+```

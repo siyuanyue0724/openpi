@@ -4549,3 +4549,11 @@ object-centric manipulation work that treats persistent slots as a belief-state
 interface, not as a late auxiliary classifier. See:
 `https://arxiv.org/abs/2510.24709`, `https://arxiv.org/abs/2511.06754`, and
 `https://arxiv.org/abs/2601.20381`.
+
+The first A5 support-competition run on `24c6cf7` reached step100 with
+`aqr_same_role_support_overlap_max=0.6874`, active overlap `0.5120`,
+effective anchor count `18.18`, and posterior role-1 mean pixel distance
+`21.70px`. This is not final acceptance because raw overlap is still above the
+preferred early gate, but it is no longer the old A5 `0.95+` rebound at the same
+stage. Continue this run to step200 before deciding whether to change upstream
+token/probe extraction.
