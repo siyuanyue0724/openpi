@@ -5148,6 +5148,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 _SPEC_DEFAULTS.posterior_occupancy_prior_clip,
             )
         ),
+        observation_anchor_seed_point_mix=float(
+            _arg_or_default(
+                "observation_anchor_seed_point_mix",
+                _SPEC_DEFAULTS.observation_anchor_seed_point_mix,
+            )
+        ),
         recycle_normalize_residual_summary=bool(
             _arg_or_default(
                 "recycle_normalize_residual_summary",
@@ -6273,7 +6279,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -6339,6 +6345,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "posterior_occupancy_prior_weight", _SPEC_DEFAULTS.posterior_occupancy_prior_weight)),
                 float(getattr(args, "posterior_occupancy_prior_sigma_m", _SPEC_DEFAULTS.posterior_occupancy_prior_sigma_m)),
                 float(getattr(args, "posterior_occupancy_prior_clip", _SPEC_DEFAULTS.posterior_occupancy_prior_clip)),
+                float(getattr(args, "observation_anchor_seed_point_mix", _SPEC_DEFAULTS.observation_anchor_seed_point_mix)),
                 str(getattr(args, "recycle_residual_norm_mode", _SPEC_DEFAULTS.recycle_residual_norm_mode)),
                 bool(
                     getattr(
@@ -7475,6 +7482,15 @@ def main() -> None:
         "--posterior-occupancy-prior-clip",
         type=float,
         default=_SPEC_DEFAULTS.posterior_occupancy_prior_clip,
+    )
+    parser.add_argument(
+        "--observation-anchor-seed-point-mix",
+        type=float,
+        default=_SPEC_DEFAULTS.observation_anchor_seed_point_mix,
+        help=(
+            "Mix seed-point one-hot coverage back into observation-anchor point weights. "
+            "This keeps same-role observation hypotheses spatially distinct before posterior association."
+        ),
     )
     parser.add_argument(
         "--recycle-normalize-residual-summary",

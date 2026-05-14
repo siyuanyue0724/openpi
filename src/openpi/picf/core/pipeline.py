@@ -5337,6 +5337,7 @@ class PicfFullCore(nn.Module):
         graph_tracklet_weights = None
         graph_proposal_weights = None
         anchor_address = None
+        seed_point_priors = None
         if point_count > 0:
             pool_ids = self._point_pool_ids(token_field)
             seed_parts: list[tuple[slice, torch.Tensor]] = []
@@ -5414,6 +5415,7 @@ class PicfFullCore(nn.Module):
                 if bool(seed_valid.any().item()):
                     rows = torch.nonzero(seed_valid, as_tuple=False).squeeze(-1)
                     seed_priors[rows, seed_indices[rows]] = 1.0
+                seed_point_priors = seed_priors
                 slot_point_priors = _normalize_rows(slot_point_priors + seed_priors, eps=self.config.epsilon_a)
             graph_assignment = self._mapg_slot_assignment(
                 anchor_graph,
@@ -5539,6 +5541,13 @@ class PicfFullCore(nn.Module):
                 graph_valid = _row_has_mass(graph_point_weights, eps=self.config.epsilon_a)
                 graph_mix = torch.where(graph_valid[:, None], graph_point_weights, point_weights)
                 point_weights = ((1.0 - mapg_obs_point_mix_gate) * point_weights) + (mapg_obs_point_mix_gate * graph_mix)
+                point_weights = torch.clamp(point_weights, min=0.0)
+                point_weights = point_weights / torch.clamp(point_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+            seed_mix = min(max(float(getattr(self.config, "observation_anchor_seed_point_mix", 0.0)), 0.0), 1.0)
+            if seed_mix > 0.0 and seed_point_priors is not None and seed_point_priors.numel() == point_weights.numel():
+                seed_valid_rows = _row_has_mass(seed_point_priors, eps=self.config.epsilon_a)
+                seed_mix_weights = torch.where(seed_valid_rows[:, None], seed_point_priors, point_weights)
+                point_weights = ((1.0 - seed_mix) * point_weights) + (seed_mix * seed_mix_weights)
                 point_weights = torch.clamp(point_weights, min=0.0)
                 point_weights = point_weights / torch.clamp(point_weights.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
             x = point_weights @ geometry_positions

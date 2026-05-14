@@ -10667,3 +10667,40 @@ Acceptance gate for the next A5/A7 run is stricter than loss decrease:
 4. action default-equivalent loss can be interpreted only after these structural
    gates pass.
 ```
+
+2026-05-14 `1dceaef` first-run observation: A5 step100 did not pass the overlay
+gate. It improved the old posterior collapse but still showed near-coincident
+role-1 posterior files:
+
+```text
+1dceaef A5 step100:
+  aqr_same_role_support_overlap_max = 0.4972
+  aqr_active_same_role_support_overlap_max = 0.3589
+  posterior_recycle_rate = 0.5678
+  graph role-1 pairwise pixel distance:
+    min=0.65 px, mean=6.54 px, max=12.76 px
+  posterior role-1 pairwise pixel distance:
+    min=0.07 px, mean=0.68 px, max=1.21 px
+```
+
+The posterior occupancy prior is therefore necessary but insufficient. The
+failure is now localized one step earlier: observation-anchor construction can
+still let every same-role candidate reread a broad, nearly identical point-cloud
+mixture before posterior data association sees it. The corrected measurement
+model keeps observation anchors as coverage hypotheses by retaining a seed-point
+component:
+
+```math
+w_j^{obs}
+\leftarrow
+(1-\lambda_{seed})w_j^{reader}
++
+\lambda_{seed} e_{seed(j)},\qquad
+\lambda_{seed}=0.35.
+```
+
+This is not a new loss and does not rewrite posterior truth. It makes the
+measurement hypotheses match the object-file model: AQR/support reading may
+refine each observation anchor, but it should not erase the initial per-role FPS
+coverage before posterior assignment. The new A5/A7 candidate must improve both
+the graph and posterior role-1 pairwise distances at step100/200.

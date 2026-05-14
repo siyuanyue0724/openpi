@@ -67,6 +67,7 @@ COMMON=(
   --posterior-occupancy-prior-weight 1.0
   --posterior-occupancy-prior-sigma-m 0.04
   --posterior-occupancy-prior-clip 4.0
+  --observation-anchor-seed-point-mix 0.35
   --recycle-normalize-residual-summary
   --recycle-residual-norm-mode layernorm
   --posterior-slotwise-recycle-residual

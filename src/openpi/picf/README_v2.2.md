@@ -4479,3 +4479,19 @@ next A5/A7 matrix must show that posterior role-1 overlay points are no longer
 co-located at step100/200 before action loss is treated as meaningful. Full
 math, metrics, and acceptance gates are recorded in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
+2026-05-14 follow-up: the first `1dceaef` A5 step100 run showed the posterior
+occupancy prior improved the failure but did not fully solve it: posterior
+role-1 pairwise pixel mean rose from the old near-zero value to roughly `0.68px`,
+while graph role-1 candidates were themselves only moderately separated. The
+root issue is therefore earlier than posterior assignment: observation anchors
+must retain their seed coverage geometry and cannot all reread the same broad
+point-cloud mixture. The maintained candidate now also enables:
+
+```text
+observation_anchor_seed_point_mix = 0.35
+```
+
+This mixes each valid seed-point one-hot prior back into its observation-anchor
+point weights after graph/readout fusion. It is a measurement construction prior,
+not an auxiliary loss or action-side patch.

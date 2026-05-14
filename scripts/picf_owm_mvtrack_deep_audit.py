@@ -429,6 +429,21 @@ def run_static_checks() -> list[Finding]:
     )
     checks.append(
         _finding(
+            "observation_anchor_seed_coverage_prevents_measurement_centroid_collapse",
+            "observation_anchor_seed_point_mix" in config.text
+            and "seed_point_priors" in pipeline.text
+            and "seed_mix_weights" in pipeline.text
+            and "point_weights = ((1.0 - seed_mix) * point_weights) + (seed_mix * seed_mix_weights)" in pipeline.text,
+            severity="fail",
+            detail=(
+                "Observation anchors must retain a seed-point coverage component; otherwise the obs reader can average "
+                "all same-role candidates into the same point-cloud centroid before posterior occupancy can separate object files."
+            ),
+            evidence=pipeline.node_refs("_build_observation_anchors") + config.refs("observation_anchor_seed_point_mix"),
+        )
+    )
+    checks.append(
+        _finding(
             "posterior_updates_address_slowly_and_resets_through_recycle",
             "base_address" in posterior
             and "obs_address = binding_cond @ obs_anchors.anchor_address" in posterior

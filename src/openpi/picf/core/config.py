@@ -31,6 +31,11 @@ class PicfCoreConfig:
     posterior_occupancy_prior_weight: float = 1.0
     posterior_occupancy_prior_sigma_m: float = 0.04
     posterior_occupancy_prior_clip: float = 4.0
+    # Observation anchors are measurement hypotheses, not free latent tokens.
+    # Retaining a seed-point coverage component prevents every same-role
+    # observation row from rereading the same broad point-cloud centroid before
+    # posterior association has a chance to assign distinct object files.
+    observation_anchor_seed_point_mix: float = 0.35
     hidden_dim: int = 512
     posterior_hidden_dim: int = 512
     latent_dim: int = 112
