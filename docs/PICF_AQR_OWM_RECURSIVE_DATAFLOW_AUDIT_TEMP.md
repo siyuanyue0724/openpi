@@ -42,9 +42,9 @@ The latest OWM profile must be the default path; legacy routers and risky auxili
 Evidence:
 
 - `src/openpi/picf/core/config.py:164: aqr_mapg_enabled: bool = True`
-- `scripts/picf_core_train.py:7264: default="paligemma",`
-- `src/openpi/picf/core/training.py:71: lambda_mapg_cycle: float = 0.02`
-- `src/openpi/picf/core/training.py:76: lambda_slot_jepa: float = 0.0`
+- `scripts/picf_core_train.py:7272: default="paligemma",`
+- `src/openpi/picf/core/training.py:72: lambda_mapg_cycle: float = 0.02`
+- `src/openpi/picf/core/training.py:77: lambda_slot_jepa: float = 0.0`
 
 ## 3. V-JEPA temporal evidence - PASS
 
@@ -211,9 +211,9 @@ PV alignment is geometry-projected support consistency, not a cosmetic RoPE/embe
 Evidence:
 
 - `src/openpi/picf/core/pipeline.py:463: projective_compatibility: torch.Tensor,`
-- `src/openpi/picf/core/training.py:1105: point_from_visual = visual @ point_given_visual.T`
-- `src/openpi/picf/core/training.py:1106: visual_from_point = point @ visual_given_point`
-- `src/openpi/picf/core/training.py:71: lambda_mapg_cycle: float = 0.02`
+- `src/openpi/picf/core/training.py:1106: point_from_visual = visual @ point_given_visual.T`
+- `src/openpi/picf/core/training.py:1107: visual_from_point = point @ visual_given_point`
+- `src/openpi/picf/core/training.py:72: lambda_mapg_cycle: float = 0.02`
 
 ## 11. Prior prediction - PASS
 
@@ -313,8 +313,8 @@ Future posterior is a detached target only; it is never current action input.
 
 Evidence:
 
-- `src/openpi/picf/core/training.py:2082: target_slots = future.posterior_tokens.detach().to(device=slot_tokens.device, dtype=slot_tokens.dtype)`
-- `src/openpi/picf/core/training.py:442: def future_targets_from_current_targets(`
+- `src/openpi/picf/core/training.py:2083: target_slots = future.posterior_tokens.detach().to(device=slot_tokens.device, dtype=slot_tokens.dtype)`
+- `src/openpi/picf/core/training.py:443: def future_targets_from_current_targets(`
 
 ## 16. Temporal binding consistency - PASS
 
@@ -332,9 +332,9 @@ Binding consistency must include temporal identity contrast, not only current bi
 
 Evidence:
 
-- `src/openpi/picf/core/training.py:286: def _binding_consistency_loss(`
-- `src/openpi/picf/core/training.py:314: future_tokens = future.posterior_tokens`
-- `src/openpi/picf/core/training.py:1709: losses.append(weight * fn.cross_entropy(logits[None, :], target))`
+- `src/openpi/picf/core/training.py:287: def _binding_consistency_loss(`
+- `src/openpi/picf/core/training.py:315: future_tokens = future.posterior_tokens`
+- `src/openpi/picf/core/training.py:1710: losses.append(weight * fn.cross_entropy(logits[None, :], target))`
 
 ## 17. Training-only support denoising - PASS
 
@@ -352,9 +352,9 @@ Denoising is a guarded training-only auxiliary and cannot alter inference, poste
 
 Evidence:
 
-- `src/openpi/picf/core/training.py:394: def _aqr_support_denoising_loss(`
-- `src/openpi/picf/core/training.py:79: lambda_aqr_denoising: float = 0.0`
-- `scripts/picf_core_train.py:7104: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
+- `src/openpi/picf/core/training.py:395: def _aqr_support_denoising_loss(`
+- `src/openpi/picf/core/training.py:80: lambda_aqr_denoising: float = 0.0`
+- `scripts/picf_core_train.py:7111: parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)`
 - `src/openpi/picf/core/training_test.py:461: def test_aqr_denoising_loss_is_training_only_and_guarded(tmp_path: Path) -> None:`
 
 ## 18. Evidence cache write - PASS
@@ -414,8 +414,8 @@ Removed dead knobs/loss-looking placeholders and stale metrics that could create
 
 Evidence:
 
-- `scripts/verify_picf_owm_contract.py:391: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
-- `scripts/verify_picf_owm_contract.py:391: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:393: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
+- `scripts/verify_picf_owm_contract.py:393: "Only mathematically grounded OWM loss knobs should be available; weak placeholder losses must stay removed.",`
 - `docs/PICF_AQR_OWM_FINAL_DEPLOYMENT_README.md:2177: 3. Do not expose placeholder losses for cross-modal alignment, ordinal rank, or`
 
 ## Final Interpretation

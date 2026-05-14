@@ -4811,3 +4811,46 @@ active visual overlap `0.2127`, raw object-core overlap `0.1977`, active
 object-core overlap `0.1977`, effective anchors `19.65`, recycle `0.3366`, and
 address update `0.0265`. This is an early healthy row, not final acceptance; the
 decisive gates are still step100/200/300 plus overlays.
+
+2026-05-14 one-hour object-core result: both A5 and A7 reproduced the same
+late collapse pattern. A5 anchor-only reached step450; raw same-role visual
+overlap returned to `0.9972`, active visual overlap to `0.9931`, raw object-core
+overlap to `0.9524`, and `loss_mapg_support_diversity` rose from `0.3274` to
+`0.9333`. A7 cotrain reached step200; raw visual overlap was `0.9907` and
+active visual overlap `0.9810`. Therefore the object-core prior is useful but
+not sufficient. The decisive new diagnosis is not a code-path break: it is loss
+budget starvation. In the rejected A5 row, `loss_alignment_raw` rose to
+`1.44-1.54`, but `loss_alignment` was capped at exactly `0.0125` because the
+alignment group budget was tied to `aux_budget_alignment_ratio=0.05` and the
+generic action-loss floor `0.25`. The structure loss was detecting collapse but
+was not allowed to exert enough gradient to prevent it.
+
+The maintained next test therefore separates the latent binding invariant from
+the generic auxiliary action budget:
+
+```text
+aux_budget_alignment_floor = 2.0
+aux_budget_alignment_ratio = 1.0
+lambda_mapg_support_diversity = 0.25
+lambda_mapg_geometry_diversity = 0.05
+```
+
+This is not a new module. It is a target-function repair: object-file birth,
+ownership, and support diversity are the measurement model that makes posterior
+belief meaningful, so they must not be starved during bootstrap. The next paired
+diagnostic profiles are:
+
+```bash
+bash scripts/run_picf_posterior_birth_matrix.sh a5_structure_budget
+bash scripts/run_picf_posterior_birth_matrix.sh a7_structure_budget
+```
+
+Acceptance now requires:
+
+```text
+step150/200 active visual overlap < 0.75
+step150/200 active object-core overlap < 0.50
+alignment_budget_scale not pinned near zero
+loss_mapg_support_diversity not monotonically rising
+anchor overlay role-1/2/3 pixel std not collapsing to single-digit pixels
+```

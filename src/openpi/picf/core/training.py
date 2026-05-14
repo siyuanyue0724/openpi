@@ -58,6 +58,7 @@ class PicfTransitionLossConfig:
     aux_budget_semantic_ratio: float = 0.10
     aux_budget_alignment_ratio: float = 0.05
     aux_budget_floor: float = 0.25
+    aux_budget_alignment_floor: float = 0.25
     lambda_vl_heatmap_task: float = 0.0
     lambda_vl_heatmap_effector: float = 0.0
     lambda_vl_heatmap_interaction: float = 0.0
@@ -2173,7 +2174,7 @@ def compute_transition_loss(
         action_loss=action_loss,
         enabled=bool(cfg.enable_aux_budgeting),
         ratio=float(cfg.aux_budget_alignment_ratio),
-        floor=float(cfg.aux_budget_floor),
+        floor=float(cfg.aux_budget_alignment_floor),
     )
 
     total = (

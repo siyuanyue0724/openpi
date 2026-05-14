@@ -5395,6 +5395,7 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         aux_budget_semantic_ratio=float(getattr(args, "aux_budget_semantic_ratio", defaults.aux_budget_semantic_ratio)),
         aux_budget_alignment_ratio=float(getattr(args, "aux_budget_alignment_ratio", defaults.aux_budget_alignment_ratio)),
         aux_budget_floor=float(getattr(args, "aux_budget_floor", defaults.aux_budget_floor)),
+        aux_budget_alignment_floor=float(getattr(args, "aux_budget_alignment_floor", defaults.aux_budget_alignment_floor)),
         lambda_vl_heatmap_task=float(getattr(args, "lambda_vl_heatmap_task", defaults.lambda_vl_heatmap_task)),
         lambda_vl_heatmap_effector=float(getattr(args, "lambda_vl_heatmap_effector", defaults.lambda_vl_heatmap_effector)),
         lambda_vl_heatmap_interaction=float(getattr(args, "lambda_vl_heatmap_interaction", defaults.lambda_vl_heatmap_interaction)),
@@ -7152,6 +7153,7 @@ def main() -> None:
     parser.add_argument("--aux-budget-semantic-ratio", type=float, default=_LOSS_DEFAULTS.aux_budget_semantic_ratio)
     parser.add_argument("--aux-budget-alignment-ratio", type=float, default=_LOSS_DEFAULTS.aux_budget_alignment_ratio)
     parser.add_argument("--aux-budget-floor", type=float, default=_LOSS_DEFAULTS.aux_budget_floor)
+    parser.add_argument("--aux-budget-alignment-floor", type=float, default=_LOSS_DEFAULTS.aux_budget_alignment_floor)
     parser.add_argument("--tau-pv", type=float, default=_LOSS_DEFAULTS.tau_pv)
     parser.add_argument("--tau-pt", type=float, default=_LOSS_DEFAULTS.tau_pt)
     parser.add_argument("--tau-route-p", type=float, default=_LOSS_DEFAULTS.tau_route_p)

@@ -107,6 +107,8 @@ run_one() {
   local action_weight="$6"
   local active_max="$7"
   local active_overlap="$8"
+  shift 8
+  local extra_args=("$@")
   local log="${LOG_BASE}/${exp}.log"
   {
     echo "[posterior-birth-matrix] exp=${exp} start $(date -Is)"
@@ -124,7 +126,8 @@ run_one() {
       --lambda-action-rot "${action_weight}" \
       --lambda-action-gripper "${action_weight}" \
       --aqr-active-slot-max-per-role "${active_max}" \
-      --aqr-active-slot-overlap-threshold "${active_overlap}"
+      --aqr-active-slot-overlap-threshold "${active_overlap}" \
+      "${extra_args[@]}"
     echo "[posterior-birth-matrix] exp=${exp} done $(date -Is)"
   } 2>&1 | tee -a "${log}"
 }
@@ -146,6 +149,21 @@ case "${PROFILE}" in
   a7_fast)
     run_one "picf_a7_birth_cotrain_u2b1_a025_300_${RUN_TAG}" 300 all 2 1 0.25 6 0.70
     run_one "picf_a7_birth_cotrain_u2b1_a05_300_${RUN_TAG}" 300 all 2 1 0.50 6 0.70
+    ;;
+  a5_structure_budget)
+    run_one "picf_a5_structure_budget_anchor_u2b1_a0_450_${RUN_TAG}" 450 anchor_only 2 1 0.0 6 0.70 \
+      --aux-budget-alignment-ratio 1.0 \
+      --aux-budget-alignment-floor 2.0 \
+      --lambda-mapg-support-diversity 0.25 \
+      --lambda-mapg-geometry-diversity 0.05
+    ;;
+  a7_structure_budget)
+    run_one "picf_a7_structure_budget_cotrain_u2b1_a025_300_${RUN_TAG}" 300 all 2 1 0.25 6 0.70 \
+      --picf-action-prefix-stopgrad \
+      --aux-budget-alignment-ratio 1.0 \
+      --aux-budget-alignment-floor 2.0 \
+      --lambda-mapg-support-diversity 0.25 \
+      --lambda-mapg-geometry-diversity 0.05
     ;;
   *)
     echo "unknown profile: ${PROFILE}" >&2

@@ -11584,3 +11584,85 @@ object-core overlap are both low, effective anchor count remains high, and
 recycle is no longer near saturation. It is not acceptance yet; the decisive
 points remain step100/200/300, because earlier candidates also looked healthy
 before same-role support reuse returned.
+
+One-hour follow-up, 2026-05-14:
+
+```text
+A5 anchor-only, commit 674de2f, step450:
+  aqr_same_role_support_overlap_max              = 0.9972
+  aqr_active_same_role_support_overlap_max       = 0.9931
+  aqr_same_role_object_core_overlap_max          = 0.9524
+  aqr_active_same_role_object_core_overlap_max   = 0.2735
+  loss_mapg_support_diversity                    = 0.9333
+  loss_alignment_raw                             = 1.4409
+  loss_alignment                                 = 0.0125
+  alignment_budget_scale                         ≈ 0.0087
+
+A7 cotrain, commit 674de2f, step200:
+  aqr_same_role_support_overlap_max              = 0.9907
+  aqr_active_same_role_support_overlap_max       = 0.9810
+  aqr_same_role_object_core_overlap_max          = 0.7741
+  aqr_active_same_role_object_core_overlap_max   = 0.5781
+```
+
+Conclusion: object-core ownership is a real early improvement, but it is not a
+complete fix. Both cards show the same late same-role support reuse. The new
+root-cause candidate is target-function starvation, not a missing code hook:
+the raw structural objective detects the collapse, but the alignment group is
+capped to `0.0125` by `aux_budget_alignment_ratio=0.05` and the generic
+`aux_budget_floor=0.25`. This makes the invariant binding objective too weak
+relative to the routing dynamics it is supposed to regularize.
+
+Mathematical repair:
+
+```math
+L =
+L_{action}
++ cap(L_{physical})
++ cap(L_{semantic})
++ cap_{align}(L_{align})
+```
+
+The old profile used:
+
+```math
+cap_{align} = 0.05 \cdot \max(L_{action}^{detach}, 0.25)
+```
+
+which equals `0.0125` during the rejected bootstrap rows. The next diagnostic
+uses an independent alignment floor:
+
+```math
+cap_{align} =
+\rho_{align}\cdot
+\max(L_{action}^{detach}, F_{align})
+```
+
+with:
+
+```text
+rho_align = 1.0
+F_align   = 2.0
+```
+
+This is not a new module and not a detector. It is the correct treatment of
+measurement-model structure as a belief-filter invariant: object ownership and
+support diversity must be trainable enough before action cotrain can rely on the
+posterior.
+
+Deployed next profiles:
+
+```bash
+bash scripts/run_picf_posterior_birth_matrix.sh a5_structure_budget
+bash scripts/run_picf_posterior_birth_matrix.sh a7_structure_budget
+```
+
+Acceptance gates:
+
+```text
+step150/200 active visual overlap < 0.75
+step150/200 active object-core overlap < 0.50
+alignment_budget_scale should not stay near 0.01
+loss_mapg_support_diversity should not monotonically rise
+anchor overlay role-1/2/3 pixel std should not collapse to single-digit pixels
+```
