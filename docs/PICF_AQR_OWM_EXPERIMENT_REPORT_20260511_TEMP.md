@@ -10344,3 +10344,146 @@ Why these rows:
   The 0.50 action-scale rows test whether action pressure can be increased
   after identity birth without immediately forcing same-state coalescence.
 ```
+
+## 2026-05-14 Slot-Local Recycle/Reset Residual Fix
+
+### One-Hour Posterior-Birth Matrix Audit
+
+The requested one-hour audit was run after the posterior object-file birth
+defaults were deployed. Both remote matrices were live and GPU-active, so the
+result is a model/dataflow signal rather than a runtime failure.
+
+```text
+A5 current branch:
+  picf_a5_birth_anchor_u2b1_a025_450_1e5af2c
+  step 400:
+    aqr_same_role_support_overlap_max        = 0.9994
+    aqr_active_same_role_support_overlap_max = 0.4435
+    aqr_active_anchor_count                  = 8.83
+    posterior_recycle_rate                   = 0.0181
+    posterior_recycle_gate_std               = 0.000209
+    posterior_identity_switch_rate           = 0.7783
+    loss_action_default_equiv                = 0.1374
+
+  overlay result:
+    seven role-1 posterior slots are exactly co-located at pixel
+    [116.79, 95.52].
+
+A7 current branch:
+  picf_a7_birth_cotrain_u2b1_a025_600_1e5af2c
+  step 150:
+    aqr_same_role_support_overlap_max        = 0.2685
+    aqr_active_same_role_support_overlap_max = 0.2401
+    aqr_active_anchor_count                  = 20.0
+    posterior_recycle_rate                   = 0.8385
+    posterior_recycle_gate_std               = 0.000115
+    posterior_address_update_rate_mean       = 0.00696
+    loss_action_default_equiv                = 0.1764
+
+  overlay result:
+    graph role-1 anchors are still spatially spread, but seven role-1
+    posterior slots are exactly co-located at pixel [67.65, 83.66].
+```
+
+### Interpretation
+
+The posterior-birth prior is useful but insufficient. It breaks the initial
+object-file symmetry, yet the posterior correction can still erase that
+separation because the recycle/reset path used a single global dustbin residual
+for all slots:
+
+```math
+r_t = \sum_i d_i o_i
+```
+
+and then reset every recycled object file from the same vector:
+
+```math
+(\bar h_j,\bar c_j,\bar \mu_j,\bar \Sigma_j)
+=
+(1-\rho_j)(h_j^-,c_j^-,\mu_j^-,\Sigma_j^-)
++\rho_j F(r_t).
+```
+
+When several same-role slots recycle in the same window, this update is
+permutation-equivariant and can map distinct object files into the same latent
+and physical state. This matches the overlays: graph-stage candidates still
+exist, but posterior object files collapse to identical pixel coordinates,
+support mass, recycle gate, confidence, and address update.
+
+### Maintained Fix
+
+The maintained repair is slot-local recycle/reset residuals. Each slot now
+computes the raw measurement mixture implied by its own pre-recycle binding row:
+
+```math
+r_{t,j}
+=
+\frac{\sum_i b^{raw}_{j,i} o_i}
+       {\max(\sum_i b^{raw}_{j,i}, \epsilon)}.
+```
+
+Only slots with no support fall back to the global dustbin residual. Recycle
+trust still uses the normalized slot-local residual direction, and residual
+state heads now produce per-slot reset states:
+
+```math
+\rho_j = \sigma(G(h_j^-, mass_j, var_j, norm(r_{t,j}), \alpha_j^-))
+```
+
+```math
+(\bar h_j,\bar c_j,\bar \mu_j,\bar \Sigma_j)
+=
+(1-\rho_j)(h_j^-,c_j^-,\mu_j^-,\Sigma_j^-)
++\rho_j F(r_{t,j}).
+```
+
+This is the belief-filter-consistent form: recycle is an object-file trust
+decision about that object's current measurement, not a shared scene-level
+reset. It does not add a new loss, does not introduce random jitter, does not
+make cache authoritative, and does not change the PI0.5 action objective.
+
+### Code Contract
+
+```text
+src/openpi/picf/core/config.py:
+  posterior_slotwise_recycle_residual = True
+
+src/openpi/picf/core/pipeline.py:
+  support_raw / support_mass_raw -> slot_residual_summary
+  recycle_head receives normalized slot_residual_summary
+  residual_mu/logvar/h/c heads receive slot_residual_summary
+
+scripts/picf_core_train.py:
+  --posterior-slotwise-recycle-residual
+  startup log includes posterior_slotwise_recycle_residual
+
+scripts/run_picf_posterior_birth_matrix.sh:
+  run names now include the current git short SHA instead of the old 1e5af2c
+  suffix, so repeated causal matrices do not collide.
+```
+
+### Next Causal Matrix
+
+Stop the old posterior-birth matrix after this commit is synced, because it has
+already served its purpose. Restart the same A5/A7 matrix with the new
+slot-local recycle residual enabled. This is the clean causal comparison:
+
+```text
+A5:
+  anchor-only, unroll=2, burnin=1, action scale=0.25
+  then all-scope cotrain rows at action scale 0.25 and 0.50
+
+A7:
+  production-like all-scope cotrain rows at action scale 0.25 and 0.50
+```
+
+Acceptance gates at step 50/100/200:
+
+```text
+posterior role-1 pairwise pixel distance is not exactly zero for active slots;
+posterior_recycle_gate_std is not near 1e-4;
+posterior_recycle_rate avoids both near-0 and near-1 saturation;
+aqr_same_role_support_overlap_max does not rebound into 0.98+;
+loss_action_default_equiv remains comparable to the prior A7 flow baseline.
+```

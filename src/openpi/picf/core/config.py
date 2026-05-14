@@ -219,6 +219,11 @@ class PicfCoreConfig:
     recycle_normalize_residual_summary: bool = True
     recycle_residual_norm_mode: str = "layernorm"
     recycle_logit_clamp: float = 0.0
+    # Recycle/reset is an object-file trust decision. A global dustbin residual
+    # would reset multiple same-role scene slots into the same latent state.
+    # Use each slot's own raw measurement mixture for recycle/reset and fall
+    # back to the dustbin residual only when that slot has no support.
+    posterior_slotwise_recycle_residual: bool = True
     # Legacy archived local top-k reread. The 2026-05-13 diagnostics showed the
     # normalized recycle fix is the root repair, while this residual adds
     # recycle/gradient pressure. Keep the implementation for reproducible

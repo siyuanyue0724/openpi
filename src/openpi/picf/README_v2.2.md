@@ -4435,3 +4435,20 @@ It runs A5 anchor/cotrain isolation and A7 cotrain stress rows with the same
 `unroll=2`, `burnin=1`, local-refinement-off, PaliGemma-cotrain profile used by
 the latest matrix. This isolates posterior object-file birth from unrelated
 module changes.
+
+2026-05-14 slot-local recycle/reset update: the one-hour posterior-birth matrix
+showed that identity seeding and first-step geometry bootstrap are necessary
+but not sufficient. A5 step400 and A7 step150 still produced exact same-pixel
+posterior co-location for seven role-1 object files. The graph-stage anchors
+were not the sole failure source; the posterior recycle/reset path was still
+able to erase separation because recycled slots shared one global dustbin
+residual. The maintained default now uses each posterior slot's own raw
+measurement mixture for recycle/reset (`posterior_slotwise_recycle_residual =
+True`) and only falls back to the dustbin residual when that slot has no
+support. This is the belief-filter-consistent repair: recycle is an object-file
+trust decision, not a scene-global reset. The causal A5/A7 matrix entrypoint is
+still
+[`scripts/run_picf_posterior_birth_matrix.sh`](/home/siyuanyue/Documents/openpi/scripts/run_picf_posterior_birth_matrix.sh),
+but run names now include the current git short SHA instead of the old fixed
+suffix. Detailed numbers, math, and acceptance gates are recorded in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).

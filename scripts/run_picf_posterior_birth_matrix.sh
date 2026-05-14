@@ -13,6 +13,7 @@ export PYTHONUNBUFFERED=1
 
 BASE="${PICF_CHECKPOINT_BASE:-/mnt/checkpoints/picf_core}"
 LOG_BASE="${PICF_LOG_BASE:-/mnt/picf_run_logs}"
+RUN_TAG="${PICF_RUN_TAG:-$(git rev-parse --short HEAD)}"
 mkdir -p "${LOG_BASE}"
 
 COMMON=(
@@ -53,6 +54,7 @@ COMMON=(
   --posterior-bootstrap-from-observation
   --recycle-normalize-residual-summary
   --recycle-residual-norm-mode layernorm
+  --posterior-slotwise-recycle-residual
   --no-legacy-local-refinement-opt-in
   --no-local-refinement-enabled
   --local-refinement-topk 0
@@ -104,13 +106,13 @@ run_one() {
 
 case "${PROFILE}" in
   a5)
-    run_one picf_a5_birth_anchor_u2b1_a025_450_1e5af2c 450 anchor_only 2 1 0.25 6 0.70
-    run_one picf_a5_birth_cotrain_u2b1_a025_450_1e5af2c 450 all 2 1 0.25 6 0.70
-    run_one picf_a5_birth_cotrain_u2b1_a05_450_1e5af2c 450 all 2 1 0.50 6 0.70
+    run_one "picf_a5_birth_anchor_u2b1_a025_450_${RUN_TAG}" 450 anchor_only 2 1 0.25 6 0.70
+    run_one "picf_a5_birth_cotrain_u2b1_a025_450_${RUN_TAG}" 450 all 2 1 0.25 6 0.70
+    run_one "picf_a5_birth_cotrain_u2b1_a05_450_${RUN_TAG}" 450 all 2 1 0.50 6 0.70
     ;;
   a7)
-    run_one picf_a7_birth_cotrain_u2b1_a025_600_1e5af2c 600 all 2 1 0.25 6 0.70
-    run_one picf_a7_birth_cotrain_u2b1_a05_600_1e5af2c 600 all 2 1 0.50 6 0.70
+    run_one "picf_a7_birth_cotrain_u2b1_a025_600_${RUN_TAG}" 600 all 2 1 0.25 6 0.70
+    run_one "picf_a7_birth_cotrain_u2b1_a05_600_${RUN_TAG}" 600 all 2 1 0.50 6 0.70
     ;;
   *)
     echo "unknown profile: ${PROFILE}" >&2

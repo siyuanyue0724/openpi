@@ -6002,6 +6002,18 @@ class PicfFullCore(nn.Module):
             if obs_anchors.tokens.shape[0] > 0
             else torch.zeros((self.config.hidden_dim,), device=self.device, dtype=self.dtype)
         )
+        if bool(getattr(self.config, "posterior_slotwise_recycle_residual", True)) and obs_anchors.tokens.shape[0] > 0:
+            raw_denom = torch.clamp(support_mass_raw[:, None], min=self.config.epsilon_a)
+            raw_cond = support_raw / raw_denom
+            slot_residual_summary = raw_cond @ obs_anchors.tokens
+            has_slot_support = support_mass_raw > self.config.epsilon_a
+            slot_residual_summary = torch.where(
+                has_slot_support[:, None],
+                slot_residual_summary,
+                residual_summary[None, :].expand_as(slot_residual_summary),
+            )
+        else:
+            slot_residual_summary = residual_summary[None, :].expand(h_prior.shape[0], -1)
         alpha_in = torch.cat(
             [
                 h_prior,
@@ -6012,22 +6024,27 @@ class PicfFullCore(nn.Module):
             dim=-1,
         )
         alpha = torch.sigmoid(self.activity_head(alpha_in)).squeeze(-1)
-        recycle_residual_summary = residual_summary
+        recycle_residual_summary = slot_residual_summary
         if bool(getattr(self.config, "recycle_normalize_residual_summary", True)):
             # Recycle is a trust/reset probability; it should depend on the
             # residual evidence direction and context, not the unbounded norm of
-            # the aggregated dustbin residual.
+            # the aggregated residual. Use the slot-local measurement summary so
+            # multiple same-role object files cannot all reset from one global
+            # dustbin vector.
             recycle_norm_mode = str(getattr(self.config, "recycle_residual_norm_mode", "layernorm")).lower()
             if recycle_norm_mode in ("layernorm", "layer_norm"):
                 recycle_residual_summary = fn.layer_norm(
-                    residual_summary,
-                    normalized_shape=(int(residual_summary.shape[-1]),),
+                    slot_residual_summary,
+                    normalized_shape=(int(slot_residual_summary.shape[-1]),),
                 )
             elif recycle_norm_mode in ("rmsnorm", "rms_norm"):
-                rms = torch.sqrt(torch.mean(residual_summary * residual_summary) + self.config.epsilon_residual)
-                recycle_residual_summary = residual_summary / torch.clamp(rms, min=self.config.epsilon_residual)
+                rms = torch.sqrt(
+                    torch.mean(slot_residual_summary * slot_residual_summary, dim=-1, keepdim=True)
+                    + self.config.epsilon_residual
+                )
+                recycle_residual_summary = slot_residual_summary / torch.clamp(rms, min=self.config.epsilon_residual)
             elif recycle_norm_mode in ("none", "off", "identity"):
-                recycle_residual_summary = residual_summary
+                recycle_residual_summary = slot_residual_summary
             else:
                 raise ValueError(f"Unsupported recycle_residual_norm_mode={recycle_norm_mode!r}")
         recycle_in = torch.cat(
@@ -6035,7 +6052,7 @@ class PicfFullCore(nn.Module):
                 h_prior,
                 support_mass_raw[:, None],
                 var_prior.mean(dim=-1, keepdim=True),
-                recycle_residual_summary[None, :].expand(h_prior.shape[0], -1),
+                recycle_residual_summary,
                 alpha_prior[:, None],
             ],
             dim=-1,
@@ -6050,18 +6067,18 @@ class PicfFullCore(nn.Module):
         dustbin_final = dustbin_raw / torch.clamp(1.0 + recycle.sum(), min=self.config.epsilon_a)
         binding = torch.cat([binding_support, dustbin_final[None, :]], dim=0)
         support_mass = binding_support.sum(dim=1)
-        res_mu = self.residual_mu_head(residual_summary[None, :])[0]
+        res_mu = self.residual_mu_head(slot_residual_summary)
         res_var = _variance_from_logvar(
-            self.residual_logvar_head(residual_summary[None, :]),
+            self.residual_logvar_head(slot_residual_summary),
             min_var=self.config.sigma_min2,
             max_var=self.config.sigma_max2,
-        )[0]
-        res_h = self.residual_h_head(residual_summary[None, :])[0]
-        res_c = self.residual_c_head(residual_summary[None, :])[0]
-        bar_h = (1.0 - recycle[:, None]) * h_prior + recycle[:, None] * res_h[None, :]
-        bar_c = (1.0 - recycle[:, None]) * c_prior + recycle[:, None] * res_c[None, :]
-        bar_mu = (1.0 - recycle[:, None]) * mu_prior + recycle[:, None] * res_mu[None, :]
-        bar_var = (1.0 - recycle[:, None]) * var_prior + recycle[:, None] * res_var[None, :]
+        )
+        res_h = self.residual_h_head(slot_residual_summary)
+        res_c = self.residual_c_head(slot_residual_summary)
+        bar_h = (1.0 - recycle[:, None]) * h_prior + recycle[:, None] * res_h
+        bar_c = (1.0 - recycle[:, None]) * c_prior + recycle[:, None] * res_c
+        bar_mu = (1.0 - recycle[:, None]) * mu_prior + recycle[:, None] * res_mu
+        bar_var = (1.0 - recycle[:, None]) * var_prior + recycle[:, None] * res_var
         anchor_seed = torch.cat(
             [
                 bar_h,
