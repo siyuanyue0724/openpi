@@ -11563,3 +11563,24 @@ failure. The run was replaced after adding these keys to OWM_DEBUG_METRIC_KEYS:
 
 No final judgment should be made from the pre-logging-fix object-core run.
 ```
+
+First valid A5 object-core row after the logging fix, commit `674de2f`, step50:
+
+```text
+aqr_same_role_support_overlap_max              = 0.2190
+aqr_active_same_role_support_overlap_max       = 0.2127
+aqr_same_role_object_core_overlap_max          = 0.1977
+aqr_active_same_role_object_core_overlap_max   = 0.1977
+aqr_effective_anchor_count                     = 19.65
+posterior_recycle_rate                         = 0.3366
+posterior_address_update_rate_mean             = 0.0265
+loss_action_default_equiv                      = 0.1404
+loss_total                                     = 0.1051
+```
+
+Interpretation: this is the first row that can actually test the repair. It is
+healthy relative to the rejected step50/100/150 trend because visual overlap and
+object-core overlap are both low, effective anchor count remains high, and
+recycle is no longer near saturation. It is not acceptance yet; the decisive
+points remain step100/200/300, because earlier candidates also looked healthy
+before same-role support reuse returned.

@@ -4804,3 +4804,10 @@ required keys are `aqr_same_role_object_core_overlap_max`,
 `aqr_ownership_point_prior_sigma_m`. A run that only logs visual overlap cannot
 decide whether the repair is separating physical object cores or merely
 renaming the old visual-support collapse.
+
+2026-05-14 valid object-core step50: commit `674de2f` logs the required
+object-core metrics. A5 anchor-only step50 has visual raw overlap `0.2190`,
+active visual overlap `0.2127`, raw object-core overlap `0.1977`, active
+object-core overlap `0.1977`, effective anchors `19.65`, recycle `0.3366`, and
+address update `0.0265`. This is an early healthy row, not final acceptance; the
+decisive gates are still step100/200/300 plus overlays.
