@@ -5007,3 +5007,22 @@ aqr_active_same_role_object_core_overlap_max should stay below 0.30-0.45;
 posterior_recycle_rate must not saturate;
 anchor overlays should not show multiple active same-role anchors co-located.
 ```
+
+Runtime note:
+
+```text
+The first A5 dustbin-router poll at steps 50/100 shows active_anchor_count
+around 8, active same-role support overlap below 0.08, and active object-core
+overlap below 0.21. This is an early positive signal, not final acceptance.
+The remaining watch item is posterior_recycle_rate, which rose to about 0.74
+at step 100 and must be checked at later metrics points.
+
+The first A7 cotrain poll at step 50 also remains structurally healthy:
+active_anchor_count ~= 7.45, active same-role support overlap ~= 0.038,
+active object-core overlap ~= 0.073, and posterior_recycle_rate ~= 0.56.
+This is early evidence that the dustbin router can coexist with limited action
+cotrain, but it still needs later metrics points before acceptance.
+```
+
+Detailed numbers and tail commands are tracked in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).

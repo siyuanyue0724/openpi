@@ -12080,3 +12080,135 @@ A5 fails, A7 fails:
   the next non-cosmetic repair must add real objectness evidence such as
   tracklets/proposals, not another scalar overlap loss.
 ```
+
+2026-05-14 runtime check: A5/A7 dustbin router diagnostics
+----------------------------------------------------------
+
+Commit:
+
+```text
+1948bfc Add evidence-relative active dustbin router
+```
+
+Remote runs:
+
+```text
+A5:
+  tmux: picf_a5_dustbin_1948bfc
+  profile: a5_dustbin_router
+  run: picf_a5_dustbin_router_anchor_u2b1_a0_300_1948bfc_dustbin_a5
+  purpose: anchor-only structural assignment, no action pressure.
+
+A7:
+  tmux: picf_a7_dustbin_1948bfc
+  profile: a7_dustbin_router
+  run: picf_a7_dustbin_router_cotrain_u2b1_a025_240_1948bfc_dustbin_a7
+  purpose: prefix-stopgrad cotrain with action weight 0.25.
+```
+
+A5 reached step 100 and is running normally. The first two metrics points are
+structurally better than the previous fixed-capacity active-slot runs:
+
+```text
+step 50:
+  aqr_active_anchor_count = 8.18
+  aqr_active_same_role_support_overlap_max = 0.037
+  aqr_active_same_role_object_core_overlap_max = 0.040
+  aqr_effective_anchor_count = 8.00
+  posterior_recycle_rate = 0.487
+
+step 100:
+  aqr_active_anchor_count = 8.36
+  aqr_active_same_role_support_overlap_max = 0.077
+  aqr_active_same_role_object_core_overlap_max = 0.205
+  aqr_effective_anchor_count = 8.12
+  posterior_recycle_rate = 0.741
+```
+
+Interpretation:
+
+```text
+Positive:
+  The active set is no longer mechanically fixed at 14 anchors.
+  Active same-role support overlap stays far below the old 0.9+ failure mode.
+  Active same-role object-core overlap remains below the planned early gate.
+  The wrist temporal branch is live:
+    aqr_temporal_view_mass_0 ~= 0.63
+    aqr_temporal_view_mass_1 ~= 0.37 at step 100.
+
+Watch:
+  posterior_recycle_rate rose from 0.49 to 0.74 by step 100.
+  This is not yet a failure, but it means the router must be checked again at
+  steps 150/200/300. If recycle stays above 0.70 while active overlaps remain
+  low, the remaining issue is posterior identity stability rather than active
+  support collapse.
+```
+
+Overlay check at A5 step 100:
+
+```text
+anchor_overlays/step_000100.json:
+  total anchors in overlay = 32
+  active graph anchors = 11
+  inactive/dustbin anchors = 21
+  visible active anchors = 11
+
+minimum active pixel distance:
+  0.27 px, but across different roles.
+
+minimum same-role active pixel distance:
+  11.31 px.
+```
+
+This matters because the previous failure was mostly same-role duplicate
+ownership. The current overlay still allows different roles to co-locate on a
+salient object, which can be legitimate if those roles encode different task
+functions. The current acceptance gate therefore remains same-role overlap and
+same-role object-core overlap, not raw marker count or cross-role marker
+distance.
+
+A7 reached step 50 and is running normally. Its first JSON metrics point is:
+
+```text
+step 50:
+  aqr_active_anchor_count = 7.45
+  aqr_active_same_role_support_overlap_max = 0.038
+  aqr_active_same_role_object_core_overlap_max = 0.073
+  aqr_effective_anchor_count = 7.26
+  posterior_recycle_rate = 0.562
+  posterior_identity_switch_rate_stable = 0.216
+  loss_action_default_equiv = 0.126
+  loss_action_weight_scale = 0.125
+```
+
+Interpretation:
+
+```text
+Positive:
+  This is not repeating the old A7 failure where action cotrain pushed active
+  same-role overlap back toward 0.9+ almost immediately.
+  The active set is smaller and evidence-dependent.
+  Recycle is lower than A5 at step 100 and not saturated.
+  Wrist temporal evidence is active:
+    aqr_temporal_view_mass_0 ~= 0.34
+    aqr_temporal_view_mass_1 ~= 0.66.
+
+Watch:
+  A7 is only at the first metrics point. The decisive question is whether
+  steps 100/150/200 keep active overlap low as action weight and LR continue
+  warming up.
+  semantic_future_aux is large at step 50, but its budget scale is very small;
+  do not over-interpret the raw uncapped auxiliary value without the budget.
+```
+
+Tail commands:
+
+```bash
+ssh -p 29776 root@36.139.225.68
+tail -f /mnt/picf_run_logs/picf_a5_dustbin_router_anchor_u2b1_a0_300_1948bfc_dustbin_a5.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_dustbin_router_anchor_u2b1_a0_300_1948bfc_dustbin_a5/metrics.jsonl
+
+ssh -p 28060 root@36.139.225.68
+tail -f /mnt/picf_run_logs/picf_a7_dustbin_router_cotrain_u2b1_a025_240_1948bfc_dustbin_a7.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_dustbin_router_cotrain_u2b1_a025_240_1948bfc_dustbin_a7/metrics.jsonl
+```
