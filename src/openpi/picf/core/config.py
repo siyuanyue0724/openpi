@@ -204,6 +204,12 @@ class PicfCoreConfig:
     aqr_active_slot_max_per_role: int = 4
     aqr_active_slot_min_confidence: float = 0.05
     aqr_active_slot_overlap_threshold: float = 0.75
+    # Object-conditional dustbin router. This keeps the fixed AQR query set
+    # but lets weak or duplicate same-role anchors become inactive candidates.
+    aqr_active_slot_relative_score_threshold: float = 0.0
+    aqr_active_slot_geometry_duplicate_enabled: bool = True
+    aqr_active_slot_geometry_duplicate_sigma_m: float = 0.04
+    aqr_active_slot_geometry_duplicate_threshold: float = 0.70
     aqr_vjepa_temporal_mode: str = "last_two_tokens"
     aqr_vjepa_temporal_tokens: int = 2
     aqr_vjepa_temporal_include_delta: bool = True

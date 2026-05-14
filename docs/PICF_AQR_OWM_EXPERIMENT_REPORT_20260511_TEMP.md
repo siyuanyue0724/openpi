@@ -11886,3 +11886,197 @@ A5 fails, A7 passes:
 A5 passes, A7 passes:
   this becomes the first acceptable candidate for a longer 2.5k/30k run.
 ```
+
+## 2026-05-14 Relative-Score Geometry Dustbin Router
+
+The object-conditioned assignment test refined the failure but did not close it.
+The important observation is that "too many anchors on the overlay" is not only
+a visualization issue. A5 object-assign produced:
+
+```text
+final step360:
+  aqr_active_anchor_count                         = 14.0
+  aqr_effective_anchor_count                      = 13.31
+  aqr_same_role_support_overlap_max               = 0.9202
+  aqr_active_same_role_support_overlap_max        = 0.5290
+  aqr_same_role_object_core_overlap_max           = 0.8297
+  aqr_active_same_role_object_core_overlap_max    = 0.3154
+  posterior_recycle_rate                          = 0.7160
+```
+
+The overlay JSONs showed `24` graph candidates, `14` active graph candidates,
+`10` inactive graph candidates, and `8` posterior circles. The minimum active
+graph pixel distance at the saved frames was only a few pixels. Therefore the
+remaining bug is not simply "gray anchors are numerous"; it is that the active
+subset can still keep weak or geometrically duplicate same-role anchors.
+
+This repair keeps the same architectural principle and does not add a new loss.
+It changes active-slot selection from fixed role capacity to object-conditioned
+dustbin routing:
+
+```math
+score_j
+=
+score^{graph}_j \cdot max(conf_j, c_{floor})
++ max_i p^{support}_{j,i}.
+```
+
+For each role, after the minimum role count is satisfied:
+
+```math
+rel_j = score_j / max_{k: role(k)=role(j)} score_k.
+```
+
+Candidates with low relative evidence are dustbin candidates. Same-role
+duplicates are also dustbin candidates when either support/object-core overlap
+is high or valid geometry is near-duplicate:
+
+```math
+G_{ij}
+=
+exp(-||x_i-x_j||^2 / (2 sigma_g^2)).
+```
+
+The final duplicate score is:
+
+```math
+D_{ij}
+=
+max(
+  overlap^{support/object}_{ij},
+  1[G_{ij} >= tau_g] G_{ij}
+).
+```
+
+This is the set-assignment/dustbin form of the same belief filter. It is not a
+hand-written object detector: it only says that a weak or duplicate same-role
+query should remain a recurrent candidate rather than being forced to become an
+active object owner.
+
+Paper and theory basis:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  Object binding is a pairwise/quadratic IsSameObject relation, not a simple
+  scalar token saliency. This supports duplicate/same-object checks in the
+  active assignment stage rather than relying on per-anchor action loss.
+
+MetaSlot / dynamic-slot OCL:
+  Fixed slot banks need duplicate slot removal or variable effective slot count.
+  A fixed query count should be capacity, not a requirement that every query
+  explain a distinct object.
+
+SuperGlue / differentiable matching with dustbin:
+  Unmatched candidates should have a no-match/dustbin exit. PICF uses the same
+  principle at the role-local active-object level.
+```
+
+Code changes:
+
+```text
+src/openpi/picf/core/config.py
+  aqr_active_slot_relative_score_threshold
+  aqr_active_slot_geometry_duplicate_enabled
+  aqr_active_slot_geometry_duplicate_sigma_m
+  aqr_active_slot_geometry_duplicate_threshold
+
+src/openpi/picf/core/pipeline.py
+  _aqr_active_slot_mask now receives anchor_x / geometry_valid and combines
+  support/object overlap with valid-geometry duplicate detection.
+
+scripts/picf_core_train.py
+  CLI, config threading, startup logs, and metric/debug exposure.
+
+scripts/run_picf_posterior_birth_matrix.sh
+  a5_dustbin_router and a7_dustbin_router profiles.
+
+src/openpi/picf/core/pipeline_test.py
+  relative-score dustbin and geometry-duplicate dustbin unit tests.
+```
+
+Local verification before remote deployment:
+
+```text
+python -m py_compile:
+  config.py, pipeline.py, picf_core_train.py PASS
+
+bash -n scripts/run_picf_posterior_birth_matrix.sh:
+  PASS
+
+python scripts/verify_picf_owm_contract.py:
+  PASS
+
+python scripts/picf_owm_strict_diagnose.py --fail-on-fail:
+  PASS
+
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+  PASS
+
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS
+
+uv run --no-sync pytest -q scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py:
+  PASS
+
+uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py \
+  -k "active_slot_filter or ownership_prior or slot_assignment_ignores or same_role or overlay":
+  PASS
+
+uv run --no-sync pytest -q src/openpi/picf/core/training_test.py \
+  -k "support or binding or action or loss or denoising":
+  PASS
+```
+
+Deployment profiles:
+
+```text
+A5:
+  bash scripts/run_picf_posterior_birth_matrix.sh a5_dustbin_router
+  anchor_only, no action, unroll=2, burnin=1, 300 steps.
+
+A7:
+  bash scripts/run_picf_posterior_birth_matrix.sh a7_dustbin_router
+  all-scope prefix-stopgrad cotrain, action=0.25, unroll=2, burnin=1, 240 steps.
+```
+
+Acceptance gates:
+
+```text
+active_anchor_count:
+  should be evidence-dependent, not mechanically fixed at 14.
+
+aqr_active_same_role_support_overlap_max:
+  preferred < 0.35, acceptable early < 0.50.
+
+aqr_active_same_role_object_core_overlap_max:
+  preferred < 0.30, acceptable early < 0.45.
+
+posterior_recycle_rate:
+  must not saturate above 0.70.
+
+overlay:
+  active same-role graph anchors should not be visually co-located; inactive
+  gray dustbin carriers may overlap and should not be counted as object owners.
+```
+
+Interpretation:
+
+```text
+A5 passes, A7 passes:
+  relative-score + geometry duplicate dustbin routing is the first production
+  candidate for a longer run.
+
+A5 passes, A7 fails:
+  active assignment can work, but action cotrain still corrupts identity;
+  reduce or stage action pressure before a long run.
+
+A5 fails, A7 passes:
+  task-conditioned gradients are needed to decide useful active objects; use
+  cotrain rather than anchor-only warmup as the bootstrap.
+
+A5 fails, A7 fails:
+  the current typed evidence is insufficient to create stable object files;
+  the next non-cosmetic repair must add real objectness evidence such as
+  tracklets/proposals, not another scalar overlap loss.
+```

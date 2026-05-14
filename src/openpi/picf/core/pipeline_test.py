@@ -481,6 +481,76 @@ def test_aqr_active_slot_filter_keeps_visual_duplicates_when_point_core_differs(
     assert int(active.sum().item()) == 2
 
 
+def test_aqr_active_slot_filter_dustbins_low_relative_score_same_role(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_active_slot_filter_enabled=True,
+        aqr_active_slot_min_per_role=1,
+        aqr_active_slot_max_per_role=4,
+        aqr_active_slot_overlap_threshold=0.95,
+        aqr_active_slot_relative_score_threshold=0.90,
+        aqr_active_slot_geometry_duplicate_enabled=False,
+    )
+    visual_priors = torch.tensor(
+        [
+            [0.80, 0.20, 0.00, 0.00],
+            [0.20, 0.80, 0.00, 0.00],
+            [0.00, 0.00, 0.80, 0.20],
+        ],
+        dtype=torch.float32,
+    )
+    active = core._aqr_active_slot_mask(
+        roles=torch.zeros((3,), dtype=torch.long),
+        visual_priors=visual_priors,
+        anchor_scores=torch.tensor([1.0, 0.55, 0.95], dtype=torch.float32),
+        anchor_confidence=torch.ones((3,), dtype=torch.float32),
+    )
+
+    assert active.shape == (3,)
+    assert active.to(dtype=torch.bool).tolist() == [True, False, True]
+
+
+def test_aqr_active_slot_filter_dustbins_geometry_duplicate_same_role(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_active_slot_filter_enabled=True,
+        aqr_active_slot_min_per_role=1,
+        aqr_active_slot_max_per_role=4,
+        aqr_active_slot_overlap_threshold=0.95,
+        aqr_active_slot_geometry_duplicate_enabled=True,
+        aqr_active_slot_geometry_duplicate_sigma_m=0.05,
+        aqr_active_slot_geometry_duplicate_threshold=0.60,
+    )
+    visual_priors = torch.tensor(
+        [
+            [0.80, 0.20, 0.00, 0.00],
+            [0.20, 0.80, 0.00, 0.00],
+            [0.00, 0.00, 0.80, 0.20],
+        ],
+        dtype=torch.float32,
+    )
+    active = core._aqr_active_slot_mask(
+        roles=torch.zeros((3,), dtype=torch.long),
+        visual_priors=visual_priors,
+        anchor_x=torch.tensor(
+            [
+                [0.00, 0.00, 0.00],
+                [0.01, 0.00, 0.00],
+                [0.20, 0.00, 0.00],
+            ],
+            dtype=torch.float32,
+        ),
+        geometry_valid=torch.tensor([True, True, True]),
+        anchor_scores=torch.ones((3,), dtype=torch.float32),
+        anchor_confidence=torch.ones((3,), dtype=torch.float32),
+    )
+
+    assert active.shape == (3,)
+    assert active.to(dtype=torch.bool).tolist() == [True, False, True]
+
+
 def test_aqr_slot_assignment_ignores_inactive_duplicate_anchors(tmp_path: Path) -> None:
     core, _ = _make_core(
         tmp_path,

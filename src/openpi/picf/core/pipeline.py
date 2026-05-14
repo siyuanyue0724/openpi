@@ -2298,6 +2298,8 @@ class PicfFullCore(nn.Module):
         point_priors: torch.Tensor | None = None,
         temporal_priors: torch.Tensor | None = None,
         pg_priors: torch.Tensor | None = None,
+        anchor_x: torch.Tensor | None = None,
+        geometry_valid: torch.Tensor | None = None,
         anchor_scores: torch.Tensor,
         anchor_confidence: torch.Tensor,
     ) -> torch.Tensor:
@@ -2327,6 +2329,26 @@ class PicfFullCore(nn.Module):
         )
         if overlap is None:
             overlap = torch.eye(count, device=self.device, dtype=self.dtype)
+        duplicate_overlap = overlap.to(device=self.device, dtype=self.dtype).clone()
+        if (
+            bool(getattr(self.config, "aqr_active_slot_geometry_duplicate_enabled", True))
+            and anchor_x is not None
+            and anchor_x.numel() > 0
+            and anchor_x.shape[0] == count
+        ):
+            centers = anchor_x.to(device=self.device, dtype=self.dtype)[:, :3]
+            dist2 = torch.cdist(centers, centers) ** 2
+            sigma = max(float(getattr(self.config, "aqr_active_slot_geometry_duplicate_sigma_m", 0.04)), self.config.epsilon_a)
+            geom_overlap = torch.exp(-dist2 / (2.0 * sigma * sigma))
+            if geometry_valid is not None and geometry_valid.numel() == count:
+                valid = geometry_valid.to(device=self.device, dtype=torch.bool)
+                geom_overlap = torch.where(valid[:, None] & valid[None, :], geom_overlap, torch.zeros_like(geom_overlap))
+            geom_threshold = min(
+                max(float(getattr(self.config, "aqr_active_slot_geometry_duplicate_threshold", 0.70)), 0.0),
+                1.0,
+            )
+            geom_duplicate = torch.where(geom_overlap >= geom_threshold, geom_overlap, torch.zeros_like(geom_overlap))
+            duplicate_overlap = torch.maximum(duplicate_overlap, geom_duplicate)
         score = torch.clamp(anchor_scores.to(device=self.device, dtype=self.dtype), min=0.0)
         confidence = torch.clamp(anchor_confidence.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
         support_peak = priors.max(dim=-1).values
@@ -2335,6 +2357,10 @@ class PicfFullCore(nn.Module):
         # demote the redundant candidate to dustbin.
         tie_break = torch.arange(count, device=self.device, dtype=self.dtype) * self.config.epsilon_a
         score = (score * torch.clamp(confidence, min=float(self.config.mapg_confidence_floor))) + support_peak - tie_break
+        relative_threshold = min(
+            max(float(getattr(self.config, "aqr_active_slot_relative_score_threshold", 0.0)), 0.0),
+            1.0,
+        )
         roles = roles.to(device=self.device, dtype=torch.long)
         for role_value in torch.unique(roles, sorted=True).tolist():
             role_indices = torch.nonzero(roles == int(role_value), as_tuple=False).squeeze(-1)
@@ -2347,11 +2373,16 @@ class PicfFullCore(nn.Module):
                 idx = int(role_indices[int(local_rank)].item())
                 if max_per_role > 0 and len(kept) >= max_per_role:
                     continue
+                if relative_threshold > 0.0 and len(kept) >= min_per_role:
+                    best_score = torch.clamp(local_score.max(), min=self.config.epsilon_a)
+                    relative_score = float((score[idx] / best_score).item())
+                    if relative_score < relative_threshold:
+                        continue
                 if len(kept) >= min_per_role and float(score[idx].item()) < min_conf:
                     continue
                 if kept:
                     kept_t = torch.as_tensor(kept, device=self.device, dtype=torch.long)
-                    max_overlap = float(overlap[idx, kept_t].max().item())
+                    max_overlap = float(duplicate_overlap[idx, kept_t].max().item())
                     if max_overlap > overlap_threshold and len(kept) >= min_per_role:
                         continue
                 kept.append(idx)
@@ -3585,15 +3616,6 @@ class PicfFullCore(nn.Module):
         if point_priors is not None and point_priors.numel() > 0:
             anchor_scores = anchor_scores + torch.max(point_priors, dim=-1).values
         anchor_conf = torch.clamp(modality_conf.max(dim=-1).values, min=0.0, max=1.0)
-        anchor_active = self._aqr_active_slot_mask(
-            roles=roles,
-            visual_priors=visual_priors,
-            point_priors=point_priors,
-            temporal_priors=vjepa_temporal_priors,
-            pg_priors=pg_priors,
-            anchor_scores=anchor_scores,
-            anchor_confidence=anchor_conf,
-        )
         anchor_x = None
         anchor_S = None
         geometry_valid = torch.zeros((anchor_count,), device=self.device, dtype=torch.bool)
@@ -3606,6 +3628,17 @@ class PicfFullCore(nn.Module):
             anchor_x = posterior_priors @ previous.posterior.x.to(device=self.device, dtype=self.dtype)
             anchor_S = torch.eye(3, device=self.device, dtype=self.dtype)[None, :, :].expand(anchor_count, -1, -1).clone()
             geometry_valid = _row_has_mass(posterior_priors, eps=self.config.epsilon_a)
+        anchor_active = self._aqr_active_slot_mask(
+            roles=roles,
+            visual_priors=visual_priors,
+            point_priors=point_priors,
+            temporal_priors=vjepa_temporal_priors,
+            pg_priors=pg_priors,
+            anchor_x=anchor_x,
+            geometry_valid=geometry_valid,
+            anchor_scores=anchor_scores,
+            anchor_confidence=anchor_conf,
+        )
         return PicfAnchorPriorGraphState(
             pg_priors=pg_priors,
             visual_priors=visual_priors,
@@ -7351,6 +7384,15 @@ class PicfFullCore(nn.Module):
             )
             debug["aqr_ownership_temporal_prior_weight"] = float(
                 getattr(self.config, "aqr_ownership_temporal_prior_weight", 0.0)
+            )
+            debug["aqr_active_slot_relative_score_threshold"] = float(
+                getattr(self.config, "aqr_active_slot_relative_score_threshold", 0.0)
+            )
+            debug["aqr_active_slot_geometry_duplicate_enabled"] = (
+                1.0 if bool(getattr(self.config, "aqr_active_slot_geometry_duplicate_enabled", True)) else 0.0
+            )
+            debug["aqr_active_slot_geometry_duplicate_threshold"] = float(
+                getattr(self.config, "aqr_active_slot_geometry_duplicate_threshold", 0.0)
             )
             debug["aqr_same_role_support_competition_enabled"] = (
                 1.0 if bool(getattr(self.config, "aqr_same_role_support_competition_enabled", False)) else 0.0

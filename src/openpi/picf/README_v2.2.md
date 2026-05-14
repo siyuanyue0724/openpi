@@ -4945,3 +4945,65 @@ are retained candidate/dustbin carriers, not accepted object owners. Do not
 judge object count from marker count alone. Use role-colored active graph
 squares, posterior circles, same-role support overlap, object-core overlap, and
 effective-anchor metrics together.
+
+2026-05-14 relative-score + geometry dustbin router follow-up:
+
+The A5 object-assign branch exposed a more precise issue than "too many gray
+anchors": the overlay still had many colored active graph anchors, and several
+active same-role markers could be within only a few pixels. That means the
+capacity repair was not yet object-conditional enough; it capped active slots
+but still allowed weak or geometrically duplicate same-role candidates to stay
+active.
+
+The next paired diagnostic is documented in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md),
+section `2026-05-14 Relative-Score Geometry Dustbin Router`.
+
+New controls:
+
+```text
+aqr_active_slot_relative_score_threshold
+aqr_active_slot_geometry_duplicate_enabled
+aqr_active_slot_geometry_duplicate_sigma_m
+aqr_active_slot_geometry_duplicate_threshold
+```
+
+The router keeps the fixed AQR query bank, but treats each role as a set
+assignment with a dustbin exit:
+
+```math
+r_j = score_j / max_{k: role(k)=role(j)} score_k
+```
+
+and
+
+```math
+G_{ij} = exp(-||x_i-x_j||^2 / (2 sigma_g^2)).
+```
+
+After the role-local minimum count is satisfied, a same-role candidate is
+inactive if its relative score is below threshold or if its support/object-core
+or valid-geometry overlap with a stronger kept candidate is too high. This is
+not a new supervision signal and not a hand-coded object detector. It is the
+same belief-filter assignment principle as before, made stricter about
+unmatched/redundant queries.
+
+Run profiles:
+
+```text
+A5:
+  bash scripts/run_picf_posterior_birth_matrix.sh a5_dustbin_router
+
+A7:
+  bash scripts/run_picf_posterior_birth_matrix.sh a7_dustbin_router
+```
+
+Acceptance is stricter than loss decrease:
+
+```text
+active_anchor_count should become evidence-dependent, not fixed at 14;
+aqr_active_same_role_support_overlap_max should stay below 0.35-0.50;
+aqr_active_same_role_object_core_overlap_max should stay below 0.30-0.45;
+posterior_recycle_rate must not saturate;
+anchor overlays should not show multiple active same-role anchors co-located.
+```
