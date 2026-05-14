@@ -11302,3 +11302,78 @@ Acceptance of such a scaffold requires an ablation with scaffold weight zero
 after warmup. If binding collapses when the scaffold fades, learned binding has
 not yet absorbed the object structure.
 ```
+
+## 2026-05-14 A5 Latest Runtime Gate
+
+A5 was synced through the mainland GitHub mirror path and fast-forwarded from
+`c119321` to `4da418e`. Local and remote checks passed before launch:
+
+```text
+python -m py_compile config/pipeline/train/verifier/deep_audit: PASS
+bash -n scripts/run_picf_posterior_birth_matrix.sh: PASS
+python scripts/verify_picf_owm_contract.py: PASS
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail: PASS
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail: PASS
+```
+
+Launched run:
+
+```text
+tmux:
+  picf_a5_posterior_birth_4da418e
+
+profile:
+  scripts/run_picf_posterior_birth_matrix.sh a5
+
+first row:
+  picf_a5_birth_anchor_u2b1_a025_450_4da418e_a5_latest
+  scope=anchor_only
+  unroll=2
+  burnin=1
+  action_weight=0.25
+  active_max_per_role=6
+  active_overlap_threshold=0.70
+```
+
+Startup contract confirms the intended maintained profile:
+
+```text
+posterior_occupancy_prior_enabled = True
+posterior_occupancy_prior_weight = 1.0
+posterior_occupancy_prior_sigma_m = 0.04
+observation_anchor_seed_point_mix = 0.35
+posterior_slotwise_recycle_residual = True
+same_role_support_competition_enabled = True
+legacy_local_refinement_opt_in = False
+local_refinement_enabled = False
+lambda_slot_jepa/support_pred/binding_consistency/aqr_denoising = 0
+```
+
+First metrics gate:
+
+```text
+step50:
+  loss_total                         = 0.1048
+  loss_action_default_equiv           = 0.1383
+  raw same-role support overlap       = 0.2081
+  active same-role support overlap    = 0.1938
+  effective anchor count              = 19.58
+  active anchor count                 = 19.97
+  posterior recycle rate              = 0.4809
+  posterior stable slot fraction      = 0.3367
+  posterior address update mean       = 0.0211
+  posterior identity switch rate      = 0.5333
+  grad norm                           = 7.68
+```
+
+Interpretation:
+
+```text
+1. The latest maintained candidate is live and structurally healthy at step50.
+   It does not reproduce the old early exact-overlap collapse.
+2. This is not acceptance. Many rejected branches were also healthy at step50
+   and failed at step150-300.
+3. The next required gates are step100, step200, and step300 plus anchor
+   overlays. Acceptance requires the active set and posterior physical spread
+   to survive beyond the early warm state.
+```

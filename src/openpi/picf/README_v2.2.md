@@ -4661,3 +4661,20 @@ continuation prior with robust-normalized soft proposal evidence, not a
 category-specific hand rule. The detailed plan and gates are in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md),
 section `2026-05-14 A5 Stale-Run Gate And Object-File Birth Plan`.
+
+2026-05-14 A5 latest runtime gate: A5 has been synced to `4da418e` and is
+running `picf_a5_posterior_birth_4da418e` with the latest maintained posterior
+birth/occupancy/seed-coverage profile. Startup confirms
+`posterior_occupancy_prior_enabled=True`,
+`observation_anchor_seed_point_mix=0.35`,
+`posterior_slotwise_recycle_residual=True`, local refinement off, and all
+guarded OWM auxiliary losses at zero. The first step50 row is structurally
+healthy: raw same-role overlap `0.2081`, active overlap `0.1938`, effective
+anchor count `19.58`, active anchor count `19.97`, recycle `0.4809`, and
+address update `0.0211`. This proves the latest run is live and early-healthy,
+but it is not acceptance; previous rejected branches failed at step150-300. The
+next gates are step100/200/300 plus anchor overlays. The live log is:
+
+```bash
+tail -f /mnt/picf_run_logs/picf_a5_birth_anchor_u2b1_a025_450_4da418e_a5_latest.log
+```
