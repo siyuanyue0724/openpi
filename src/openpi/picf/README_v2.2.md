@@ -4495,3 +4495,57 @@ observation_anchor_seed_point_mix = 0.35
 This mixes each valid seed-point one-hot prior back into its observation-anchor
 point weights after graph/readout fusion. It is a measurement construction prior,
 not an auxiliary loss or action-side patch.
+
+2026-05-14 `07bdf66` runtime gate: the seed-coverage candidate is running on
+both cloud machines. A5 anchor-only reached step200 and gives a split result.
+The old posterior exact co-location failure is fixed at step100/200: role-1
+posterior pairwise pixel mean is `25.59px` at step100 and `18.38px` at step200,
+instead of the old near-zero values. However, A5 is not accepted as a stable
+anchor-only solution because raw same-role support overlap rebounds to `0.9523`,
+active overlap reaches `0.6029`, and effective anchor count falls to `13.32`.
+This means seed coverage plus posterior occupancy repairs physical object-file
+co-location, but anchor-only pressure can still reuse same-role support and
+demote redundant candidates. The production-relevant discriminator is now A7
+cotrain step100/200: if A7 keeps posterior separation without raw overlap
+collapse under task/action/semantic pressure, the candidate can proceed; if A7
+also rebounds, the remaining issue is same-role measurement competition rather
+than action loss or unroll length.
+
+2026-05-14 A7 step100 update: the production-relevant cotrain branch is
+healthier than A5 anchor-only. A7 reaches `loss_action_default_equiv=0.0829`,
+`aqr_same_role_support_overlap_max=0.6559`, active overlap `0.4281`,
+effective anchor count `19.42`, and posterior role-1 pairwise pixel mean
+`22.21px`. This is not final acceptance because raw overlap is above the
+preferred `0.60` early gate, but it is materially different from the old
+`0.95-0.99` collapse and from the A5 anchor-only rebound. Continue A7 to
+step200 before any new code change; A5 is now only a negative-control record
+showing that anchor-only pressure still demotes/reuses same-role candidates.
+
+2026-05-14 root-cause routing update: A5 step250/300 showed the remaining
+failure is not posterior exact co-location. It is same-role support reuse:
+multiple physical object files can read the same visual/point/temporal evidence
+and only become distinct after posterior correction, which is too late for a
+stable object-file measurement model. The maintained repair is
+`aqr_same_role_support_competition_enabled=True`. For each same-role physical
+object-file group, the AQR support rows are transformed by a role-local
+competition step before graph priors are consumed:
+
+```text
+E_jn^(0) = P_jn
+E_jn^(k+1) = Normalize_n(E_jn^k / sum_{l in same_role(j)} E_ln^k)
+P'_j = Normalize_n((1-lambda) P_j + lambda E_j^(K))
+```
+
+This is a measurement-routing invariant, not a new loss and not a heuristic
+action patch. It cannot invent object evidence: identical rows remain
+identical, so it depends on the existing ownership prior, seed-point coverage,
+geometry, and pairwise binding-signature subspace to provide weak differences.
+It only prevents same-role object files from all keeping the same support when
+weak row-specific evidence already exists. This follows the object-binding
+paper's IsSameObject lesson: binding is a pairwise low-dimensional relation
+that guides attention, so the correct integration point is the support-routing
+subspace rather than an action-side penalty. It is also consistent with recent
+object-centric manipulation work that treats persistent slots as a belief-state
+interface, not as a late auxiliary classifier. See:
+`https://arxiv.org/abs/2510.24709`, `https://arxiv.org/abs/2511.06754`, and
+`https://arxiv.org/abs/2601.20381`.

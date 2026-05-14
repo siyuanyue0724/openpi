@@ -189,6 +189,10 @@ class PicfCoreConfig:
     aqr_ownership_prior_weight: float = 0.35
     aqr_ownership_temporal_prior_weight: float = 0.20
     aqr_ownership_prior_uniform_mix: float = 0.05
+    aqr_same_role_support_competition_enabled: bool = True
+    aqr_same_role_support_competition_weight: float = 0.35
+    aqr_same_role_support_competition_iters: int = 2
+    aqr_same_role_support_competition_physical_only: bool = True
     # Capacity-aware active-slot selection. AQR keeps the fixed query set for
     # compatibility, but only distinct high-confidence same-role anchors are
     # eligible for downstream obs/task assignment; redundant anchors become

@@ -207,6 +207,8 @@ def run_static_checks() -> list[Finding]:
                 "evidence_cache_read_weight: float = 0.05",
                 "tracklet_memory_enabled: bool = True",
                 "proposal_memory_enabled: bool = True",
+                "aqr_same_role_support_competition_enabled: bool = True",
+                "aqr_same_role_support_competition_weight: float = 0.35",
                 'recycle_residual_norm_mode: str = "layernorm"',
                 "legacy_local_refinement_opt_in: bool = False",
                 "local_refinement_enabled: bool = False",

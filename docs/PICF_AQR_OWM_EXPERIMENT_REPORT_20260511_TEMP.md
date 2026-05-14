@@ -10704,3 +10704,280 @@ measurement hypotheses match the object-file model: AQR/support reading may
 refine each observation anchor, but it should not erase the initial per-role FPS
 coverage before posterior assignment. The new A5/A7 candidate must improve both
 the graph and posterior role-1 pairwise distances at step100/200.
+
+2026-05-14 `07bdf66` seed-coverage runtime gate: the A5/A7 matrix was relaunched
+from the maintained `07bdf66` worktree. Startup contracts match the intended
+profile on both hosts:
+
+```text
+unroll_steps = 2
+burnin_steps = 1
+local_refinement_enabled = False
+posterior_occupancy_prior_enabled = True
+observation_anchor_seed_point_mix = 0.35
+lambda_slot_jepa/support_pred/binding_consistency/aqr_denoising = 0
+```
+
+A5 anchor-only early metrics:
+
+```text
+step50:
+  raw same-role overlap     = 0.2532
+  active same-role overlap  = 0.2293
+  effective anchor count    = 19.76
+  posterior recycle rate    = 0.2474
+  action default-equiv loss = 0.1377
+
+step100:
+  raw same-role overlap     = 0.3832
+  active same-role overlap  = 0.3012
+  effective anchor count    = 19.70
+  posterior recycle rate    = 0.0719
+  action default-equiv loss = 0.1416
+
+step150:
+  raw same-role overlap     = 0.7340
+  active same-role overlap  = 0.4731
+  effective anchor count    = 19.42
+  posterior recycle rate    = 0.0212
+  action default-equiv loss = 0.1416
+
+step200:
+  raw same-role overlap     = 0.9523
+  active same-role overlap  = 0.6029
+  effective anchor count    = 13.32
+  posterior recycle rate    = 0.1445
+  action default-equiv loss = 0.1397
+```
+
+Overlay audit:
+
+```text
+A5 step100:
+  graph role-1 pairwise pixel distance:
+    min=0.51 px, mean=15.90 px, max=28.22 px
+  posterior role-1 pairwise pixel distance:
+    min=1.17 px, mean=25.59 px, max=41.08 px
+
+A5 step200:
+  graph role-1 pairwise pixel distance:
+    min=0.22 px, mean=9.15 px, max=20.47 px
+  posterior role-1 pairwise pixel distance:
+    min=0.31 px, mean=18.38 px, max=35.19 px
+```
+
+Interpretation:
+
+```text
+1. The previous posterior exact co-location failure is materially fixed in this
+   branch. The role-1 posterior files no longer collapse to near-zero pairwise
+   pixel distance at step100/200.
+2. This does not yet accept the anchor-only line. Raw support overlap rebounds
+   to the old collapse band by step200 and active overlap is just above the
+   provisional 0.60 gate, while effective anchor count drops.
+3. The failure mode has shifted from physical posterior co-location to support
+   reuse / active candidate demotion under anchor-only pressure. This is why A5
+   is a diagnostic isolation line, not the production acceptance line.
+4. The decisive production branch is A7 cotrain. A7 step50 is structurally
+   healthy on overlap (`0.2305` raw, `0.2133` active) but has high recycle
+   (`0.6163`) before the first overlay. Wait for A7 step100 and step200 before
+   making the next code change.
+```
+
+Do not patch again before A7 reaches step100 unless the remote run crashes. The
+current evidence says the measurement construction/correction repair is useful
+but incomplete under anchor-only isolation; the all-scope cotrain branch is the
+intended discriminator for whether task/semantic/action pressure stabilizes or
+destroys that separation.
+
+2026-05-14 A7 step100 discriminator:
+
+```text
+A7 step100:
+  loss_total                 = 0.0979
+  loss_action_default_equiv  = 0.0829
+  raw same-role overlap      = 0.6559
+  active same-role overlap   = 0.4281
+  effective anchor count     = 19.42
+  posterior recycle rate     = 0.3463
+  posterior identity switch  = 0.5317
+  posterior address update   = 0.0260
+  grad norm                  = 1.43
+```
+
+Overlay audit:
+
+```text
+A7 step100:
+  graph role-1 pairwise pixel distance:
+    min=1.46 px, mean=5.95 px, max=12.01 px
+  posterior role-1 pairwise pixel distance:
+    min=0.69 px, mean=22.21 px, max=37.70 px
+```
+
+Manual overlay reading:
+
+```text
+A5 step200:
+  The visible anchors are no longer mathematically co-located, but the graph
+  candidates are crowded around the drawer/table-edge neighborhood. This matches
+  the metric split: posterior role-1 distance is repaired, while same-role
+  support reuse is still high.
+
+A7 step100:
+  The anchors are concentrated around the task-relevant object/handle region,
+  but they are not the old exact same-pixel collapse. This is consistent with
+  high effective anchor count and posterior role-1 mean distance > 20px.
+```
+
+Interpretation:
+
+```text
+1. A7 is the production-relevant branch and is healthier than A5 anchor-only.
+   It keeps high effective anchor count, nonzero address updates, non-saturated
+   recycle, and posterior physical separation while action loss improves.
+2. A7 is not accepted yet. Raw overlap is above the preferred 0.60 early gate,
+   and graph role-1 candidates are only moderately separated even though the
+   posterior is not co-located.
+3. This falsifies the strongest "action always destroys anchors" hypothesis:
+   under the current lower action weight / cotrain profile, action and semantic
+   pressure do not immediately recreate the old exact co-location failure.
+4. This also falsifies "anchor-only warmup is enough": A5 anchor-only is worse
+   by step250. The better path is production-like cotrain with guarded action
+   pressure, not isolated anchor-only optimization.
+```
+
+Next gate:
+
+```text
+Continue A7 to step200.
+If step200 keeps active overlap < 0.60, effective count near 19, posterior
+role-1 mean pixel distance > 10px, and recycle in the non-saturated band, treat
+the seed-coverage/occupancy candidate as the first viable production candidate.
+If A7 rebounds into raw/active overlap collapse by step200, the remaining issue
+is not unroll, action presence, or posterior exact co-location; it is same-role
+measurement competition before posterior correction.
+```
+
+## 2026-05-14 Same-Role Support Competition Repair
+
+The A5/A7 split localizes the current failure more precisely than the older
+"all anchors collapse to one point" diagnosis.
+
+Observed failure:
+
+```text
+A5 anchor-only:
+  posterior exact co-location is fixed by seed coverage + occupancy prior.
+  raw same-role support overlap still rebounds toward 0.95-0.999.
+  effective anchor count falls as redundant same-role supports are demoted.
+
+A7 cotrain:
+  action/semantic pressure does not instantly recreate exact co-location.
+  raw same-role support is still above the preferred early gate.
+```
+
+Mathematical interpretation:
+
+```text
+The posterior correction can now separate physical object files once it receives
+distinct measurements. The remaining error is earlier: same-role AQR support
+rows may keep the same evidence distribution, so the measurement model provides
+duplicate evidence to multiple object files.
+```
+
+The maintained fix is role-local support competition:
+
+```math
+E_{j,n}^{0}=P_{j,n}
+```
+
+For each physical same-role group \(G_r\):
+
+```math
+E_{j,n}^{k+1}
+=
+\operatorname{Normalize}_{n}
+\left(
+  \frac{E_{j,n}^{k}}
+       {\epsilon+\sum_{\ell\in G_r}E_{\ell,n}^{k}}
+\right)
+```
+
+Then:
+
+```math
+P'_{j,n}
+=
+\operatorname{Normalize}_{n}
+\left((1-\lambda)P_{j,n}+\lambda E_{j,n}^{K}\right)
+```
+
+Default:
+
+```text
+aqr_same_role_support_competition_enabled = true
+aqr_same_role_support_competition_weight = 0.35
+aqr_same_role_support_competition_iters = 2
+aqr_same_role_support_competition_physical_only = true
+```
+
+Why this is not a late patch:
+
+```text
+1. It lives inside measurement routing, before posterior correction.
+2. It is not an auxiliary loss, so it cannot fight action/cotrain gradients.
+3. It is role-local and physical-only, so task queries may still intentionally
+   share evidence.
+4. It cannot create evidence. If two rows are exactly identical, the update is
+   unchanged; it only amplifies weak object-specific differences already
+   supplied by ownership priors, seed-point coverage, geometry, multiview
+   temporal tokens, or the binding-signature subspace.
+```
+
+Paper alignment:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  The paper motivates pairwise IsSameObject relations and low-dimensional
+  binding subspaces that guide attention. This supports putting the repair in
+  support routing rather than in action loss.
+
+SlotVLA / STORM / object-centric world-model papers:
+  These support persistent object slots as a belief-state interface and staged
+  object-centric adaptation. The repair preserves posterior authority and does
+  not add a new supervised object label requirement.
+```
+
+Validation completed locally:
+
+```text
+py_compile: config/pipeline/pipeline_test/trainer/verifier/deep_audit passed
+verify_picf_owm_contract.py: PASS
+picf_owm_mvtrack_deep_audit.py --fail-on-fail: PASS
+picf_owm_dataflow_trace.py --fail-on-fail: PASS
+picf_owm_strict_diagnose.py --fail-on-fail: PASS
+pytest:
+  pipeline_test.py::test_aqr_same_role_support_competition_amplifies_relative_evidence
+  scripts verifier/evidence-bundle tests
+  5 passed
+```
+
+Remote test plan:
+
+```text
+A5 is the right first test because it is the negative control that still
+rebounds under anchor-only pressure. Restart A5 with the same anchor-only
+configuration plus same-role support competition. Acceptance is not action
+loss; acceptance is:
+
+  raw same-role support overlap stays below the old 0.95 collapse band,
+  active overlap stays below 0.60,
+  effective anchor count does not fall toward 8-13,
+  posterior pairwise pixel distance stays above 10px,
+  anchor overlays show object-file spread rather than same-region reuse.
+
+If A5 still collapses, the next root cause is that the weak row-specific
+evidence is not present in the support rows and must be moved earlier into
+token/probe extraction, not solved by stronger losses.
+```

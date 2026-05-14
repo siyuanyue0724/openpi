@@ -2690,6 +2690,65 @@ class PicfFullCore(nn.Module):
             local = local / torch.clamp(local.sum(dim=-1, keepdim=True), min=eps)
         return local
 
+    def _aqr_same_role_support_competition(
+        self,
+        priors: torch.Tensor,
+        *,
+        roles: torch.Tensor,
+        query_types: torch.Tensor | None,
+        eps: float,
+    ) -> torch.Tensor:
+        """Make same-role scene object files compete for evidence tokens.
+
+        This is a measurement-routing constraint, not an auxiliary loss: if two
+        same-role object files read the same support, the branch keeps only the
+        row-specific relative advantage and then mixes it back as a small
+        residual. Identical rows remain identical, so the term cannot invent
+        evidence; it only amplifies weak object-specific differences already
+        present in the typed support.
+        """
+        if not bool(getattr(self.config, "aqr_same_role_support_competition_enabled", False)):
+            return priors
+        if priors.numel() == 0 or priors.shape[0] < 2 or priors.shape[1] == 0:
+            return priors
+        weight = max(float(getattr(self.config, "aqr_same_role_support_competition_weight", 0.0)), 0.0)
+        if weight <= 0.0:
+            return priors
+        weight = min(weight, 1.0)
+        iters = max(int(getattr(self.config, "aqr_same_role_support_competition_iters", 1)), 1)
+        local = _normalize_rows(
+            torch.clamp(torch.nan_to_num(priors.to(device=self.device, dtype=self.dtype), nan=0.0), min=0.0),
+            eps=eps,
+        )
+        roles_t = roles.to(device=self.device)
+        if roles_t.numel() != int(local.shape[0]):
+            return local
+        eligible = roles_t != 0
+        if bool(getattr(self.config, "aqr_same_role_support_competition_physical_only", True)) and query_types is not None:
+            qt = query_types.to(device=self.device)
+            if qt.numel() == int(local.shape[0]):
+                eligible = eligible & (qt == 0)
+        if int(eligible.sum().item()) < 2:
+            return local
+        out = local.clone()
+        for role_value in torch.unique(roles_t[eligible]).tolist():
+            row_mask = eligible & (roles_t == int(role_value))
+            if int(row_mask.sum().item()) < 2:
+                continue
+            rows = torch.nonzero(row_mask, as_tuple=False).flatten()
+            original = local.index_select(0, rows)
+            exclusive = original
+            valid_cols = original.sum(dim=0, keepdim=True) > eps
+            if int(valid_cols.sum().item()) <= 1:
+                continue
+            for _ in range(iters):
+                share = exclusive / torch.clamp(exclusive.sum(dim=0, keepdim=True), min=eps)
+                share = torch.where(valid_cols, share, torch.zeros_like(share))
+                exclusive = _normalize_rows(share, eps=eps)
+            mixed = _normalize_rows(((1.0 - weight) * original) + (weight * exclusive), eps=eps)
+            out = out.index_copy(0, rows, mixed)
+        return out
+
     def _mapg_mode_priors(
         self,
         weights: torch.Tensor,
@@ -3176,7 +3235,12 @@ class PicfFullCore(nn.Module):
                 visual_count=visual_count,
             )
             if round_pg_priors is not None:
-                pg_priors = round_pg_priors
+                pg_priors = self._aqr_same_role_support_competition(
+                    round_pg_priors,
+                    roles=roles,
+                    query_types=query_types,
+                    eps=self.config.epsilon_a,
+                )
             if pg_image_bias is not None:
                 round_visual_bias = pg_image_bias if round_visual_bias is None else (round_visual_bias + pg_image_bias)
             if self.aqr_visual_reader is not None and visual_count > 0:
@@ -3185,21 +3249,36 @@ class PicfFullCore(nn.Module):
                     token_field.visual_tokens.to(device=self.device, dtype=self.dtype)[None, :],
                     attn_bias=round_visual_bias,
                 )
-                visual_priors = self._aqr_competitive_support(visual_weights, eps=self.config.epsilon_a)
+                visual_priors = self._aqr_same_role_support_competition(
+                    self._aqr_competitive_support(visual_weights, eps=self.config.epsilon_a),
+                    roles=roles,
+                    query_types=query_types,
+                    eps=self.config.epsilon_a,
+                )
             if self.aqr_temporal_visual_reader is not None and token_field.temporal_visual is not None and temporal_count > 0:
                 q, temporal_weights = self.aqr_temporal_visual_reader(
                     q,
                     token_field.temporal_visual.tokens.to(device=self.device, dtype=self.dtype)[None, :],
                     attn_bias=temporal_bias,
                 )
-                vjepa_temporal_priors = self._aqr_competitive_support(temporal_weights, eps=self.config.epsilon_a)
+                vjepa_temporal_priors = self._aqr_same_role_support_competition(
+                    self._aqr_competitive_support(temporal_weights, eps=self.config.epsilon_a),
+                    roles=roles,
+                    query_types=query_types,
+                    eps=self.config.epsilon_a,
+                )
             if self.aqr_point_reader is not None and point_count > 0:
                 q, point_weights = self.aqr_point_reader(
                     q,
                     token_field.point_tokens.to(device=self.device, dtype=self.dtype)[None, :],
                     attn_bias=point_bias,
                 )
-                point_priors = self._aqr_competitive_support(point_weights, eps=self.config.epsilon_a)
+                point_priors = self._aqr_same_role_support_competition(
+                    self._aqr_competitive_support(point_weights, eps=self.config.epsilon_a),
+                    roles=roles,
+                    query_types=query_types,
+                    eps=self.config.epsilon_a,
+                )
             if self.aqr_tactile_reader is not None and tactile_count > 0:
                 q, tactile_weights = self.aqr_tactile_reader(
                     q,
@@ -3235,7 +3314,12 @@ class PicfFullCore(nn.Module):
                     attn_bias=tracklet_bias,
                 )
                 q = q_before_track + (float(self.config.tracklet_read_weight) * (track_read - q_before_track))
-                tracklet_priors = self._aqr_competitive_support(track_weights, eps=self.config.epsilon_a)
+                tracklet_priors = self._aqr_same_role_support_competition(
+                    self._aqr_competitive_support(track_weights, eps=self.config.epsilon_a),
+                    roles=roles,
+                    query_types=query_types,
+                    eps=self.config.epsilon_a,
+                )
             if self.aqr_proposal_reader is not None and token_field.proposal is not None and proposal_count > 0:
                 proposal_bias = torch.log(
                     torch.clamp(token_field.proposal.objectness, min=self.config.epsilon_a)
@@ -3247,7 +3331,12 @@ class PicfFullCore(nn.Module):
                     attn_bias=proposal_bias,
                 )
                 q = q_before_prop + (float(self.config.proposal_read_weight) * (prop_read - q_before_prop))
-                proposal_priors = self._aqr_competitive_support(prop_weights, eps=self.config.epsilon_a)
+                proposal_priors = self._aqr_same_role_support_competition(
+                    self._aqr_competitive_support(prop_weights, eps=self.config.epsilon_a),
+                    roles=roles,
+                    query_types=query_types,
+                    eps=self.config.epsilon_a,
+                )
             # Archived legacy path: this top-k reread is intentionally not part
             # of the production belief update unless both flags are explicitly
             # enabled. The maintained path relies on AQR supports plus normalized
@@ -7143,6 +7232,12 @@ class PicfFullCore(nn.Module):
             debug["aqr_ownership_prior_weight"] = float(getattr(self.config, "aqr_ownership_prior_weight", 0.0))
             debug["aqr_ownership_temporal_prior_weight"] = float(
                 getattr(self.config, "aqr_ownership_temporal_prior_weight", 0.0)
+            )
+            debug["aqr_same_role_support_competition_enabled"] = (
+                1.0 if bool(getattr(self.config, "aqr_same_role_support_competition_enabled", False)) else 0.0
+            )
+            debug["aqr_same_role_support_competition_weight"] = float(
+                getattr(self.config, "aqr_same_role_support_competition_weight", 0.0)
             )
             usage = torch.zeros((graph.anchor_tokens.shape[0],), device=self.device, dtype=self.dtype)
             for assignment in (graph.obs_slot_assignment, graph.task_assignment):

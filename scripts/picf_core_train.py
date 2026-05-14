@@ -3053,6 +3053,8 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_ownership_prior_enabled",
     "aqr_ownership_prior_weight",
     "aqr_ownership_temporal_prior_weight",
+    "aqr_same_role_support_competition_enabled",
+    "aqr_same_role_support_competition_weight",
     "posterior_identity_switch_rate",
     "posterior_identity_switch_rate_stable",
     "posterior_identity_switch_rate_nonrecycled",
@@ -5031,6 +5033,30 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         aqr_ownership_prior_uniform_mix=float(
             _arg_or_default("aqr_ownership_prior_uniform_mix", _SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix)
         ),
+        aqr_same_role_support_competition_enabled=bool(
+            _arg_or_default(
+                "aqr_same_role_support_competition_enabled",
+                _SPEC_DEFAULTS.aqr_same_role_support_competition_enabled,
+            )
+        ),
+        aqr_same_role_support_competition_weight=float(
+            _arg_or_default(
+                "aqr_same_role_support_competition_weight",
+                _SPEC_DEFAULTS.aqr_same_role_support_competition_weight,
+            )
+        ),
+        aqr_same_role_support_competition_iters=int(
+            _arg_or_default(
+                "aqr_same_role_support_competition_iters",
+                _SPEC_DEFAULTS.aqr_same_role_support_competition_iters,
+            )
+        ),
+        aqr_same_role_support_competition_physical_only=bool(
+            _arg_or_default(
+                "aqr_same_role_support_competition_physical_only",
+                _SPEC_DEFAULTS.aqr_same_role_support_competition_physical_only,
+            )
+        ),
         aqr_active_slot_filter_enabled=bool(
             _arg_or_default("aqr_active_slot_filter_enabled", _SPEC_DEFAULTS.aqr_active_slot_filter_enabled)
         ),
@@ -6279,7 +6305,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s same_role_support_competition_enabled=%s same_role_support_competition_weight=%s same_role_support_competition_iters=%s same_role_support_competition_physical_only=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -6307,6 +6333,34 @@ def train(args: argparse.Namespace) -> None:
                         args,
                         "aqr_ownership_prior_uniform_mix",
                         _SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_same_role_support_competition_enabled",
+                        _SPEC_DEFAULTS.aqr_same_role_support_competition_enabled,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "aqr_same_role_support_competition_weight",
+                        _SPEC_DEFAULTS.aqr_same_role_support_competition_weight,
+                    )
+                ),
+                int(
+                    getattr(
+                        args,
+                        "aqr_same_role_support_competition_iters",
+                        _SPEC_DEFAULTS.aqr_same_role_support_competition_iters,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_same_role_support_competition_physical_only",
+                        _SPEC_DEFAULTS.aqr_same_role_support_competition_physical_only,
                     )
                 ),
                 bool(getattr(args, "aqr_active_slot_filter_enabled", _SPEC_DEFAULTS.aqr_active_slot_filter_enabled)),
@@ -7376,6 +7430,30 @@ def main() -> None:
         "--aqr-ownership-prior-uniform-mix",
         type=float,
         default=_SPEC_DEFAULTS.aqr_ownership_prior_uniform_mix,
+    )
+    parser.add_argument(
+        "--aqr-same-role-support-competition-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_same_role_support_competition_enabled,
+        help=(
+            "Apply role-local evidence competition among same-role physical object files after AQR support reads. "
+            "This is a measurement-routing invariant, not a loss."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-same-role-support-competition-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_same_role_support_competition_weight,
+    )
+    parser.add_argument(
+        "--aqr-same-role-support-competition-iters",
+        type=int,
+        default=_SPEC_DEFAULTS.aqr_same_role_support_competition_iters,
+    )
+    parser.add_argument(
+        "--aqr-same-role-support-competition-physical-only",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_same_role_support_competition_physical_only,
     )
     parser.add_argument(
         "--aqr-active-slot-filter-enabled",

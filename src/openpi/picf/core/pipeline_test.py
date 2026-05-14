@@ -332,6 +332,40 @@ def test_aqr_ownership_prior_breaks_temporal_multiview_symmetry(tmp_path: Path) 
     assert torch.unique(torch.argmax(bias, dim=-1)).numel() > 1
 
 
+def test_aqr_same_role_support_competition_amplifies_relative_evidence(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_same_role_support_competition_enabled=True,
+        aqr_same_role_support_competition_weight=1.0,
+        aqr_same_role_support_competition_iters=2,
+    )
+    priors = torch.tensor(
+        [
+            [0.50, 0.30, 0.20, 0.00],
+            [0.45, 0.35, 0.00, 0.20],
+            [0.25, 0.25, 0.25, 0.25],
+        ],
+        dtype=torch.float32,
+    )
+    roles = torch.tensor([1, 1, 2], dtype=torch.long)
+    query_types = torch.zeros((3,), dtype=torch.long)
+
+    competed = core._aqr_same_role_support_competition(
+        priors,
+        roles=roles,
+        query_types=query_types,
+        eps=core.config.epsilon_a,
+    )
+
+    before_overlap = torch.dot(priors[0], priors[1])
+    after_overlap = torch.dot(competed[0], competed[1])
+    assert competed.shape == priors.shape
+    assert torch.allclose(competed.sum(dim=-1), torch.ones((3,), device=competed.device), atol=1e-5)
+    assert after_overlap < before_overlap
+    assert torch.allclose(competed[2], priors[2].to(device=competed.device), atol=1e-5)
+
+
 def test_aqr_active_slot_filter_deactivates_duplicate_same_role_support(tmp_path: Path) -> None:
     core, _ = _make_core(
         tmp_path,
