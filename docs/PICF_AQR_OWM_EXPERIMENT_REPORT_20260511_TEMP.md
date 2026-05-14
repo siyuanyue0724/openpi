@@ -10487,3 +10487,97 @@ posterior_recycle_rate avoids both near-0 and near-1 saturation;
 aqr_same_role_support_overlap_max does not rebound into 0.98+;
 loss_action_default_equiv remains comparable to the prior A7 flow baseline.
 ```
+
+## 2026-05-14 Slot-Local Residual Runtime Gate
+
+Remote worktrees were synced to `e4f0b91` and the old posterior-birth matrix was
+stopped. The new matrix is running in:
+
+```text
+A5:
+  /root/openpi_recyclenorm_4ec25ae
+  tmux: picf_a5_slotlocal_recycle_matrix
+  first run: picf_a5_birth_anchor_u2b1_a025_450_e4f0b91
+
+A7:
+  /root/openpi_a7_overlay_unroll2_b9ad838
+  tmux: picf_a7_slotlocal_recycle_matrix
+  first run: picf_a7_birth_cotrain_u2b1_a025_600_e4f0b91
+```
+
+Local and remote validation before launch:
+
+```text
+python -m py_compile config/pipeline/trainer/verifier: PASS
+python scripts/verify_picf_owm_contract.py: PASS
+python scripts/picf_owm_strict_diagnose.py --fail-on-fail: PASS
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail: PASS
+python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail: PASS
+uv run --no-sync pytest -q src/openpi/picf/core/pipeline_test.py -k "...": 3 passed
+uv run --no-sync pytest -q src/openpi/picf/core/training_test.py -k "...": 6 passed
+```
+
+Early metrics:
+
+```text
+A5 step50:
+  aqr_same_role_support_overlap_max        = 0.2578
+  aqr_active_same_role_support_overlap_max = 0.2392
+  aqr_active_anchor_count                  = 20.0
+  posterior_recycle_rate                   = 0.5338
+  posterior_recycle_gate_std               = 0.00523
+  posterior_address_update_rate_mean       = 0.0212
+  grad_norm                                = 16.06
+
+A5 step100:
+  aqr_same_role_support_overlap_max        = 0.2861
+  aqr_active_same_role_support_overlap_max = 0.2309
+  aqr_active_anchor_count                  = 20.0
+  posterior_recycle_rate                   = 0.3305
+  posterior_recycle_gate_std               = 0.00984
+  posterior_address_update_rate_mean       = 0.0296
+  grad_norm                                = 6.27
+
+A7 step50:
+  aqr_same_role_support_overlap_max        = 0.2156
+  aqr_active_same_role_support_overlap_max = 0.1964
+  aqr_active_anchor_count                  = 20.0
+  posterior_recycle_rate                   = 0.4812
+  posterior_recycle_gate_std               = 0.0173
+  posterior_address_update_rate_mean       = 0.0236
+  loss_action_default_equiv                = 0.2621
+  grad_norm                                = 2.47
+```
+
+These numbers confirm the slot-local residual repair changes the failed
+recycle regime: recycle is neither pinned near 0 nor 1, and gate variance is no
+longer at the old `1e-4` symmetry level. However, the A5 step100 overlay still
+rejects this as a complete posterior identity fix:
+
+```text
+A5 step100 overlay:
+  graph role-1 pairwise pixel distance:
+    min=2.58 px, mean=17.54 px, max=37.37 px
+  posterior role-1 pairwise pixel distance:
+    min=0.0009 px, mean=0.0928 px, max=0.2828 px
+```
+
+Interpretation:
+
+```text
+1. Slot-local recycle/reset residuals fix the recycle-gate symmetry and are a
+   correct maintained improvement.
+2. They do not by themselves fix posterior physical co-location. The graph
+   stage still contains separated candidates, while posterior correction maps
+   seven same-role object files to effectively the same pixel.
+3. The remaining root cause is not only reset-state generation. It is the
+   posterior assignment/correction occupancy problem: multiple active same-role
+   object files can still use nearly the same observation mode.
+4. The next architecture change should be posterior-stage same-role occupancy
+   control or set-assignment regularization inside the belief update, not an
+   outer action-side or support-diversity patch.
+```
+
+Do not call `e4f0b91` accepted. Continue the A7 run to step100 overlay to check
+whether the same posterior co-location appears under all-scope cotrain; the A5
+anchor-only overlay already shows the current fix is incomplete.
