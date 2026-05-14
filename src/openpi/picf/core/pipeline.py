@@ -7343,6 +7343,12 @@ class PicfFullCore(nn.Module):
             debug["mapg_posterior_available"] = 1.0 if graph.posterior_priors is not None else 0.0
             debug["aqr_ownership_prior_enabled"] = 1.0 if bool(getattr(self.config, "aqr_ownership_prior_enabled", True)) else 0.0
             debug["aqr_ownership_prior_weight"] = float(getattr(self.config, "aqr_ownership_prior_weight", 0.0))
+            debug["aqr_ownership_point_prior_weight"] = float(
+                getattr(self.config, "aqr_ownership_point_prior_weight", 0.0)
+            )
+            debug["aqr_ownership_point_prior_sigma_m"] = float(
+                getattr(self.config, "aqr_ownership_point_prior_sigma_m", 0.0)
+            )
             debug["aqr_ownership_temporal_prior_weight"] = float(
                 getattr(self.config, "aqr_ownership_temporal_prior_weight", 0.0)
             )

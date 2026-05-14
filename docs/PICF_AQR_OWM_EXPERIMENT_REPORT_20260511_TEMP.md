@@ -11545,3 +11545,21 @@ Gate at step100/200/300:
   posterior recycle
   posterior physical overlay spread
 ```
+
+Deployment correction after first launch:
+
+```text
+The first A5 object-core run reached step50 and confirmed the new point prior
+was active in startup logs, but metrics.jsonl did not yet include the new
+object-core overlap keys. That is an audit-contract failure, not a model
+failure. The run was replaced after adding these keys to OWM_DEBUG_METRIC_KEYS:
+
+  aqr_same_role_object_core_overlap_max
+  aqr_same_role_object_core_overlap_mean
+  aqr_active_same_role_object_core_overlap_max
+  aqr_active_same_role_object_core_overlap_mean
+  aqr_ownership_point_prior_weight
+  aqr_ownership_point_prior_sigma_m
+
+No final judgment should be made from the pre-logging-fix object-core run.
+```

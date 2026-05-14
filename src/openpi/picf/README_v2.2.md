@@ -4795,3 +4795,12 @@ in
 point ownership prior before AQR point attention plus multi-modal object-core
 overlap for active-slot filtering. The next maintained A5 run must be launched
 from the new commit; A7 remains only an older support-competition control.
+
+Operational logging requirement: object-core runs are only valid after
+`metrics.jsonl` records both visual-only overlap and object-core overlap. The
+required keys are `aqr_same_role_object_core_overlap_max`,
+`aqr_active_same_role_object_core_overlap_max`,
+`aqr_ownership_point_prior_weight`, and
+`aqr_ownership_point_prior_sigma_m`. A run that only logs visual overlap cannot
+decide whether the repair is separating physical object cores or merely
+renaming the old visual-support collapse.
