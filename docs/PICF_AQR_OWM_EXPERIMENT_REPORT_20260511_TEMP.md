@@ -12820,3 +12820,85 @@ Unknown until A5 step200/300:
   whether stronger action from step zero causes persistent duplicate active
   markers or recycle instability.
 ```
+
+2026-05-15 A5 stress step300 judgment
+-------------------------------------
+
+A5 stress run:
+
+```text
+Run:
+  picf_a5_dustbin_router_cotrain_u2b1_a05_360_b85f425_a5stress
+
+Mode:
+  cotrain, action weight 0.50, prefix-stopgrad, unroll=2, burnin=1
+```
+
+Metric trajectory through step300:
+
+```text
+step  action_eq  total  align  active  active_support  active_core  raw_support  raw_core  recycle
+50    0.1252     1.338  1.232  7.84    0.040           0.077        0.097        0.088     0.579
+100   0.0857     1.217  1.120  9.74    0.105           0.198        0.162        0.218     0.614
+150   0.0800     1.189  1.094  6.32    0.155           0.292        0.277        0.448     0.743
+200   0.0717     1.152  1.059  6.33    0.207           0.286        0.415        0.472     0.796
+250   0.0659     1.151  1.059  7.43    0.223           0.327        0.396        0.366     0.752
+300   0.0614     1.118  1.028  7.10    0.225           0.310        0.540        0.361     0.455
+```
+
+Overlay trajectory:
+
+```text
+step 100:
+  active=11, inactive=21
+  min same-role active pixel distance:
+    role1 6.21 px, role2 8.08 px, role3 3.03 px
+
+step 200:
+  active=8, inactive=24
+  min same-role active pixel distance:
+    role1 42.99 px, role2 49.89 px, role3 17.85 px
+
+step 300:
+  active=7, inactive=25
+  min same-role active pixel distance:
+    role1 73.25 px, role2 82.06 px, role3 108.34 px
+```
+
+Interpretation:
+
+```text
+The early step100 close same-role active markers were not a terminal failure.
+By step200 and especially step300, the active/dustbin router pruned redundant
+active markers and the remaining same-role active owners are physically well
+separated in the overlay.
+
+The action-default-equivalent loss improves monotonically enough for this short
+stress test:
+  0.1252 -> 0.0614.
+
+The active support/core overlap remains inside the acceptance band:
+  active_support max ~= 0.225
+  active_core max ~= 0.310
+
+The remaining caution is recycle. It peaks near 0.80 at step200 and falls to
+0.455 by step300. This is acceptable for the short stress gate, but it means a
+longer run should still track recycle and address update rate as first-class
+stability metrics.
+```
+
+Updated two-machine conclusion:
+
+```text
+A7 a0.25 limited cotrain:
+  PASS for short-run active-owner health and action decrease.
+
+A5 a0.50 action-pressure stress:
+  PASS for short-run active-owner health, overlay separation, and action decrease.
+  WATCH recycle in longer runs.
+
+The evidence now supports moving from short diagnostics to a longer staged
+cotrain recipe. The conservative maintained recipe should still start at
+action=0.25 or ramp from 0.25 to 0.50, because recycle peak remains the only
+unresolved stability risk.
+```

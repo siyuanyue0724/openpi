@@ -5122,6 +5122,28 @@ Conclusion:
   same-role active markers. Continue to step200/300 before accepting immediate
   a0.50 action pressure.
 ```
+
+2026-05-15 A5 stress step300 update:
+
+```text
+A5 a0.50 stress reached step300:
+  action_default_equiv: 0.1252 -> 0.0614
+  active_support max: 0.040 -> 0.225
+  active_core max: 0.077 -> 0.310
+  active_anchor_count: 7.84 -> 7.10
+  posterior_recycle_rate: peak ~=0.796, step300 ~=0.455
+
+Overlay:
+  step100 had close same-role active markers;
+  step200/300 pruned them.
+  step300 min same-role active pixel distance:
+    role1 ~=73 px, role2 ~=82 px, role3 ~=108 px.
+
+Conclusion:
+  A5 a0.50 stress passes the short active-owner gate.
+  The remaining caution is recycle, so longer runs should keep recycle and
+  address-update metrics as first-class acceptance signals.
+```
 ```
 
 Detailed numbers and tail commands are tracked in
