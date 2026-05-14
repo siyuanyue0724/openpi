@@ -12123,6 +12123,13 @@ step 100:
   aqr_active_same_role_object_core_overlap_max = 0.205
   aqr_effective_anchor_count = 8.12
   posterior_recycle_rate = 0.741
+
+step 150:
+  aqr_active_anchor_count = 8.55
+  aqr_active_same_role_support_overlap_max = 0.526
+  aqr_active_same_role_object_core_overlap_max = 0.270
+  aqr_effective_anchor_count = 8.23
+  posterior_recycle_rate = 0.531
 ```
 
 Interpretation:
@@ -12137,11 +12144,14 @@ Positive:
     aqr_temporal_view_mass_1 ~= 0.37 at step 100.
 
 Watch:
-  posterior_recycle_rate rose from 0.49 to 0.74 by step 100.
-  This is not yet a failure, but it means the router must be checked again at
-  steps 150/200/300. If recycle stays above 0.70 while active overlaps remain
-  low, the remaining issue is posterior identity stability rather than active
-  support collapse.
+  Step 150 is mixed. Recycle improved from 0.74 to 0.53, which argues against
+  the old "posterior recycle saturation" failure. However active same-role
+  support overlap rebounded to 0.526, slightly above the planned early gate.
+  Active object-core overlap stayed acceptable at 0.270. The remaining question
+  is therefore narrower: the dustbin router removes the worst duplicate object
+  cores, but same-role support distributions can still become too similar.
+  Step 200 decides whether this is transient batch noise or a persistent
+  support-shape conflict.
 ```
 
 Overlay check at A5 step 100:

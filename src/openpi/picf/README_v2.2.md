@@ -5017,6 +5017,12 @@ overlap below 0.21. This is an early positive signal, not final acceptance.
 The remaining watch item is posterior_recycle_rate, which rose to about 0.74
 at step 100 and must be checked at later metrics points.
 
+At A5 step 150, recycle improved to about 0.53 but active same-role support
+overlap rebounded to about 0.53 while active object-core overlap remained about
+0.27. This narrows the remaining concern: the new router is not repeating the
+old hard object-core collapse, but same-role support shapes can still become
+too similar and need later-step confirmation.
+
 The first A7 cotrain poll at step 50 also remains structurally healthy:
 active_anchor_count ~= 7.45, active same-role support overlap ~= 0.038,
 active object-core overlap ~= 0.073, and posterior_recycle_rate ~= 0.56.
