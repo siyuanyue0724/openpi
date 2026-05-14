@@ -12408,3 +12408,144 @@ The decisive comparison is A5 anchor-only vs A7 limited cotrain:
   if A7 rebounds like A5, the next repair must be binding-subspace pairwise
   demotion, not stronger scalar diversity loss.
 ```
+
+2026-05-14 A5 final dustbin-router audit
+----------------------------------------
+
+Final A5 state:
+
+```text
+Run:
+  /mnt/checkpoints/picf_core/picf_core/
+  picf_a5_dustbin_router_anchor_u2b1_a0_300_1948bfc_dustbin_a5
+
+Mode:
+  anchor_only, action weight 0, unroll=2, burnin=1
+
+Result:
+  completed 300 / 300 steps
+```
+
+Final metric trajectory:
+
+```text
+step  total  align  anchor_pv  pv_weak  denoise  routing  cycle  slot_jepa
+50    1.357  1.282  2.999      6.342    1.913    0.724    0.366  1.584
+100   1.640  1.565  4.628      6.039    2.472    0.784    0.378  2.146
+150   1.658  1.583  4.732      5.394    1.968    0.864    0.447  4.513
+200   1.567  1.492  4.281      4.982    1.982    0.852    0.463  5.366
+250   1.399  1.324  3.586      4.196    2.188    0.785    0.438  2.653
+300   1.323  1.248  3.371      3.915    2.317    0.754    0.408  3.011
+```
+
+Final structure trajectory:
+
+```text
+step  active  effective  active_support  active_core  raw_support  raw_core  recycle
+50    8.18    8.00       0.037           0.040        0.096        0.047     0.487
+100   8.36    8.12       0.077           0.205        0.247        0.221     0.741
+150   8.55    8.23       0.526           0.270        0.884        0.709     0.531
+200   7.81    7.50       0.462           0.136        0.979        0.868     0.671
+250   6.70    6.37       0.265           0.268        0.743        0.741     0.277
+300   5.91    5.64       0.195           0.369        0.467        0.629     0.180
+```
+
+Step-300 overlay inspection:
+
+```text
+prompt:
+  grasp the red block and turn it left
+
+visible graph anchors:
+  32 total
+  5 active
+  27 inactive/dustbin
+
+active by role:
+  role 0: 1
+  role 1: 2
+  role 2: 1
+  role 3: 1
+
+minimum active pixel distance:
+  12.39 px, across different roles
+
+minimum same-role active pixel distance:
+  role 1: 14.60 px
+```
+
+Interpretation:
+
+```text
+A5 is not a physical all-anchor collapse at the final step. The final overlay
+shows a small active object-owner set plus many inactive/dustbin carriers. The
+raw same-role overlap is still nonzero because inactive and weak candidates
+remain in the fixed query bank, but the active set is much cleaner.
+
+The step-150/200 rebound was real, but it was not terminal. By step 300 the
+router pruned from about 8.5 active owners to about 5.9 and reduced active
+same-role support overlap from 0.53/0.46 to 0.195. Recycle also fell from
+0.67 at step 200 to 0.18 at step 300.
+```
+
+Updated judgment:
+
+```text
+Passed by anchor-only structure gate:
+  active same-role support overlap below 0.35-0.50
+  active object-core overlap below 0.45
+  active owner count is evidence-dependent rather than fixed
+  final overlay does not show same-role physical co-location collapse
+  recycle is not saturated
+
+Not proven by A5:
+  task utility of the selected active owners
+  long-run cotrain stability
+  ordinal/fine-instance binding
+  tracklet/proposal evidence, which remains inactive in current CALVIN dataflow
+```
+
+This changes the A5 conclusion from "not enough / maybe failing" to:
+
+```text
+A5 supports the dustbin-router design as an anchor-only structural repair.
+It does not, by itself, prove the full policy-training solution.
+```
+
+The 2025-2026 object-centric literature supports this interpretation rather
+than a fixed-slot interpretation:
+
+```text
+MetaSlot:
+  variable effective slot count and duplicate removal are expected, not a bug.
+
+DIAS:
+  redundant slots can compete with useful slots; re-initialization/dustbin-like
+  handling is a principled response to redundant aggregation.
+
+IsSameObject / object binding:
+  final acceptance still needs pairwise object-file evidence. A5 proves the
+  active/dustbin selection mechanism is useful, but not that the binding
+  subspace is fully learned.
+```
+
+Current A7 comparison:
+
+```text
+A7 dustbin cotrain, step 50:
+  loss_action_default_equiv: 0.1261
+  active_support: 0.0379
+  active_core: 0.0727
+  active_anchor_count: 7.45
+  recycle: 0.562
+
+A7 dustbin cotrain, step 100:
+  loss_action_default_equiv: 0.1004
+  active_support: 0.0575
+  active_core: 0.0988
+  active_anchor_count: 8.68
+  recycle: 0.452
+```
+
+This is early positive evidence that limited action cotrain can coexist with
+the dustbin-router repair, but A7 still needs later-step confirmation.

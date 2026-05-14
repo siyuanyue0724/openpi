@@ -5028,6 +5028,40 @@ active_anchor_count ~= 7.45, active same-role support overlap ~= 0.038,
 active object-core overlap ~= 0.073, and posterior_recycle_rate ~= 0.56.
 This is early evidence that the dustbin router can coexist with limited action
 cotrain, but it still needs later metrics points before acceptance.
+
+2026-05-14 A5 final dustbin-router audit:
+
+```text
+A5 anchor-only completed 300 / 300 steps.
+
+Final step300:
+  active_anchor_count ~= 5.91
+  effective_anchor_count ~= 5.64
+  inactive_anchor_fraction ~= 0.754
+  active same-role support overlap max ~= 0.195
+  active same-role object-core overlap max ~= 0.369
+  raw same-role support overlap max ~= 0.467
+  raw same-role object-core overlap max ~= 0.629
+  posterior_recycle_rate ~= 0.180
+```
+
+The step150/200 support-overlap rebound was real but not terminal. By step300
+the evidence-relative dustbin router pruned the active owner set and recovered
+low active same-role overlap. The step300 overlay has 32 visible graph
+candidates, but only 5 active graph anchors and 27 inactive/dustbin carriers;
+the active same-role pixel separation is not an all-anchor physical collapse.
+
+This updates the A5 status:
+
+```text
+PASS as anchor-only structural evidence for active/dustbin routing.
+NOT sufficient as policy-training or behavior acceptance.
+```
+
+A7 cotrain has also reached step100 with active overlap still low
+(`active_support ~= 0.058`, `active_core ~= 0.099`) and action default-equivalent
+loss improving from `0.126` to `0.100`; continue A7 to later checkpoints before
+declaring cotrain stable.
 ```
 
 Detailed numbers and tail commands are tracked in
