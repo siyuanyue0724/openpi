@@ -11377,3 +11377,73 @@ Interpretation:
    overlays. Acceptance requires the active set and posterior physical spread
    to survive beyond the early warm state.
 ```
+
+Follow-up status:
+
+```text
+A5 latest anchor-only row at step100:
+  loss_action_default_equiv        = 0.1438
+  raw same-role support overlap    = 0.4865
+  active same-role support overlap = 0.3340
+  effective anchor count           = 19.45
+  active anchor count              = 19.92
+  posterior recycle rate           = 0.5828
+  posterior address update mean    = 0.0163
+
+A5 latest anchor-only row at step150:
+  loss_action_default_equiv        = 0.1416
+  raw same-role support overlap    = 0.8298
+  active same-role support overlap = 0.6111
+  effective anchor count           = 18.07
+  active anchor count              = 19.25
+  posterior recycle rate           = 0.7589
+  posterior address update mean    = 0.0096
+```
+
+Interpretation:
+
+```text
+1. The latest repair still materially delays the old collapse: by step150 the
+   active/effective anchor counts remain high, unlike earlier branches that
+   fell toward 4-8 active anchors.
+2. The trend is not yet accepted. Raw overlap has risen to 0.8298, active
+   overlap is just over the provisional 0.60 gate, and recycle is rising while
+   address update is weakening.
+3. This keeps the old warning alive: anchor-only pressure may still drift into
+   same-role support reuse. Continue to step200/300 before deciding whether the
+   maintained repair is sufficient without a learned object-core continuation
+   prior.
+```
+
+A7 fast cotrain control is also live on commit `92f064c`. It is not the latest
+posterior-birth commit, but it is still useful as a production-like cotrain
+pressure control:
+
+```text
+A7 fast cotrain row at step50:
+  loss_action_default_equiv        = 0.1195
+  raw same-role support overlap    = 0.1991
+  active same-role support overlap = 0.1872
+  effective anchor count           = 19.34
+  active anchor count              = 19.82
+  posterior recycle rate           = 0.5365
+
+A7 fast cotrain row at step100:
+  loss_action_default_equiv        = 0.1021
+  raw same-role support overlap    = 0.3208
+  active same-role support overlap = 0.2612
+  effective anchor count           = 19.46
+  active anchor count              = 19.98
+  posterior recycle rate           = 0.4309
+  posterior address update mean    = 0.0227
+```
+
+Interpretation:
+
+```text
+A7 is healthier than A5 at the same early window, but it is on the older fast
+support-competition commit. It supports the hypothesis that production-like
+cotrain pressure can help object files remain useful, but it cannot validate the
+latest posterior-birth candidate. The decisive next evidence remains A5
+step200/300 and then the A5 cotrain row after the anchor-only row completes.
+```

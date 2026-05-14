@@ -4678,3 +4678,15 @@ next gates are step100/200/300 plus anchor overlays. The live log is:
 ```bash
 tail -f /mnt/picf_run_logs/picf_a5_birth_anchor_u2b1_a025_450_4da418e_a5_latest.log
 ```
+
+2026-05-14 live status update: A5 latest has reached step150. The repair still
+delays collapse, but the trend is not yet accepted: step100 had raw overlap
+`0.4865`, active overlap `0.3340`, and effective anchors `19.45`; step150 rose
+to raw overlap `0.8298`, active overlap `0.6111`, effective anchors `18.07`,
+recycle `0.7589`, and address update `0.0096`. This is materially better than
+the old 0.99/K≈4-8 collapse, but it is a warning row, not success. A7 fast
+cotrain on the older `92f064c` support-competition commit is healthier at
+step100 (`raw=0.3208`, `active=0.2612`, `K=19.46`,
+`loss_action_default_equiv=0.1021`), which supports testing production-like
+cotrain after A5 anchor-only. The decisive gates remain A5 step200/300 and the
+following A5 cotrain row.
