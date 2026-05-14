@@ -5062,6 +5062,42 @@ A7 cotrain has also reached step100 with active overlap still low
 (`active_support ~= 0.058`, `active_core ~= 0.099`) and action default-equivalent
 loss improving from `0.126` to `0.100`; continue A7 to later checkpoints before
 declaring cotrain stable.
+
+2026-05-14 two-machine cotrain stress plan:
+
+```text
+A7 keeps the existing dustbin-router limited cotrain run:
+  profile: a7_dustbin_router
+  action weight: 0.25
+  steps: 240
+  purpose: normal limited-action acceptance.
+
+A5 starts a stronger cotrain stress run:
+  profile: a5_dustbin_cotrain_stress
+  action weight: 0.50
+  steps: 360
+  purpose: test whether action pressure, not the router itself, is the next
+  binding destabilizer.
+```
+
+The pass/fail boundary is active owner health, not raw fixed-query overlap:
+
+```text
+active same-role support overlap max:
+  preferred < 0.35, acceptable < 0.50, fail >= 0.70 sustained
+
+active same-role object-core overlap max:
+  preferred < 0.30, acceptable < 0.45, fail >= 0.60 sustained
+
+posterior_recycle_rate:
+  preferred < 0.30 after warmup, fail >= 0.70 sustained
+```
+
+This is the direct test of whether A5's anchor-only structural repair survives
+cotrain. If A7 passes but A5 stress fails, the next maintained recipe should
+use staged action ramping rather than a stronger fixed action weight from step
+zero. Full rationale is recorded in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
 ```
 
 Detailed numbers and tail commands are tracked in

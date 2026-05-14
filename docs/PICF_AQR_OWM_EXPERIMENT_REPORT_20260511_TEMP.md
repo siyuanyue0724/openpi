@@ -12549,3 +12549,147 @@ A7 dustbin cotrain, step 100:
 
 This is early positive evidence that limited action cotrain can coexist with
 the dustbin-router repair, but A7 still needs later-step confirmation.
+
+2026-05-14 two-machine dustbin-router cotrain plan
+--------------------------------------------------
+
+Purpose:
+
+```text
+Use the two available machines for a short but causal diagnostic matrix.
+The question is not "can loss decrease once"; the question is whether the
+active/dustbin object-owner mechanism remains stable under action gradients.
+```
+
+Current evidence before this matrix:
+
+```text
+A5 anchor-only:
+  final step300 passes the structural active-slot gate.
+  It proves the dustbin router can select a smaller active owner set.
+  It does not prove task usefulness or cotrain stability.
+
+A7 limited cotrain:
+  step50 and step100 are still structurally healthy.
+  It is the first direct evidence that limited action feedback can coexist
+  with the router.
+```
+
+Mathematical framing:
+
+```math
+L = L_{action} + L_{align} + L_{route} + L_{cycle} + L_{diversity}.
+```
+
+The old failure mode happened when the action-related gradient altered the
+prefix/belief representation faster than AQR could maintain distinct object
+owners. The current design protects the object binding subspace in three ways:
+
+```text
+1. action-prefix stop-gradient limits direct action backprop into PICF prefix
+   tokens while still measuring action compatibility;
+2. evidence-relative active/dustbin routing prevents weak fixed queries from
+   being forced into object ownership;
+3. ownership and same-role competition provide a low-amplitude assignment prior
+   before diversity losses see already-collapsed rows.
+```
+
+The decisive metric is not raw query-bank overlap. It is active owner overlap:
+
+```math
+O^{active}_{same-role}
+=
+\max_{j \ne k,\ role(j)=role(k),\ a_j=a_k=1}
+\sum_i \min(p_{j,i}, p_{k,i}).
+```
+
+Acceptance gates:
+
+```text
+active same-role support overlap max:
+  preferred < 0.35
+  acceptable < 0.50
+  fail >= 0.70 sustained
+
+active same-role object-core overlap max:
+  preferred < 0.30
+  acceptable < 0.45
+  fail >= 0.60 sustained
+
+posterior_recycle_rate:
+  preferred < 0.30 after warmup
+  acceptable < 0.50 if falling
+  fail >= 0.70 sustained
+
+action default-equivalent loss:
+  should decrease or remain comparable to historical warmup;
+  structural pass is invalid if action loss is achieved only by collapsing
+  active owners.
+```
+
+Paper alignment:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  Supports reading binding as a pairwise IsSameObject subspace. This is why
+  the experiment watches support overlap and object-core overlap, not just
+  marker positions or scalar saliency.
+
+MetaSlot:
+  Supports variable effective slot count and duplicate removal. The active
+  owner count is allowed to fall to the actual number of useful object files.
+
+DIAS:
+  Supports re-initializing / demoting redundant slots rather than forcing all
+  slots to explain objects. Our dustbin router is the PICF belief-filter analogue
+  of duplicate-slot removal, not a hand-written object detector.
+```
+
+Two-machine plan:
+
+```text
+A7 existing run:
+  profile: a7_dustbin_router
+  role: limited-action cotrain acceptance row
+  action weight: 0.25
+  steps: 240
+  unroll/burnin: 2 / 1
+
+A5 new run:
+  profile: a5_dustbin_cotrain_stress
+  role: action-pressure stress row
+  action weight: 0.50
+  steps: 360
+  unroll/burnin: 2 / 1
+```
+
+Interpretation matrix:
+
+```text
+A7 pass, A5 pass:
+  dustbin router is robust to at least moderate action pressure. Move to a
+  longer cotrain run with action ramp/checkpoint retention.
+
+A7 pass, A5 fail:
+  action pressure threshold exists. Use staged ramp from 0.25 to 0.50 rather
+  than immediate stronger action.
+
+A7 fail:
+  action cotrain still conflicts with binding. The next repair must target
+  pairwise binding-subspace demotion or action-to-PICF gradient routing, not
+  another scalar overlap penalty.
+```
+
+Tail commands:
+
+```bash
+# A7
+ssh -p 28060 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_dustbin_router_cotrain_u2b1_a025_240_1948bfc_dustbin_a7/metrics.jsonl
+tail -f /mnt/picf_run_logs/picf_a7_dustbin_router_cotrain_u2b1_a025_240_1948bfc_dustbin_a7.log
+
+# A5
+ssh -p 29776 root@36.139.225.68
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_dustbin_router_cotrain_u2b1_a05_360_3ea1559_a5stress/metrics.jsonl
+tail -f /mnt/picf_run_logs/picf_a5_dustbin_router_cotrain_u2b1_a05_360_3ea1559_a5stress.log
+```
