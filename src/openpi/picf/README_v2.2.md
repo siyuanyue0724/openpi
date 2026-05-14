@@ -4635,3 +4635,29 @@ support competition. The purpose is not to chase a lower action loss in
 isolation; it is to test whether current measurement routing keeps
 `effective_anchor_count` healthy while action decreases under production-like
 cotrain pressure.
+
+2026-05-14 A5 stale-run gate: the live A5 cotrain run is still on commit
+`c119321`, so its healthy step50/100 rows cannot validate the maintained
+posterior object-file birth / occupancy / seed-coverage repair. The run is
+useful only as a support-competition cotrain early signal:
+`loss_action_default_equiv` fell to `0.0869`, raw same-role overlap stayed at
+`0.2062`, and effective anchor count stayed at `19.46` at step100. The current
+deployment plan is to stop this stale A5 row, sync A5 to the latest branch, and
+run
+[`scripts/run_picf_posterior_birth_matrix.sh`](/home/siyuanyue/Documents/openpi/scripts/run_picf_posterior_birth_matrix.sh)
+profile `a5`.
+
+The maintained mathematical contract being tested is not a hard-coded object
+detector. It is a label-free belief-filter birth and measurement prior:
+nonzero posterior object-file identity seed, first-step observation bootstrap,
+slot-local recycle residual, same-role posterior occupancy prior, observation
+seed-point coverage, and same-role support competition. This matches the
+object-agent tokenization / DINO-style query initialization lesson: seed
+distinct object hypotheses from encoder evidence, then let learned attention,
+support signatures, and posterior correction own the state. Raw PaliGemma
+attention heatmaps are explicitly not used as object truth; if the maintained
+candidate fails, the next escalation is an annealable learned object-core
+continuation prior with robust-normalized soft proposal evidence, not a
+category-specific hand rule. The detailed plan and gates are in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md),
+section `2026-05-14 A5 Stale-Run Gate And Object-File Birth Plan`.

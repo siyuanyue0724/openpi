@@ -11181,3 +11181,124 @@ that historically gave the best action-vs-anchor discriminator. Step100/200/300
 are sufficient gates for the specific failure because every rejected branch
 rebounded before or around that window.
 ```
+
+## 2026-05-14 A5 Stale-Run Gate And Object-File Birth Plan
+
+Remote A5 was rechecked after the support-competition cotrain launch. The live
+worktree is still at commit `c119321`:
+
+```text
+host:
+  ZWWQO6 / port 29776
+
+tmux:
+  picf_a5_cotrain_iter_c119321
+
+live row:
+  picf_a5_birth_cotrain_u2b1_a025_450_c119321_support_comp_cotrain
+```
+
+The first cotrain row has reached step100 and is structurally promising:
+
+```text
+step50:
+  loss_action_default_equiv        = 0.1024
+  raw same-role support overlap    = 0.1663
+  active same-role support overlap = 0.1609
+  effective anchor count           = 19.34
+  posterior recycle rate           = 0.4719
+
+step100:
+  loss_action_default_equiv        = 0.0869
+  raw same-role support overlap    = 0.2062
+  active same-role support overlap = 0.1918
+  effective anchor count           = 19.46
+  posterior recycle rate           = 0.5371
+```
+
+This is not accepted as the current architecture result because the run predates
+the maintained posterior object-file birth / occupancy / seed-coverage repair.
+It tests only role-local support competition under cotrain. Earlier experiments
+already showed that support competition can be healthy early and still fail
+after posterior association/correction reuses same-role object files.
+
+The current maintained candidate is therefore the posterior object-file birth
+contract:
+
+```text
+posterior_slot_identity_std              = 0.02
+task_slot_identity_std                   = 0.02
+posterior_bootstrap_from_observation     = true
+posterior_slotwise_recycle_residual      = true
+posterior_occupancy_prior_enabled        = true
+posterior_occupancy_prior_weight         = 1.0
+posterior_occupancy_prior_sigma_m        = 0.04
+posterior_occupancy_prior_clip           = 4.0
+observation_anchor_seed_point_mix        = 0.35
+aqr_same_role_support_competition_enabled= true
+```
+
+Mathematical reason:
+
+```text
+The rejected branches show two distinct failures:
+
+1. Same-role support rows can duplicate the same evidence distribution.
+2. Even when graph candidates spread, symmetric posterior object files can be
+   corrected toward the same role-level measurement centroid.
+
+The repair must therefore live in the belief filter, not in an action-side
+loss. Object files need a nonzero birth identity, an initial geometry bootstrap,
+a slot-local recycle residual, a same-role occupancy measurement prior, and a
+seed-point component in observation-anchor measurement construction.
+```
+
+This is not a hand-written object detector. It is a weak, label-free measurement
+model prior. It follows the same principle as object-agent tokenization and
+DETR/DINO-style query initialization: use encoder evidence to seed distinct
+object hypotheses, then let learned attention and posterior correction own the
+final state. It also follows the IsSameObject interpretation of pretrained
+ViTs: binding should be extracted through representation/pairwise compatibility,
+not by treating raw PaliGemma attention heatmaps as object masks.
+
+Deployment decision:
+
+```text
+Stop the stale A5 c119321 run.
+Sync A5 to the latest local branch.
+Run scripts/run_picf_posterior_birth_matrix.sh a5.
+
+Primary two-hour acceptance rows:
+  A5 anchor-only row:
+    should prove object-file birth/occupancy/seed coverage prevents exact
+    posterior co-location under isolated anchor pressure.
+
+  A5 cotrain row:
+    should prove production-like action/semantic pressure does not immediately
+    destroy the same object-file separation.
+
+Required gates at step100/200/300:
+  posterior role-1 overlay points are not exact same-pixel co-located.
+  raw same-role support overlap does not rebound to 0.95+.
+  active overlap stays below about 0.60.
+  effective anchor count does not collapse toward 4-8.
+  recycle does not pin to 0 or 1.
+  action default-equivalent loss is interpreted only after the structural gates.
+```
+
+Fallback if the latest maintained candidate fails:
+
+```text
+Move to a learned object-core continuation prior, not a hard-coded detector.
+The prior may use robust-normalized PG, motion, point-geometry, contact-halo,
+and posterior-history evidence as soft proposal features, but never as labels
+or direct action truth. Its weight must be annealable:
+
+  early:  strong scaffold to avoid bad assignment basins
+  middle: weak stabilizer while action pressure ramps
+  late:   fade to near-zero if binding health remains stable
+
+Acceptance of such a scaffold requires an ablation with scaffold weight zero
+after warmup. If binding collapses when the scaffold fades, learned binding has
+not yet absorbed the object structure.
+```
