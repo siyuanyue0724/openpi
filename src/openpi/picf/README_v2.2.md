@@ -5098,6 +5098,30 @@ cotrain. If A7 passes but A5 stress fails, the next maintained recipe should
 use staged action ramping rather than a stronger fixed action weight from step
 zero. Full rationale is recorded in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
+Runtime update:
+
+```text
+A7 dustbin-router limited cotrain completed 240 / 240:
+  action_default_equiv: 0.1261 -> 0.0666
+  active_support max: 0.0379 -> 0.1962
+  active_core max: 0.0727 -> 0.2367
+  posterior_recycle_rate: peaked ~=0.708, finished ~=0.439
+
+Conclusion:
+  short-run a0.25 cotrain passes the active-owner gate.
+
+A5 dustbin-router a0.50 stress reached step100 and is still running:
+  action_default_equiv: 0.1252 -> 0.0857
+  active_support max: 0.0402 -> 0.1054
+  active_core max: 0.0767 -> 0.1980
+  posterior_recycle_rate: 0.579 -> 0.614
+
+Conclusion:
+  early scalar metrics are healthy, but step100 overlay still has close
+  same-role active markers. Continue to step200/300 before accepting immediate
+  a0.50 action pressure.
+```
 ```
 
 Detailed numbers and tail commands are tracked in

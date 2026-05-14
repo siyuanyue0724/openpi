@@ -12693,3 +12693,130 @@ ssh -p 29776 root@36.139.225.68
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a5_dustbin_router_cotrain_u2b1_a05_360_3ea1559_a5stress/metrics.jsonl
 tail -f /mnt/picf_run_logs/picf_a5_dustbin_router_cotrain_u2b1_a05_360_3ea1559_a5stress.log
 ```
+
+2026-05-14 two-machine runtime gate
+-----------------------------------
+
+Launch status:
+
+```text
+Local commit:
+  b85f425 Plan dustbin cotrain stress matrix
+
+A7:
+  existing run kept:
+  picf_a7_dustbin_router_cotrain_u2b1_a025_240_1948bfc_dustbin_a7
+
+A5:
+  synced to b85f425 and launched in tmux:
+  picf_a5_dustbin_router_cotrain_u2b1_a05_360_b85f425_a5stress
+```
+
+Local validation before A5 launch:
+
+```text
+bash -n scripts/run_picf_posterior_birth_matrix.sh:
+  PASS
+
+python scripts/verify_picf_owm_contract.py:
+  33/33 PASS
+```
+
+A7 completed 240 / 240:
+
+```text
+step  action_eq  active_support  active_core  raw_support  active  recycle
+50    0.1261     0.0379          0.0727       0.1104       7.45    0.562
+100   0.1004     0.0575          0.0988       0.1247       8.68    0.452
+150   0.0866     0.1583          0.2260       0.4387       6.42    0.701
+200   0.0768     0.1326          0.2550       0.3951       7.97    0.708
+240   0.0666     0.1962          0.2367       0.7137       9.94    0.439
+```
+
+A7 overlay check:
+
+```text
+step 200 prompt:
+  lift the red block in the drawer
+
+active graph anchors:
+  10 active, 22 inactive
+
+active by role:
+  role 0: 1
+  role 1: 3
+  role 2: 3
+  role 3: 3
+
+minimum same-role active pixel distance:
+  role 1: 48.05 px
+  role 2: 31.02 px
+  role 3: 81.93 px
+```
+
+A7 judgment:
+
+```text
+Pass for the short limited-action cotrain gate.
+
+The old active-collapse failure does not reappear under action weight 0.25.
+Action default-equivalent loss improves from 0.1261 to 0.0666 while active
+same-role support/core overlap stays below the acceptance thresholds.
+
+The only remaining yellow signal is recycle: it peaks above 0.70 around
+steps 150/200, then falls to 0.439 by step 240. This is not a failure but must
+be watched in any longer run.
+```
+
+A5 stress run reached step 100 and is still running:
+
+```text
+step  action_eq  active_support  active_core  raw_support  active  recycle
+50    0.1252     0.0402          0.0767       0.0969       7.84    0.579
+100   0.0857     0.1054          0.1980       0.1618       9.74    0.614
+```
+
+A5 step-100 overlay check:
+
+```text
+prompt:
+  turn on the yellow lamp
+
+active graph anchors:
+  11 active, 21 inactive
+
+minimum same-role active pixel distance:
+  role 1: 6.21 px
+  role 2: 8.08 px
+  role 3: 3.03 px
+```
+
+A5 stress interpretation:
+
+```text
+The scalar health metrics remain good at step100, but the overlay shows
+same-role active markers that are still physically close. This is not yet a
+failure, because support/core overlap is low and A5 anchor-only showed a
+similar early redundancy that was later pruned by step300. The decisive A5
+stress gates are therefore step200 and step300:
+
+  if active overlap stays low and close same-role markers disappear, action
+  weight 0.50 is acceptable;
+
+  if active overlap rises or close same-role markers remain active, immediate
+  a0.50 is too aggressive and the maintained recipe should use a staged action
+  ramp after an anchor-healthy warmup.
+```
+
+Updated causal judgment:
+
+```text
+Known now:
+  active/dustbin routing solves the anchor-only structural collapse;
+  limited action cotrain at a0.25 is compatible in the 240-step short run;
+  A5 a0.50 stress has started cleanly and is the current action-pressure test.
+
+Unknown until A5 step200/300:
+  whether stronger action from step zero causes persistent duplicate active
+  markers or recycle instability.
+```
