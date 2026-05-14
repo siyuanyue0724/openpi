@@ -12222,3 +12222,189 @@ ssh -p 28060 root@36.139.225.68
 tail -f /mnt/picf_run_logs/picf_a7_dustbin_router_cotrain_u2b1_a025_240_1948bfc_dustbin_a7.log
 tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_dustbin_router_cotrain_u2b1_a025_240_1948bfc_dustbin_a7/metrics.jsonl
 ```
+
+2026-05-14 A5 deep audit: what the dustbin router did and did not fix
+---------------------------------------------------------------------
+
+Scope:
+
+```text
+Run:
+  picf_a5_dustbin_router_anchor_u2b1_a0_300_1948bfc_dustbin_a5
+
+Mode:
+  anchor_only, action weight 0, unroll=2, burnin=1
+
+Question:
+  Does evidence-relative active/dustbin routing solve the A5 anchor collapse,
+  or only hide it by reducing the number of visible anchors?
+```
+
+Metric trajectory:
+
+```text
+step  active  effective  active_support  active_core  raw_support  raw_core  recycle
+50    8.18    8.00       0.037           0.040        0.096        0.047     0.487
+100   8.36    8.12       0.077           0.205        0.247        0.221     0.741
+150   8.55    8.23       0.526           0.270        0.884        0.709     0.531
+200   7.81    7.50       0.462           0.136        0.979        0.868     0.671
+```
+
+Loss trajectory:
+
+```text
+step  total   align   anchor_pv  pv_weak  denoise  routing  cycle  slot_jepa
+50    1.357   1.282   2.999      6.342    1.913    0.724    0.366  1.584
+100   1.640   1.565   4.628      6.039    2.472    0.784    0.378  2.146
+150   1.658   1.583   4.732      5.394    1.968    0.864    0.447  4.513
+200   1.567   1.492   4.281      4.982    1.982    0.852    0.463  5.366
+```
+
+Overlay inspection:
+
+```text
+step 100:
+  active graph anchors = 11
+  inactive/dustbin anchors = 21
+  min active pixel distance = 0.27 px, but across different roles
+  min same-role active pixel distance = 11.31 px
+
+step 200:
+  active graph anchors = 11
+  inactive/dustbin anchors = 21
+  role-wise min active pixel distance:
+    role 1: 19.66 px
+    role 2: 21.06 px
+    role 3: 46.45 px
+```
+
+Visual interpretation:
+
+```text
+The active anchors are not all physically collapsed into one point.
+At step 200, the object-core overlap is lower than step 150 and same-role
+active markers are separated by roughly 20 px or more for the roles with
+multiple active anchors.
+
+The remaining failure is softer:
+  raw support distributions are still highly similar;
+  the active router removes many duplicate owners;
+  but same-role active support shapes can still overlap around 0.46-0.53.
+```
+
+The distinction matters. A visible marker is only the peak / representative
+state of an anchor. `aqr_active_same_role_support_overlap_max` measures how much
+the full support distributions overlap, so it can rise even when projected
+anchor centers remain separated. This is exactly what A5 shows.
+
+Paper alignment:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  arXiv:2510.24709
+  The relevant claim is that binding is pairwise IsSameObject structure in a
+  low-dimensional subspace, not a scalar token saliency. A5 confirms this:
+  selecting fewer salient anchors is insufficient if their support distributions
+  still encode similar pairwise object membership.
+
+MetaSlot: Break Through the Fixed Number of Slots in Object-Centric Learning
+  arXiv:2505.20772
+  The relevant claim is variable effective object count / duplicate-slot
+  removal. A5 confirms this direction: forcing a fixed active count was wrong,
+  and dustbin routing improves active count and object-core duplication.
+
+Slot Attention with Re-Initialization and Self-Distillation
+  arXiv:2507.23755
+  The relevant claim is that redundant reused slots can compete with useful
+  ones and split / duplicate objects. A5 still shows a softer version of this:
+  duplicate support shapes survive after peak-level duplicate removal.
+
+MUFASA
+  arXiv:2602.07544
+  The relevant claim is that different ViT layers carry different semantic
+  object cues. A5 currently uses the available typed support, but the support
+  overlap rebound suggests that a single projected support family may not carry
+  enough object-discriminative shape information without either stronger
+  pairwise binding signatures or external track/proposal evidence.
+```
+
+Mathematical diagnosis:
+
+```math
+z_j = \sum_i p_{j,i} v_i
+```
+
+The overlay mainly shows `argmax_i p_{j,i}` or a derived geometry center. The
+failure metric is closer to:
+
+```math
+O_{j,k} = \sum_i \min(p_{j,i}, p_{k,i})
+```
+
+or the object-core variant over high-mass support. A5 now improves the geometry
+core:
+
+```text
+active_core <= 0.27 through step 200
+```
+
+but not the full support shape:
+
+```text
+active_support ~= 0.46-0.53 after step 150
+```
+
+Therefore, the current repair solves the hard duplicate-owner problem but not
+the full pairwise binding problem. The next principled step, if A7 later also
+shows this rebound, should not be another scalar diversity coefficient. It
+should make the active routing score explicitly pairwise in the binding
+subspace:
+
+```math
+score_{j,k}^{same}
+=
+\langle W_b s_j,\ W_b s_k \rangle
+```
+
+and demote same-role candidates only when both conditions hold:
+
+```math
+O_{j,k}^{support} > \tau_s
+\quad\text{and}\quad
+score_{j,k}^{same} > \tau_b.
+```
+
+This keeps the design consistent with the IsSameObject literature: do not
+punish broad support overlap blindly if the binding subspace says two anchors
+refer to different object files, and do not keep two anchors merely because
+their geometry peaks are separated if their binding signatures say they are the
+same object.
+
+Current A5 judgment:
+
+```text
+Not a failure of the dustbin-router idea.
+Not enough to declare solved.
+
+Resolved:
+  fixed active count;
+  severe active object-core collapse;
+  misleading interpretation of inactive gray anchors.
+
+Remaining:
+  same-role support-shape similarity after step 150;
+  anchor-only lacks task-conditioned evidence to decide which object files are
+  useful;
+  no tracklet/proposal evidence in this CALVIN dataflow.
+```
+
+Decision:
+
+```text
+Let A5 finish, but do not use A5 alone as acceptance.
+The decisive comparison is A5 anchor-only vs A7 limited cotrain:
+  if A7 keeps support overlap low, task-conditioned cotrain is needed to select
+  useful object owners;
+  if A7 rebounds like A5, the next repair must be binding-subspace pairwise
+  demotion, not stronger scalar diversity loss.
+```
