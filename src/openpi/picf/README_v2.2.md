@@ -1302,6 +1302,101 @@ class _StepDenseMemory:
     tactile_group_tokens: tuple[torch.Tensor, ...]
 ```
 
+2026-05-14 object-core ownership deployment: A5 latest reached step200 with
+raw same-role support overlap `0.9064`, active overlap `0.6260`, effective
+anchor count `17.15`, recycle `0.8201`, and address update `0.0070`. This
+rejects the current anchor-only row as a final solution. The failure is now
+localized more narrowly: posterior co-location is delayed, but same-role
+object files can still reread the same broad support. A7 remains useful as an
+older cotrain control, but it is not the maintained candidate.
+
+The maintained repair is a full object-core measurement prior, not another
+outer loss. The previous ownership prior acted on visual and temporal tokens;
+the new default also adds a label-free point ownership prior before AQR point
+attention:
+
+```text
+aqr_ownership_point_prior_weight = 0.35
+aqr_ownership_point_prior_sigma_m = 0.04
+```
+
+For each role-local object-file row `j`, candidate point tokens are selected by
+the existing role mask (`local` for effector, visible global scene points for
+scene/object). Farthest-point centers are sampled from that candidate set and
+converted into a soft ownership prior:
+
+```math
+O_{j,n}
+=
+Normalize_n\left(
+  (1-\epsilon)
+  \exp\left[-\frac{\|x_n-c_j\|^2}{2\sigma_p^2}\right]
+  +
+  \epsilon / N_r
+\right)
+```
+
+AQR receives the centered log-prior:
+
+```math
+b^{point}_{j,n}
+=
+\lambda_p
+\left(
+  \log(O_{j,n})
+  -
+  \frac{1}{N_r}\sum_m \log(O_{j,m})
+\right)
+```
+
+This is not a category-specific detector and not a hand-labeled object mask. It
+is the point-cloud analogue of DINO/query initialization: seed distinct object
+hypotheses from encoder evidence, then let attention, support signatures, and
+posterior correction learn the object files. It also follows the 2025
+IsSameObject object-binding result: binding should be represented as a
+pairwise low-dimensional relation that guides attention, not as a late action
+penalty (`https://arxiv.org/abs/2510.24709`). Spatial-trace VLA work also
+supports using persistent spatial evidence as a routing scaffold rather than
+hoping action gradients alone discover stable object ownership
+(`https://arxiv.org/abs/2508.09032`).
+
+The active-slot filter is now aligned with the same object-core semantics. A
+slot is considered redundant only when it overlaps in every available
+object-core support space. With available overlaps `R^v, R^p, R^t, R^pg`, the
+filter uses:
+
+```math
+R^{core}_{i,j}
+=
+\exp\left(
+  \frac{1}{|\mathcal M|}
+  \sum_{m\in\mathcal M}
+  \log\left(\max(R^m_{i,j}, \varepsilon)\right)
+\right)
+```
+
+This avoids demoting two object files that share diffuse visual support but
+have distinct point/temporal evidence. Raw visual overlap remains logged for
+diagnosis, but the active-capacity decision now uses the multi-modal
+object-core overlap. New debug keys:
+
+```text
+aqr_same_role_object_core_overlap_max
+aqr_same_role_object_core_overlap_mean
+aqr_active_same_role_object_core_overlap_max
+aqr_active_same_role_object_core_overlap_mean
+```
+
+Acceptance for the next A5 deployment is stricter than “loss goes down”:
+
+```text
+1. active object-core overlap should stay below the visual-only collapse band.
+2. effective anchor count should remain high past step150/200.
+3. posterior recycle must not climb simply because object files share support.
+4. anchor overlays must show role-1 posterior object files no longer collapse
+   to one physical centroid.
+```
+
 This matters because v2.2 needs semantic-conditioned readout over:
 
 - current public multimodal memory
@@ -4690,3 +4785,13 @@ step100 (`raw=0.3208`, `active=0.2612`, `K=19.46`,
 `loss_action_default_equiv=0.1021`), which supports testing production-like
 cotrain after A5 anchor-only. The decisive gates remain A5 step200/300 and the
 following A5 cotrain row.
+
+2026-05-14 step200 update: A5 latest reached raw overlap `0.9064`, active
+overlap `0.6260`, effective anchors `17.15`, recycle `0.8201`, and address
+update `0.0070`. This rejects the anchor-only row as a final solution and
+triggers the object-core ownership repair described earlier in this README and
+in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md):
+point ownership prior before AQR point attention plus multi-modal object-core
+overlap for active-slot filtering. The next maintained A5 run must be launched
+from the new commit; A7 remains only an older support-competition control.

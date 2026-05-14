@@ -187,6 +187,8 @@ class PicfCoreConfig:
     # create object ownership by itself.
     aqr_ownership_prior_enabled: bool = True
     aqr_ownership_prior_weight: float = 0.35
+    aqr_ownership_point_prior_weight: float = 0.35
+    aqr_ownership_point_prior_sigma_m: float = 0.04
     aqr_ownership_temporal_prior_weight: float = 0.20
     aqr_ownership_prior_uniform_mix: float = 0.05
     aqr_same_role_support_competition_enabled: bool = True

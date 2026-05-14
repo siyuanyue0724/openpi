@@ -60,6 +60,15 @@ COMMON=(
   --lambda-support-pred 0.0
   --lambda-binding-consistency 0.0
   --lambda-aqr-denoising 0.0
+  --aqr-ownership-prior-enabled
+  --aqr-ownership-prior-weight 0.35
+  --aqr-ownership-point-prior-weight 0.35
+  --aqr-ownership-point-prior-sigma-m 0.04
+  --aqr-ownership-temporal-prior-weight 0.20
+  --aqr-ownership-prior-uniform-mix 0.05
+  --aqr-same-role-support-competition-enabled
+  --aqr-same-role-support-competition-weight 0.35
+  --aqr-same-role-support-competition-iters 2
   --posterior-slot-identity-std 0.02
   --task-slot-identity-std 0.02
   --posterior-bootstrap-from-observation

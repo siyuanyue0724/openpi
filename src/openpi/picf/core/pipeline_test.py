@@ -15,6 +15,7 @@ from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
 from openpi.picf.core.contracts import PicfAnchorPriorGraphState
 from openpi.picf.core.contracts import PicfTemporalVisualSupportState
+from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.contracts import PicfVLGroundingState
 from openpi.picf.core import pipeline as pipeline_module
 from openpi.picf.core.pipeline import PicfFullCore
@@ -332,6 +333,54 @@ def test_aqr_ownership_prior_breaks_temporal_multiview_symmetry(tmp_path: Path) 
     assert torch.unique(torch.argmax(bias, dim=-1)).numel() > 1
 
 
+def test_aqr_point_ownership_prior_breaks_scene_point_symmetry(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_ownership_point_prior_weight=1.0,
+        aqr_ownership_point_prior_sigma_m=0.05,
+        aqr_ownership_prior_uniform_mix=0.05,
+    )
+    point_tokens = torch.zeros((8, core.config.hidden_dim), dtype=torch.float32)
+    point_positions_world = torch.tensor(
+            [
+                [-0.20, -0.20, 0.02],
+                [0.20, -0.20, 0.02],
+                [-0.20, 0.20, 0.02],
+                [0.20, 0.20, 0.02],
+                [-0.10, 0.00, 0.02],
+                [0.10, 0.00, 0.02],
+                [0.00, -0.10, 0.02],
+                [0.00, 0.10, 0.02],
+            ],
+            dtype=torch.float32,
+    )
+    token_field = PicfTokenFieldState(
+        point_tokens=point_tokens,
+        visual_tokens=torch.zeros((0, core.config.hidden_dim), dtype=torch.float32),
+        tactile_tokens=torch.zeros((0, core.config.hidden_dim), dtype=torch.float32),
+        context_tokens=torch.zeros((0, core.config.hidden_dim), dtype=torch.float32),
+        fused_tokens=point_tokens,
+        point_positions=point_positions_world,
+        modality_ids=torch.zeros((8,), dtype=torch.long),
+        point_align_embeddings=torch.zeros((8, core.config.hidden_dim), dtype=torch.float32),
+        visual_align_embeddings=torch.zeros((0, core.config.hidden_dim), dtype=torch.float32),
+        tactile_align_embeddings=torch.zeros((0, core.config.hidden_dim), dtype=torch.float32),
+        tactile_positions_world=torch.zeros((0, 3), dtype=torch.float32),
+        tactile_contact_gate=torch.zeros((0,), dtype=torch.float32),
+        point_pool_ids=torch.ones((8,), dtype=torch.long),
+        point_positions_world=point_positions_world,
+    )
+    roles = torch.ones((4,), dtype=torch.long)
+
+    bias = core._aqr_point_ownership_bias(token_field, roles)
+
+    assert bias is not None
+    assert bias.shape == (4, 8)
+    assert not torch.allclose(bias[0], bias[1])
+    assert torch.unique(torch.argmax(bias, dim=-1)).numel() > 1
+
+
 def test_aqr_same_role_support_competition_amplifies_relative_evidence(tmp_path: Path) -> None:
     core, _ = _make_core(
         tmp_path,
@@ -395,6 +444,41 @@ def test_aqr_active_slot_filter_deactivates_duplicate_same_role_support(tmp_path
     assert bool(active[0].item())
     assert not bool(active[1].item())
     assert bool(active[2].item())
+
+
+def test_aqr_active_slot_filter_keeps_visual_duplicates_when_point_core_differs(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_active_slot_filter_enabled=True,
+        aqr_active_slot_min_per_role=1,
+        aqr_active_slot_max_per_role=4,
+        aqr_active_slot_overlap_threshold=0.75,
+    )
+    visual_priors = torch.tensor(
+        [
+            [0.95, 0.05, 0.00, 0.00],
+            [0.94, 0.06, 0.00, 0.00],
+        ],
+        dtype=torch.float32,
+    )
+    point_priors = torch.tensor(
+        [
+            [0.95, 0.05, 0.00, 0.00],
+            [0.00, 0.00, 0.05, 0.95],
+        ],
+        dtype=torch.float32,
+    )
+    active = core._aqr_active_slot_mask(
+        roles=torch.zeros((2,), dtype=torch.long),
+        visual_priors=visual_priors,
+        point_priors=point_priors,
+        anchor_scores=torch.ones((2,), dtype=torch.float32),
+        anchor_confidence=torch.ones((2,), dtype=torch.float32),
+    )
+
+    assert active.shape == (2,)
+    assert int(active.sum().item()) == 2
 
 
 def test_aqr_slot_assignment_ignores_inactive_duplicate_anchors(tmp_path: Path) -> None:

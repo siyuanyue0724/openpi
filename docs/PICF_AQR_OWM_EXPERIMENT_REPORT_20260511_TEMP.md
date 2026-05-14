@@ -11447,3 +11447,101 @@ cotrain pressure can help object files remain useful, but it cannot validate the
 latest posterior-birth candidate. The decisive next evidence remains A5
 step200/300 and then the A5 cotrain row after the anchor-only row completes.
 ```
+
+## 2026-05-14 Object-Core Ownership Repair
+
+A5 latest reached step200 with a clear warning row:
+
+```text
+raw same-role support overlap    = 0.9064
+active same-role support overlap = 0.6260
+effective anchor count           = 17.15
+posterior recycle rate           = 0.8201
+posterior address update mean    = 0.0070
+```
+
+This rejects the anchor-only row as a final solution. It also localizes the
+remaining problem: posterior co-location is delayed, but same-role object files
+can still reread the same broad support. The correct repair is not another
+late support-diversity loss. It is to make the measurement model itself
+object-core aware before AQR reads point evidence.
+
+New maintained config:
+
+```text
+aqr_ownership_point_prior_weight = 0.35
+aqr_ownership_point_prior_sigma_m = 0.04
+```
+
+Mathematical contract:
+
+```math
+O_{j,n}
+=
+Normalize_n\left(
+  (1-\epsilon)
+  \exp\left[-\frac{\|x_n-c_j\|^2}{2\sigma_p^2}\right]
+  +
+  \epsilon / N_r
+\right)
+```
+
+```math
+b^{point}_{j,n}
+=
+\lambda_p
+\left(
+  \log(O_{j,n})
+  -
+  \frac{1}{N_r}\sum_m \log(O_{j,m})
+\right)
+```
+
+This is label-free and role-local: effector rows use local/gripper points;
+scene/object rows use visible global scene points. It is a point-cloud
+ownership prior, not a detector and not a category rule.
+
+Active-slot filtering is also corrected. Previously a visual-only duplicate
+test could demote two object files even when point or temporal evidence
+separated them. The new redundancy score is a geometric mean over available
+object-core overlaps:
+
+```math
+R^{core}_{i,j}
+=
+\exp\left(
+  \frac{1}{|\mathcal M|}
+  \sum_{m\in\mathcal M}
+  \log\left(\max(R^m_{i,j}, \varepsilon)\right)
+\right)
+```
+
+This says two slots are redundant only if they overlap in every available
+object-core modality. Raw visual overlap remains logged, but it is no longer
+the sole active-capacity decision.
+
+Paper alignment:
+
+```text
+1. Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+   (arXiv:2510.24709): object binding is pairwise/quadratic and low-dimensional;
+   therefore the routing subspace, not a late action penalty, is the right
+   insertion point.
+2. Spatial Traces / TraceVLA style work: persistent spatial evidence improves
+   VLA spatial-temporal awareness; the point-core prior is a label-free spatial
+   trace over current evidence.
+3. DINO/query-initialization lesson: object queries need non-identical evidence
+   seeds before attention can specialize; symmetric rows cannot self-separate.
+```
+
+Next A5 test:
+
+```text
+Run scripts/run_picf_posterior_birth_matrix.sh a5 on the new commit.
+Gate at step100/200/300:
+  active object-core overlap
+  raw visual overlap
+  effective anchor count
+  posterior recycle
+  posterior physical overlay spread
+```

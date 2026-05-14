@@ -2190,11 +2190,114 @@ class PicfFullCore(nn.Module):
         priors = self._aqr_ownership_priors_from_coords(roles=roles, coords=coords)
         return float(self.config.aqr_ownership_temporal_prior_weight) * self._aqr_centered_log_prior_bias(priors)
 
+    def _aqr_point_ownership_bias(
+        self,
+        token_field: PicfTokenFieldState,
+        roles: torch.Tensor,
+    ) -> torch.Tensor | None:
+        """Label-free object-core ownership prior over point evidence.
+
+        Visual/temporal ownership breaks image-token symmetry, but posterior
+        object files are corrected through point-derived geometry. Without a
+        row-specific point prior, same-role scene slots can still read the same
+        broad point mixture and only separate after posterior correction, which
+        is too late for stable object-file ownership.
+        """
+
+        point_count = int(token_field.point_tokens.shape[0])
+        if (
+            point_count == 0
+            or roles.numel() == 0
+            or not bool(getattr(self.config, "aqr_ownership_prior_enabled", True))
+            or float(getattr(self.config, "aqr_ownership_point_prior_weight", 0.0)) == 0.0
+        ):
+            return None
+        positions = self._world_point_positions(token_field)
+        if positions.shape != (point_count, 3):
+            return None
+        roles_t = roles.to(device=self.device, dtype=torch.long)
+        pool_ids = self._point_pool_ids(token_field)
+        local_mask = pool_ids == 0
+        scene_mask = self._scene_point_candidate_mask(token_field, fallback_to_global=True)
+        priors = torch.zeros((int(roles_t.numel()), point_count), device=self.device, dtype=self.dtype)
+        sigma = max(
+            float(getattr(self.config, "aqr_ownership_point_prior_sigma_m", 0.04)),
+            float(self.config.epsilon_a),
+        )
+        for role_value in torch.unique(roles_t, sorted=True).tolist():
+            row_indices = torch.nonzero(roles_t == int(role_value), as_tuple=False).squeeze(-1)
+            if row_indices.numel() == 0:
+                continue
+            candidate_mask = local_mask if int(role_value) == 0 else scene_mask
+            if not bool(candidate_mask.any().item()):
+                candidate_mask = torch.ones((point_count,), device=self.device, dtype=torch.bool)
+            candidate_indices = torch.nonzero(candidate_mask, as_tuple=False).squeeze(-1)
+            if candidate_indices.numel() == 0:
+                continue
+            local_priors = self._aqr_ownership_priors_from_coords(
+                roles=roles_t.index_select(0, row_indices),
+                coords=positions.index_select(0, candidate_indices),
+                sigma=sigma,
+            )
+            priors[row_indices[:, None], candidate_indices[None, :]] = local_priors
+        if not bool((priors.sum(dim=-1) > self.config.epsilon_a).any().item()):
+            return None
+        priors = _normalize_rows(priors, eps=self.config.epsilon_a)
+        return float(self.config.aqr_ownership_point_prior_weight) * self._aqr_centered_log_prior_bias(priors)
+
+    def _support_overlap_matrix(self, priors: torch.Tensor | None) -> torch.Tensor | None:
+        if priors is None or priors.numel() == 0 or priors.shape[0] == 0 or priors.shape[1] == 0:
+            return None
+        p = torch.clamp(
+            torch.nan_to_num(priors.to(device=self.device, dtype=self.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+            min=0.0,
+        )
+        valid = p.sum(dim=-1) > self.config.epsilon_a
+        if not bool(valid.any().item()):
+            return None
+        p = p / torch.clamp(p.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
+        overlap = p @ p.T
+        diag = torch.clamp(torch.diag(overlap), min=self.config.epsilon_a)
+        overlap = overlap / torch.sqrt(torch.clamp(diag[:, None] * diag[None, :], min=self.config.epsilon_a))
+        valid_pair = valid[:, None] & valid[None, :]
+        return torch.where(valid_pair, overlap, torch.zeros_like(overlap))
+
+    def _object_core_overlap_matrix(
+        self,
+        visual_priors: torch.Tensor | None,
+        *,
+        point_priors: torch.Tensor | None = None,
+        temporal_priors: torch.Tensor | None = None,
+        pg_priors: torch.Tensor | None = None,
+    ) -> torch.Tensor | None:
+        overlaps = [
+            overlap
+            for overlap in (
+                self._support_overlap_matrix(visual_priors),
+                self._support_overlap_matrix(point_priors),
+                self._support_overlap_matrix(temporal_priors),
+                self._support_overlap_matrix(pg_priors),
+            )
+            if overlap is not None
+        ]
+        if not overlaps:
+            return None
+        if len(overlaps) == 1:
+            return overlaps[0]
+        # Redundancy means the same rows overlap in every available object-core
+        # evidence space. A geometric mean keeps one discriminative modality from
+        # being overruled by a diffuse visual support map.
+        stacked = torch.stack(overlaps, dim=0)
+        return torch.exp(torch.mean(torch.log(torch.clamp(stacked, min=self.config.epsilon_a)), dim=0))
+
     def _aqr_active_slot_mask(
         self,
         *,
         roles: torch.Tensor,
         visual_priors: torch.Tensor,
+        point_priors: torch.Tensor | None = None,
+        temporal_priors: torch.Tensor | None = None,
+        pg_priors: torch.Tensor | None = None,
         anchor_scores: torch.Tensor,
         anchor_confidence: torch.Tensor,
     ) -> torch.Tensor:
@@ -2216,10 +2319,14 @@ class PicfFullCore(nn.Module):
         )
         if priors.numel() == 0:
             return torch.ones((count,), device=self.device, dtype=self.dtype)
-        priors = priors / torch.clamp(priors.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
-        overlap = priors @ priors.T
-        diag = torch.clamp(torch.diag(overlap), min=self.config.epsilon_a)
-        overlap = overlap / torch.sqrt(torch.clamp(diag[:, None] * diag[None, :], min=self.config.epsilon_a))
+        overlap = self._object_core_overlap_matrix(
+            priors,
+            point_priors=point_priors,
+            temporal_priors=temporal_priors,
+            pg_priors=pg_priors,
+        )
+        if overlap is None:
+            overlap = torch.eye(count, device=self.device, dtype=self.dtype)
         score = torch.clamp(anchor_scores.to(device=self.device, dtype=self.dtype), min=0.0)
         confidence = torch.clamp(anchor_confidence.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
         support_peak = priors.max(dim=-1).values
@@ -3179,6 +3286,9 @@ class PicfFullCore(nn.Module):
                 visual_bias = ownership_bias if visual_bias is None else (visual_bias + ownership_bias)
         temporal_bias = self._aqr_temporal_ownership_bias(roles=roles, temporal=token_field.temporal_visual)
         point_bias = self._aqr_point_bias(token_field, roles)
+        point_ownership_bias = self._aqr_point_ownership_bias(token_field, roles)
+        if point_ownership_bias is not None:
+            point_bias = point_ownership_bias if point_bias is None else (point_bias + point_ownership_bias)
         posterior_bias = self._aqr_posterior_bias(previous, roles)
         cache_bias = None
         if cache_scores is not None and cache_count > 0:
@@ -3478,6 +3588,9 @@ class PicfFullCore(nn.Module):
         anchor_active = self._aqr_active_slot_mask(
             roles=roles,
             visual_priors=visual_priors,
+            point_priors=point_priors,
+            temporal_priors=vjepa_temporal_priors,
+            pg_priors=pg_priors,
             anchor_scores=anchor_scores,
             anchor_confidence=anchor_conf,
         )
@@ -7253,11 +7366,20 @@ class PicfFullCore(nn.Module):
                 overlap = visual_priors @ visual_priors.T
                 diag = torch.clamp(torch.diag(overlap), min=self.config.epsilon_a)
                 overlap = overlap / torch.sqrt(torch.clamp(diag[:, None] * diag[None, :], min=self.config.epsilon_a))
+                object_core_overlap = self._object_core_overlap_matrix(
+                    graph.visual_priors,
+                    point_priors=graph.point_priors,
+                    temporal_priors=graph.vjepa_temporal_priors,
+                    pg_priors=graph.pg_priors,
+                )
                 same_role = graph.anchor_roles[:, None] == graph.anchor_roles[None, :]
                 pair_mask = torch.triu(same_role, diagonal=1)
                 if bool(pair_mask.any().item()):
                     debug["mapg_same_role_visual_overlap_max"] = float(overlap[pair_mask].max().item())
                     debug["aqr_same_role_support_overlap_max"] = debug["mapg_same_role_visual_overlap_max"]
+                    if object_core_overlap is not None:
+                        debug["aqr_same_role_object_core_overlap_max"] = float(object_core_overlap[pair_mask].max().item())
+                        debug["aqr_same_role_object_core_overlap_mean"] = float(object_core_overlap[pair_mask].mean().item())
                 if graph.anchor_active is not None and graph.anchor_active.numel() == graph.visual_priors.shape[0]:
                     active = graph.anchor_active.to(device=self.device, dtype=self.dtype).reshape(-1)
                     active_bool = active > 0.5
@@ -7267,9 +7389,14 @@ class PicfFullCore(nn.Module):
                     if bool(active_pair_mask.any().item()):
                         debug["aqr_active_same_role_support_overlap_max"] = float(overlap[active_pair_mask].max().item())
                         debug["aqr_active_same_role_support_overlap_mean"] = float(overlap[active_pair_mask].mean().item())
+                        if object_core_overlap is not None:
+                            debug["aqr_active_same_role_object_core_overlap_max"] = float(object_core_overlap[active_pair_mask].max().item())
+                            debug["aqr_active_same_role_object_core_overlap_mean"] = float(object_core_overlap[active_pair_mask].mean().item())
                     else:
                         debug["aqr_active_same_role_support_overlap_max"] = 0.0
                         debug["aqr_active_same_role_support_overlap_mean"] = 0.0
+                        debug["aqr_active_same_role_object_core_overlap_max"] = 0.0
+                        debug["aqr_active_same_role_object_core_overlap_mean"] = 0.0
                     if graph.anchor_roles.numel() == active.shape[0]:
                         roles = graph.anchor_roles.to(device=self.device, dtype=torch.long)
                         for role_value in tuple(torch.unique(roles, sorted=True).tolist()):

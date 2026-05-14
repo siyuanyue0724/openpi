@@ -1424,6 +1424,8 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_pg_bias_weight",
         "aqr_support_bias_clip",
         "aqr_ownership_prior_weight",
+        "aqr_ownership_point_prior_weight",
+        "aqr_ownership_point_prior_sigma_m",
         "aqr_ownership_temporal_prior_weight",
         "aqr_ownership_prior_uniform_mix",
         "aqr_active_slot_min_confidence",
@@ -5027,6 +5029,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         aqr_ownership_prior_weight=float(
             _arg_or_default("aqr_ownership_prior_weight", _SPEC_DEFAULTS.aqr_ownership_prior_weight)
         ),
+        aqr_ownership_point_prior_weight=float(
+            _arg_or_default("aqr_ownership_point_prior_weight", _SPEC_DEFAULTS.aqr_ownership_point_prior_weight)
+        ),
+        aqr_ownership_point_prior_sigma_m=float(
+            _arg_or_default("aqr_ownership_point_prior_sigma_m", _SPEC_DEFAULTS.aqr_ownership_point_prior_sigma_m)
+        ),
         aqr_ownership_temporal_prior_weight=float(
             _arg_or_default("aqr_ownership_temporal_prior_weight", _SPEC_DEFAULTS.aqr_ownership_temporal_prior_weight)
         ),
@@ -6305,7 +6313,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s same_role_support_competition_enabled=%s same_role_support_competition_weight=%s same_role_support_competition_iters=%s same_role_support_competition_physical_only=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_point_prior_weight=%s ownership_point_prior_sigma_m=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s same_role_support_competition_enabled=%s same_role_support_competition_weight=%s same_role_support_competition_iters=%s same_role_support_competition_physical_only=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -6321,6 +6329,8 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "aqr_support_bias_clip", _SPEC_DEFAULTS.aqr_support_bias_clip)),
                 bool(getattr(args, "aqr_ownership_prior_enabled", _SPEC_DEFAULTS.aqr_ownership_prior_enabled)),
                 float(getattr(args, "aqr_ownership_prior_weight", _SPEC_DEFAULTS.aqr_ownership_prior_weight)),
+                float(getattr(args, "aqr_ownership_point_prior_weight", _SPEC_DEFAULTS.aqr_ownership_point_prior_weight)),
+                float(getattr(args, "aqr_ownership_point_prior_sigma_m", _SPEC_DEFAULTS.aqr_ownership_point_prior_sigma_m)),
                 float(
                     getattr(
                         args,
@@ -7421,6 +7431,16 @@ def main() -> None:
         ),
     )
     parser.add_argument("--aqr-ownership-prior-weight", type=float, default=_SPEC_DEFAULTS.aqr_ownership_prior_weight)
+    parser.add_argument(
+        "--aqr-ownership-point-prior-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_ownership_point_prior_weight,
+    )
+    parser.add_argument(
+        "--aqr-ownership-point-prior-sigma-m",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_ownership_point_prior_sigma_m,
+    )
     parser.add_argument(
         "--aqr-ownership-temporal-prior-weight",
         type=float,
