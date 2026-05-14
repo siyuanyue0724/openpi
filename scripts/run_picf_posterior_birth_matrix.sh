@@ -10,6 +10,17 @@ export UV_PROJECT_ENVIRONMENT="${UV_PROJECT_ENVIRONMENT:-/root/openpi/.venv}"
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}"
 export TOKENIZERS_PARALLELISM=false
 export PYTHONUNBUFFERED=1
+UV_BIN="${UV_BIN:-}"
+if [[ -z "${UV_BIN}" ]]; then
+  if command -v uv >/dev/null 2>&1; then
+    UV_BIN="$(command -v uv)"
+  elif [[ -x /root/.local/bin/uv ]]; then
+    UV_BIN=/root/.local/bin/uv
+  else
+    echo "[posterior-birth-matrix] ERROR: uv not found; set UV_BIN=/path/to/uv" >&2
+    exit 127
+  fi
+fi
 
 BASE="${PICF_CHECKPOINT_BASE:-/mnt/checkpoints/picf_core}"
 LOG_BASE="${PICF_LOG_BASE:-/mnt/picf_run_logs}"
@@ -91,7 +102,7 @@ run_one() {
     echo "[posterior-birth-matrix] exp=${exp} start $(date -Is)"
     echo "[posterior-birth-matrix] repo=$(pwd) commit=$(git rev-parse --short HEAD)"
     echo "[posterior-birth-matrix] scope=${scope} steps=${steps} unroll=${unroll} burnin=${burnin} action=${action_weight} active_max=${active_max} overlap=${active_overlap}"
-    uv run --no-sync --project . torchrun --standalone --nproc_per_node=2 scripts/picf_core_train.py \
+    "${UV_BIN}" run --no-sync --project . torchrun --standalone --nproc_per_node=2 scripts/picf_core_train.py \
       "${COMMON[@]}" \
       --exp-name "${exp}" \
       --num-train-steps "${steps}" \
