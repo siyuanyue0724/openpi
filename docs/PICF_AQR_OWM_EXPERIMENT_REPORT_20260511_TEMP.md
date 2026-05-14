@@ -11031,3 +11031,44 @@ candidate. Continue to step200 before deciding whether the role-local
 competition is sufficient or whether the support rows still lack enough
 row-specific evidence upstream.
 ```
+
+Step300 follow-up:
+
+```text
+Run:
+  picf_a5_birth_anchor_u2b1_a025_450_24c6cf7_support_comp
+
+step200:
+  raw same-role support overlap    = 0.9963
+  active same-role support overlap = 0.5776
+  effective anchor count           = 9.05
+  posterior recycle rate           = 0.0015
+  stable slot fraction             = 0.3811
+
+step300:
+  raw same-role support overlap    = 0.9999
+  active same-role support overlap = 0.1867
+  effective anchor count           = 4.63
+  posterior recycle rate           = 0.0537
+  stable slot fraction             = 0.3506
+```
+
+Interpretation:
+
+```text
+Reject this as a standalone anchor-only fix. Same-role support competition is
+not a wrong mathematical operation; it is a correct measurement-routing
+competition and it clearly improves the first 50-100 steps. The failure is that
+anchor-only pressure does not force all same-role object files to stay useful.
+Once the active-slot filter demotes duplicates, the raw support rows may
+collapse again while the active overlap metric looks superficially healthier.
+The low recycle rate rules out the older recycle-saturation diagnosis.
+
+The next iteration is therefore not another action-side penalty or stronger
+support-diversity loss. It is a production-like cotrain test under the same
+routing repair. Acceptance depends on whether task/action/semantic gradients
+reward object files enough to keep effective anchor count healthy. If cotrain
+also collapses, then the support rows lack sufficient object-specific evidence
+upstream and the next fix must target token/probe extraction rather than the
+loss surface.
+```

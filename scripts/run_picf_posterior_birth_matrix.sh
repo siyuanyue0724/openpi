@@ -126,6 +126,10 @@ case "${PROFILE}" in
     run_one "picf_a5_birth_cotrain_u2b1_a025_450_${RUN_TAG}" 450 all 2 1 0.25 6 0.70
     run_one "picf_a5_birth_cotrain_u2b1_a05_450_${RUN_TAG}" 450 all 2 1 0.50 6 0.70
     ;;
+  a5_cotrain)
+    run_one "picf_a5_birth_cotrain_u2b1_a025_450_${RUN_TAG}" 450 all 2 1 0.25 6 0.70
+    run_one "picf_a5_birth_cotrain_u2b1_a05_450_${RUN_TAG}" 450 all 2 1 0.50 6 0.70
+    ;;
   a7)
     run_one "picf_a7_birth_cotrain_u2b1_a025_600_${RUN_TAG}" 600 all 2 1 0.25 6 0.70
     run_one "picf_a7_birth_cotrain_u2b1_a05_600_${RUN_TAG}" 600 all 2 1 0.50 6 0.70

@@ -4557,3 +4557,43 @@ effective anchor count `18.18`, and posterior role-1 mean pixel distance
 preferred early gate, but it is no longer the old A5 `0.95+` rebound at the same
 stage. Continue this run to step200 before deciding whether to change upstream
 token/probe extraction.
+
+2026-05-14 follow-up gate: the same A5 support-competition anchor-only run
+reached step300 and is rejected as a standalone fix. The role-local competition
+is mathematically valid and helped early, but it did not make anchor-only
+pressure self-sufficient:
+
+```text
+step50:
+  raw overlap    = 0.2179
+  active overlap = 0.2035
+  effective K    = 19.49
+
+step100:
+  raw overlap    = 0.6874
+  active overlap = 0.5120
+  effective K    = 18.18
+
+step200:
+  raw overlap    = 0.9963
+  active overlap = 0.5776
+  effective K    = 9.05
+
+step300:
+  raw overlap    = 0.9999
+  active overlap = 0.1867
+  effective K    = 4.63
+  recycle rate   = 0.0537
+```
+
+This is a useful negative result. The remaining failure is no longer recycle
+saturation or exact posterior co-location: recycle is low by step300. The
+failure is that anchor-only optimization can still reuse the same same-role
+support and demote redundant object files until only a small active set remains.
+Active filtering prevents duplicate slots from contaminating assignment, but it
+does not prove all object files remain useful. Do not add another loss penalty
+on top of this. The next diagnostic must test production-like cotrain pressure:
+if cotrain keeps `effective_anchor_count` healthy while action decreases, then
+anchor-only is the wrong acceptance environment; if cotrain also rebounds, the
+root cause moves upstream to weak object-specific evidence in token/probe
+extraction.
