@@ -4854,3 +4854,52 @@ alignment_budget_scale not pinned near zero
 loss_mapg_support_diversity not monotonically rising
 anchor overlay role-1/2/3 pixel std not collapsing to single-digit pixels
 ```
+
+2026-05-14 one-hour structure-budget result: the budget repair is a real
+target-function fix, but it is not a final solution by itself. A5
+`a5_structure_budget` completed 450 steps with `alignment_budget_scale ~= 1.0`,
+so the previous starvation bug is gone. Early rows were healthy
+(`step50 active visual overlap = 0.1914`, active object-core overlap =
+`0.1691`), but the later rows still drifted upward:
+
+```text
+A5 structure-budget, step450:
+  aqr_same_role_support_overlap_max              = 0.8712
+  aqr_active_same_role_support_overlap_max       = 0.7683
+  aqr_same_role_object_core_overlap_max          = 0.7155
+  aqr_active_same_role_object_core_overlap_max   = 0.5999
+  loss_mapg_support_diversity                    = 0.4075
+  loss_alignment_raw                             = 0.9953
+  alignment_budget_scale                         = 0.9977
+```
+
+This is a large improvement over the rejected object-core run
+(`active visual overlap = 0.9931` at step450), but it misses the strict gate
+(`active visual < 0.75`, active object-core < 0.50`). Overlay statistics also
+show partial geometric concentration rather than a clean multi-object spread.
+The diagnosis is therefore refined: the old failure was partly budget
+starvation, but not only budget starvation. Same-role supports still need a
+more object-conditional assignment objective, not just a larger diversity
+coefficient.
+
+A7 `a7_structure_budget` stayed healthier than A5 but did not pass the final
+structure gate by step300:
+
+```text
+A7 structure-budget cotrain, step300:
+  loss_action_default_equiv                      = 0.0709
+  aqr_same_role_support_overlap_max              = 0.6876
+  aqr_active_same_role_support_overlap_max       = 0.5681
+  aqr_same_role_object_core_overlap_max          = 0.6006
+  aqr_active_same_role_object_core_overlap_max   = 0.5798
+  loss_mapg_support_diversity                    = 0.3125
+  alignment_budget_scale                         = 0.9928
+```
+
+This is much better than the rejected collapse band and keeps action moving
+down, but it misses the final object-core gate. The useful distinction is now
+clear: A7's task-conditioned cotrain with prefix stop-gradient is not destroying
+anchors in this profile and supplies a useful selection signal, but scalar
+budget/support-diversity changes alone are not a complete cure. The next repair
+must change the object-conditional assignment energy itself rather than only
+increasing the weight of the existing diversity term.

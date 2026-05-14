@@ -11666,3 +11666,97 @@ alignment_budget_scale should not stay near 0.01
 loss_mapg_support_diversity should not monotonically rise
 anchor overlay role-1/2/3 pixel std should not collapse to single-digit pixels
 ```
+
+One-hour structure-budget follow-up, 2026-05-14:
+
+```text
+A5 structure-budget anchor-only, commit 42530fa, step450:
+  loss_total                                      = 1.2013
+  loss_alignment                                  = 1.1263
+  loss_alignment_raw                              = 0.9953
+  alignment_budget_scale                          = 0.9977
+  loss_mapg_support_diversity                     = 0.4075
+  loss_mapg_geometry_diversity                    = 0.2323
+  loss_anchor_pv                                  = 2.9608
+  loss_pv_weak                                    = 3.6307
+  aqr_same_role_support_overlap_max               = 0.8712
+  aqr_active_same_role_support_overlap_max        = 0.7683
+  aqr_same_role_object_core_overlap_max           = 0.7155
+  aqr_active_same_role_object_core_overlap_max    = 0.5999
+  aqr_effective_anchor_count                      = 18.98
+  posterior_recycle_rate                          = 0.1031
+  posterior_identity_switch_rate                  = 0.5500
+
+A7 structure-budget cotrain, commit 42530fa, step300:
+  loss_action_default_equiv                       = 0.0709
+  loss_action_active7                             = 0.2894
+  loss_alignment                                  = 1.1676
+  loss_alignment_raw                              = 1.0807
+  alignment_budget_scale                          = 0.9928
+  loss_mapg_support_diversity                     = 0.3125
+  loss_mapg_geometry_diversity                    = 0.1610
+  aqr_same_role_support_overlap_max               = 0.6876
+  aqr_active_same_role_support_overlap_max        = 0.5681
+  aqr_same_role_object_core_overlap_max           = 0.6006
+  aqr_active_same_role_object_core_overlap_max    = 0.5798
+```
+
+Interpretation:
+
+```text
+1. The old budget-starvation bug is confirmed and fixed. Alignment scale is no
+   longer ~0.01; it is ~1.0 on both A5 and A7.
+2. A5 improves strongly relative to the rejected object-core run, but fails the
+   strict final gate at step450. The repair is therefore necessary but not
+   sufficient.
+3. A7 is materially healthier than A5 and action-equivalent loss keeps moving
+   down, but it does not pass final structure acceptance at step300.
+4. Task-conditioned cotrain with prefix stop-gradient is useful and does not
+   reproduce the catastrophic A5 collapse, but it is not sufficient.
+5. The next repair should change the object-conditional assignment energy
+   itself, not only the scalar budget or diversity coefficient.
+```
+
+Mathematically, the refined diagnosis is:
+
+```math
+L_{align}
+\text{ must be strong enough to matter,}
+```
+
+but strength alone does not guarantee object partitioning. A same-role support
+diversity term can push supports apart only when the underlying measurement
+model offers distinguishable object-conditioned alternatives. If the assignment
+objective still permits several same-role slots to reuse the same high-value
+physical evidence, the optimizer can reduce auxiliary losses while keeping a
+partially collapsed posterior. The next non-cosmetic repair, if A7 fails, must
+change the assignment energy:
+
+```math
+E_{j,i}
+=
+E_{evidence}(j,i)
++ E_{geometry}(j,i)
++ E_{task}(j,i)
++ E_{competition}(j,i \mid role)
+```
+
+with competition operating on object-conditioned support signatures, not only
+on visual support overlap.
+
+Do not start a 30k run from this profile as the final anchor solution. It is a
+useful diagnostic and a partial improvement. The next principled test should
+separate object-conditioned assignment from generic same-role diversity. A
+reasonable next pair is:
+
+```text
+A5:
+  anchor-only object-conditioned assignment, no action.
+
+A7:
+  same object-conditioned assignment with prefix-stopgrad cotrain.
+```
+
+Acceptance should remain strict: step300 active visual overlap `<0.50`, active
+object-core overlap `<0.45`, effective anchor count `>18`, and overlay spread
+must stay broad rather than merely improving scalar losses.
