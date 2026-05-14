@@ -4428,3 +4428,10 @@ This is a minimal object-file birth prior, not a new loss or an action-side
 patch. The next A5/A7 causal runs should test whether nonzero posterior identity
 seeds plus first-step geometry bootstrap prevent same-pixel posterior
 co-location under cotrain.
+
+The corresponding deployment entrypoint is
+[`scripts/run_picf_posterior_birth_matrix.sh`](/home/siyuanyue/Documents/openpi/scripts/run_picf_posterior_birth_matrix.sh).
+It runs A5 anchor/cotrain isolation and A7 cotrain stress rows with the same
+`unroll=2`, `burnin=1`, local-refinement-off, PaliGemma-cotrain profile used by
+the latest matrix. This isolates posterior object-file birth from unrelated
+module changes.

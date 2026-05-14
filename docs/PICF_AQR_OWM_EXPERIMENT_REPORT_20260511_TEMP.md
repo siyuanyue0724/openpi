@@ -10316,3 +10316,31 @@ Acceptance after 100/200/400:
   aqr_same_role_support_overlap_max must not rebound into 0.98+;
   action_default_equiv must remain comparable to the current A7 flow row.
 ```
+
+Deployment script:
+
+```text
+scripts/run_picf_posterior_birth_matrix.sh
+
+A5 sequence:
+  picf_a5_birth_anchor_u2b1_a025_450_1e5af2c
+    anchor_only, unroll=2, burnin=1, action scale=0.25
+  picf_a5_birth_cotrain_u2b1_a025_450_1e5af2c
+    all-scope cotrain, unroll=2, burnin=1, action scale=0.25
+  picf_a5_birth_cotrain_u2b1_a05_450_1e5af2c
+    all-scope cotrain, unroll=2, burnin=1, action scale=0.50
+
+A7 sequence:
+  picf_a7_birth_cotrain_u2b1_a025_600_1e5af2c
+    all-scope cotrain, unroll=2, burnin=1, action scale=0.25
+  picf_a7_birth_cotrain_u2b1_a05_600_1e5af2c
+    all-scope cotrain, unroll=2, burnin=1, action scale=0.50
+
+Why these rows:
+  A5 first isolates whether posterior object-file birth alone fixes posterior
+  co-location without full action pressure.
+  A5 second and A7 first test production-like cotrain at the action scale that
+  improved recycle but previously still collapsed.
+  The 0.50 action-scale rows test whether action pressure can be increased
+  after identity birth without immediately forcing same-state coalescence.
+```
