@@ -4390,3 +4390,21 @@ remain spatially spread, but seven role-1 posterior slots are exactly co-located
 at pixel `[90.2, 108.4]`. Current conclusion: this is no longer an active-cap
 or action-scale-only problem; the remaining root cause is posterior
 binding/correction coalescing same-role candidates into one physical state.
+
+2026-05-14 08:51 requested follow-up: the remote matrix is still running
+normally. A7 flow reached structured step400 and progress-bar step407/450 with
+both GPUs active; A5 completed and is idle. A7 flow still fails structurally:
+`loss_action_default_equiv=0.0738`, but
+`aqr_same_role_support_overlap_max=0.9866`,
+`aqr_active_same_role_support_overlap_max=0.5990`,
+`posterior_recycle_rate=0.8593`,
+`posterior_identity_switch_rate=0.8256`, and
+`posterior_stable_slot_fraction=0.11`. The step400 overlay confirms the failure
+is physical, not a metric artifact: graph role anchors remain somewhat spread,
+but seven visible role-1 posterior slots are exactly co-located at pixel
+`[66.84, 116.62]`. This further rejects active-capacity, action-scale, and
+unroll-only explanations. The next architecture change must target posterior
+assignment/correction with same-role occupancy control; adding another outer
+support-diversity loss would be a patch, not a cure. Full numbers and the
+mathematical interpretation are in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).

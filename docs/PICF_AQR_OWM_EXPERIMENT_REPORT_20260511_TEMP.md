@@ -10086,3 +10086,153 @@ Interpretation:
      or a posterior matching penalty that operates on physical posterior
      geometry rather than graph supports alone.
 ```
+
+08:51 requested one-hour follow-up:
+
+```text
+A7 runtime:
+  machine:
+    qgE72e, ssh port 28060
+  tmux:
+    picf_a7_activecap_matrix
+    picf_a7_activecap_monitor
+    picf_a7_activecap_watch10h
+  current branch:
+    picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2
+  live state:
+    still running normally
+    progress bar around step407/450
+    both GPUs busy
+    latest structured metrics row: step400
+  output directory:
+    /mnt/checkpoints/picf_core/picf_core/
+      picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2
+
+A5 runtime:
+  machine:
+    ZWWQO6, ssh port 29776
+  state:
+    matrix branches completed
+    GPUs idle
+  important completed branches:
+    picf_a5_activecap_anchor_u1b4_a025_600_ac273a2
+    picf_a5_activecap_anchor_u2b1_a025_600_ac273a2
+    picf_a5_activecap_anchor_u2b1_max6_a025_600_ac273a2
+```
+
+A7 flow step400:
+
+```text
+loss_total                              = 0.096719
+loss_action_default_equiv               = 0.073750
+loss_action_active7                     = 0.313459
+loss_anchor_pv                          = 4.641698
+loss_mapg_routing                       = 0.958322
+loss_mapg_cycle                         = 0.459890
+loss_mapg_support_diversity             = 0.517221
+aqr_same_role_support_overlap_max       = 0.986589
+aqr_active_same_role_support_overlap_max= 0.598955
+aqr_active_anchor_count                 = 12.23
+aqr_inactive_anchor_fraction            = 0.490417
+posterior_recycle_rate                  = 0.859305
+posterior_recycle_logit_mean            = 1.930588
+posterior_recycle_gate_std              = 0.000136
+posterior_address_update_rate_mean      = 0.004486
+posterior_identity_switch_rate          = 0.825556
+posterior_binding_top1_margin_mean      = 0.109431
+posterior_stable_slot_fraction          = 0.110000
+speed                                   = about 22.7 sec/step
+```
+
+A7 step400 overlay audit:
+
+```text
+Artifact:
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a7_activecap_cotrain_flow_u2b1_a025_450_ac273a2/
+      anchor_overlays/step_000400.png
+      anchor_overlays/step_000400.json
+
+Debug row in overlay JSON:
+  aqr_effective_anchor_count      = 13.1840
+  aqr_same_role_support_overlap   = 0.9927
+  temporal view mass static       = 0.5759
+  temporal view mass gripper      = 0.4241
+  posterior_identity_switch_rate  = 0.8889
+  posterior_recycle_rate          = 0.8665
+
+Image/geometry result:
+  graph role 1:
+    min pixel distance 0.60, mean 9.76, max 21.33
+  graph role 2:
+    min pixel distance 0.76, mean 11.87, max 25.97
+  graph role 3:
+    min pixel distance 0.66, mean 7.43, max 16.44
+  posterior role 1:
+    min pixel distance 0.00, mean 0.00, max 0.00
+    all seven visible role-1 posterior slots are at pixel [66.84, 116.62]
+```
+
+Interpretation:
+
+```text
+1. The A7 flow branch is running normally, so the matrix infrastructure is not
+   the current failure source.
+2. A7 flow improves over the rejected full-action prefix branch in one way:
+   recycle is not saturated at 0.998, and address update remains nonzero.
+3. It still fails the structural acceptance test by step400. The raw
+   same-role overlap is again in the collapse band, active overlap is above
+   the provisional gate, and posterior role-1 slots are exactly co-located.
+4. The overlay separates graph-stage and posterior-stage failure:
+     graph anchors are still spatially spread enough to contain multiple
+     candidates;
+     posterior anchors coalesce to a single physical state.
+5. This further rules out "unroll=2 only", "action scale only",
+   "active-capacity only", and "metric false positive" as sufficient
+   explanations.
+6. The remaining root cause is posterior binding/correction. The next code
+   change should target the posterior assignment/update interface, not add
+   another outer support-diversity loss.
+```
+
+Mathematical update:
+
+```text
+Current failure shape:
+  Q_graph can still produce multiple same-role candidate locations, but
+  posterior correction maps them into the same state:
+
+    {x_i^obs}_{i in role r}  ->  x_post,j ~= x_post,k for j != k.
+
+Therefore the missing pressure is not simply support entropy. It is a
+state-space occupancy and assignment constraint at the posterior transition:
+
+  B = assignment(previous_slots, observation_anchors)
+  x_post = Correction(x_prior, B @ x_obs)
+
+If several same-role rows of B select the same observation mode, the posterior
+duplicates are mathematically stable even when graph supports had some spread.
+
+The fix must preserve the belief-filter interpretation:
+  - current evidence remains authoritative;
+  - no hard random jitter;
+  - no cache-as-truth;
+  - no extra unrelated head;
+  - posterior assignment should be discouraged from mapping multiple active
+    same-role slots onto one physical observation mode unless object count is
+    genuinely low and the extra slots are sent to dustbin/inactive.
+```
+
+Literature note:
+
+```text
+The 2025 object-binding ViT probe result supports using pairwise same-object
+subspaces as evidence, but it does not imply that a downstream belief filter
+will preserve separate object files automatically. Our current metrics match
+that distinction: the graph/token stage retains enough pairwise signal to
+spread candidates, while the posterior object-file update coalesces them.
+
+Therefore the next principled repair is not another feature extractor or a
+new auxiliary task. It is posterior-stage set assignment with same-role
+occupancy control, using the existing binding signatures/geometry as evidence.
+```
