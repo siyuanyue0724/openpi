@@ -4408,3 +4408,23 @@ assignment/correction with same-role occupancy control; adding another outer
 support-diversity loss would be a patch, not a cure. Full numbers and the
 mathematical interpretation are in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
+2026-05-14 posterior object-file birth update: the step400 A7 overlay exposed a
+lower-level symmetry issue. AQR graph queries had coverage/type identities, but
+persistent posterior object files still used the legacy symmetric birth
+contract: `posterior_slot_identity_std=0`,
+`task_slot_identity_std=0`, and
+`posterior_bootstrap_from_observation=False`. That makes same-role recurrent
+slots exactly permutation-symmetric before identity evidence exists, so a shared
+posterior residual/recycle path can update multiple scene slots into the same
+state. The production default is now changed to
+`posterior_slot_identity_std=0.02`,
+`task_slot_identity_std=0.02`, and
+`posterior_bootstrap_from_observation=True`, with CLI/logging support in
+[`scripts/picf_core_train.py`](/home/siyuanyue/Documents/openpi/scripts/picf_core_train.py)
+and verifier coverage in
+[`scripts/verify_picf_owm_contract.py`](/home/siyuanyue/Documents/openpi/scripts/verify_picf_owm_contract.py).
+This is a minimal object-file birth prior, not a new loss or an action-side
+patch. The next A5/A7 causal runs should test whether nonzero posterior identity
+seeds plus first-step geometry bootstrap prevent same-pixel posterior
+co-location under cotrain.

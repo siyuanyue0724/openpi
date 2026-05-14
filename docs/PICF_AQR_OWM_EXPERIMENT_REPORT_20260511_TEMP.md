@@ -10236,3 +10236,83 @@ Therefore the next principled repair is not another feature extractor or a
 new auxiliary task. It is posterior-stage set assignment with same-role
 occupancy control, using the existing binding signatures/geometry as evidence.
 ```
+
+Root-cause code audit after the 08:51 poll:
+
+```text
+New code-level finding:
+  The persistent posterior object files were still initialized as an exactly
+  symmetric set:
+
+    posterior_slot_identity_std = 0.0
+    task_slot_identity_std      = 0.0
+    posterior_bootstrap_from_observation = False
+
+Why this matters:
+  AQR graph queries already have role/type/coverage identity, so graph anchors
+  can separate for a while. Posterior slots, however, are the recurrent object
+  files. With zero identity seed and no first-step geometry bootstrap, all
+  same-role scene posterior slots start with identical h/c/token/address and
+  identical geometry. If the shared residual/recycle path sees the same input
+  for those slots, the posterior update is equivariant and keeps them
+  identical:
+
+    S_j^0 = S_k^0  and  U(S_j, o_t) = U(S_k, o_t)
+    => S_j^t = S_k^t
+
+  This is exactly what the A7 step400 overlay shows: graph candidates are not
+  all identical, but posterior role-1 object files become identical in pixel,
+  support mass, recycle gate, confidence, and address update.
+
+Why this is a root fix rather than another patch:
+  The object-binding paper motivates using pairwise same-object evidence, but
+  the model still needs separate object files to preserve that evidence through
+  time. A nonzero posterior identity seed and first-step FPS geometry bootstrap
+  are the minimal object-file birth prior. They do not add a new loss, do not
+  touch the PI0.5 action target, and do not invent labels.
+```
+
+Implemented local code change for the next causal run:
+
+```text
+src/openpi/picf/core/config.py:
+  posterior_slot_identity_std = 0.02
+  task_slot_identity_std = 0.02
+  posterior_bootstrap_from_observation = True
+
+scripts/picf_core_train.py:
+  added CLI/logging for:
+    --posterior-slot-identity-std
+    --task-slot-identity-std
+    --posterior-bootstrap-from-observation / --no-posterior-bootstrap-from-observation
+
+scripts/verify_picf_owm_contract.py:
+  now checks that the production contract is not the legacy symmetric posterior
+  initialization.
+```
+
+Next causal test:
+
+```text
+Use A5 and A7 after the current A7 flow branch finishes or is stopped:
+
+A5:
+  posterior_identity_std = 0.02
+  posterior_bootstrap_from_observation = true
+  anchor/cotrain smoke, unroll=2, burnin=1, action scale 0.25
+  purpose:
+    test whether symmetry breaking alone prevents same-pixel posterior
+    co-location in the fast diagnostic window.
+
+A7:
+  same object-file birth prior, production-like all-scope cotrain
+  purpose:
+    test whether the fix survives action/PaliGemma cotrain pressure.
+
+Acceptance after 100/200/400:
+  posterior role-1 pairwise pixel min distance must be nonzero for active slots;
+  posterior_recycle_gate_std must no longer be near 1e-4 globally;
+  posterior_recycle_rate must avoid both near-0 and near-1 saturation;
+  aqr_same_role_support_overlap_max must not rebound into 0.98+;
+  action_default_equiv must remain comparable to the current A7 flow row.
+```

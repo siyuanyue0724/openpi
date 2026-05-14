@@ -12,9 +12,16 @@ class PicfCoreConfig:
     observation_anchors: int = 16
     effector_persistent_anchors: int = 1
     effector_observation_anchors: int = 1
-    posterior_slot_identity_std: float = 0.0
-    task_slot_identity_std: float = 0.0
-    posterior_bootstrap_from_observation: bool = False
+    # Persistent object files need a small identity seed.  Zero-initialized
+    # same-role slots are exactly permutation-symmetric and can coalesce under
+    # the shared posterior residual/recycle path before action training has a
+    # chance to assign stable identities.
+    posterior_slot_identity_std: float = 0.02
+    task_slot_identity_std: float = 0.02
+    # Bootstrap the first posterior geometry from current observation anchors
+    # using per-role farthest-point selection. This is not a label; it is the
+    # initial object-file birth prior needed before recurrent identity exists.
+    posterior_bootstrap_from_observation: bool = True
     hidden_dim: int = 512
     posterior_hidden_dim: int = 512
     latent_dim: int = 112

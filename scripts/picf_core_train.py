@@ -4885,6 +4885,13 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         observation_anchors=args.observation_anchors,
         effector_persistent_anchors=int(_arg_or_default("effector_persistent_anchors", _SPEC_DEFAULTS.effector_persistent_anchors)),
         effector_observation_anchors=int(_arg_or_default("effector_observation_anchors", _SPEC_DEFAULTS.effector_observation_anchors)),
+        posterior_slot_identity_std=float(
+            _arg_or_default("posterior_slot_identity_std", _SPEC_DEFAULTS.posterior_slot_identity_std)
+        ),
+        task_slot_identity_std=float(_arg_or_default("task_slot_identity_std", _SPEC_DEFAULTS.task_slot_identity_std)),
+        posterior_bootstrap_from_observation=bool(
+            _arg_or_default("posterior_bootstrap_from_observation", _SPEC_DEFAULTS.posterior_bootstrap_from_observation)
+        ),
         fusion_layers=args.fusion_layers,
         posterior_layers=args.posterior_layers,
         predictive_layers=args.predictive_layers,
@@ -6135,7 +6142,7 @@ def train(args: argparse.Namespace) -> None:
                 True,
             )
             logging.info(
-                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s effector_persistent_anchors=%s effector_observation_anchors=%s global_scene_point_cap=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s task_local_queries=%s task_effector_queries=%s task_global_queries=%s task_instruction_queries=%s task_self_layers=%s conditioned_control_queries=%s pi_prefix_queries=%s conditioned_future_queries=%s task_visual_reread_topk=%s task_tactile_reread_groups=%s task_point_reread_topk=%s visual_real_grid=%s visual_real_dim=%s require_pi0_action_generator=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
+                "PICF core config: hidden=%s posterior_hidden=%s latent=%s innovation=%s control=%s semantic=%s semantic_cross=%s future_hidden=%s persistent_anchors=%s observation_anchors=%s effector_persistent_anchors=%s effector_observation_anchors=%s posterior_slot_identity_std=%s task_slot_identity_std=%s posterior_bootstrap_from_observation=%s global_scene_point_cap=%s fusion_layers=%s posterior_layers=%s predictive_layers=%s control_layers=%s control_query_tokens=%s predictive_query_tokens=%s task_local_queries=%s task_effector_queries=%s task_global_queries=%s task_instruction_queries=%s task_self_layers=%s conditioned_control_queries=%s pi_prefix_queries=%s conditioned_future_queries=%s task_visual_reread_topk=%s task_tactile_reread_groups=%s task_point_reread_topk=%s visual_real_grid=%s visual_real_dim=%s require_pi0_action_generator=%s predictive_semantic_reads=%s control_semantic_reads=%s predictive_semantic_dropout_prob=%s semantic_prefix_dropout_prob=%s attention_heads=%s future_vote_heads=%s",
                 args.hidden_dim,
                 args.posterior_hidden_dim,
                 args.latent_dim,
@@ -6148,6 +6155,13 @@ def train(args: argparse.Namespace) -> None:
                 args.observation_anchors,
                 args.effector_persistent_anchors,
                 args.effector_observation_anchors,
+                getattr(args, "posterior_slot_identity_std", _SPEC_DEFAULTS.posterior_slot_identity_std),
+                getattr(args, "task_slot_identity_std", _SPEC_DEFAULTS.task_slot_identity_std),
+                getattr(
+                    args,
+                    "posterior_bootstrap_from_observation",
+                    _SPEC_DEFAULTS.posterior_bootstrap_from_observation,
+                ),
                 args.global_scene_point_cap,
                 args.fusion_layers,
                 args.posterior_layers,
@@ -7164,6 +7178,31 @@ def main() -> None:
     parser.add_argument("--observation-anchors", type=int, default=_SPEC_DEFAULTS.observation_anchors)
     parser.add_argument("--effector-persistent-anchors", type=int, default=_SPEC_DEFAULTS.effector_persistent_anchors)
     parser.add_argument("--effector-observation-anchors", type=int, default=_SPEC_DEFAULTS.effector_observation_anchors)
+    parser.add_argument(
+        "--posterior-slot-identity-std",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_slot_identity_std,
+        help=(
+            "Stddev for persistent posterior slot identity seeds. Keep nonzero "
+            "for object-file symmetry breaking; setting it to 0 reproduces the "
+            "legacy symmetric posterior initialization."
+        ),
+    )
+    parser.add_argument(
+        "--task-slot-identity-std",
+        type=float,
+        default=_SPEC_DEFAULTS.task_slot_identity_std,
+        help="Stddev for task query identity seeds.",
+    )
+    parser.add_argument(
+        "--posterior-bootstrap-from-observation",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_bootstrap_from_observation,
+        help=(
+            "Initialize posterior geometry from current observation anchors by "
+            "per-role farthest-point selection on the first step."
+        ),
+    )
     parser.add_argument("--fusion-layers", type=int, default=_SPEC_DEFAULTS.fusion_layers)
     parser.add_argument("--posterior-layers", type=int, default=_SPEC_DEFAULTS.posterior_layers)
     parser.add_argument("--predictive-layers", type=int, default=_SPEC_DEFAULTS.predictive_layers)
