@@ -37,6 +37,7 @@ from openpi.picf.core.contracts import PicfProjectiveGeometryState
 from openpi.picf.core.contracts import PicfPseudoProposalState
 from openpi.picf.core.contracts import PicfRecurrentCarryState
 from openpi.picf.core.contracts import PicfRecurrentPredictiveState
+from openpi.picf.core.contracts import PicfSlotQualityState
 from openpi.picf.core.contracts import PicfTemporalVisualSupportState
 from openpi.picf.core.contracts import PicfTrackletSupportState
 from openpi.picf.core.contracts import PicfRecurrentTokenFieldState
@@ -1255,6 +1256,14 @@ class PicfFullCore(nn.Module):
             self.aqr_role_embedding = nn.Embedding(4, hidden_dim)
             self.aqr_type_embedding = nn.Embedding(2, hidden_dim)
             self.aqr_coverage_proj = nn.Linear(2, hidden_dim)
+            self.aqr_slot_quality_head = nn.Sequential(
+                nn.LazyLinear(hidden_dim),
+                nn.GELU(),
+                nn.LayerNorm(hidden_dim),
+                nn.Linear(hidden_dim, 3),
+            )
+            nn.init.zeros_(self.aqr_slot_quality_head[-1].weight)
+            nn.init.zeros_(self.aqr_slot_quality_head[-1].bias)
             self.aqr_proprio_proj = nn.LazyLinear(hidden_dim)
             self.aqr_posterior_summary_proj = nn.LazyLinear(hidden_dim)
             self.aqr_task_conditioner = GatedCrossAttentionRead(
@@ -1350,6 +1359,7 @@ class PicfFullCore(nn.Module):
             self.aqr_role_embedding = None
             self.aqr_type_embedding = None
             self.aqr_coverage_proj = None
+            self.aqr_slot_quality_head = None
             self.aqr_proprio_proj = None
             self.aqr_posterior_summary_proj = None
             self.aqr_task_conditioner = None
@@ -2345,6 +2355,243 @@ class PicfFullCore(nn.Module):
         stacked = torch.stack(overlaps, dim=0)
         return torch.exp(torch.mean(torch.log(torch.clamp(stacked, min=self.config.epsilon_a)), dim=0))
 
+    def _row_strength_vector(
+        self,
+        value: torch.Tensor | None,
+        *,
+        row_count: int,
+        reduce: str = "max",
+    ) -> torch.Tensor:
+        result = torch.zeros((int(row_count),), device=self.device, dtype=self.dtype)
+        if value is None or value.numel() == 0 or value.ndim < 1 or int(row_count) <= 0:
+            return result
+        tensor = torch.clamp(value.to(device=self.device, dtype=self.dtype), min=0.0)
+        if tensor.shape[0] < int(row_count):
+            pad_shape = (int(row_count) - int(tensor.shape[0]), *tensor.shape[1:])
+            tensor = torch.cat([tensor, torch.zeros(pad_shape, device=self.device, dtype=self.dtype)], dim=0)
+        tensor = tensor[: int(row_count)]
+        if tensor.ndim == 1:
+            return torch.clamp(tensor, min=0.0, max=1.0)
+        flat = tensor.reshape(int(row_count), -1)
+        if reduce == "sum":
+            result = flat.sum(dim=-1)
+        else:
+            result = flat.max(dim=-1).values
+        return torch.clamp(result, min=0.0, max=1.0)
+
+    def _slot_duplicate_risk(
+        self,
+        *,
+        visual_priors: torch.Tensor,
+        row_count: int,
+        point_priors: torch.Tensor | None = None,
+        temporal_priors: torch.Tensor | None = None,
+        pg_priors: torch.Tensor | None = None,
+        proposal_priors: torch.Tensor | None = None,
+        anchor_x: torch.Tensor | None = None,
+        geometry_valid: torch.Tensor | None = None,
+        object_candidate_duplicate_overlap: torch.Tensor | None = None,
+    ) -> torch.Tensor:
+        duplicate = torch.zeros((int(row_count),), device=self.device, dtype=self.dtype)
+        if int(row_count) <= 0:
+            return duplicate
+        overlap = self._object_core_overlap_matrix(
+            visual_priors,
+            point_priors=point_priors,
+            temporal_priors=temporal_priors,
+            pg_priors=pg_priors,
+            proposal_priors=proposal_priors,
+        )
+        if overlap is not None and overlap.shape[0] >= int(row_count):
+            overlap = overlap.to(device=self.device, dtype=self.dtype)[: int(row_count), : int(row_count)].clone()
+            overlap = overlap.masked_fill(torch.eye(int(row_count), device=self.device, dtype=torch.bool), 0.0)
+            duplicate = torch.maximum(duplicate, torch.clamp(overlap.max(dim=-1).values, min=0.0, max=1.0))
+        if (
+            bool(getattr(self.config, "aqr_active_slot_geometry_duplicate_enabled", True))
+            and anchor_x is not None
+            and anchor_x.numel() > 0
+            and anchor_x.shape[0] >= int(row_count)
+        ):
+            centers = anchor_x.to(device=self.device, dtype=self.dtype)[: int(row_count), :3]
+            dist2 = torch.cdist(centers, centers) ** 2
+            sigma = max(float(getattr(self.config, "aqr_active_slot_geometry_duplicate_sigma_m", 0.04)), self.config.epsilon_a)
+            geom_overlap = torch.exp(-dist2 / (2.0 * sigma * sigma))
+            if geometry_valid is not None and geometry_valid.numel() >= int(row_count):
+                valid = geometry_valid.to(device=self.device, dtype=torch.bool)[: int(row_count)]
+                geom_overlap = torch.where(valid[:, None] & valid[None, :], geom_overlap, torch.zeros_like(geom_overlap))
+            geom_overlap = geom_overlap.masked_fill(torch.eye(int(row_count), device=self.device, dtype=torch.bool), 0.0)
+            threshold = min(max(float(getattr(self.config, "aqr_active_slot_geometry_duplicate_threshold", 0.70)), 0.0), 1.0)
+            geom_overlap = torch.where(geom_overlap >= threshold, geom_overlap, torch.zeros_like(geom_overlap))
+            duplicate = torch.maximum(duplicate, torch.clamp(geom_overlap.max(dim=-1).values, min=0.0, max=1.0))
+        if (
+            object_candidate_duplicate_overlap is not None
+            and object_candidate_duplicate_overlap.numel() > 0
+            and object_candidate_duplicate_overlap.ndim >= 2
+            and object_candidate_duplicate_overlap.shape[0] >= int(row_count)
+        ):
+            cand = object_candidate_duplicate_overlap.to(device=self.device, dtype=self.dtype)[: int(row_count), : int(row_count)]
+            cand = cand.masked_fill(torch.eye(int(row_count), device=self.device, dtype=torch.bool), 0.0)
+            duplicate = torch.maximum(duplicate, torch.clamp(cand.max(dim=-1).values, min=0.0, max=1.0))
+        return torch.clamp(duplicate, min=0.0, max=1.0)
+
+    def _build_slot_quality_state(
+        self,
+        *,
+        anchor_tokens: torch.Tensor,
+        roles: torch.Tensor,
+        query_types: torch.Tensor,
+        visual_priors: torch.Tensor,
+        point_priors: torch.Tensor | None,
+        temporal_priors: torch.Tensor | None,
+        pg_priors: torch.Tensor | None,
+        tactile_priors: torch.Tensor | None,
+        tracklet_priors: torch.Tensor | None,
+        proposal_priors: torch.Tensor | None,
+        anchor_x: torch.Tensor | None,
+        geometry_valid: torch.Tensor | None,
+        anchor_scores: torch.Tensor,
+        anchor_confidence: torch.Tensor,
+        modality_confidence: torch.Tensor,
+        object_candidate_assignment: torch.Tensor | None,
+        object_candidate_owner_assignment: torch.Tensor | None,
+        object_candidate_owner_point_priors: torch.Tensor | None,
+        object_candidate_duplicate_overlap: torch.Tensor | None,
+        object_candidate_row_strength: torch.Tensor | None,
+        proposal_anchor_seed_strength: torch.Tensor | None,
+        proposal_anchor_seed_assignment: torch.Tensor | None,
+        task_owner_anchor_score: torch.Tensor | None,
+        task_owner_point_priors: torch.Tensor | None,
+    ) -> PicfSlotQualityState | None:
+        """Adaptive object/no-object/duplicate quality for fixed-capacity rows.
+
+        This is the PICF-native form of adaptive slot selection: sidecar,
+        tracklet, point, tactile and current support produce a deterministic
+        measurement target; a zero-initialized head learns residual calibration.
+        The state is a measurement gate, never posterior truth.
+        """
+
+        if not bool(getattr(self.config, "aqr_slot_quality_enabled", True)):
+            return None
+        row_count = int(anchor_tokens.shape[0])
+        if row_count <= 0:
+            return None
+        eps = float(self.config.epsilon_a)
+
+        evidence = torch.zeros((row_count,), device=self.device, dtype=self.dtype)
+        evidence = torch.maximum(evidence, self._row_strength_vector(object_candidate_row_strength, row_count=row_count))
+        evidence = torch.maximum(evidence, self._row_strength_vector(object_candidate_assignment, row_count=row_count, reduce="sum"))
+        evidence = torch.maximum(evidence, self._row_strength_vector(object_candidate_owner_assignment, row_count=row_count, reduce="sum"))
+        evidence = torch.maximum(evidence, self._row_strength_vector(object_candidate_owner_point_priors, row_count=row_count, reduce="max"))
+        evidence = torch.maximum(evidence, self._row_strength_vector(proposal_anchor_seed_strength, row_count=row_count))
+        evidence = torch.maximum(evidence, self._row_strength_vector(proposal_anchor_seed_assignment, row_count=row_count, reduce="sum"))
+        evidence = torch.maximum(evidence, self._row_strength_vector(task_owner_anchor_score, row_count=row_count))
+        evidence = torch.maximum(evidence, self._row_strength_vector(task_owner_point_priors, row_count=row_count, reduce="max"))
+        evidence = torch.maximum(evidence, self._row_strength_vector(proposal_priors, row_count=row_count, reduce="max") * 0.75)
+        evidence = torch.maximum(evidence, self._row_strength_vector(tracklet_priors, row_count=row_count, reduce="max") * 0.50)
+        evidence = torch.maximum(evidence, self._row_strength_vector(point_priors, row_count=row_count, reduce="max") * 0.35)
+        evidence = torch.maximum(evidence, self._row_strength_vector(tactile_priors, row_count=row_count, reduce="max") * 0.35)
+        score = torch.clamp(anchor_scores.to(device=self.device, dtype=self.dtype).reshape(-1)[:row_count], min=0.0)
+        if score.numel() < row_count:
+            score = fn.pad(score, (0, row_count - int(score.numel())), value=0.0)
+        conf = torch.clamp(anchor_confidence.to(device=self.device, dtype=self.dtype).reshape(-1)[:row_count], min=0.0, max=1.0)
+        if conf.numel() < row_count:
+            conf = fn.pad(conf, (0, row_count - int(conf.numel())), value=0.0)
+        if bool((score.max() > eps).item()):
+            evidence = torch.maximum(evidence, 0.15 * (score / torch.clamp(score.max(), min=eps)) * conf)
+
+        duplicate = self._slot_duplicate_risk(
+            visual_priors=visual_priors,
+            row_count=row_count,
+            point_priors=point_priors,
+            temporal_priors=temporal_priors,
+            pg_priors=pg_priors,
+            proposal_priors=proposal_priors,
+            anchor_x=anchor_x,
+            geometry_valid=geometry_valid,
+            object_candidate_duplicate_overlap=object_candidate_duplicate_overlap,
+        )
+        roles_t = roles.to(device=self.device, dtype=torch.long).reshape(-1)[:row_count]
+        query_types_t = query_types.to(device=self.device, dtype=torch.long).reshape(-1)[:row_count]
+        if roles_t.numel() < row_count:
+            roles_t = fn.pad(roles_t, (0, row_count - int(roles_t.numel())), value=1)
+        if query_types_t.numel() < row_count:
+            query_types_t = fn.pad(query_types_t, (0, row_count - int(query_types_t.numel())), value=0)
+        eligible = torch.zeros((row_count,), device=self.device, dtype=torch.bool)
+        for role in tuple(int(role) for role in getattr(self.config, "object_candidate_eligible_roles", (1, 2))):
+            if role == 0:
+                continue
+            eligible = eligible | (roles_t == int(role))
+        eligible = eligible & (query_types_t == 0)
+        # If no eligible pattern exists, avoid destroying legacy ablations.
+        if not bool(eligible.any().item()):
+            eligible = query_types_t == 0
+        evidence = torch.where(eligible, evidence, torch.zeros_like(evidence))
+        duplicate = torch.where(eligible, duplicate, torch.ones_like(duplicate))
+
+        smooth = min(max(float(getattr(self.config, "aqr_slot_quality_target_smoothing", 0.02)), 0.0), 0.49)
+        target_object = torch.clamp(evidence * (1.0 - duplicate), min=smooth, max=1.0 - smooth)
+        target_no_object = torch.clamp(1.0 - evidence, min=smooth, max=1.0 - smooth)
+        duplicate_threshold = min(max(float(getattr(self.config, "aqr_slot_quality_duplicate_threshold", 0.50)), 0.0), 1.0)
+        target_duplicate = torch.clamp(torch.maximum(duplicate, (duplicate >= duplicate_threshold).to(dtype=self.dtype)), min=smooth, max=1.0 - smooth)
+        deterministic_quality = torch.clamp(evidence * (1.0 - duplicate), min=0.0, max=1.0)
+
+        def _logit(x: torch.Tensor) -> torch.Tensor:
+            x = torch.clamp(x, min=eps, max=1.0 - eps)
+            return torch.log(x) - torch.log1p(-x)
+
+        base_logits = torch.stack(
+            [_logit(target_object.detach()), _logit(target_no_object.detach()), _logit(target_duplicate.detach())],
+            dim=-1,
+        )
+        logits = base_logits
+        if bool(getattr(self.config, "aqr_slot_quality_learned_enabled", True)) and self.aqr_slot_quality_head is not None:
+            scalar_features = torch.stack(
+                [
+                    torch.clamp(evidence, min=0.0, max=1.0),
+                    torch.clamp(duplicate, min=0.0, max=1.0),
+                    torch.clamp(score / torch.clamp(score.max(), min=eps), min=0.0, max=1.0)
+                    if bool((score.max() > eps).item())
+                    else torch.zeros_like(score),
+                    conf,
+                    eligible.to(dtype=self.dtype),
+                ],
+                dim=-1,
+            )
+            if modality_confidence.numel() > 0 and modality_confidence.shape[0] >= row_count:
+                scalar_features = torch.cat(
+                    [
+                        scalar_features,
+                        torch.clamp(modality_confidence.to(device=self.device, dtype=self.dtype)[:row_count], min=0.0, max=1.0),
+                    ],
+                    dim=-1,
+                )
+            head_input = torch.cat([anchor_tokens.to(device=self.device, dtype=self.dtype), scalar_features], dim=-1)
+            residual_scale = float(getattr(self.config, "aqr_slot_quality_learned_scale", 0.25))
+            logits = logits + (residual_scale * self.aqr_slot_quality_head(head_input))
+
+        object_quality = torch.sigmoid(logits[:, 0])
+        no_object_prob = torch.sigmoid(logits[:, 1])
+        duplicate_prob = torch.sigmoid(logits[:, 2])
+        floor = min(max(float(getattr(self.config, "aqr_slot_quality_floor", 0.05)), 0.0), 1.0)
+        active_weight = torch.clamp(object_quality * (1.0 - no_object_prob) * (1.0 - duplicate_prob), min=0.0, max=1.0)
+        active_weight = torch.where(eligible, torch.clamp(active_weight, min=floor, max=1.0), torch.zeros_like(active_weight))
+        context_scale = min(max(float(getattr(self.config, "aqr_slot_quality_context_scale", 0.25)), 0.0), 1.0)
+        context_weight = torch.clamp(context_scale * object_quality * (1.0 - duplicate_prob), min=0.0, max=1.0)
+        context_weight = torch.where(eligible, context_weight, torch.zeros_like(context_weight))
+        return PicfSlotQualityState(
+            object_quality=object_quality,
+            no_object_prob=no_object_prob,
+            duplicate_prob=duplicate_prob,
+            active_weight=active_weight,
+            context_weight=context_weight,
+            deterministic_object_quality=deterministic_quality.detach(),
+            target_object_quality=target_object.detach(),
+            target_no_object_prob=target_no_object.detach(),
+            target_duplicate_prob=target_duplicate.detach(),
+            logits=logits,
+            valid=torch.tensor(True, device=self.device),
+        )
+
     def _aqr_active_slot_mask(
         self,
         *,
@@ -2358,6 +2605,7 @@ class PicfFullCore(nn.Module):
         geometry_valid: torch.Tensor | None = None,
         anchor_scores: torch.Tensor,
         anchor_confidence: torch.Tensor,
+        slot_quality: PicfSlotQualityState | None = None,
     ) -> torch.Tensor:
         """Select distinct active anchors; redundant same-role anchors become dustbin candidates."""
 
@@ -2409,6 +2657,10 @@ class PicfFullCore(nn.Module):
         score = torch.clamp(anchor_scores.to(device=self.device, dtype=self.dtype), min=0.0)
         confidence = torch.clamp(anchor_confidence.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
         support_peak = priors.max(dim=-1).values
+        if slot_quality is not None and slot_quality.active_weight.numel() >= count:
+            quality = torch.clamp(slot_quality.active_weight.to(device=self.device, dtype=self.dtype)[:count], min=0.0, max=1.0)
+            score = score * quality
+            confidence = torch.maximum(confidence * quality, quality)
         # Deterministic tie-breaks matter here: when two same-role anchors are
         # near duplicates, keep the slightly more confident support owner and
         # demote the redundant candidate to dustbin.
@@ -2464,6 +2716,7 @@ class PicfFullCore(nn.Module):
         geometry_valid: torch.Tensor | None = None,
         anchor_scores: torch.Tensor,
         anchor_confidence: torch.Tensor,
+        slot_quality: PicfSlotQualityState | None = None,
     ) -> torch.Tensor:
         """Return action-visible graph weights for active/context/reserve anchors.
 
@@ -2486,6 +2739,12 @@ class PicfFullCore(nn.Module):
         active = torch.clamp(active.to(device=self.device, dtype=self.dtype).reshape(-1)[:count], min=0.0, max=1.0)
         if active.numel() < count:
             active = fn.pad(active, (0, count - int(active.numel())), value=0.0)
+        quality_active = torch.ones((count,), device=self.device, dtype=self.dtype)
+        quality_context = torch.ones((count,), device=self.device, dtype=self.dtype)
+        if slot_quality is not None and slot_quality.active_weight.numel() >= count:
+            quality_active = torch.clamp(slot_quality.active_weight.to(device=self.device, dtype=self.dtype)[:count], min=0.0, max=1.0)
+            quality_context = torch.clamp(slot_quality.context_weight.to(device=self.device, dtype=self.dtype)[:count], min=0.0, max=1.0)
+            active = active * quality_active
         if not bool(getattr(self.config, "aqr_context_slot_enabled", True)):
             return active
         priors = torch.clamp(
@@ -2546,7 +2805,7 @@ class PicfFullCore(nn.Module):
             )
             context_candidate = context_candidate & (max_to_active < duplicate_threshold)
         context_scale = min(max(float(getattr(self.config, "aqr_context_slot_weight", 0.15)), 0.0), 1.0)
-        context = context_candidate.to(dtype=self.dtype) * context_scale
+        context = context_candidate.to(dtype=self.dtype) * context_scale * quality_context
         return torch.clamp(torch.maximum(active, context), min=0.0, max=1.0)
 
     def _task_owner_query_rows(self, roles: torch.Tensor, query_types: torch.Tensor) -> torch.Tensor:
@@ -5340,6 +5599,32 @@ class PicfFullCore(nn.Module):
             anchor_x = posterior_priors @ previous.posterior.x.to(device=self.device, dtype=self.dtype)
             anchor_S = torch.eye(3, device=self.device, dtype=self.dtype)[None, :, :].expand(anchor_count, -1, -1).clone()
             geometry_valid = _row_has_mass(posterior_priors, eps=self.config.epsilon_a)
+        slot_quality = self._build_slot_quality_state(
+            anchor_tokens=anchor_tokens,
+            roles=roles,
+            query_types=query_types,
+            visual_priors=visual_priors,
+            point_priors=point_priors,
+            temporal_priors=vjepa_temporal_priors,
+            pg_priors=pg_priors,
+            tactile_priors=tactile_priors,
+            tracklet_priors=tracklet_priors,
+            proposal_priors=proposal_priors,
+            anchor_x=anchor_x,
+            geometry_valid=geometry_valid,
+            anchor_scores=anchor_scores,
+            anchor_confidence=anchor_conf,
+            modality_confidence=modality_conf,
+            object_candidate_assignment=object_candidate_assignment,
+            object_candidate_owner_assignment=object_candidate_owner_assignment,
+            object_candidate_owner_point_priors=object_candidate_owner_point_priors,
+            object_candidate_duplicate_overlap=object_candidate_duplicate_overlap,
+            object_candidate_row_strength=object_candidate_row_strength,
+            proposal_anchor_seed_strength=proposal_anchor_seed_strength,
+            proposal_anchor_seed_assignment=proposal_anchor_seed_assignment,
+            task_owner_anchor_score=task_owner_anchor_score,
+            task_owner_point_priors=task_owner_point_priors,
+        )
         anchor_active = self._aqr_active_slot_mask(
             roles=roles,
             visual_priors=visual_priors,
@@ -5351,6 +5636,7 @@ class PicfFullCore(nn.Module):
             geometry_valid=geometry_valid,
             anchor_scores=anchor_scores,
             anchor_confidence=anchor_conf,
+            slot_quality=slot_quality,
         )
         anchor_downstream_weight = self._aqr_downstream_slot_weights(
             roles=roles,
@@ -5364,6 +5650,7 @@ class PicfFullCore(nn.Module):
             geometry_valid=geometry_valid,
             anchor_scores=anchor_scores,
             anchor_confidence=anchor_conf,
+            slot_quality=slot_quality,
         )
         active_proposals = self._finalize_vcap_proposal_state(
             active_proposals,
@@ -5422,6 +5709,7 @@ class PicfFullCore(nn.Module):
             object_candidate_coverage=object_candidate_coverage,
             object_candidate_background=object_candidate_background,
             object_candidate_duplicate_overlap=object_candidate_duplicate_overlap,
+            slot_quality=slot_quality,
         )
 
     def _object_explanation_masks(
@@ -5548,6 +5836,8 @@ class PicfFullCore(nn.Module):
             quality = torch.ones((anchor_count,), device=self.device, dtype=self.dtype)
         if graph.anchor_downstream_weight is not None and graph.anchor_downstream_weight.numel() == anchor_count:
             quality = quality * torch.clamp(graph.anchor_downstream_weight.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+        if graph.slot_quality is not None and graph.slot_quality.active_weight.numel() == anchor_count:
+            quality = quality * torch.clamp(graph.slot_quality.active_weight.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
         if not bool((quality.sum() > self.config.epsilon_a).item()):
             score = torch.clamp(graph.anchor_scores.to(device=self.device, dtype=self.dtype).reshape(-1), min=0.0)
             if score.numel() == anchor_count and bool((score.max() > self.config.epsilon_a).item()):
@@ -10635,6 +10925,25 @@ class PicfFullCore(nn.Module):
                     debug["aqr_object_candidate_duplicate_overlap_max"] = float(
                         graph.object_candidate_duplicate_overlap.to(device=self.device, dtype=self.dtype).max().item()
                     )
+            if graph.slot_quality is not None and bool(graph.slot_quality.valid.item()):
+                sq = graph.slot_quality
+                object_quality = torch.clamp(sq.object_quality.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+                no_object = torch.clamp(sq.no_object_prob.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+                duplicate = torch.clamp(sq.duplicate_prob.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+                active_weight = torch.clamp(sq.active_weight.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+                context_weight = torch.clamp(sq.context_weight.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+                target_object = torch.clamp(sq.target_object_quality.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+                target_duplicate = torch.clamp(sq.target_duplicate_prob.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+                debug["aqr_slot_quality_object_mean"] = float(object_quality.mean().item())
+                debug["aqr_slot_quality_object_max"] = float(object_quality.max().item())
+                debug["aqr_slot_quality_no_object_mean"] = float(no_object.mean().item())
+                debug["aqr_slot_quality_duplicate_mean"] = float(duplicate.mean().item())
+                debug["aqr_slot_quality_duplicate_max"] = float(duplicate.max().item())
+                debug["aqr_slot_quality_active_weight_mean"] = float(active_weight.mean().item())
+                debug["aqr_slot_quality_active_weight_max"] = float(active_weight.max().item())
+                debug["aqr_slot_quality_context_weight_mean"] = float(context_weight.mean().item())
+                debug["aqr_slot_quality_target_object_mean"] = float(target_object.mean().item())
+                debug["aqr_slot_quality_target_duplicate_mean"] = float(target_duplicate.mean().item())
             if graph.task_owner_visual_prior is not None and graph.task_owner_visual_prior.numel() > 0:
                 owner_visual = _normalize_rows(
                     torch.clamp(graph.task_owner_visual_prior.to(device=self.device, dtype=self.dtype).reshape(1, -1), min=0.0),

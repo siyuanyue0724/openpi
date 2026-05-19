@@ -91,6 +91,7 @@ class PicfTransitionLossConfig:
     lambda_support_pred: float = 0.0
     lambda_binding_consistency: float = 0.0
     lambda_aqr_denoising: float = 0.0
+    lambda_slot_quality: float = 0.0
     aqr_denoising_active_object_only: bool = True
     aqr_denoising_confirmed_object_only: bool = True
     aqr_denoising_confirmation_threshold: float = 0.05
@@ -203,6 +204,7 @@ class PicfTransitionLossBreakdown:
     support_pred: torch.Tensor
     binding_consistency: torch.Tensor
     aqr_denoising: torch.Tensor
+    slot_quality: torch.Tensor
     vcap: torch.Tensor
     object_explanation: torch.Tensor
     object_explanation_feature: torch.Tensor
@@ -260,6 +262,7 @@ class PicfTransitionLossBreakdown:
             "support_pred": float(self.support_pred.item()),
             "binding_consistency": float(self.binding_consistency.item()),
             "aqr_denoising": float(self.aqr_denoising.item()),
+            "slot_quality": float(self.slot_quality.item()),
             "vcap": float(self.vcap.item()),
             "object_explanation": float(self.object_explanation.item()),
             "object_explanation_feature": float(self.object_explanation_feature.item()),
@@ -786,6 +789,45 @@ def _object_explanation_loss(
     return total, feature, point, contact, duplicate, background
 
 
+def _slot_quality_loss(
+    state: PicfCoreState,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Train the adaptive slot-quality head against measurement-derived targets.
+
+    The targets come from object-candidate/tracklet/point/contact evidence inside
+    `PicfSlotQualityState`.  They are weak measurement targets, not mask labels:
+    when no row has any evidence, the loss is zero so a missing sidecar does not
+    teach every slot to be empty.
+    """
+
+    graph = getattr(state, "anchor_prior_graph", None)
+    slot_quality = getattr(graph, "slot_quality", None) if graph is not None else None
+    if slot_quality is None or not bool(slot_quality.valid.item()) or slot_quality.logits.numel() == 0:
+        return _zero_like(reference)
+    logits = slot_quality.logits.to(device=reference.device, dtype=reference.dtype)
+    target_object = torch.clamp(slot_quality.target_object_quality.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
+    target_no_object = torch.clamp(slot_quality.target_no_object_prob.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
+    target_duplicate = torch.clamp(slot_quality.target_duplicate_prob.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
+    count = min(int(logits.shape[0]), int(target_object.numel()), int(target_no_object.numel()), int(target_duplicate.numel()))
+    if count <= 0:
+        return _zero_like(reference)
+    logits = logits[:count]
+    targets = torch.stack([target_object[:count], target_no_object[:count], target_duplicate[:count]], dim=-1)
+    evidence = torch.maximum(target_object[:count], target_duplicate[:count])
+    if not bool((evidence > eps).any().item()):
+        return _zero_like(reference)
+    row_weight = torch.clamp(evidence + (0.25 * (target_no_object[:count] > 0.5).to(dtype=reference.dtype)), min=0.0, max=1.0)
+    bce = fn.binary_cross_entropy_with_logits(logits, targets, reduction="none")
+    target_entropy = -(targets * torch.log(torch.clamp(targets, min=eps))) - (
+        (1.0 - targets) * torch.log(torch.clamp(1.0 - targets, min=eps))
+    )
+    loss = torch.relu(bce - target_entropy).mean(dim=-1)
+    return (loss * row_weight).sum() / torch.clamp(row_weight.sum(), min=eps)
+
+
 def make_action_only_transition_loss(
     *,
     reference: torch.Tensor,
@@ -859,6 +901,7 @@ def make_action_only_transition_loss(
         support_pred=zero,
         binding_consistency=zero,
         aqr_denoising=zero,
+        slot_quality=zero,
         vcap=zero,
         object_explanation=zero,
         object_explanation_feature=zero,
@@ -2827,6 +2870,11 @@ def compute_transition_loss(
         confirmed_object_only=bool(cfg.aqr_denoising_confirmed_object_only),
         confirmation_threshold=float(cfg.aqr_denoising_confirmation_threshold),
     )
+    slot_quality = _slot_quality_loss(
+        output_t.state,
+        reference=predictive.action,
+        eps=float(core.config.epsilon_a),
+    )
     vcap = _vcap_auxiliary_loss(
         output_t.state,
         cfg,
@@ -2851,6 +2899,7 @@ def compute_transition_loss(
         + (cfg.lambda_support_pred * support_pred)
         + (cfg.lambda_binding_consistency * binding_consistency)
         + (cfg.lambda_aqr_denoising * aqr_denoising)
+        + (cfg.lambda_slot_quality * slot_quality)
         + vcap
         + object_explanation
     )
@@ -2933,6 +2982,7 @@ def compute_transition_loss(
         support_pred=support_pred,
         binding_consistency=binding_consistency,
         aqr_denoising=aqr_denoising,
+        slot_quality=slot_quality,
         vcap=vcap,
         object_explanation=object_explanation,
         object_explanation_feature=object_explanation_feature,

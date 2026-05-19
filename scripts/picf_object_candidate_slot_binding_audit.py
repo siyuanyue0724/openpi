@@ -354,6 +354,41 @@ def run_audit() -> list[AuditResult]:
             "Remote launches must be able to enable and inspect owner transport explicitly.",
         )
     )
+    training_text = (repo_root / "src/openpi/picf/core/training.py").read_text(encoding="utf-8")
+    contracts_text = (repo_root / "src/openpi/picf/core/contracts.py").read_text(encoding="utf-8")
+    results.append(
+        AuditResult(
+            "slot_quality_state_is_first_class_graph_contract",
+            "class PicfSlotQualityState" in contracts_text
+            and "slot_quality: \"PicfSlotQualityState | None\"" in contracts_text
+            and "object_quality" in contracts_text
+            and "duplicate_prob" in contracts_text
+            and "target_no_object_prob" in contracts_text,
+            "Adaptive object/no-object/duplicate quality must be an explicit graph state, not an undocumented debug scalar.",
+        )
+    )
+    results.append(
+        AuditResult(
+            "slot_quality_runtime_gates_active_context_and_object_explanation",
+            "def _build_slot_quality_state" in pipeline_text
+            and "slot_quality=slot_quality" in pipeline_text
+            and "score = score * quality" in pipeline_text
+            and "context = context_candidate.to(dtype=self.dtype) * context_scale * quality_context" in pipeline_text
+            and "graph.slot_quality.active_weight" in pipeline_text,
+            "Slot quality must affect active selection, context visibility, and object-explanation quality without deleting dense typed memory.",
+        )
+    )
+    results.append(
+        AuditResult(
+            "slot_quality_loss_is_guarded_and_cli_exposed",
+            "lambda_slot_quality" in training_text
+            and "def _slot_quality_loss" in training_text
+            and "target_entropy" in training_text
+            and "--lambda-slot-quality" in train_text
+            and "lambda_slot_quality=float" in train_text,
+            "The learned selector needs an optional entropy-corrected weak loss; default remains off and launchers must expose it.",
+        )
+    )
     pre_reader_call = pipeline_text.find("q, round_point_bias = self._apply_proposal_anchor_seed_to_query_and_point_bias")
     point_reader_call = pipeline_text.find("q, point_weights = self.aqr_point_reader")
     results.append(

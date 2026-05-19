@@ -245,6 +245,19 @@ class PicfCoreConfig:
     aqr_context_slot_min_confidence: float = 0.05
     aqr_context_slot_min_score: float = 0.01
     aqr_context_slot_duplicate_overlap_threshold: float = 0.75
+    # Adaptive slot-quality selector.  This is the PICF-native analogue of
+    # adaptive slot-count / slot-quality methods: fixed query capacity remains
+    # available, but every row receives differentiable object/no-object/
+    # duplicate scores that gate downstream evidence.  The learned head is
+    # zero-initialized around deterministic sidecar/tracklet/contact evidence,
+    # so enabling it is behavior-preserving before training.
+    aqr_slot_quality_enabled: bool = True
+    aqr_slot_quality_learned_enabled: bool = True
+    aqr_slot_quality_learned_scale: float = 0.25
+    aqr_slot_quality_floor: float = 0.05
+    aqr_slot_quality_context_scale: float = 0.25
+    aqr_slot_quality_duplicate_threshold: float = 0.50
+    aqr_slot_quality_target_smoothing: float = 0.02
     # Posterior object-file ownership gate. The active-slot filter above
     # selects object owners from the fixed AQR query bank; this gate carries
     # that owner/reserve decision into posterior binding so inactive reserve

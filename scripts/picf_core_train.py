@@ -6929,6 +6929,7 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_support_pred=float(getattr(args, "lambda_support_pred", defaults.lambda_support_pred)),
         lambda_binding_consistency=float(getattr(args, "lambda_binding_consistency", defaults.lambda_binding_consistency)),
         lambda_aqr_denoising=float(getattr(args, "lambda_aqr_denoising", defaults.lambda_aqr_denoising)),
+        lambda_slot_quality=float(getattr(args, "lambda_slot_quality", defaults.lambda_slot_quality)),
         aqr_denoising_active_object_only=bool(
             getattr(args, "aqr_denoising_active_object_only", defaults.aqr_denoising_active_object_only)
         ),
@@ -8989,6 +8990,15 @@ def main() -> None:
     parser.add_argument("--lambda-support-pred", type=float, default=_LOSS_DEFAULTS.lambda_support_pred)
     parser.add_argument("--lambda-binding-consistency", type=float, default=_LOSS_DEFAULTS.lambda_binding_consistency)
     parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)
+    parser.add_argument(
+        "--lambda-slot-quality",
+        type=float,
+        default=_LOSS_DEFAULTS.lambda_slot_quality,
+        help=(
+            "Weak BCE loss for the adaptive object/no-object/duplicate slot-quality head. "
+            "Targets are derived from sidecar/tracklet/point/contact measurements and default to zero unless explicitly enabled."
+        ),
+    )
     parser.add_argument(
         "--aqr-denoising-active-object-only",
         action=argparse.BooleanOptionalAction,

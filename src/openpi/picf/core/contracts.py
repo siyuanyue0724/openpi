@@ -104,6 +104,7 @@ class PicfAnchorPriorGraphState:
     object_candidate_duplicate_overlap: torch.Tensor | None = None
     object_explanation_quality: torch.Tensor | None = None
     object_explanation_duplicate_overlap: torch.Tensor | None = None
+    slot_quality: "PicfSlotQualityState | None" = None
 
 
 @dataclasses.dataclass
@@ -128,6 +129,30 @@ class PicfActiveProposalState:
     unexplained_evidence: torch.Tensor | None = None
     count_cost: torch.Tensor | None = None
     continuity_cost: torch.Tensor | None = None
+
+
+@dataclasses.dataclass
+class PicfSlotQualityState:
+    """Adaptive object-file quality state for fixed-capacity PICF slots.
+
+    This is the PICF analogue of adaptive-slot quality/no-object selection:
+    fixed query capacity is retained for compatibility, but every row carries a
+    differentiable belief that it is a real object owner, duplicate capacity, or
+    no-object/background reserve. These values are measurement gates, not hard
+    ground-truth labels.
+    """
+
+    object_quality: torch.Tensor
+    no_object_prob: torch.Tensor
+    duplicate_prob: torch.Tensor
+    active_weight: torch.Tensor
+    context_weight: torch.Tensor
+    deterministic_object_quality: torch.Tensor
+    target_object_quality: torch.Tensor
+    target_no_object_prob: torch.Tensor
+    target_duplicate_prob: torch.Tensor
+    logits: torch.Tensor
+    valid: torch.Tensor
 
 
 @dataclasses.dataclass

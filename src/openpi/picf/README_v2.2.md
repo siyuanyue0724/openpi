@@ -111,6 +111,42 @@ memory, posterior authority, background residual, and sidecar-as-measurement
 contract.  The acceptance probe is the A7 1000-step anchor-only run
 `picf_a7_conditional_slot_initializer_anchor1000_20260519`.
 
+2026-05-19 latest slot-literature follow-through: use
+[`temp/audits_20260519/latest_slot_literature_gap_followthrough_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/latest_slot_literature_gap_followthrough_20260519.md)
+for the current strict comparison against MetaSlot/QASA/Object-Binding/SlotVLA/
+OA-WAM/visuo-tactile object-binding patterns and the active A7 conditional slot
+initializer probe.  The current conclusion is precise: PICF has implemented the
+belief-filter-compatible core mechanisms, but it has not yet reached full
+MetaSlot/QASA-style learned adaptive slot-quality/prototype maturity.  The
+remaining short-term gates are latest-artifact IsSameObject probing, sidecar/
+tracklet coverage validation, and overlay confirmation that the active role-1
+posterior file is actually on the task object before any 30000-step production
+run.
+
+2026-05-19 adaptive slot-quality selector update: the MetaSlot/QASA maturity gap
+above is now partially closed in the PICF-native way.  The code adds
+`PicfSlotQualityState` and a zero-initialized `aqr_slot_quality_head` that
+predict object-quality, no-object probability, and duplicate probability for
+each fixed-capacity AQR row.  Its deterministic target is derived from
+sidecar/object-candidate owner assignment, transported point masks, proposal
+seeds, task-owner point evidence, tracklets, tactile/contact and duplicate
+overlap.  It gates active/context/reserve routing and object-explanation
+measurements; it never deletes dense typed memory and never overwrites posterior
+truth.  The optional loss is `lambda_slot_quality`, default `0`, and is an
+entropy-corrected weak calibration loss so a zero-initialized head around the
+measurement target contributes near-zero loss.  This is the maintained
+QASA-like selector path; blind SAM remains archived and disabled.
+
+The maintained A7 validation launcher for this update is
+[`run_a7_slot_quality_selector_anchor1000_20260519.sh`](/home/siyuanyue/Documents/openpi/run_a7_slot_quality_selector_anchor1000_20260519.sh).
+It is intentionally an anchor/slot capability probe: PaliGemma, action losses,
+and pretrained perception are frozen or zeroed; object-only AQR rows consume
+contact/task sidecars and tracklet/proposal typed evidence; `lambda_slot_quality`
+is enabled at `0.10`; six overlay variants are dumped every 50 steps.  Passing
+this probe means the slot selector and posterior owner transport can bind to
+the inspected sidecar object without action/semantic help.  It is still not a
+30000-step behavior acceptance run.
+
 2026-05-19 object-pull-only capability probe: the current failure under review
 is not whether sidecar evidence reaches the model, but whether trainable AQR
 anchor rows can move their point-derived center onto the inspected task object
