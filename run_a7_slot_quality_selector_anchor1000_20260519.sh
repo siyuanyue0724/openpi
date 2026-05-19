@@ -46,6 +46,8 @@ cat /tmp/${EXP}_verify.json
   --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
   --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
   --semantic-checkpoint-path /root/openpi/checkpoints/foundation/pi05_base_pytorch \
+  --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json \
+  --prompt-state-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json \
   --training-strategy fsdp_full_shard \
   --optimizer-sharding none \
   --optimizer-checkpoint-mode model-only \
