@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-cd /root/openpi_posterior_vla_clean
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${SCRIPT_DIR}"
 
 EXP=${EXP:-picf_a7_conditional_slot_initializer_anchor1000_20260519}
 NUM_TRAIN_STEPS=${NUM_TRAIN_STEPS:-1000}
@@ -250,4 +251,3 @@ if [ -d "${RUN_DIR}/anchor_overlays" ]; then
   PYTHONPATH=src "${PYTHON_BIN}" scripts/picf_anchor_overlay_make_gifs.py \
     --overlay-dir "${RUN_DIR}/anchor_overlays" || true
 fi
-
