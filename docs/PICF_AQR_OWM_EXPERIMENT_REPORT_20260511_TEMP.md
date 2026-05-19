@@ -16865,3 +16865,75 @@ cause.  The next repair must split active object PV from global PV weak
 coverage and must restrict AQR denoising to confirmed object candidates, or
 keep denoising disabled for production.
 ```
+
+### 2026-05-19 run taxonomy correction
+
+The current A7 run:
+
+```text
+picf_a7_slot_quality_selector_anchor1000_20260519
+```
+
+is classified by `scripts/picf_run_contract_audit.py` as:
+
+```text
+anchor_capability_probe
+```
+
+because its command uses:
+
+```text
+--picf-trainable-scope anchor_only
+--lambda-action-pos 0
+--lambda-action-rot 0
+--lambda-action-gripper 0
+--lambda-slot-jepa 0
+--lambda-support-pred 0
+--lambda-binding-consistency 0
+--lambda-aqr-denoising 0
+--lambda-anchor-object-pull 1.0
+--lambda-slot-quality 0.10
+```
+
+This run is valid, but narrow.  It answers:
+
+```text
+Can object anchors / posterior owners localize to inspected contact/task
+sidecar evidence without action or PaliGemma pressure?
+```
+
+It does not answer:
+
+```text
+Does the whole slot/router/posterior/OEML stack train cleanly when PaliGemma
+and the action head are frozen?
+```
+
+That broader frozen-policy validation must instead use:
+
+```text
+--picf-trainable-scope all
+--perception-finetune-mode frozen
+manual encoder flags instead of --use-foundation-backbones
+no --semantic-trainable
+--lambda-action-pos 0
+--lambda-action-rot 0
+--lambda-action-gripper 0
+--picf-action-prefix-stopgrad
+sidecar/contact proposals enabled
+blind SAM disabled
+```
+
+Reason:
+
+```text
+--use-foundation-backbones is a convenience profile that flips
+semantic_trainable=True.  That is correct for formal co-training, but wrong for
+the frozen-PaliGemma slot-comprehensive validation.
+```
+
+The run taxonomy and latest-slot deployment decision are recorded in:
+
+```text
+temp/audits_20260519/run_taxonomy_latest_slot_deployment_20260519.md
+```

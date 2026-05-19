@@ -26,6 +26,19 @@ under `scripts/archive/` and
 `proposal_*` sidecar schema only for inspected contact/task/tracklet-aware
 sources.
 
+2026-05-19 run taxonomy / latest-slot deployment update: use
+[`temp/audits_20260519/run_taxonomy_latest_slot_deployment_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/run_taxonomy_latest_slot_deployment_20260519.md)
+before interpreting any A7/A5 run. The active
+`picf_a7_slot_quality_selector_anchor1000_20260519` command is an
+`anchor_capability_probe` because it uses `--picf-trainable-scope anchor_only`
+and zero action/PaliGemma/predictive losses. It is valid for testing whether
+object anchors and posterior owners can move to inspected contact/task sidecar
+evidence, but it is not the broader frozen-policy validation. The broader
+validation must use `--picf-trainable-scope all`, frozen perception,
+non-trainable PaliGemma, zero action losses, and PICF slot/router/posterior/OEML
+modules trainable. The read-only classifier is
+[`scripts/picf_run_contract_audit.py`](/home/siyuanyue/Documents/openpi/scripts/picf_run_contract_audit.py).
+
 2026-05-19 posterior continuity metric update: use
 [`temp/audits_20260519/posterior_file_continuity_metric_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/posterior_file_continuity_metric_followthrough.md)
 for the current object-file continuity audit. The important correction is that

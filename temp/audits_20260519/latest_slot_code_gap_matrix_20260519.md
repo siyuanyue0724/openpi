@@ -6,6 +6,12 @@ Scope: strict comparison between the current PICF object-slot path and the
 newer slot/object-binding/visuo-tactile papers and local code snapshots under
 `temp/paper_code_20260518` and `temp/external_repos`.
 
+Run-contract companion:
+
+```text
+temp/audits_20260519/run_taxonomy_latest_slot_deployment_20260519.md
+```
+
 This document is deliberately operational: every paper mechanism is classified
 as implemented, deployed in a PICF-native form, rejected for a concrete
 mathematical reason, or pending because it requires data coverage / behavior
