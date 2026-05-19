@@ -354,6 +354,29 @@ def run_audit() -> list[AuditResult]:
             "Remote launches must be able to enable and inspect owner transport explicitly.",
         )
     )
+    pre_reader_call = pipeline_text.find("q, round_point_bias = self._apply_proposal_anchor_seed_to_query_and_point_bias")
+    point_reader_call = pipeline_text.find("q, point_weights = self.aqr_point_reader")
+    results.append(
+        AuditResult(
+            "proposal_anchor_seed_conditions_point_reader_before_attention",
+            "proposal_anchor_seed_pre_reader_enabled: bool = True" in config_text
+            and "--proposal-anchor-seed-pre-reader-enabled" in train_text
+            and "proposal_anchor_seed_pre_reader_enabled=bool" in train_text
+            and "def _apply_proposal_anchor_seed_to_query_and_point_bias" in pipeline_text
+            and 0 <= pre_reader_call < point_reader_call,
+            "Inspected proposal/mask references must condition the query and point bias before dense point attention, not only after a wrong point read.",
+        )
+    )
+    results.append(
+        AuditResult(
+            "proposal_seed_defaults_are_active_when_explicitly_enabled",
+            "proposal_anchor_seed_weight: float = 0.85" in config_text
+            and "proposal_anchor_seed_token_weight: float = 0.35" in config_text
+            and "object_candidate_point_mix: float = 0.80" in config_text
+            and "object_candidate_owner_point_mix: float = 1.0" in config_text,
+            "When an inspected sidecar/proposal path is explicitly enabled, the default seed/owner transport weights should be nonzero enough to test object localization.",
+        )
+    )
     results.append(
         AuditResult(
             "config_exposes_object_owner_tactile_and_role_layout",

@@ -299,9 +299,17 @@ class PicfCoreConfig:
     # correction. Dense typed memory is still read normally; this does not prune
     # V-JEPA/point/proposal tokens or turn sidecars into hard labels.
     proposal_anchor_seed_enabled: bool = False
+    # When sidecar/contact proposals are explicitly enabled, their inspected
+    # task-owner masks should initialize the object query before point reread,
+    # not only correct geometry after AQR has already read the scene. This is
+    # the PICF-native equivalent of SAVi mask/box conditioning and
+    # Deformable-DETR/DINO reference-query initialization: proposal evidence is
+    # still soft, typed, and posterior-gated, but the query is given the right
+    # object-conditioned coordinate system before it competes for dense tokens.
+    proposal_anchor_seed_pre_reader_enabled: bool = True
     proposal_anchor_seed_rows: int = 2
-    proposal_anchor_seed_weight: float = 0.0
-    proposal_anchor_seed_token_weight: float = 0.0
+    proposal_anchor_seed_weight: float = 0.85
+    proposal_anchor_seed_token_weight: float = 0.35
     proposal_anchor_seed_score_floor: float = 0.05
     proposal_anchor_seed_point_topk: int = 128
     proposal_anchor_seed_point_power: float = 1.5
@@ -326,7 +334,7 @@ class PicfCoreConfig:
     object_candidate_seed_weight: float = 1.25
     object_candidate_task_owner_weight: float = 0.50
     object_candidate_anchor_score_weight: float = 1.0
-    object_candidate_point_mix: float = 0.50
+    object_candidate_point_mix: float = 0.80
     object_candidate_proposal_mix: float = 0.35
     object_candidate_min_shape_quality: float = 0.01
     # Owner transport is the missing object-file leg: after a sidecar candidate
@@ -336,7 +344,7 @@ class PicfCoreConfig:
     object_candidate_owner_transport_enabled: bool = True
     object_candidate_owner_roles: tuple[int, ...] = (1,)
     object_candidate_owner_min_share: float = 0.65
-    object_candidate_owner_point_mix: float = 0.85
+    object_candidate_owner_point_mix: float = 1.0
     # Object Explanation Measurement Layer (OEML). This is the PICF-native
     # slot/OCL invariant: every dense typed evidence token is explained by
     # competing object anchors or a background/no-object residual before the

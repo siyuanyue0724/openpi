@@ -6163,6 +6163,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         proposal_anchor_seed_enabled=bool(
             _arg_or_default("proposal_anchor_seed_enabled", _SPEC_DEFAULTS.proposal_anchor_seed_enabled)
         ),
+        proposal_anchor_seed_pre_reader_enabled=bool(
+            _arg_or_default(
+                "proposal_anchor_seed_pre_reader_enabled",
+                _SPEC_DEFAULTS.proposal_anchor_seed_pre_reader_enabled,
+            )
+        ),
         proposal_anchor_seed_rows=int(
             _arg_or_default("proposal_anchor_seed_rows", _SPEC_DEFAULTS.proposal_anchor_seed_rows)
         ),
@@ -8224,8 +8230,15 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "proposal_age_decay_steps", _SPEC_DEFAULTS.proposal_age_decay_steps)),
             )
             logging.info(
-                "Proposal reference-anchor seed contract: enabled=%s rows=%s weight=%s token_weight=%s score_floor=%s point_topk=%s point_power=%s; sidecar proposals seed physical measurement rows but do not bypass AQR/posterior.",
+                "Proposal reference-anchor seed contract: enabled=%s pre_reader=%s rows=%s weight=%s token_weight=%s score_floor=%s point_topk=%s point_power=%s; sidecar proposals condition physical measurement rows before point reread but do not bypass AQR/posterior.",
                 bool(getattr(args, "proposal_anchor_seed_enabled", _SPEC_DEFAULTS.proposal_anchor_seed_enabled)),
+                bool(
+                    getattr(
+                        args,
+                        "proposal_anchor_seed_pre_reader_enabled",
+                        _SPEC_DEFAULTS.proposal_anchor_seed_pre_reader_enabled,
+                    )
+                ),
                 int(getattr(args, "proposal_anchor_seed_rows", _SPEC_DEFAULTS.proposal_anchor_seed_rows)),
                 float(getattr(args, "proposal_anchor_seed_weight", _SPEC_DEFAULTS.proposal_anchor_seed_weight)),
                 float(getattr(args, "proposal_anchor_seed_token_weight", _SPEC_DEFAULTS.proposal_anchor_seed_token_weight)),
@@ -9574,6 +9587,15 @@ def main() -> None:
         ),
     )
     parser.add_argument("--proposal-anchor-seed-rows", type=int, default=_SPEC_DEFAULTS.proposal_anchor_seed_rows)
+    parser.add_argument(
+        "--proposal-anchor-seed-pre-reader-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.proposal_anchor_seed_pre_reader_enabled,
+        help=(
+            "Apply accepted proposal/mask seed priors before the point reader so object slots are "
+            "conditioned like modern object-centric initializers instead of being pulled back only after dense attention."
+        ),
+    )
     parser.add_argument("--proposal-anchor-seed-weight", type=float, default=_SPEC_DEFAULTS.proposal_anchor_seed_weight)
     parser.add_argument("--proposal-anchor-seed-token-weight", type=float, default=_SPEC_DEFAULTS.proposal_anchor_seed_token_weight)
     parser.add_argument("--proposal-anchor-seed-score-floor", type=float, default=_SPEC_DEFAULTS.proposal_anchor_seed_score_floor)

@@ -99,6 +99,18 @@ adaptive slot-quality/prototype selector and still needs latest-artifact
 IsSameObject plus full sidecar/tracklet coverage validation before claiming
 mature object-slot parity.
 
+2026-05-19 conditional object-slot initializer update: use
+[`temp/audits_20260519/conditional_object_slot_initializer_full_deployment_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/conditional_object_slot_initializer_full_deployment_20260519.md)
+for the current paper-aligned repair to the "orange object anchor does not
+move onto the sidecar/mask object" failure.  The fix is not a new late loss:
+accepted contact/task sidecar candidates now condition role-eligible object
+queries before dense point attention via a bounded proposal-token interpolation
+and point-reader logit bias.  This follows the MetaSlot/QASA/SAVi/DINO-style
+object-centric initializer principle while preserving PICF's dense typed
+memory, posterior authority, background residual, and sidecar-as-measurement
+contract.  The acceptance probe is the A7 1000-step anchor-only run
+`picf_a7_conditional_slot_initializer_anchor1000_20260519`.
+
 2026-05-19 object-pull-only capability probe: the current failure under review
 is not whether sidecar evidence reaches the model, but whether trainable AQR
 anchor rows can move their point-derived center onto the inspected task object

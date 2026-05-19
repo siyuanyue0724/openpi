@@ -3048,6 +3048,78 @@ class PicfFullCore(nn.Module):
         strength.index_copy_(0, selected_rows, torch.clamp(values / torch.clamp(values.max(), min=self.config.epsilon_a), min=0.0, max=1.0))
         return seed_priors, assignment, strength
 
+    def _apply_proposal_anchor_seed_to_query_and_point_bias(
+        self,
+        *,
+        q: torch.Tensor,
+        round_point_bias: torch.Tensor | None,
+        proposal_anchor_seed_priors: torch.Tensor | None,
+        proposal_anchor_seed_assignment: torch.Tensor | None,
+        proposal_anchor_seed_strength: torch.Tensor | None,
+        token_field: PicfTokenFieldState,
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Condition object queries on accepted proposal/mask references.
+
+        Recent object-centric video slot models do not wait for a randomly
+        initialized slot to discover a conditioned object from scratch: masks or
+        boxes initialize the slot before iterative attention.  This helper keeps
+        the PICF contract intact by applying only a soft attention bias and a
+        bounded query-token interpolation; dense point/proposal/V-JEPA memories
+        remain available and posterior update remains authoritative.
+        """
+
+        if (
+            proposal_anchor_seed_priors is None
+            or proposal_anchor_seed_priors.numel() == 0
+            or proposal_anchor_seed_strength is None
+            or proposal_anchor_seed_strength.numel() == 0
+        ):
+            return q, round_point_bias
+        seed_priors = torch.clamp(proposal_anchor_seed_priors.to(device=self.device, dtype=self.dtype), min=0.0)
+        if seed_priors.ndim != 2 or seed_priors.shape[0] != q.shape[1]:
+            return q, round_point_bias
+        seed_rows = _row_has_mass(seed_priors, eps=self.config.epsilon_a)
+        if not bool(seed_rows.any().item()):
+            return q, round_point_bias
+        strength = torch.clamp(
+            proposal_anchor_seed_strength.to(device=self.device, dtype=self.dtype).reshape(-1),
+            min=0.0,
+            max=1.0,
+        )
+        if strength.numel() < seed_priors.shape[0]:
+            strength = fn.pad(strength, (0, seed_priors.shape[0] - int(strength.numel())), value=0.0)
+        strength = strength[: seed_priors.shape[0]]
+
+        point_weight = min(max(float(getattr(self.config, "proposal_anchor_seed_weight", 0.0)), 0.0), 1.0)
+        if point_weight > 0.0:
+            seed_bias = torch.log(torch.clamp(seed_priors, min=self.config.epsilon_a))
+            seed_bias = seed_bias - seed_bias.mean(dim=-1, keepdim=True)
+            seed_bias = seed_bias * (point_weight * strength[:, None])
+            seed_bias = torch.where(seed_rows[:, None], seed_bias, torch.zeros_like(seed_bias))
+            round_point_bias = seed_bias if round_point_bias is None else (round_point_bias + seed_bias)
+
+        token_weight = min(max(float(getattr(self.config, "proposal_anchor_seed_token_weight", 0.0)), 0.0), 1.0)
+        if (
+            token_weight > 0.0
+            and proposal_anchor_seed_assignment is not None
+            and proposal_anchor_seed_assignment.numel() > 0
+            and token_field.proposal is not None
+            and token_field.proposal.tokens.numel() > 0
+            and proposal_anchor_seed_assignment.shape[0] == q.shape[1]
+            and proposal_anchor_seed_assignment.shape[-1] == token_field.proposal.tokens.shape[0]
+        ):
+            assignment = torch.clamp(proposal_anchor_seed_assignment.to(device=self.device, dtype=self.dtype), min=0.0)
+            seed_tokens = assignment @ token_field.proposal.tokens.to(device=self.device, dtype=self.dtype)
+            q_seeded = q[0].clone()
+            row_mix = (token_weight * strength)[:, None]
+            q_seeded = torch.where(
+                seed_rows[:, None],
+                q_seeded + (row_mix * (seed_tokens - q_seeded)),
+                q_seeded,
+            )
+            q = q_seeded[None, :, :]
+        return q, round_point_bias
+
     def _proposal_object_candidate_assignment(
         self,
         *,
@@ -4815,6 +4887,32 @@ class PicfFullCore(nn.Module):
                     owner_point_score = self._proposal_scores_from_visual_prior(token_field, task_owner_visual_prior)
                     if owner_point_score is not None:
                         task_owner_proposal_score = owner_point_score
+                        if (
+                            bool(getattr(self.config, "proposal_anchor_seed_pre_reader_enabled", True))
+                            and point_count > 0
+                        ):
+                            proposal_anchor_seed = self._proposal_anchor_seed_transport(
+                                task_owner_proposal_score=owner_point_score,
+                                roles=roles,
+                                query_types=query_types,
+                                token_field=token_field,
+                                row_count=anchor_count,
+                                point_count=point_count,
+                            )
+                            if proposal_anchor_seed is not None:
+                                (
+                                    proposal_anchor_seed_priors,
+                                    proposal_anchor_seed_assignment,
+                                    proposal_anchor_seed_strength,
+                                ) = proposal_anchor_seed
+                                q, round_point_bias = self._apply_proposal_anchor_seed_to_query_and_point_bias(
+                                    q=q,
+                                    round_point_bias=round_point_bias,
+                                    proposal_anchor_seed_priors=proposal_anchor_seed_priors,
+                                    proposal_anchor_seed_assignment=proposal_anchor_seed_assignment,
+                                    proposal_anchor_seed_strength=proposal_anchor_seed_strength,
+                                    token_field=token_field,
+                                )
                         owner_point_bias = self._task_owner_proposal_point_bias(
                             task_owner_proposal_score=owner_point_score,
                             roles=roles,
@@ -5056,7 +5154,7 @@ class PicfFullCore(nn.Module):
                     else:
                         point_priors = task_owner_point_priors
 
-        if task_owner_proposal_score is not None and point_count > 0:
+        if task_owner_proposal_score is not None and point_count > 0 and proposal_anchor_seed_priors is None:
             proposal_anchor_seed = self._proposal_anchor_seed_transport(
                 task_owner_proposal_score=task_owner_proposal_score,
                 roles=roles,
