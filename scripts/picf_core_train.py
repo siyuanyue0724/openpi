@@ -3867,6 +3867,12 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "posterior_owner_transport_confidence_max",
     "posterior_owner_transport_dist_to_standard_mean",
     "posterior_owner_transport_dist_to_standard_max",
+    "posterior_owner_transport_active_count",
+    "posterior_owner_transport_active_confidence_mean",
+    "posterior_owner_transport_active_confidence_max",
+    "posterior_owner_transport_active_dist_mean",
+    "posterior_owner_transport_active_dist_min",
+    "posterior_owner_transport_active_dist_max",
     "posterior_owner_transport_applied_fraction",
     "posterior_owner_active_gate_enabled",
     "posterior_owner_active_score_mean",
@@ -3956,6 +3962,7 @@ class _MetricAccumulator:
     loss_support_pred: float = 0.0
     loss_binding_consistency: float = 0.0
     loss_aqr_denoising: float = 0.0
+    loss_slot_quality: float = 0.0
     loss_vcap: float = 0.0
     loss_object_explanation: float = 0.0
     loss_object_explanation_feature: float = 0.0
@@ -4024,6 +4031,7 @@ class _MetricAccumulator:
         self.loss_support_pred += float(_loss_component_or_zero(losses, "support_pred").item())
         self.loss_binding_consistency += float(_loss_component_or_zero(losses, "binding_consistency").item())
         self.loss_aqr_denoising += float(_loss_component_or_zero(losses, "aqr_denoising").item())
+        self.loss_slot_quality += float(_loss_component_or_zero(losses, "slot_quality").item())
         self.loss_vcap += float(_loss_component_or_zero(losses, "vcap").item())
         self.loss_object_explanation += float(_loss_component_or_zero(losses, "object_explanation").item())
         self.loss_object_explanation_feature += float(_loss_component_or_zero(losses, "object_explanation_feature").item())
@@ -4084,6 +4092,7 @@ class _MetricAccumulator:
         self.loss_support_pred += float(outputs.get("loss_support_pred", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_binding_consistency += float(outputs.get("loss_binding_consistency", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_aqr_denoising += float(outputs.get("loss_aqr_denoising", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_slot_quality += float(outputs.get("loss_slot_quality", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_vcap += float(outputs.get("loss_vcap", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_object_explanation += float(outputs.get("loss_object_explanation", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_object_explanation_feature += float(outputs.get("loss_object_explanation_feature", outputs["loss_pt"] * 0.0).detach().item())
@@ -4150,6 +4159,7 @@ class _MetricAccumulator:
             "loss_support_pred": self.loss_support_pred / denom,
             "loss_binding_consistency": self.loss_binding_consistency / denom,
             "loss_aqr_denoising": self.loss_aqr_denoising / denom,
+            "loss_slot_quality": self.loss_slot_quality / denom,
             "loss_vcap": self.loss_vcap / denom,
             "loss_object_explanation": self.loss_object_explanation / denom,
             "loss_object_explanation_feature": self.loss_object_explanation_feature / denom,
@@ -4257,6 +4267,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
             "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
             "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
+            "loss_slot_quality": _loss_component_or_zero(losses, "slot_quality"),
             "loss_vcap": _loss_component_or_zero(losses, "vcap"),
             "loss_object_explanation": _loss_component_or_zero(losses, "object_explanation"),
             "loss_object_explanation_feature": _loss_component_or_zero(losses, "object_explanation_feature"),
@@ -4384,6 +4395,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
             "loss_aqr_denoising": metrics["loss_aqr_denoising"] / denom,
+            "loss_slot_quality": metrics["loss_slot_quality"] / denom,
             "loss_vcap": metrics["loss_vcap"] / denom,
             "loss_object_explanation": metrics["loss_object_explanation"] / denom,
             "loss_object_explanation_feature": metrics["loss_object_explanation_feature"] / denom,
@@ -4631,6 +4643,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
                     "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
+                    "loss_slot_quality": _loss_component_or_zero(losses, "slot_quality"),
                     "loss_vcap": _loss_component_or_zero(losses, "vcap"),
                     "loss_object_explanation": _loss_component_or_zero(losses, "object_explanation"),
                     "loss_object_explanation_feature": _loss_component_or_zero(losses, "object_explanation_feature"),
@@ -4696,6 +4709,9 @@ class _PicfWindowTrainer(torch.nn.Module):
                 )
                 metrics["loss_aqr_denoising"] = metrics["loss_aqr_denoising"] + _loss_component_or_zero(
                     losses, "aqr_denoising"
+                )
+                metrics["loss_slot_quality"] = metrics["loss_slot_quality"] + _loss_component_or_zero(
+                    losses, "slot_quality"
                 )
                 metrics["loss_vcap"] = metrics["loss_vcap"] + _loss_component_or_zero(losses, "vcap")
                 metrics["loss_object_explanation"] = metrics["loss_object_explanation"] + _loss_component_or_zero(
@@ -4794,6 +4810,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
                     "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
+                    "loss_slot_quality": _loss_component_or_zero(losses, "slot_quality"),
                     "loss_vcap": _loss_component_or_zero(losses, "vcap"),
                     "loss_object_explanation": _loss_component_or_zero(losses, "object_explanation"),
                     "loss_object_explanation_feature": _loss_component_or_zero(losses, "object_explanation_feature"),
@@ -4856,6 +4873,9 @@ class _PicfWindowTrainer(torch.nn.Module):
                 )
                 metrics["loss_aqr_denoising"] = metrics["loss_aqr_denoising"] + _loss_component_or_zero(
                     losses, "aqr_denoising"
+                )
+                metrics["loss_slot_quality"] = metrics["loss_slot_quality"] + _loss_component_or_zero(
+                    losses, "slot_quality"
                 )
                 metrics["loss_vcap"] = metrics["loss_vcap"] + _loss_component_or_zero(losses, "vcap")
                 metrics["loss_object_explanation"] = metrics["loss_object_explanation"] + _loss_component_or_zero(
@@ -4932,6 +4952,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
             "loss_aqr_denoising": metrics["loss_aqr_denoising"] / denom,
+            "loss_slot_quality": metrics["loss_slot_quality"] / denom,
             "loss_vcap": metrics["loss_vcap"] / denom,
             "loss_object_explanation": metrics["loss_object_explanation"] / denom,
             "loss_object_explanation_feature": metrics["loss_object_explanation_feature"] / denom,
@@ -5001,6 +5022,7 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_support_pred",
     "loss_binding_consistency",
     "loss_aqr_denoising",
+    "loss_slot_quality",
     "loss_vcap",
     "loss_object_explanation",
     "loss_object_explanation_feature",

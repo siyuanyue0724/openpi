@@ -11481,6 +11481,35 @@ class PicfFullCore(nn.Module):
             _debug_tensor_stats("posterior_owner_transport_mass", observed.posterior.owner_transport_mass)
             _debug_tensor_stats("posterior_owner_transport_confidence", observed.posterior.owner_transport_confidence)
             _debug_tensor_stats("posterior_owner_transport_dist_to_standard", observed.posterior.owner_transport_dist_to_standard)
+            if (
+                observed.posterior.owner_transport_confidence is not None
+                and observed.posterior.owner_transport_confidence.numel() > 0
+                and observed.posterior.owner_transport_dist_to_standard is not None
+                and observed.posterior.owner_transport_dist_to_standard.numel() > 0
+            ):
+                owner_conf = torch.clamp(
+                    observed.posterior.owner_transport_confidence.detach().to(device=self.device, dtype=self.dtype).reshape(-1),
+                    min=0.0,
+                    max=1.0,
+                )
+                owner_dist = observed.posterior.owner_transport_dist_to_standard.detach().to(
+                    device=self.device,
+                    dtype=self.dtype,
+                ).reshape(-1)
+                count = min(int(owner_conf.numel()), int(owner_dist.numel()))
+                if count > 0:
+                    owner_conf = owner_conf[:count]
+                    owner_dist = owner_dist[:count]
+                    active_owner = owner_conf > self.config.epsilon_a
+                    if bool(active_owner.any().item()):
+                        active_dist = owner_dist[active_owner]
+                        active_conf = owner_conf[active_owner]
+                        debug["posterior_owner_transport_active_count"] = float(active_owner.to(dtype=self.dtype).sum().item())
+                        debug["posterior_owner_transport_active_confidence_mean"] = float(active_conf.mean().item())
+                        debug["posterior_owner_transport_active_confidence_max"] = float(active_conf.max().item())
+                        debug["posterior_owner_transport_active_dist_mean"] = float(active_dist.mean().item())
+                        debug["posterior_owner_transport_active_dist_min"] = float(active_dist.min().item())
+                        debug["posterior_owner_transport_active_dist_max"] = float(active_dist.max().item())
             if observed.posterior.owner_transport_applied_fraction is not None:
                 debug["posterior_owner_transport_applied_fraction"] = float(
                     observed.posterior.owner_transport_applied_fraction.to(device=self.device, dtype=self.dtype).reshape(()).item()

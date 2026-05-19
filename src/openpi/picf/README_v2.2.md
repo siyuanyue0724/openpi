@@ -94,10 +94,21 @@ and local paper-code repositories. The strict conclusion is deliberately not
 "all solved": PICF has absorbed the core belief-state-compatible principles
 (typed evidence competition, object/background residual, same-object binding
 subspace, posterior file competition, tactile-to-object owner routing, and
-precision owner transport), but it still lacks a MetaSlot/QASA-level learned
-adaptive slot-quality/prototype selector and still needs latest-artifact
-IsSameObject plus full sidecar/tracklet coverage validation before claiming
-mature object-slot parity.
+precision owner transport).  The later adaptive slot-quality update below
+partially closes the QASA-style selector gap, but PICF still does not copy a
+MetaSlot visual VQ codebook into posterior state and still needs
+latest-artifact IsSameObject plus full sidecar/tracklet coverage validation
+before claiming mature object-slot parity.
+
+2026-05-19 paper-code gap matrix: use
+[`temp/audits_20260519/latest_slot_code_gap_matrix_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/latest_slot_code_gap_matrix_20260519.md)
+for the current line-by-line comparison against local MetaSlot, AdaSlot/OCL,
+SlotContrast, SlotLifter, QASA-style selection, Object-Binding, SlotVLA,
+OA-WAM, and OmniVTA patterns.  Its strict conclusion is that the remaining
+short-term gate is behavior closure from accepted sidecar/contact object
+candidates into persistent posterior owner files; it is not a license to
+revive blind SAM or dump an image-reconstruction slot decoder into the PI0.5
+action path.
 
 2026-05-19 conditional object-slot initializer update: use
 [`temp/audits_20260519/conditional_object_slot_initializer_full_deployment_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/conditional_object_slot_initializer_full_deployment_20260519.md)
@@ -146,6 +157,25 @@ is enabled at `0.10`; six overlay variants are dumped every 50 steps.  Passing
 this probe means the slot selector and posterior owner transport can bind to
 the inspected sidecar object without action/semantic help.  It is still not a
 30000-step behavior acceptance run.
+
+2026-05-19 logging fix for the selector probe: `loss_slot_quality` is now part
+of the trainer metric aggregation and checkpointed window output contract.  The
+selector loss already affected gradients before this fix; the bug was
+diagnostic visibility.  A run started before this commit can still answer the
+posterior-closure question with overlays and debug metrics, but a fresh run is
+required to inspect the selector loss curve directly.
+
+2026-05-19 active-owner metric fix: `posterior_owner_transport_dist_to_standard`
+and its mean are not sufficient acceptance metrics because inactive posterior
+files are intentionally kept as reserve/background belief files.  Use
+`posterior_owner_transport_active_dist_mean`,
+`posterior_owner_transport_active_confidence_mean`, and
+`posterior_owner_transport_active_count` when checking whether the accepted
+task/contact object actually reached the live posterior owner.  In the A7
+slot-quality probe, step 200 showed the active posterior owner on the inspected
+sidecar mask while the all-file distance mean still looked bad; this is a
+diagnostic false negative, not evidence that the graph-to-posterior closure is
+absent.
 
 2026-05-19 object-pull-only capability probe: the current failure under review
 is not whether sidecar evidence reaches the model, but whether trainable AQR

@@ -136,14 +136,23 @@ PICF gap:
 ```text
 PICF does not have:
   global VQ prototype codebook
-  learned slot-quality selector
   explicit aggregate-and-deduplicate module
   learned termination/selection objective for object files
 ```
 
-This is a real maturity gap.  It does not mean PICF is wrong; it means PICF's
-current active/reserve mechanism is a belief-filter analogue, not the full
-MetaSlot/QASA solution.
+2026-05-19 update:
+
+```text
+The learned selector part is now partially deployed as PicfSlotQualityState and
+aqr_slot_quality_head.  It is QASA-like in function, but deliberately remains
+measurement-derived and weakly calibrated rather than a reconstruction-head
+selector.
+```
+
+The remaining real maturity gap is the MetaSlot-style global prototype /
+aggregate-deduplicate mechanism.  It should be introduced only as a birth /
+proposal initializer if future evidence shows fixed-capacity births are still
+the bottleneck.  It should not replace persistent posterior files.
 
 ### 1.4 Object binding is pairwise/quadratic and must be probed
 
@@ -272,7 +281,7 @@ which is appropriate for CALVIN but weaker than dedicated tactile-world training
 |---|---|---|---|
 | Slot attention competition | Query-axis softmax, recurrent update, token-normalized slot updates | AQR modality readers plus same-role competition | Partial |
 | Object/background explanation | Object masks plus background/no-object residual | OEML masks and dustbin exist | Partial; losses guarded |
-| Adaptive cardinality | VQ prototypes / slot quality / learned active subset | Active/reserve gates and file caps | Partial; no codebook/quality selector |
+| Adaptive cardinality | VQ prototypes / slot quality / learned active subset | Active/reserve gates, file caps, PicfSlotQualityState | Partial; no VQ prototype codebook |
 | Duplicate prevention | Dedup by codebook, mask IoU, slot quality | support/geometry duplicate demotion | Partial |
 | Temporal identity | Memory table, stale counter, slot contrast, tracking annotations | posterior files, binding signature memory, optional tracklets | Partial; tracklet coverage needed |
 | Object identity | persistent address + content, address-only routing in OA-WAM | slot_address/content plus gated address scores | Partial |
@@ -477,8 +486,9 @@ What is solved at code level:
 What is not solved:
 
 ```text
-1. No MetaSlot/QASA-level adaptive slot cardinality and learned slot-quality
-   selector.
+1. No MetaSlot-level global VQ/prototype aggregate-and-deduplicate initializer.
+   The QASA-like slot-quality selector is now deployed, but behavior acceptance
+   remains pending.
 2. No completed latest-run IsSameObject artifact probe.
 3. No guaranteed dense sidecar/tracklet coverage over the full dataset.
 4. No tactile-world pretraining equivalent to OmniVTA.
@@ -492,7 +502,6 @@ Final assessment:
 PICF is no longer a naive or obviously immature slot-binding implementation.
 It is a coherent belief-state adaptation of modern object-centric principles.
 However, compared with the most mature 2025-2026 slot/tactile methods, it is
-still missing adaptive learned slot quality/prototype selection and latest
-artifact-level binding validation.
+still missing prototype-level birth initialization and latest artifact-level
+binding validation.
 ```
-

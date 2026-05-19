@@ -391,7 +391,10 @@ def run_audit() -> list[AuditResult]:
             and "def _slot_quality_loss" in training_text
             and "target_entropy" in training_text
             and "--lambda-slot-quality" in train_text
-            and "lambda_slot_quality=float" in train_text,
+            and "lambda_slot_quality=float" in train_text
+            and "loss_slot_quality" in train_text
+            and '"loss_slot_quality": _loss_component_or_zero(losses, "slot_quality")' in train_text
+            and '"loss_slot_quality": metrics["loss_slot_quality"] / denom' in train_text,
             "The learned selector needs an optional entropy-corrected weak loss; default remains off and launchers must expose it.",
         )
     )
@@ -606,7 +609,9 @@ def run_audit() -> list[AuditResult]:
             and "owner_precision = torch.linalg.pinv(owner_S_aligned + jitter)" in pipeline_text
             and "fused_x = torch.matmul(fused_S, fused_eta[:, :, None]).squeeze(-1)" in pipeline_text
             and "owner_transport_confidence=owner_transport_confidence" in pipeline_text
-            and "posterior_owner_transport_confidence_mean" in train_text,
+            and "posterior_owner_transport_confidence_mean" in train_text
+            and "posterior_owner_transport_active_dist_mean" in pipeline_text
+            and "posterior_owner_transport_active_dist_mean" in train_text,
             "Accepted graph object responsibility must be transported through observation/posterior assignment and fused as a high-precision posterior measurement.",
         )
     )
