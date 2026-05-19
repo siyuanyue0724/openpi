@@ -1215,16 +1215,15 @@ no cache truth write
 Optional sources:
 
 ```text
-SAM/SAM2 masks
-DINO/DINOv2 objectness
-Grounding/proposal boxes
+contact/task/tracklet-aware sidecar masks
+DINO/DINOv2 objectness after explicit inspection
+Grounding/proposal boxes after explicit inspection
 ```
 
-SAM/DINO are explicitly not required for the maintained runtime and are not
-implemented in this pass. Runtime-c only provides optional proposal tensor
-ingestion and typed proposal routing. If an upstream system supplies proposal
-centers/boxes/objectness/source ids, PICF can consume them; if not, the proposal
-branch is a no-op.
+Blind automatic SAM is rejected for the maintained runtime. Runtime-c only
+provides optional proposal tensor ingestion and typed proposal routing. If an
+inspected upstream system supplies proposal centers/boxes/objectness/source ids,
+PICF can consume them; if not, the proposal branch is a no-op.
 
 Use only as:
 

@@ -12993,6 +12993,3875 @@ Tail commands:
 
 ```bash
 ssh -p 28060 root@36.139.225.68
-tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d5e513b_long30k/metrics.jsonl
-tail -f /mnt/picf_run_logs/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d5e513b_long30k.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d163d18_long30k/metrics.jsonl
+tail -f /mnt/picf_run_logs/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d163d18_long30k.log
+ls -lh /mnt/checkpoints/picf_core/picf_core/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d163d18_long30k/anchor_overlays
+```
+
+2026-05-15 long-run first metrics and storage cleanup
+-----------------------------------------------------
+
+Actual active run:
+
+```text
+machine:
+  A7, ssh -p 28060 root@36.139.225.68
+
+run_dir:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d163d18_long30k
+
+log:
+  /mnt/picf_run_logs/picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d163d18_long30k.log
+
+launch:
+  30000 steps
+  save_interval=2500
+  keep_last_checkpoints=3
+  anchor_overlay_interval=100
+  unroll_steps=2
+  burnin_steps=1
+  burnin_mode=state_only
+  action scale a0.50
+  active max per role 4
+  active overlap threshold 0.55
+```
+
+Initial metrics:
+
+```text
+step 50 -> 100:
+  loss_total:                            1.3407 -> 1.2155
+  loss_action_default_equiv:             0.1273 -> 0.0950
+  loss_alignment:                        1.2339 -> 1.1167
+  loss_anchor_pv:                        2.7802 -> 2.7021
+  loss_pv_weak:                          6.3418 -> 6.0434
+  active same-role support overlap max:  0.0317 -> 0.0465
+  all same-role support overlap max:     0.1016 -> 0.1520
+  active same-role object-core max:      0.0578 -> 0.0773
+  posterior_recycle_rate:                0.2338 -> 0.2178
+  effective_anchor_count:                7.29 -> 8.09
+  stable identity switch rate:           0.2579 -> 0.2497
+  temporal view mass static/gripper:     0.357 / 0.643 at step100
+```
+
+Interpretation:
+
+```text
+The first 100 steps are structurally healthier than the previously rejected
+collapse runs. Active same-role overlap and active object-core overlap are low,
+the active/dustbin capacity control is doing useful work, recycle is not
+saturated, wrist temporal evidence is used, and default-equivalent action loss
+is decreasing.
+
+This is not behavior acceptance. The run still needs step 200/500/1000 checks,
+the anchor overlays, and later CALVIN/video evidence. The main watch item is
+whether stable identity switch and raw observation binding-signature overlap
+fall without active supports collapsing.
+```
+
+Storage cleanup performed on A7:
+
+```text
+date:
+  2026-05-15
+
+policy:
+  remove only large checkpoint weight files from 2026-05-01 onward outside the
+  active long-run directory.
+
+preserved:
+  current long-run directory
+  old April baselines such as 4-22 ablation and full-PICF checkpoints
+  metrics.jsonl
+  args.json
+  metadata.pt
+  anchor overlays
+  run logs under /mnt/picf_run_logs
+
+deleted:
+  28 non-current recent model checkpoint files over 100MB
+  total freed: about 276.20 GB
+
+post-cleanup check:
+  remaining non-current May checkpoint files over 100MB: 0
+  current long-run metrics and overlay files still present
+```
+
+Strict boundary:
+
+```text
+The current long run is the only May checkpoint family worth keeping as model
+weights unless a later short diagnostic is explicitly accepted. The previous
+May diagnostics are preserved as logs/metrics/overlays for analysis, but their
+large model.pt files were intentionally removed because they are not deployment
+or resume candidates.
+```
+
+## 2026-05-15 root-cause audit: active owner health vs raw candidate overlap
+
+Current A7 long-run row:
+
+```text
+run:
+  picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d163d18_long30k
+
+step 150 -> 200 -> 250:
+  loss_action_default_equiv:              0.0807 -> 0.0722 -> 0.0663
+  loss_action_active7:                    0.3625 -> 0.3255 -> 0.2947
+  loss_total:                             1.1772 -> 1.2717 -> 1.4398
+  loss_alignment:                         1.0821 -> 1.1786 -> 1.3482
+  loss_anchor_pv:                         2.6329 -> 3.1217 -> 3.7240
+  loss_pv_weak:                           5.4662 -> 4.5326 -> 4.0802
+  loss_mapg_routing:                      0.7988 -> 0.8251 -> 0.8257
+  loss_mapg_cycle:                        0.3887 -> 0.4045 -> 0.4537
+
+  raw same-role support overlap max:      0.2419 -> 0.4036 -> 0.8245
+  active same-role support overlap max:   0.1572 -> 0.1449 -> 0.2975
+  raw same-role object-core overlap max:  0.3552 -> 0.3241 -> 0.5541
+  active same-role object-core max:       0.2572 -> 0.2855 -> 0.2644
+
+  effective_anchor_count:                 6.58 -> 7.24 -> 6.74
+  posterior_recycle_rate:                 0.4715 -> 0.0308 -> 0.0013
+  obs binding-signature overlap max:      0.9995 -> 0.9995 -> 0.9997
+```
+
+Strict diagnosis:
+
+```text
+This is not the old failure mode where all accepted object owners immediately
+collapse into one active set. The active owner metrics are still inside the
+early acceptance band at step250:
+
+  active support overlap max = 0.2975
+  active object-core overlap max = 0.2644
+
+The failing subsystem is narrower:
+
+  inactive / reserve / weak same-role candidates are again learning highly
+  overlapping support distributions, while the active/dustbin router is still
+  filtering most of them out of the accepted owner set.
+
+Therefore the current issue is candidate-pool object ownership, not immediate
+action-path collapse.
+```
+
+Mathematical interpretation:
+
+```text
+Let K be fixed query capacity and M be the number of actual object files in the
+scene, usually M << K for CALVIN-style manipulation scenes.
+
+Each same-role candidate j has a support distribution p_j over typed evidence
+tokens. The raw overlap metric is approximately:
+
+  O_raw = max_{i != j, role_i = role_j} <p_i, p_j>
+
+The active/dustbin router defines accepted owner weights a_j in [0, 1]. The
+active overlap metric is approximately:
+
+  O_active = max_{i != j, role_i = role_j} a_i a_j <p_i, p_j>
+
+The observed state is:
+
+  O_raw high, O_active still moderate.
+
+That means the router is choosing a smaller active owner set, but the unused
+capacity is still allowed to converge to the same high-saliency evidence. This
+is expected when K exceeds M and reserve queries have no explicit no-object,
+reset, or prototype assignment objective.
+```
+
+Why the short A5/A7 gates did not contradict this:
+
+```text
+The short gates intentionally accepted active-owner health, not raw candidate
+purity. A5 anchor-only passed because the final active owners were separated.
+A7 limited cotrain passed because action gradients did not immediately collapse
+the active owner set.
+
+The long run reveals the remaining second-order problem: reserve same-role
+candidates can stay redundant after active ownership is solved. This was not
+falsified by the short tests because they were designed to test active/dustbin
+selection, not long-horizon reserve-pool hygiene.
+```
+
+Relevant literature check:
+
+```text
+Object-binding ViT probe work (Li et al., NeurIPS 2025) shows that IsSameObject
+is recoverable from pretrained ViT patch embeddings by a quadratic / bilinear
+probe and that this signal lies in a low-dimensional subspace. This supports
+our binding_signature direction, but the current observation signature overlap
+near 0.999 indicates that our runtime binding-signature path is not yet
+separating same-role observation candidates strongly enough.
+
+MetaSlot (2025) identifies the fixed-slot-count problem directly: when object
+count varies, multiple slots can represent the same object. Its solution uses
+prototype/codebook duplicate removal and stabilizing noise. This supports a
+slot-capacity repair, not another scalar overlap-only penalty.
+
+DIAS / Slot Attention with Re-Initialization and Self-Distillation (2025)
+identifies redundant slots competing with informative slots and repairs it with
+re-initialization plus internal self-distillation. This supports explicit reset
+or retirement of redundant reserve candidates.
+
+Dynamic-query DETR work argues that fixed query count and learned query
+positions produce false positives or wasted capacity when object count varies.
+This is the detection analogue of our K >> M reserve-candidate problem.
+```
+
+Non-negotiable repair direction:
+
+```text
+Do not fix this by simply increasing one support-diversity scalar loss. That
+would be a symptom patch and can fight legitimate broad supports.
+
+The principled repair is to make object ownership an explicit two-state
+decision:
+
+  owner candidates:
+    may receive action/PV/posterior carry and must remain distinct.
+
+  reserve/dustbin candidates:
+    should not be carried forward as object files; if they overlap a confident
+    active owner and have no unique evidence, they must be retired, reset, or
+    assigned to a no-object/prototype state.
+
+This keeps the belief-filter semantics:
+
+  posterior is current belief,
+  active owners are object files,
+  reserve queries are capacity, not objects.
+```
+
+Concrete repair plan:
+
+```text
+1. Add an IsSameObject-style audit, not as a new production loss first.
+   Use weak pairs from existing signals only:
+     high support overlap + same geometry neighborhood + temporal consistency
+     as positive pairs;
+     same-role active owners with separated object-core and low overlap
+     as negative pairs.
+   Report AUC for binding_signature, V-JEPA temporal, PG image, point, and
+   posterior signatures.
+
+2. Use the audit result to gate ownership, not to force all supports apart.
+   Candidate j should be carried only when:
+     active_score high,
+     support_mass high,
+     novelty relative to active same-role owners high,
+     binding_signature separability high,
+     geometry is valid.
+
+3. Add reserve-candidate retirement/reset:
+   if candidate j is inactive and overlaps an active same-role owner while
+   providing no unique object-core or binding-signature evidence, then:
+     do not update it as a posterior object file;
+     reset or blend it toward role prior / dustbin prototype;
+     keep it visible in diagnostics as inactive capacity.
+
+4. Keep action gradients routed through active owners. Do not let action loss
+   train reserve candidate supports until the owner map is stable.
+
+5. Keep active-owner acceptance thresholds as the primary runtime gate:
+     active support overlap max < 0.50 preferred, < 0.70 stop-warning;
+     active object-core overlap max < 0.45 preferred, < 0.60 stop-warning.
+   Raw overlap is a reserve-pool hygiene metric, not by itself a behavior
+   collapse criterion.
+```
+
+Current operational decision:
+
+```text
+Continue only until step300/500 for classification unless active overlap also
+crosses the warning band. If active overlap remains healthy but raw overlap
+stays high, the run is useful as evidence that reserve-pool retirement is the
+next required repair before claiming 30k readiness.
+```
+
+Step300 update:
+
+```text
+step300 metrics:
+  loss_action_default_equiv              = 0.0622
+  loss_action_active7                    = 0.2808
+  loss_total                             = 1.4377
+  loss_alignment                         = 1.3471
+  loss_anchor_pv                         = 3.6025
+  loss_pv_weak                           = 4.5716
+  loss_mapg_routing                      = 0.8186
+  loss_mapg_cycle                        = 0.4758
+  loss_mapg_support_diversity            = 0.4400
+  raw same-role support overlap max      = 0.9851
+  active same-role support overlap max   = 0.5343
+  raw same-role object-core overlap max  = 0.7326
+  active same-role object-core max       = 0.2362
+  effective_anchor_count                 = 6.1542
+  active_anchor_count                    = 6.5400
+  inactive_anchor_fraction               = 0.7275
+  posterior_recycle_rate                 = 0.0029
+  obs binding-signature overlap max      = 0.9997
+```
+
+Overlay audit:
+
+```text
+step100:
+  active graph anchors = 8
+  active anchors are spatially separated; min same-role active distances are
+  about 22.9 px / 87.0 px for the active multi-slot roles.
+
+step200:
+  active graph anchors = 11
+  active anchors remain spatially separated; same-role active min distances are
+  about 24.1 px / 28.8 px / 57.7 px.
+
+step300:
+  active graph anchors = 9
+  active graph anchors are still not all physically collapsed:
+    role1 active min distance = 10.49 px
+    role2 active min distance = 28.74 px
+    role3 active min distance = 58.12 px
+  posterior scene slots remain spatially clustered:
+    role1 posterior bbox = [70.4, 74.0] -> [108.0, 106.8],
+    min pair distance = 4.69 px.
+```
+
+Step300 judgment:
+
+```text
+The action head is still improving quickly and reaches approximately the old
+4-22 ablation's early several-hundred-step action-loss range, but structure has
+crossed the stop-warning boundary:
+
+  active same-role support overlap = 0.5343  (> preferred 0.50)
+  raw same-role support overlap    = 0.9851  (reserve pool effectively duplicate)
+  raw object-core overlap          = 0.7326
+  loss_anchor_pv and loss_mapg_cycle have both worsened after step150.
+
+This is enough evidence that the current long-run recipe should not be accepted
+as 30k-ready. The active/dustbin router delays and filters collapse, but it does
+not fully solve reserve-candidate ownership over longer cotrain.
+```
+
+Implication:
+
+```text
+The next repair must be structural, not another short ablation:
+
+  1. owner/reserve state must be explicit;
+  2. inactive reserve candidates that duplicate active owners must be retired
+     or reset instead of being posterior-carried as object files;
+  3. binding_signature must be audited and then used as an ownership novelty
+     gate, because the current same-role observation binding signature overlap
+     is nearly 1.0 and therefore not separating candidates.
+
+Until that repair is implemented, further 30k cotrain primarily measures how
+fast action loss can drop while the candidate pool degenerates. It is not a
+clean architecture acceptance run.
+```
+
+## 2026-05-15 Owner/Reserve Posterior Gate: Structural Repair Before Restart
+
+### Diagnosis
+
+The step300 A7 run shows that the previous active/dustbin router only solved
+the first half of the object-file problem. In graph space, the active anchors
+are mostly separated. In posterior space, duplicate observation-anchor
+candidates can still be bound to persistent scene slots because the posterior
+measurement update did not know which observation anchors were active object
+owners and which were reserve/dustbin capacity.
+
+This is a follow-through failure, not primarily a loss-weight failure:
+
+```text
+graph.anchor_active:
+  selects active AQR graph owners
+
+_mapg_slot_assignment:
+  masks inactive graph anchors and renormalizes rows
+
+_build_observation_anchors:
+  previously returned all observation anchors as ordinary measurements
+
+_posterior_update:
+  bound persistent object files to all observation anchors
+```
+
+Because `_mapg_slot_assignment` renormalizes rows over active graph anchors,
+the naive score `graph_assignment @ anchor_active` is almost always one and
+does not identify duplicate observation rows. The correct object-file owner
+state must be constructed at observation-anchor granularity.
+
+### Math
+
+Let `A in R^{N_obs x K_graph}` be the observation-to-graph assignment and let
+`a_k in {0,1}` be graph active ownership. For each active graph owner `k`, we
+greedily select one unused observation row with maximum `A_{i,k}`:
+
+```math
+owner_i = 1
+\quad\text{iff}\quad
+i = \arg\max_{i'\notin U} A_{i',k}
+\quad\text{for some active } k.
+```
+
+The posterior binding logits then receive an owner/reserve eligibility bias:
+
+```math
+\ell'_{j,i}
+=
+\ell_{j,i}
+
+\begin{cases}
+0, & owner_i \ge \tau_{owner} \\
+B_{reserve}, & owner_i < \tau_{owner}
+\end{cases}
+```
+
+with default `tau_owner=0.25` and `B_reserve=-1e4`.
+
+This is a measurement-eligibility constraint in the belief filter. It is not a
+new auxiliary loss:
+
+```math
+b_t
+\propto
+p(o_t \mid s_t, owner(o_t)=1)
+\int p(s_t \mid s_{t-1}, a_{t-1}) b_{t-1} ds_{t-1}.
+```
+
+Reserve anchors still exist as capacity and dustbin evidence, but they no
+longer update persistent object files. This matches the object-file semantics:
+real object owners update belief; redundant reserve hypotheses explain away
+extra evidence.
+
+This owner/reserve gate does not create missing object evidence, does not solve
+sub-token ordinal grounding, and does not replace behavior acceptance. It is a
+measurement-eligibility correction: inactive fixed-capacity reserve rows may
+remain useful for graph capacity accounting, but they cannot update persistent
+object posterior slots as if they were object files.
+
+### Paper Grounding
+
+- Object Binding in pretrained ViTs (2025) motivates pairwise same-object
+  evidence instead of relying only on single-token saliency. The current
+  `obs_binding_signature_overlap_max ~= 0.9997` says that the observation
+  binding signature is not yet separating duplicate rows, so the owner gate is
+  needed before posterior update.
+- MetaSlot (NeurIPS 2025) explicitly targets fixed-slot duplicate failure by
+  removing duplicate slots when object count is lower than slot count.
+- DIAS / Slot Attention with Re-Initialization and Self-Distillation (2025)
+  identifies redundant slots competing with informative slots and uses
+  re-initialization to keep redundant slots from corrupting object aggregation.
+
+The implementation does not import these papers wholesale. It adopts their
+shared invariant: fixed-capacity slots require an explicit owner/reserve
+separation. In PICF this invariant belongs inside posterior measurement
+eligibility, not as another global loss.
+
+### Code Deployment
+
+Implemented files:
+
+```text
+src/openpi/picf/core/config.py
+  posterior_owner_active_gate_enabled = True
+  posterior_owner_active_min = 0.25
+  posterior_owner_active_bias = -1e4
+
+src/openpi/picf/core/contracts.py
+  PicfObservationAnchorState.owner_active
+
+src/openpi/picf/core/pipeline.py
+  _observation_owner_active_from_graph(...)
+  _posterior_owner_active_binding_bias(...)
+  posterior debug:
+    posterior_owner_active_gate_enabled
+    posterior_owner_active_score_mean
+    posterior_owner_active_score_max
+    posterior_owner_active_eligible_fraction
+
+scripts/picf_core_train.py
+  CLI/startup/metrics threading for the owner gate
+
+src/openpi/picf/core/pipeline_test.py
+  owner selection and posterior mask unit coverage
+```
+
+Local verification:
+
+```text
+python -m py_compile:
+  config/contracts/pipeline/picf_core_train/verifier PASS
+
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_strict_diagnose.py --fail-on-fail:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_professor_grade_audit.py --fail-on-fail:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_owner_gate_followthrough_audit.py --fail-on-fail:
+  PASS
+
+PYTHONPATH=src uv run pytest -q \
+  src/openpi/picf/core/pipeline_test.py::test_observation_owner_active_returns_soft_measurement_reliability \
+  src/openpi/picf/core/pipeline_test.py::test_posterior_owner_active_binding_bias_masks_reserve_rows \
+  src/openpi/picf/core/pipeline_test.py::test_aqr_slot_assignment_ignores_inactive_duplicate_anchors:
+  3 passed
+```
+
+### Restart Criterion
+
+The next 30000-step A7 run must show by step500:
+
+```text
+posterior_owner_active_eligible_fraction:
+  significantly below 1.0 and near active-object capacity / observation-anchor count
+
+aqr_active_same_role_support_overlap_max:
+  stays below the previous warning region rather than drifting above 0.5 early
+
+posterior scene slot overlay:
+  no role cluster with all scene slots within a few pixels
+
+loss_action_default_equiv:
+  remains comparable to the 4-22 ablation scale, but not accepted alone
+```
+
+If action improves while posterior owner metrics show reserve leakage, the run
+is still rejected. The acceptance unit is the belief router plus action path,
+not action loss in isolation.
+
+## 2026-05-15 Owner Gate v2: Row-Sum Tautology Removed Before Restart
+
+The first soft-owner repair was rejected after the long-run reached step750.
+It fixed the dustbin/support-mass spike, but `posterior_owner_active_score_mean`
+and `posterior_owner_active_eligible_fraction` stayed exactly `1.0`. The cause
+is now mathematically identified:
+
+```math
+_mapg\_slot\_assignment:
+\quad \sum_{k\in active(role(i))} A_{ik}=1
+```
+
+so using `A[i, active].sum()` as owner reliability is not a reliability
+estimate. It is a row-normalization identity.
+
+The repaired owner score now uses:
+
+```math
+p_i=\max_k A_{ik}
+```
+
+```math
+m_i=(p_i-p_i^{(2)})/\max(p_i,\epsilon)
+```
+
+```math
+d_i=\max_{u\in U, role(u)=role(i)}
+\{sim_{geom}(i,u), sim_{binding}(i,u), sim_{point}(i,u)\}
+```
+
+```math
+owner_i =
+\begin{cases}
+1, & i\in U\\
+p_i m_i (1-d_i), & otherwise
+\end{cases}
+```
+
+This is a measurement-eligibility fix, not an auxiliary loss. It directly
+implements the fixed-capacity owner/reserve model:
+
+```text
+object owner:
+  unique graph-owner peak, or high-margin novel evidence.
+
+reserve:
+  ambiguous row, low-margin row, or same-role duplicate close to a stronger
+  owner in geometry / binding subspace / point support.
+```
+
+Paper alignment:
+
+```text
+Object-binding ViT paper:
+  same-object structure is pairwise/quadratic and can be represented in a
+  projected binding subspace; the repair uses binding_signature similarity as
+  a duplicate/novelty term.
+
+SlotContrast / temporally consistent OCL:
+  object files need consistency against competing slots, not free duplication.
+
+MetaSlot:
+  duplicate fixed-capacity slots should be retired/reserved rather than kept
+  live as object files.
+```
+
+Local verification:
+
+```text
+python -m py_compile src/openpi/picf/core/pipeline.py \
+  src/openpi/picf/core/pipeline_test.py \
+  scripts/picf_owm_owner_gate_followthrough_audit.py:
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_owner_gate_followthrough_audit.py --fail-on-fail:
+  12/12 PASS
+
+uv run pytest -q \
+  src/openpi/picf/core/pipeline_test.py::test_observation_owner_active_uses_margin_and_novelty_not_row_sum \
+  src/openpi/picf/core/pipeline_test.py::test_posterior_owner_active_binding_bias_masks_reserve_rows:
+  2 passed
+```
+
+Next restart rejection conditions:
+
+```text
+posterior_owner_active_eligible_fraction == 1.0:
+  immediate rejection; owner gate is again a no-op.
+
+posterior_dustbin_mass_raw spikes near 9:
+  hard-gate failure returned.
+
+raw same-role support overlap returns to ~1.0 while active overlap also rises:
+  owner/reserve filtering is insufficient.
+
+action loss decreases alone:
+  not sufficient; must be paired with owner/reserve and active support health.
+```
+
+## 2026-05-15 Degraded-Metric Coverage Matrix After Owner Gate v2
+
+This section records which observed degradations are structurally addressed by
+the margin/novelty owner gate and which still require runtime evidence. The goal
+is to avoid treating an action-loss decrease or a passing static verifier as
+proof that object binding has recovered.
+
+Observed degradations in the rejected owner-soft run:
+
+```text
+1. posterior_owner_active_score_mean = 1.0
+2. posterior_owner_active_eligible_fraction = 1.0
+3. aqr_same_role_support_overlap_max_raw -> ~1.0
+4. aqr_same_role_object_core_overlap_max_raw -> ~0.97
+5. active overlap stayed much lower than raw overlap but was not a proof of
+   posterior health because all observation rows were still eligible.
+6. action loss decreased, but this was not binding evidence.
+7. historical hard owner gate failure mode had posterior_dustbin_mass_raw near
+   9; owner-soft avoided that spike but accidentally became a no-op.
+```
+
+Directly repaired:
+
+```text
+posterior_owner_active_score_mean = 1.0
+posterior_owner_active_eligible_fraction = 1.0
+```
+
+Reason:
+
+```math
+\sum_{k \in active} A_{ik}=1
+```
+
+is a row-stochastic tautology when `A` has already been normalized over active
+columns. The repaired score no longer uses row sum. It uses:
+
+```math
+p_i=\max_k A_{ik}
+```
+
+```math
+m_i=(p_i-p_i^{(2)})/\max(p_i,\epsilon)
+```
+
+```math
+d_i=\max_{u\in U, role(u)=role(i)}
+\{sim_{geom}, sim_{binding}, sim_{point}\}_{i,u}
+```
+
+```math
+owner_i =
+\begin{cases}
+1, & i\in U\\
+p_i m_i (1-d_i), & otherwise
+\end{cases}
+```
+
+where `U` is the greedy unique graph-column peak set. Therefore duplicate or
+ambiguous same-role observation anchors are not automatically eligible to update
+posterior slots.
+
+Structurally targeted but still runtime-validated:
+
+```text
+aqr_same_role_support_overlap_max_raw
+aqr_same_role_object_core_overlap_max_raw
+```
+
+Reason: these were downstream symptoms of excessive eligible duplicate
+measurements. The new gate prevents duplicate rows from becoming posterior
+owners, but the metrics must still be checked at step 50/100/150 because support
+overlap can also arise from poor evidence quality, excessive slot count, or
+action-pressure collapse.
+
+Monitored, not claimed as directly fixed:
+
+```text
+loss_action_default_equiv
+loss_mapg_routing
+aqr_local_support_entropy_mean
+posterior_recycle_rate
+anchor overlay visual quality
+```
+
+Reason: these are coupled training outcomes. They should improve if the owner
+gate was the dominant failure, but the gate repair is not mathematically
+equivalent to optimizing these losses. They remain acceptance diagnostics, not
+proof-by-construction.
+
+Paper alignment:
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  Supports pairwise/quadratic IsSameObject structure and projected binding
+  subspaces; the repair uses projected binding-signature novelty instead of
+  scalar row mass.
+
+MetaSlot:
+  Fixed slot capacity can over-represent one object with duplicate slots; the
+  repair explicitly reserves duplicate same-role rows rather than keeping them
+  all live.
+
+Temporally Consistent Object-Centric Learning by Contrasting Slots:
+  Stable object files require consistency against competing slots; the repair
+  makes posterior update eligibility competitive.
+```
+
+Acceptance boundary for the new 30k restart:
+
+```text
+Required at early checkpoints:
+  posterior_owner_active_eligible_fraction < 1.0 by a meaningful margin.
+  posterior_dustbin_mass_raw must not spike to the historical hard-gate failure
+  regime near 9.
+  active/object-core overlap must stay materially below raw overlap.
+  raw overlap should not monotonically return to 0.99+.
+
+Not sufficient:
+  action loss decreasing by itself.
+```
+
+## 2026-05-15 Owner Margin/Novelty Long Run Early Metrics: Step 50-250
+
+Run:
+
+```text
+picf_a7_owner_margin_novelty_cotrain_u2b1_a05_30000_20260515
+```
+
+Early verdict:
+
+```text
+owner/reserve gate bug is fixed:
+  posterior_owner_active_eligible_fraction is no longer 1.0.
+
+but the full system is not yet healthy:
+  raw same-role support overlap returns to ~1.0 by step 250.
+```
+
+Key trend:
+
+```text
+step:
+  50      100     150     200     250
+
+loss_action_default_equiv:
+  0.1259  0.0841  0.0862  0.0745  0.0692
+
+loss_total:
+  1.3396  1.2031  1.1720  1.2799  1.6720
+
+loss_anchor_pv:
+  2.7855  2.6441  2.6527  3.1003  4.4545
+
+loss_pv_weak:
+  6.3418  6.0433  5.6749  4.8488  4.1230
+
+loss_aqr_denoising:
+  1.8503  2.2794  2.3631  1.9799  1.8942
+
+posterior_owner_active_eligible_fraction:
+  0.4638  0.4397  0.4584  0.5394  0.4253
+
+posterior_dustbin_mass_raw:
+  0.0057  0.0061  0.0064  0.0056  0.0071
+
+aqr_same_role_support_overlap_max:
+  0.0925  0.1895  0.6226  0.6878  0.9965
+
+aqr_active_same_role_support_overlap_max:
+  0.0315  0.0416  0.2148  0.3054  0.6791
+
+aqr_same_role_object_core_overlap_max:
+  0.0674  0.1161  0.2803  0.4359  0.8480
+
+aqr_active_same_role_object_core_overlap_max:
+  0.0574  0.0886  0.2161  0.2872  0.1820
+```
+
+Interpretation:
+
+```text
+1. The repaired owner gate is not a no-op:
+   eligible_fraction is ~0.42-0.54 rather than 1.0.
+
+2. The historical hard-gate failure is not present:
+   dustbin_mass_raw stays near 0.006 rather than jumping toward ~9.
+
+3. Action decreases quickly:
+   loss_action_default_equiv improves from 0.1259 to 0.0692.
+   This is useful, but not sufficient evidence of binding health.
+
+4. Anchor/support health degrades after step 150:
+   loss_total, loss_anchor_pv, raw overlap, and active overlap all worsen.
+
+5. The most likely failure location has moved upstream:
+   posterior owner eligibility is no longer the root no-op, but observation
+   support generation / assignment is still allowing same-role anchors to focus
+   on the same support region.
+```
+
+Current conclusion:
+
+```text
+The owner margin/novelty fix is mathematically correct and behaviorally active,
+but it is not sufficient by itself. It fixes posterior update eligibility, not
+the upstream support-generation collapse.
+```
+
+Next diagnostic should not add more losses. It should isolate whether the
+step-150-to-250 collapse is driven by:
+
+```text
+1. action-gradient pressure through PICF tokens,
+2. support competition strength/temperature,
+3. active-slot selection letting duplicates survive,
+4. too many same-role slots for the actual number of CALVIN objects,
+5. or observation support features not separating same-object from different-
+   object candidates.
+```
+
+## 2026-05-15 Two-Phase Support Collapse Diagnostic Plan
+
+Reason for stopping the previous 30k attempt:
+
+```text
+The owner margin/novelty repair is active, but it is insufficient:
+  owner_eligible_fraction is no longer 1.0.
+  dustbin_mass_raw is safe.
+  raw and active same-role support overlap still rise sharply after step 150.
+
+Therefore the remaining failure is upstream of posterior owner eligibility:
+  observation support generation / same-role slot selection / action pressure.
+```
+
+The next diagnostic is intentionally not a new loss stack. It tests two
+mathematically distinct hypotheses with otherwise matched settings.
+
+Phase A: no-action-gradient structural stability
+
+```text
+exp:
+  picf_a7_diag_noaction_struct_u2b1_150_20260515
+
+purpose:
+  Test whether the AQR support system collapses without action gradients.
+
+method:
+  Keep action loss reported for comparability, but detach it from PICF and the
+  action generator via --picf-action-detach-from-anchor.
+
+interpretation:
+  If same-role overlap still rises toward 1.0, action is not the root cause.
+  The support generation / active-slot mechanism is intrinsically unstable.
+
+  If overlap stays low while action-on collapses, action cotrain pressure is the
+  dominant cause and must be reintroduced by curriculum/gated bridge rather
+  than by full immediate backprop.
+```
+
+Phase B: action-on strict capacity/competition
+
+```text
+exp:
+  picf_a7_diag_action_strict_capacity_u2b1_150_20260515
+
+purpose:
+  Test whether fixed-capacity duplicate slots are the root collapse mode.
+
+method:
+  Keep action training on, but make same-role ownership more selective:
+    aqr_same_role_support_competition_weight = 0.85
+    aqr_same_role_support_competition_iters = 5
+    aqr_active_slot_max_per_role = 2
+    aqr_active_slot_overlap_threshold = 0.40
+    aqr_active_slot_relative_score_threshold = 0.80
+    aqr_active_slot_geometry_duplicate_threshold = 0.45
+    posterior_owner_active_min = 0.30
+
+interpretation:
+  If this run remains stable while the previous action-on run collapsed, the
+  repair direction is capacity/competition, not more auxiliary loss.
+
+  If this also collapses, then feature-level same-object separability is likely
+  insufficient and the next step should be an offline IsSameObject probe rather
+  than another training tweak.
+```
+
+Mathematical framing:
+
+```math
+Z_t = \{z_i\}_{i=1}^{N}
+```
+
+contains visual/temporal/point/tactile/PG support evidence. A fixed slot set
+`S={s_j}_{j=1}^{K}` should implement a partial matching:
+
+```math
+\pi: S_{active} \rightarrow Objects(Z_t)
+```
+
+not a many-to-one assignment where several same-role slots own the same object.
+The failure at step 250 is:
+
+```math
+\exists j \ne k,\ role(j)=role(k):
+  overlap(s_j, s_k) \approx 1
+```
+
+while action loss keeps improving. This means action supervision alone is
+compatible with a degenerate many-slot-to-one-object explanation. The diagnostic
+therefore separates:
+
+```text
+action pressure:
+  Does the collapse require action gradients?
+
+capacity / competition:
+  Does stricter object-owner selection prevent duplicate slots?
+```
+
+Paper alignment:
+
+```text
+MetaSlot:
+  Fixed slot counts can duplicate one object; duplicate slots should be pruned
+  or reserved before refinement.
+
+Object Binding in pretrained ViTs:
+  Same-object evidence is pairwise, not a scalar support mass; duplicate
+  suppression should use pairwise novelty / binding subspace.
+
+Temporally Consistent OCL:
+  Stable slots require competition against other slots, not independent
+  per-slot saliency maximization.
+```
+
+Run script:
+
+```text
+run_a7_two_phase_support_diagnostic_20260515.sh
+```
+
+Acceptance criteria:
+
+```text
+For Phase A:
+  overlap stays low -> action pressure is implicated.
+  overlap rises -> support generator/active selection is implicated.
+
+For Phase B:
+  overlap stays low with action on -> strict capacity/competition is viable.
+  overlap rises with action on -> need feature-level IsSameObject probe and
+  likely a learned pairwise binding audit before more training.
+
+In all phases:
+  posterior_owner_active_eligible_fraction must remain < 1.0.
+  posterior_dustbin_mass_raw must remain far below the historical ~9 failure.
+  action loss alone is not acceptance.
+```
+
+### 2026-05-15 Phase A Result And Phase B Restart Note
+
+Phase A completed at 150 steps:
+
+```text
+exp:
+  picf_a7_diag_noaction_struct_u2b1_150_20260515
+
+setting:
+  action reported but detached from PICF/anchor path.
+
+step 50:
+  loss_total                               1.4054
+  loss_action_default_equiv                0.1394
+  loss_anchor_pv                           3.2326
+  loss_pv_weak                             6.3045
+  loss_aqr_denoising                       2.0676
+  loss_mapg_routing                        0.7421
+  loss_mapg_support_diversity              0.2835
+  aqr_same_role_support_overlap_max        0.1700
+  aqr_active_same_role_support_overlap_max 0.0480
+  aqr_same_role_object_core_overlap_max    0.0943
+  active object-core overlap max           0.0841
+  obs binding signature overlap mean       0.9857
+  posterior_owner_active_eligible_fraction 0.4581
+  posterior_dustbin_mass_raw               0.0102
+  posterior_recycle_rate                   0.3261
+  posterior_identity_switch_rate           0.7033
+
+step 100:
+  loss_total                               1.4222
+  loss_action_default_equiv                0.1406
+  loss_anchor_pv                           3.4585
+  loss_pv_weak                             5.8850
+  loss_aqr_denoising                       2.1287
+  loss_mapg_routing                        0.8483
+  loss_mapg_support_diversity              0.3135
+  aqr_same_role_support_overlap_max        0.7234
+  aqr_active_same_role_support_overlap_max 0.3319
+  aqr_same_role_object_core_overlap_max    0.5178
+  active object-core overlap max           0.3069
+  obs binding signature overlap mean       0.9953
+  posterior_owner_active_eligible_fraction 0.4806
+  posterior_dustbin_mass_raw               0.0021
+  posterior_recycle_rate                   0.1650
+  posterior_identity_switch_rate           0.6806
+
+step 150:
+  loss_total                               1.3672
+  loss_action_default_equiv                0.1389
+  loss_anchor_pv                           3.3132
+  loss_pv_weak                             5.4400
+  loss_aqr_denoising                       1.9860
+  loss_mapg_routing                        0.8368
+  loss_mapg_support_diversity              0.3364
+  aqr_same_role_support_overlap_max        0.9965
+  aqr_active_same_role_support_overlap_max 0.4548
+  aqr_same_role_object_core_overlap_max    0.7825
+  active object-core overlap max           0.2071
+  obs binding signature overlap mean       0.9985
+  posterior_owner_active_eligible_fraction 0.4225
+  posterior_dustbin_mass_raw               0.0013
+  posterior_recycle_rate                   0.0596
+  posterior_identity_switch_rate           0.6967
+```
+
+Interpretation:
+
+```text
+Phase A falsifies the narrow hypothesis that same-role collapse requires
+action gradients. With action detached, raw same-role support overlap still
+rises from 0.1700 to 0.9965 by step 150.
+
+The owner margin/novelty repair remains active:
+  posterior_owner_active_eligible_fraction stays around 0.42-0.48, not 1.0.
+  posterior_dustbin_mass_raw stays near 0.001-0.010, not the historical
+  dustbin-mass failure.
+
+The more direct root signal is the observation binding signature:
+  same-role obs-binding signature overlap mean is already 0.9857 at step 50
+  and reaches 0.9985 by step 150.
+
+Therefore the current collapse is upstream of action and upstream of posterior
+owner eligibility. The support/binding feature space itself is too common-mode
+for same-role duplicate rows, so selection/competition can suppress duplicate
+rows only transiently.
+```
+
+Phase B launch note:
+
+```text
+The original two-phase script failed to start Phase B due to a launch-script
+typo:
+
+  --aqr-same-role-support-competion-weight
+
+instead of:
+
+  --aqr-same-role-support-competition-weight
+
+This is an experiment-script error, not a model runtime result. Phase B was
+restarted separately as:
+
+  run_a7_phaseB_strict_capacity_20260515.sh
+
+with the intended strict capacity/competition settings.
+```
+
+### 2026-05-15 Strict Root-Cause Localization After Phase A
+
+This note records the current strict diagnosis before interpreting Phase B.
+The goal is to avoid a vague "support collapse" label and isolate which
+mathematical mechanism has actually failed.
+
+#### Falsified hypotheses
+
+```text
+H1: The remaining same-role overlap is caused only by action gradients.
+  Rejected by Phase A.
+
+  Evidence:
+    action was detached from PICF/anchor path.
+    raw same-role support overlap still rose:
+      0.1700 -> 0.7234 -> 0.9965
+    active same-role support overlap also rose:
+      0.0480 -> 0.3319 -> 0.4548
+
+H2: The repaired posterior owner gate is still a row-sum no-op.
+  Rejected by Phase A.
+
+  Evidence:
+    posterior_owner_active_eligible_fraction stayed around 0.42-0.48,
+    not 1.0.
+
+H3: The old hard dustbin/recycle mass failure has returned.
+  Rejected by Phase A.
+
+  Evidence:
+    posterior_dustbin_mass_raw stayed near 0.001-0.010, far below the
+    historical large-dustbin failure.
+```
+
+#### Still-open hypotheses
+
+```text
+H4: Stronger active capacity and same-role competition are sufficient.
+  Tested by Phase B.
+
+  If Phase B keeps active overlap low with action on, the immediate production
+  repair can be stricter active capacity/competition plus current owner gate.
+
+  If Phase B also collapses, the failure is not a capacity hyperparameter.
+  It is feature-level same-object separability.
+
+H5: Observation binding signatures lack an IsSameObject subspace.
+  Strongly supported by Phase A, but should be audited directly.
+
+  Evidence:
+    same-role obs binding-signature overlap mean:
+      0.9857 -> 0.9953 -> 0.9985
+
+  This means same-role observation rows are almost identical in the very
+  subspace used for binding/novelty. Once that happens, downstream competition
+  cannot reliably decide which row owns which physical object.
+```
+
+#### Dataflow follow-through
+
+Current runtime path:
+
+```text
+typed support weights
+  point_weights / graph_visual_weights / graph_temporal_weights / ...
+
+support binding signature
+  _support_binding_signature(weights, tokens)
+    normalized_weights = normalize_rows(weights)
+    signature = normalized_weights @ binding_keys(tokens)
+    return normalize(signature)
+
+observation anchor binding signature
+  obs_binding_signature = normalize(mean(point_sig, visual_sig, temporal_sig, ...))
+
+posterior binding
+  _binding_logits(...)
+    hidden similarity
+    + geometry Mahalanobis
+    + support-signature similarity
+    + binding-signature similarity
+    + address similarity
+    + owner/role/occupancy biases
+```
+
+Relevant code facts:
+
+```text
+src/openpi/picf/core/pipeline.py:2740-2757
+  binding signature is a support-weighted average of projected token keys.
+
+src/openpi/picf/core/pipeline.py:5911-5935
+  observation binding signature averages modality signatures and normalizes.
+
+src/openpi/picf/core/pipeline.py:6076-6155
+  posterior binding uses this signature as a similarity term.
+
+src/openpi/picf/core/pipeline.py:2839-2846
+  same-role support competition explicitly states that identical rows remain
+  identical and the operator cannot invent evidence.
+
+src/openpi/picf/core/training.py:1320-1504
+  support-diversity loss acts after support exists and is active-pair weighted.
+```
+
+Therefore the dataflow-localized issue is:
+
+```text
+The learned/projected binding signature is dominated by common-mode support
+features for same-role observation rows. Once b_i ~= b_j for same-role rows,
+both binding-signature novelty and support competition lose discriminative
+power.
+```
+
+#### Mathematical statement
+
+Let `p_j` be the support distribution for same-role row `j`, and let
+`k_i = normalize(W z_i)` be the current binding key for evidence token `i`.
+The current observation binding signature is approximately:
+
+```math
+b_j =
+normalize\left(\sum_i p_{j,i} k_i\right)
+```
+
+If the projected token keys decompose as:
+
+```math
+k_i = \mu + \epsilon_i,\quad \|\mu\| \gg \|\epsilon_i\|
+```
+
+then:
+
+```math
+\sum_i p_{j,i} k_i
+=
+\mu + \sum_i p_{j,i}\epsilon_i
+\approx
+\mu
+```
+
+and for any two same-role rows:
+
+```math
+\cos(b_j, b_k) \approx 1
+```
+
+This exactly matches Phase A:
+
+```text
+same-role obs-binding signature overlap mean ~= 0.999
+```
+
+Now consider same-role support competition. It computes a relative share over
+already-existing support rows. If `p_j = p_k`, then:
+
+```math
+share_j(i) =
+\frac{p_j(i)}{p_j(i)+p_k(i)}
+=
+\frac{1}{2}
+=
+share_k(i)
+```
+
+After row renormalization, the two rows remain identical. Thus competition is
+mathematically unable to break exact common-mode symmetry. It can only amplify
+pre-existing row-specific differences.
+
+This is why Phase A is decisive: action was removed, but the signatures still
+became common-mode. The cause is not merely action cotrain pressure; it is the
+absence of a verified same-object binding subspace in the runtime support
+signature.
+
+#### Paper alignment
+
+```text
+Does Object Binding Naturally Emerge in Large Pretrained Vision Transformers?
+  NeurIPS 2025.
+
+  Relevant claim:
+    IsSameObject is decoded by a quadratic similarity probe and is encoded in
+    a low-dimensional subspace on top of object features.
+
+  Consequence for PICF:
+    Binding should not rely on raw cosine of generic support averages. The
+    runtime must either verify or learn a pairwise binding subspace where
+    same-object and different-object pairs separate.
+
+Temporally Consistent Object-Centric Learning by Contrasting Slots.
+  CVPR 2025.
+
+  Relevant claim:
+    stable object-centric video slots require explicit contrastive temporal
+    consistency and distinct slot initialization, not only reconstruction or
+    action objectives.
+
+  Consequence for PICF:
+    same-role slots need contrast/novelty at the object-representation level;
+    action supervision is compatible with many-to-one slot collapse.
+
+When Slots Compete: Slot Merging in Object-Centric Learning.
+  arXiv 2603.11246.
+
+  Relevant claim:
+    fixed slot sets can contain multiple slots competing for the same entity;
+    overlapping slots should be merged/reserved rather than all treated as
+    independent valid objects.
+
+  Consequence for PICF:
+    inactive/duplicate same-role rows should be reserve carriers unless they
+    provide unique object-core or IsSameObject evidence.
+```
+
+#### Root repair design
+
+The clean repair is not another scalar overlap penalty. It is a three-layer
+binding repair:
+
+```text
+Layer 1: audit
+  Add an offline IsSameObject probe/audit over current V-JEPA/static/wrist/PG/
+  point-derived evidence.
+
+  Weak positives:
+    nearby point-neighborhood tokens under a high-confidence active owner;
+    temporal/wrist tokens sharing a support peak;
+    low-overlap, spatially separated active owners across adjacent windows.
+
+  Weak negatives:
+    same-role active owners with separated object-core supports;
+    tokens from mutually exclusive point neighborhoods;
+    high novelty relative to an active owner.
+
+  Acceptance:
+    same-object AUC materially above chance.
+    If AUC is near 0.5, runtime binding signatures are not trustworthy.
+
+Layer 2: centered pairwise binding signature
+  Replace pure support-average signatures with role/modality-centered
+  signatures:
+
+    k'_i = normalize(W z_i - mean_role_modality(W z))
+    b_j  = normalize(sum_i p_{j,i} k'_i)
+
+  Optionally use a diagonal/quadratic score:
+
+    score(j,k) = b_j^T diag(w) b_k
+
+  This follows the IsSameObject paper's quadratic-subspace result without
+  introducing an object detector or manual labels.
+
+Layer 3: reserve-aware assignment
+  If a same-role candidate has:
+    high overlap with an already selected owner,
+    low centered binding novelty,
+    low unique point/object-core evidence,
+
+  then it should become a reserve/dustbin carrier for that step, not a full
+  active object update. This is not pruning the model capacity; it is a
+  measurement-association rule consistent with fixed-slot OCL duplicate-slot
+  findings.
+```
+
+#### Tests required before another 30k run
+
+```text
+T1 Phase B strict capacity:
+  decide whether stricter active capacity alone is sufficient.
+
+T2 IsSameObject audit:
+  prove whether current binding signatures contain object-pair information.
+
+T3 centered-signature unit test:
+  synthetic token set with a large common component must yield lower
+  same-role duplicate cosine after centering.
+
+T4 reserve-aware assignment test:
+  duplicate same-role candidate must be ineligible when it lacks unique
+  object-core and centered binding novelty.
+
+T5 short runtime test:
+  150-300 step diagnostic must keep:
+    active same-role support overlap below 0.30-0.40,
+    active object-core overlap below 0.35-0.45,
+    obs-binding signature overlap no longer saturated at 0.999,
+    dustbin mass safe,
+    owner eligible fraction below 1.0.
+```
+
+#### Local formula sanity check
+
+A small NumPy check was run locally to test the exact current signature form:
+
+```math
+b_j =
+normalize(P_j K)
+```
+
+where token keys contain a common component `\mu` plus token-specific residuals.
+The result is consistent with Phase A:
+
+```text
+common_scale=0.0   raw same-role cosine mean 0.8950
+common_scale=1.0   raw same-role cosine mean 0.9994
+common_scale=3.0   raw same-role cosine mean 0.9999
+common_scale=10.0  raw same-role cosine mean 1.0000
+```
+
+Role/modality centering before support pooling reduces the common-mode effect:
+
+```text
+centered cosine mean range: 0.6992 - 0.7898
+```
+
+This does not prove centering alone is sufficient, but it proves the current
+formula can saturate same-role binding cosine even when support distributions
+are not exactly identical. That is why the next repair must address the
+binding-signature representation itself, not only action loss or posterior
+owner gating.
+
+### 2026-05-15 Phase B Step-50 Result
+
+Phase B was restarted with the intended strict capacity/competition settings
+after fixing the launch-script typo.
+
+```text
+exp:
+  picf_a7_diag_action_strict_capacity_u2b1_150_20260515
+
+setting:
+  action on
+  aqr_same_role_support_competition_weight = 0.85
+  aqr_same_role_support_competition_iters  = 5
+  aqr_active_slot_max_per_role             = 2
+  aqr_active_slot_overlap_threshold        = 0.40
+  aqr_active_slot_relative_score_threshold = 0.80
+  posterior_owner_active_min               = 0.30
+
+step 50:
+  loss_total                               1.2890
+  loss_action_default_equiv                0.1186
+  loss_anchor_pv                           2.7978
+  loss_pv_weak                             6.3066
+  loss_aqr_denoising                       2.0967
+  loss_mapg_routing                        0.6811
+  loss_mapg_support_diversity              0.2440
+  aqr_same_role_support_overlap_max        0.1342
+  aqr_active_same_role_support_overlap_max 0.0212
+  aqr_same_role_object_core_overlap_max    0.1159
+  active object-core overlap max           0.0736
+  obs binding signature overlap max        0.9992
+  obs binding signature overlap mean       0.9850
+  posterior_owner_active_eligible_fraction 0.3488
+  posterior_dustbin_mass_raw               0.0017
+  posterior_recycle_rate                   0.3162
+  posterior_identity_switch_rate           0.6856
+  aqr_effective_anchor_count               5.3438
+  aqr_active_anchor_count                  5.5800
+```
+
+Interpretation:
+
+```text
+Strict capacity/competition is effective as an early active-owner filter:
+  active same-role support overlap is 0.0212.
+  active object-core overlap is 0.0736.
+  owner eligible fraction is 0.3488, so the owner gate is selective.
+  dustbin mass remains safe.
+
+However this does not yet prove the binding representation is fixed:
+  obs binding-signature mean overlap is still 0.9850 at step 50.
+
+Therefore Phase B currently supports a two-level conclusion:
+  1. Active capacity/competition can prevent early active duplicate ownership.
+  2. The deeper same-object binding-signature common-mode problem remains.
+
+Acceptance cannot be granted at step 50 alone. Continue to step 100/150:
+  if active overlap remains low, strict active capacity is a viable runtime
+  guard for the current training line;
+  if it rises like Phase A, strict capacity is only a transient suppression.
+```
+
+### 2026-05-15 Phase B Step-100 Result
+
+Phase B reached step 100 with the strict capacity/competition settings still
+active.
+
+```text
+exp:
+  picf_a7_diag_action_strict_capacity_u2b1_150_20260515
+
+step 100:
+  loss_total                               1.1989
+  loss_action_default_equiv                0.0736
+  loss_action_active7                      0.2840
+  loss_anchor_pv                           2.7079
+  loss_pv_weak                             5.9290
+  loss_aqr_denoising                       2.3180
+  loss_mapg_routing                        0.6860
+  loss_mapg_support_diversity              0.2249
+  aqr_same_role_support_overlap_max        0.1492
+  aqr_active_same_role_support_overlap_max 0.0085
+  aqr_same_role_object_core_overlap_max    0.1753
+  active object-core overlap max           0.0627
+  obs binding signature overlap max        0.9989
+  obs binding signature overlap mean       0.9846
+  posterior_owner_active_eligible_fraction 0.3184
+  posterior_dustbin_mass_raw               0.0191
+  posterior_recycle_rate                   0.5157
+  posterior_identity_switch_rate           0.6778
+  aqr_effective_anchor_count               4.8507
+  aqr_active_anchor_count                  5.2100
+  grad_norm                                1116.2
+```
+
+Interpretation:
+
+```text
+This is a strong positive result for the strict active-owner guard:
+  raw same-role support overlap remains low at 0.1492.
+  active same-role support overlap is extremely low at 0.0085.
+  active object-core overlap remains low at 0.0627.
+  action-equivalent loss improves from 0.1186 to 0.0736.
+  anchor_pv improves from 2.7978 to 2.7079.
+
+It also localizes what is not solved:
+  obs binding-signature overlap mean remains saturated at 0.9846.
+  posterior recycle rate increases to 0.5157.
+  grad_norm spikes to 1116.2 and must be checked against clip behavior/logs.
+
+Decision:
+  Move on from the pure action-detach / owner-gate / weak competition
+  diagnostic loop. Phase B falsifies the claim that active duplicate ownership
+  is unavoidable under action pressure, and it shows that strict capacity can
+  keep active supports distinct through step 100.
+
+  Do not move on to a 30k final run yet. The remaining issue is now better
+  localized to the representation level: current support-weighted binding
+  signatures still have a strong common-mode component. The next repair should
+  target the same-object binding subspace itself, with an IsSameObject-style
+  audit and a centered/contrastive binding-signature path, rather than adding
+  more post-hoc overlap penalties.
+```
+
+### 2026-05-15 Binding Signature Centering Deployment
+
+Implemented the representation-level repair proposed by the Phase B step-100
+diagnosis.
+
+```text
+changed:
+  src/openpi/picf/core/config.py
+    binding_signature_centering_enabled = True
+    binding_signature_centering_min_tokens = 4
+
+  src/openpi/picf/core/pipeline.py
+    _binding_keys(tokens, center=True) subtracts the projected token-set mean
+    before normalization.
+
+  src/openpi/picf/core/pipeline_test.py
+    test_binding_signature_centering_removes_common_mode
+
+  scripts/picf_binding_signature_common_mode_audit.py
+    static dataflow check + NumPy common-mode sanity check
+
+  docs/PICF_AQR_OWM_BINDING_SIGNATURE_CENTERING_20260515_TEMP.md
+    mathematical follow-through and runtime diagnostic contract
+```
+
+Local audit:
+
+```text
+python scripts/picf_binding_signature_common_mode_audit.py --fail-on-fail
+  PASS
+
+uv run pytest -q \
+  src/openpi/picf/core/pipeline_test.py::test_binding_signature_centering_removes_common_mode \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py
+  5 passed
+
+synthetic common-mode result:
+  raw_offdiag_cos_mean      = 0.9809
+  centered_offdiag_cos_mean = -0.3180
+  mean_drop                 = 1.2989
+```
+
+Runtime test to launch after Phase B finishes or is archived:
+
+```text
+picf_a7_diag_binding_centered_u2b1_150_20260515
+
+same as Phase B strict capacity/competition,
+but with binding_signature_centering_enabled=true from code defaults.
+
+Acceptance:
+  active overlaps remain low,
+  obs binding signature overlap drops materially below 0.9846,
+  action-equivalent loss does not regress,
+  grad_norm spike does not repeat.
+```
+
+Launched runtime diagnostic:
+
+```text
+machine:
+  A7
+
+tmux:
+  picf_a7_binding_centered_20260515
+
+exp:
+  picf_a7_diag_binding_centered_u2b1_200_20260515
+
+script:
+  run_a7_binding_centering_diagnostic_20260515.sh
+
+steps:
+  200
+
+additional safety:
+  grad_clip_mode = fixed
+  grad_clip_norm = 5.0
+
+tail:
+  tail -f /mnt/picf_run_logs/picf_a7_diag_binding_centered_u2b1_200_20260515.log
+```
+
+Step-50 checkpoint:
+
+```text
+loss_total                              1.3085
+loss_action_default_equiv              0.1161
+loss_action_active7                    0.4265
+loss_anchor_pv                         2.8515
+loss_aqr_denoising                     2.0368
+loss_mapg_routing                      0.6865
+loss_mapg_support_diversity            0.2377
+
+aqr_same_role_support_overlap_max      0.1542
+aqr_active_same_role_support_overlap   0.0160
+aqr_same_role_object_core_overlap_max  0.1133
+aqr_active_same_role_object_core_max   0.0623
+
+aqr_same_role_obs_binding_signature_mean 0.5624
+aqr_same_role_obs_binding_signature_max  0.8165
+
+posterior_owner_active_eligible_fraction 0.3487
+posterior_recycle_rate                 0.3925
+posterior_identity_switch_rate         0.7022
+posterior_dustbin_mass_raw             0.1777
+
+preclip_grad_norm                      24.75
+grad_norm                              5.0
+grad_clip_applied                      true
+```
+
+Step-50 interpretation:
+
+```text
+The intended representation-level repair is active.
+
+Compared with Phase B step 50:
+  obs binding-signature overlap mean drops from 0.9850 to 0.5624.
+  active same-role overlap stays low at 0.0160.
+  active object-core overlap stays low at 0.0623.
+  action-equivalent loss remains comparable, 0.1186 -> 0.1161.
+  gradient clipping now engages before the Phase-B-style large spike.
+
+The result is positive for the precise hypothesis:
+  projected support signatures had a common-mode component;
+  centering removes that common mode without breaking active support capacity.
+
+Not accepted yet:
+  posterior_dustbin_mass_raw is higher than Phase B step 50.
+  recycle/identity-switch remain nontrivial.
+  overlay still shows several active anchors concentrated around the
+  gripper/table interaction region rather than clean object-centered slots.
+
+Continue to step 100/150/200 before deciding whether this should replace
+the previous strict-capacity baseline.
+```
+
+Step-100 checkpoint:
+
+```text
+loss_total                              1.2325
+loss_action_default_equiv              0.0882
+loss_action_active7                    0.3677
+loss_anchor_pv                         2.8111
+loss_aqr_denoising                     2.4132
+loss_mapg_routing                      0.7265
+loss_mapg_support_diversity            0.2270
+
+aqr_same_role_support_overlap_max      0.2469
+aqr_active_same_role_support_overlap   0.0390
+aqr_same_role_object_core_overlap_max  0.3113
+aqr_active_same_role_object_core_max   0.1628
+
+aqr_same_role_obs_binding_signature_mean 0.5183
+aqr_same_role_obs_binding_signature_max  0.7661
+
+posterior_owner_active_eligible_fraction 0.3475
+posterior_recycle_rate                 0.5292
+posterior_identity_switch_rate         0.6800
+posterior_dustbin_mass_raw             0.2325
+
+preclip_grad_norm                      34.18
+grad_norm                              5.0
+grad_clip_applied                      true
+```
+
+Step-100 interpretation:
+
+```text
+The centered binding-signature fix continues to solve the targeted
+common-mode issue:
+  obs binding-signature overlap mean improves further to 0.5183.
+  obs binding-signature overlap max improves to 0.7661.
+
+The strict active-support guard remains effective:
+  active same-role support overlap remains only 0.0390.
+  active object-core overlap remains bounded at 0.1628.
+  effective active anchors stay around 5.5, consistent with a sparse
+  object/action-relevant subset rather than forcing all fixed queries to bind.
+
+The new remaining failure mode is posterior-state health:
+  dustbin raw mass rises to 0.2325.
+  recycle rises to 0.5292.
+  identity switch remains high at 0.68.
+
+Therefore this diagnostic should not be interpreted as final acceptance.
+It supports the common-mode repair but localizes the next issue to posterior
+state transition / recycle gating / ownership-to-posterior update, not to raw
+AQR support overlap.
+```
+
+## 2026-05-15 Runtime Quadratic Binding Repair
+
+### Problem localized
+
+The prior repair made `binding_signature` centered and auditable, and offline
+same-object probes implemented diagonal / low-rank / full quadratic scoring.
+However, runtime posterior binding still used a cosine-like dot product over
+`binding_signature`:
+
+```text
+binding_logit += gate * bind_embedding_signature_weight * <b_prev, b_obs>
+```
+
+This left a theory/runtime mismatch. The object-binding evidence says
+same-object information is pairwise/quadratic in a subspace; auditing that
+subspace offline is not enough if the online binder only uses a raw dot score.
+
+### Repair
+
+Added native runtime quadratic binding:
+
+```text
+diag score:
+  q_diag = (b_prev * d)^T b_obs / sqrt(D)
+
+low-rank symmetric score:
+  q_lr = 0.5 * (<A b_prev, B b_obs> + <B b_prev, A b_obs>) / sqrt(R)
+
+posterior binding:
+  logit += gate(alpha, recycle, innovation)
+           * (lambda_diag q_diag + lambda_lr q_lr)
+```
+
+Default values:
+
+```text
+bind_quadratic_signature_weight = 0.10
+bind_low_rank_signature_weight = 0.05
+binding_low_rank_signature_rank = 16
+```
+
+The diagonal vector is initialized identity-equivalent in the normalized
+signature subspace. The low-rank term starts small. Both are structural
+binding terms, not weak-label losses.
+
+### Guardrails
+
+```text
+No weak adjacent-frame same-object labels enter online training.
+No paper code is copied from vit-object-binding; it has no visible LICENSE.
+SlotContrast remains design evidence only.
+Posterior authority and action path are unchanged.
+Existing alpha/recycle/innovation gates still control identity inertia.
+```
+
+### Verification
+
+Local:
+
+```text
+python -m py_compile ...                         PASS
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py
+                                                    PASS
+PYTHONPATH=src python scripts/picf_owm_nontruncated_paper_audit.py --fail-on-fail
+                                                    9/9 PASS
+PYTHONPATH=src python scripts/picf_binding_signature_common_mode_audit.py --fail-on-fail
+                                                    PASS
+PYTHONPATH=src uv run pytest -q scripts/picf_owm_same_object_probe_test.py \
+  scripts/verify_picf_owm_contract_test.py \
+  scripts/picf_owm_evidence_bundle_test.py \
+  src/openpi/picf/core/pipeline_test.py::test_binding_signature_centering_removes_common_mode \
+  src/openpi/picf/core/pipeline_test.py::test_binding_signature_quadratic_scores_are_pairwise_not_plain_cosine
+                                                    9 passed
+git diff --check                                  PASS
+```
+
+Remote A7:
+
+```text
+/root/openpi patched.
+OWM verifier PASS.
+nontruncated paper audit 9/9 PASS after adding explicit provenance manifests
+for remote paper-code snapshots without .git metadata.
+targeted pytest 9 passed.
+```
+
+### Current deployment state
+
+The previous lifecycle diagnostic is still running under:
+
+```text
+tmux: picf_a7_lifecycle_phasea_20260515
+```
+
+The patched quadratic-binding diagnostic is queued under:
+
+```text
+tmux: picf_a7_nontruncated_signature_wait_20260515
+```
+
+It will start automatically when the current run exits, using the patched
+runtime quadratic binding code and signature overlay export.
+
+### 2026-05-15 Runtime Quadratic Binding Observability Patch
+
+The previous patch put diagonal and low-rank same-object scores into
+`_binding_logits`, but the normal training logs could not separately tell
+whether those terms were active. That was an observability gap: without it, a
+failed run could be misdiagnosed as "same-object theory failed" when the actual
+failure might be that the gate was zero, or as "runtime binding worked" when the
+scores never contributed.
+
+This patch adds posterior/debug scalar metrics:
+
+```text
+posterior_binding_signature_linear_score_mean
+posterior_binding_signature_linear_score_abs_mean
+posterior_binding_signature_quadratic_score_mean
+posterior_binding_signature_quadratic_score_abs_mean
+posterior_binding_signature_low_rank_score_mean
+posterior_binding_signature_low_rank_score_abs_mean
+posterior_binding_signature_gate_mean
+```
+
+Mathematical interpretation:
+
+```text
+linear score:
+  q_lin = normalize(b_prev)^T normalize(b_obs)
+
+diagonal quadratic score:
+  q_diag = (normalize(b_prev) * d)^T normalize(b_obs) / sqrt(D)
+
+low-rank symmetric score:
+  q_lr = 0.5 * (<A b_prev, B b_obs> + <B b_prev, A b_obs>) / sqrt(R)
+
+runtime binding contribution:
+  logit += gate(alpha, recycle, innovation)
+           * (lambda_lin q_lin + lambda_diag q_diag + lambda_lr q_lr)
+```
+
+This remains a structural binding term, not an online weak-label IsSameObject
+loss. It is consistent with the object-binding probe result because it reads
+pairwise same-object evidence inside posterior binding while preserving
+posterior authority, no future leakage, and no mask-label dependence.
+## 2026-05-15 Binding-Logit Calibration Diagnostic
+
+The A7 nontruncated runtime quadratic diagnostic exposed a model-level mismatch
+with the object-binding paper-code family:
+
+```text
+step50 -> step100:
+  linear abs score      0.402 -> 0.465
+  diag quadratic abs    0.402 -> 0.465
+  low-rank abs score    0.00029 -> 0.00026
+  identity switch       0.687 -> 0.701
+  raw support overlap   0.231 -> 0.614
+```
+
+This is not evidence that pairwise/quadratic binding is wrong. It shows the
+runtime score was not a calibrated IsSameObject logit. The external
+`vit-object-binding` implementation trains diagonal/full/fixed-rank quadratic
+probes with `BCEWithLogitsLoss`; its pairwise score includes learned scale and
+bias. PICF was directly adding raw positive cosine/quadratic scores into
+posterior binding, so common-mode ViT/PICF signatures could become false
+identity inertia.
+
+Repair deployed locally and synced to A7:
+
+```text
+1. low-rank binding probe uses orthogonal same-subspace initialization;
+2. linear + diagonal-quadratic + low-rank-quadratic scores are combined first;
+3. combined pairwise matrix is double-centered;
+4. near-constant matrices map to zero instead of amplified noise;
+5. remaining relative score is z-normalized and clipped before the existing
+   alpha/recycle/innovation gate.
+```
+
+New A7 diagnostic:
+
+```text
+session:
+  picf_a7_binding_logit_calibrated_20260515
+
+log:
+  /mnt/picf_run_logs/picf_a7_diag_binding_logit_calibrated_u2b1_180_20260515.log
+
+config delta:
+  --binding-signature-score-calibration-enabled
+  --binding-signature-score-calibration-mode double_center_zscore
+  --binding-signature-score-min-std 0.05
+  --binding-signature-score-clip 4.0
+
+status:
+  started on A7 at 2026-05-15 18:51 CST;
+  confirmed training loop reached step 3 with both A100s active.
+```
+
+First acceptance check is at step50:
+
+```text
+posterior_binding_signature_low_rank_score_abs_mean should be non-negligible;
+posterior_binding_signature_calibrated_score_std should be > 0 only with real
+  pairwise separability;
+posterior_binding_signature_calibrated_top1_margin_mean should be positive;
+aqr_active_same_role_support_overlap_max should not climb toward 1.0;
+posterior_identity_switch_rate should not stay around 0.7.
+```
+
+Math and dataflow follow-through:
+`docs/PICF_AQR_OWM_BINDING_LOGIT_CALIBRATION_20260515_TEMP.md`.
+
+Step100 follow-through:
+
+```text
+metric                                      step50       step100
+loss_action_default_equiv                   0.1233       0.0809
+loss_total                                  1.2864       1.2276
+aqr_active_same_role_support_overlap_max    0.0117       0.0359
+aqr_same_role_support_overlap_max           0.1472       0.1831
+aqr_same_role_object_core_overlap_max       0.0733       0.2400
+posterior_recycle_rate                      0.0765       0.1087
+posterior_identity_switch_rate              0.6994       0.6994
+posterior_binding_signature_low_rank_abs    0.0122       0.0172
+posterior_binding_signature_calib_std       0.0551       0.3644
+posterior_binding_signature_calib_margin    0.0554       0.2423
+preclip_grad_norm                           564.7        226.5
+```
+
+Comparison to the previous r2 non-calibrated diagnostic:
+
+```text
+r2 step50  raw overlap=0.2307 active overlap=0.0150 low_rank_abs=0.00029
+r2 step100 raw overlap=0.6141 active overlap=0.0997 low_rank_abs=0.00026
+
+calibrated step50  raw overlap=0.1472 active overlap=0.0117 low_rank_abs=0.0122
+calibrated step100 raw overlap=0.1831 active overlap=0.0359 low_rank_abs=0.0172
+```
+
+Interpretation:
+
+```text
+1. The calibrated binding repair is real: low-rank score is no longer dead, the
+   calibrated score has nonzero dispersion/margin, and raw/active support
+   overlap no longer follows the r2 step50->100 blow-up.
+2. The repair is not a full identity-continuity solution by itself:
+   posterior_identity_switch_rate stays around 0.70 through step100.
+3. The remaining problem is therefore more likely downstream posterior identity
+   continuity / assignment-to-object-file persistence, not the original raw
+   pairwise-score common-mode injection.
+4. Gradient pressure is still high but improving after clipping
+   (preclip 564.7 -> 226.5). This must be watched before any 30k run.
+```
+
+Current decision:
+
+```text
+GO to continue this diagnostic to 180 for evidence.
+NO-GO to claim final solved at step100 because identity_switch is unchanged.
+The next model-level question is whether posterior identity switch is an overly
+strict metric under active-slot filtering, or whether binding assignment still
+permutes object files despite healthy active support separation.
+```
+
+Overlay review:
+
+```text
+step100 overlay file:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_diag_binding_logit_calibrated_u2b1_180_20260515/anchor_overlays/step_000100.png
+
+visual count:
+  overlay draws 32 visible anchors because it includes graph candidates plus
+  posterior object files.
+
+important distinction:
+  graph candidates = 24
+  active graph anchors ~= 5.46
+  posterior anchors = 8
+```
+
+The apparent "many anchors everywhere" in the PNG is therefore not by itself a
+collapse signal. The active-support metrics and graph active flags are the
+decisive evidence. The still-concerning visual/dataflow point is posterior
+role-1 multiplicity: posterior object files remain visible and identity-switch
+is high even though active graph support separation is healthy. This reinforces
+the current diagnosis: support/common-mode binding was improved, but posterior
+object-file continuity remains unresolved.
+
+2026-05-15 19:45 CST strict local re-audit:
+
+```text
+py_compile:
+  PASS for config/contracts/pipeline/training/train/evidence/audit scripts
+
+scripts/verify_picf_owm_contract.py:
+  PASS, including binding-logit calibration, non-truncated paper audit, cache,
+  burn-in, active-slot, overlay, and optional MVTrack dataflow guards.
+
+scripts/picf_binding_logit_calibration_audit.py --fail-on-fail:
+  PASS.
+  common-mode pairwise score maps to zero;
+  relative pair structure survives double-center z-score calibration.
+
+scripts/picf_owm_professor_grade_audit.py --fail-on-fail:
+  PASS 16/16.
+
+scripts/picf_owm_nontruncated_paper_audit.py --fail-on-fail:
+  PASS 9/9.
+
+targeted pytest:
+  8 passed for binding centering, quadratic pairwise scoring, score calibration,
+  lifecycle calibration, and IsSameObject probe tests.
+  4 passed for verifier/evidence bundle tests.
+```
+
+Paper-code boundary:
+
+```text
+Inspected external object-binding code:
+  /tmp/vit-object-binding/src/utils/models.py
+  /tmp/vit-object-binding/src/trainer.py
+
+Relevant equations:
+  diagonal quadratic:   score(x,y) = linear(x * y)
+  full quadratic:       score(x,y) = x^T W_sym y + b
+  fixed-rank quadratic: score(x,y) = x^T (W1^T W2 + W2^T W1) y / 2 + b
+  training calibration: BCEWithLogitsLoss on instance-mask IsSameObject labels
+
+PICF decision:
+  do not copy unlicensed source;
+  reimplement the equation family natively;
+  do not add an online weak IsSameObject loss without mask/tracklet labels;
+  use the pairwise score only as a gated posterior binding logit.
+```
+
+Why the current repair is considered model-level rather than a scalar patch:
+
+```math
+S_{raw}(j,i)
+=
+w_e cos(e^-_j, e_i)
++ w_d (e^-_j)^T D e_i
++ w_r (L e^-_j)^T (R e_i)
+```
+
+The raw score is not directly trustworthy because the paper's probe learns a
+calibrated BCE logit from masks, while PICF has no mask labels at runtime.
+Therefore PICF now uses:
+
+```math
+S_{cal}
+=
+clip(
+  (S_{raw} - rowmean - colmean + mean) / max(std, sigma_min),
+  -c,
+  c
+)
+```
+
+and:
+
+```math
+L_{posterior\ bind}
+\leftarrow
+L_{hidden+geom+support+address}
++ g(\alpha, recycle, innovation) S_{cal}
+```
+
+This keeps the full belief-state invariant:
+
+```text
+current observation/posterior correction remains authoritative;
+binding signatures are relative object-file assignment evidence;
+cache remains residual historical context;
+future/predictive hooks remain detached and default-off.
+```
+
+Current operational state:
+
+```text
+A7 calibrated diagnostic is running and healthy at the process level.
+Latest structured row available during this audit: step100.
+Progress bar tail later showed step122/180 with both A100s active.
+Next decisive rows: step150 and step180.
+```
+
+Decision boundary after step100:
+
+```text
+Solved enough to reject the old hypothesis:
+  "runtime binding score exists but is numerically dead or common-mode."
+
+Not solved enough to claim final identity continuity:
+  posterior_identity_switch_rate remains about 0.70.
+
+Next analysis target:
+  determine whether identity_switch is measuring reserve/posterior role-file
+  multiplicity too harshly under active-slot filtering, or whether actual
+  object-file permutation remains.
+```
+
+### 2026-05-15 A7 calibrated binding diagnostic step150 update
+
+Run:
+
+```text
+picf_a7_diag_binding_logit_calibrated_u2b1_180_20260515
+log: /mnt/picf_run_logs/picf_a7_diag_binding_logit_calibrated_u2b1_180_20260515.log
+```
+
+Structured metrics:
+
+```text
+step 50:
+  loss_action_default_equiv                       0.12334
+  aqr_same_role_support_overlap_max              0.14720
+  aqr_active_same_role_support_overlap_max       0.01170
+  aqr_same_role_object_core_overlap_max          0.07326
+  aqr_active_same_role_object_core_overlap_max   0.03730
+  aqr_effective_anchor_count                     5.205
+  aqr_active_anchor_count                        5.455
+  posterior_identity_switch_rate                 0.69944
+  posterior_recycle_rate                         0.07647
+  binding_calibrated_std                         0.05514
+  binding_calibrated_margin                      0.05542
+
+step 100:
+  loss_action_default_equiv                       0.08086
+  aqr_same_role_support_overlap_max              0.18311
+  aqr_active_same_role_support_overlap_max       0.03594
+  aqr_same_role_object_core_overlap_max          0.24003
+  aqr_active_same_role_object_core_overlap_max   0.14188
+  aqr_effective_anchor_count                     5.090
+  aqr_active_anchor_count                        5.465
+  posterior_identity_switch_rate                 0.69944
+  posterior_recycle_rate                         0.10866
+  binding_calibrated_std                         0.36443
+  binding_calibrated_margin                      0.24227
+
+step 150:
+  loss_action_default_equiv                       0.08155
+  aqr_same_role_support_overlap_max              0.83434
+  aqr_active_same_role_support_overlap_max       0.06632
+  aqr_same_role_object_core_overlap_max          0.74055
+  aqr_active_same_role_object_core_overlap_max   0.05624
+  aqr_effective_anchor_count                     4.037
+  aqr_active_anchor_count                        4.460
+  posterior_identity_switch_rate                 0.74944
+  posterior_recycle_rate                         0.06842
+  binding_calibrated_std                         0.00000
+  binding_calibrated_margin                      0.00000
+
+step 180:
+  loss_action_default_equiv                       0.07632
+  aqr_same_role_support_overlap_max              0.97841
+  aqr_active_same_role_support_overlap_max       0.09839
+  aqr_same_role_object_core_overlap_max          0.83568
+  aqr_active_same_role_object_core_overlap_max   0.04184
+  aqr_effective_anchor_count                     4.073
+  aqr_active_anchor_count                        4.508
+  posterior_identity_switch_rate                 0.76111
+  posterior_recycle_rate                         0.08008
+  binding_calibrated_std                         0.00000
+  binding_calibrated_margin                      0.00000
+```
+
+Interpretation:
+
+```text
+1. The calibrated binding repair is not numerically dead:
+   step100 has nonzero calibrated std and margin, and active overlap remains
+   low.
+
+2. The step150 rebound is not the old identical-support failure in active
+   owners:
+   raw same-role support/object-core overlap rises to 0.83/0.74, but
+   active same-role support/object-core overlap remains 0.066/0.056.
+   This points to reserve/inactive anchor reuse or raw candidate overlap, not
+   necessarily active object-owner collapse.
+
+3. The calibration guard is doing the mathematically intended thing at step150:
+   calibrated std/margin are zero, meaning the double-centered pairwise matrix
+   did not contain enough dispersion to be trusted as identity evidence.
+   Lowering the threshold blindly would be a regression because it would amplify
+   low-dispersion noise as a fake IsSameObject logit.
+
+4. Identity continuity is still not solved:
+   posterior_identity_switch_rate stays about 0.70-0.75. The next required
+   audit is active-owner identity continuity, not another scalar loss sweep.
+
+5. Step180 confirms the same diagnosis:
+   action keeps improving and active-owner overlap remains low, but raw
+   same-role overlap rises to 0.978 and posterior identity switch rises to
+   0.761. Therefore the remaining failure is not "active owners cannot
+   separate"; it is either inactive/reserve object-file collapse, overly broad
+   identity-switch accounting, or real posterior file permutation after active
+   owner selection.
+```
+
+Next decision:
+
+```text
+Do not start another architecture variant until active-owner identity continuity
+is separated from reserve/dustbin object-file metrics.
+
+Next required implementation:
+  parse overlay JSON and metrics for step50/100/150/180;
+  compute identity continuity over active owners only;
+  report whether active owners preserve object files while reserve anchors
+  collapse;
+  only if active owners also switch, revisit binding-signature calibration or
+  support-owner competition.
+
+This keeps the repair mathematical: measure the posterior object-file error
+that remains instead of adding another auxiliary loss.
+```
+
+### 2026-05-15 posterior file-continuity diagnostic patch
+
+The old identity metric is now explicitly treated as row-churn telemetry:
+
+```math
+1[\arg\max_i B_{t,j,i} \ne \arg\max_i B_{t-1,j,i}]
+```
+
+It is not sufficient as object identity evidence because observation-anchor
+rows are reconstructed each step. The runtime now logs posterior object-file
+continuity directly from binding signatures:
+
+```math
+C_{j,k} = s_{t,j}^{\top}s_{t-1,k}
+```
+
+```math
+margin_j =
+C_{j,j} - \max_{k \ne j,\ r_k=r_j} C_{j,k}
+```
+
+Active-file filtering uses owner reliability, alpha, support mass, and recycle
+on both current and previous files. New metrics:
+
+```text
+posterior_file_self_signature_sim_mean
+posterior_file_best_other_signature_margin_mean
+posterior_file_potential_swap_rate
+posterior_active_file_fraction
+posterior_active_file_self_signature_sim_mean
+posterior_active_file_best_other_signature_margin_mean
+posterior_active_file_potential_swap_rate
+```
+
+This resolves the diagnostic ambiguity exposed by A7 step180:
+
+```text
+If row-id switch stays high but active-file potential swap is low:
+  the old metric over-reported identity churn; do not add another loss.
+
+If active-file potential swap is high:
+  fix posterior file update/continuity before any long run or predictive loss.
+```
+
+Local verification:
+
+```text
+PYTHONPATH=src python -m py_compile \
+  src/openpi/picf/core/pipeline.py \
+  scripts/picf_core_train.py \
+  scripts/picf_owm_evidence_bundle.py \
+  scripts/picf_anchor_run_diagnostic_report.py \
+  scripts/picf_binding_dataflow_math_audit.py
+
+PYTHONPATH=src python scripts/picf_binding_dataflow_math_audit.py --fail-on-fail
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py
+PYTHONPATH=src uv run pytest -q scripts/picf_anchor_run_diagnostic_report_test.py
+```
+
+### 2026-05-15 A7 posterior-file continuity diagnostic step50/100
+
+Run:
+
+```text
+picf_a7_posterior_file_continuity_u2b1_220_20260515
+log: /mnt/picf_run_logs/picf_a7_posterior_file_continuity_u2b1_220_20260515.log
+run_dir: /mnt/checkpoints/picf_core/picf_core/picf_a7_posterior_file_continuity_u2b1_220_20260515
+```
+
+Purpose:
+
+```text
+Verify whether high posterior_identity_switch_rate is merely observation-row
+argmax churn or a real posterior object-file continuity issue.
+```
+
+Key metrics:
+
+```text
+step50:
+  loss_action_default_equiv                       0.1230
+  aqr_same_role_support_overlap_max              0.1597
+  aqr_active_same_role_support_overlap_max       0.0124
+  aqr_same_role_object_core_overlap_max          0.0806
+  aqr_active_same_role_object_core_overlap_max   0.0453
+  posterior_identity_switch_rate                 0.6639
+  posterior_identity_switch_rate_stable          0.5263
+  posterior_active_file_fraction                 1.0000
+  posterior_active_file_self_signature_sim_mean  0.5871
+  posterior_active_file_best_other_margin_mean   0.1215
+  posterior_active_file_potential_swap_rate      0.3894
+  binding_calibrated_std                         0.2176
+  binding_calibrated_margin                      0.2406
+  recycle_rate                                   0.1129
+
+step100:
+  loss_action_default_equiv                       0.0768
+  aqr_same_role_support_overlap_max              0.3732
+  aqr_active_same_role_support_overlap_max       0.0870
+  aqr_same_role_object_core_overlap_max          0.2128
+  aqr_active_same_role_object_core_overlap_max   0.1309
+  posterior_identity_switch_rate                 0.7061
+  posterior_identity_switch_rate_stable          0.5551
+  posterior_active_file_fraction                 0.9094
+  posterior_active_file_self_signature_sim_mean  0.7134
+  posterior_active_file_best_other_margin_mean   0.2054
+  posterior_active_file_potential_swap_rate      0.2845
+  binding_calibrated_std                         0.0269
+  binding_calibrated_margin                      0.0239
+  recycle_rate                                   0.1792
+  preclip_grad_norm                              87.17, clipped to 5.0
+```
+
+Interpretation:
+
+```text
+1. The old row-id identity switch is not pure false positive:
+   posterior_active_file_potential_swap_rate is nonzero and high enough to
+   matter. At step50 it is 0.389 and at step100 it is 0.285.
+
+2. The posterior file issue is improving but not solved:
+   active-file self similarity rises from 0.587 to 0.713, and margin rises from
+   0.121 to 0.205. This argues against immediate failure, but the swap rate is
+   still above the desired <=0.10 acceptance target.
+
+3. Active owner support is still healthy:
+   active support overlap remains 0.012 -> 0.087, while raw overlap rises
+   0.160 -> 0.373. This again separates reserve/raw overlap from active owner
+   collapse.
+
+4. The pairwise binding logit is present but weakening:
+   calibrated score std/margin drop from 0.218/0.241 to 0.027/0.024. This means
+   the current batch/window has less relative IsSameObject evidence after
+   double-centering. The guard is functioning, but the representation is not
+   yet consistently discriminative.
+
+5. Gradient clipping is doing real work at step100:
+   preclip grad norm is 87.17 and clipped to 5.0. This is a warning for long
+   training: if it persists, action/semantic gradients can still perturb object
+   files even when active owner overlap remains low.
+```
+
+Decision:
+
+```text
+Let the diagnostic finish to step220. Do not start another architecture variant
+before seeing whether active-file potential swap continues downward or rebounds.
+
+If step150/220 active-file swap <= 0.10:
+  the current correction is likely sufficient for short-horizon object-file
+  continuity; proceed to controlled long run with the same metrics.
+
+If active-file swap remains >= 0.25:
+  the posterior file update is the remaining target. The next structural repair
+  should improve file-to-file continuity, not AQR support separation.
+
+If active support overlap crosses 0.50:
+  active owner collapse is also present and the run should be stopped.
+```
+
+### 2026-05-15 A7 posterior-file continuity diagnostic final step150/200/220
+
+Final remote metrics were copied locally to:
+
+```text
+/tmp/picf_a7_posterior_file_continuity_u2b1_220_metrics.jsonl
+```
+
+Local run-level diagnostic:
+
+```text
+PYTHONPATH=src python scripts/picf_anchor_run_diagnostic_report.py \
+  /tmp/picf_a7_posterior_file_continuity_u2b1_220_run
+```
+
+Important diagnostic finding:
+
+```text
+calibrated pairwise binding evidence is off for the last row; the score matrix
+did not have enough relative dispersion to trust as identity evidence.
+```
+
+This is expected and correct. The paper-inspired same-object subspace must not
+turn near-constant/common-mode scores into posterior identity evidence. The
+runtime therefore drops the calibrated contribution when relative dispersion is
+below threshold.
+
+Key metrics:
+
+```text
+step150:
+  loss_action_default_equiv                       0.0762
+  loss_total                                      1.2656
+  aqr_same_role_support_overlap_max              0.7400
+  aqr_active_same_role_support_overlap_max       0.1304
+  aqr_same_role_object_core_overlap_max          0.3919
+  aqr_active_same_role_object_core_overlap_max   0.2066
+  posterior_identity_switch_rate                 0.7489
+  posterior_identity_switch_rate_stable          0.6230
+  posterior_active_file_fraction                 0.8537
+  posterior_active_file_self_signature_sim_mean  0.8533
+  posterior_active_file_best_other_margin_mean   0.2583
+  posterior_active_file_potential_swap_rate      0.1318
+  recycle_rate                                   0.1957
+  binding_calibrated_std                         0.0046
+  binding_calibrated_margin                      0.0025
+
+step200:
+  loss_action_default_equiv                       0.0803
+  loss_total                                      1.2781
+  aqr_same_role_support_overlap_max              0.9497
+  aqr_active_same_role_support_overlap_max       0.1584
+  aqr_same_role_object_core_overlap_max          0.5514
+  aqr_active_same_role_object_core_overlap_max   0.1504
+  posterior_identity_switch_rate                 0.7383
+  posterior_identity_switch_rate_stable          0.6283
+  posterior_active_file_fraction                 0.8219
+  posterior_active_file_self_signature_sim_mean  0.8528
+  posterior_active_file_best_other_margin_mean   0.2729
+  posterior_active_file_potential_swap_rate      0.1018
+  recycle_rate                                   0.1904
+  binding_calibrated_std                         0.0000
+  binding_calibrated_margin                      0.0000
+
+step220:
+  loss_action_default_equiv                       0.0652
+  loss_total                                      1.2446
+  aqr_same_role_support_overlap_max              0.9207
+  aqr_active_same_role_support_overlap_max       0.1694
+  aqr_same_role_object_core_overlap_max          0.5796
+  aqr_active_same_role_object_core_overlap_max   0.1365
+  posterior_identity_switch_rate                 0.7319
+  posterior_identity_switch_rate_stable          0.6327
+  posterior_active_file_fraction                 0.8562
+  posterior_active_file_self_signature_sim_mean  0.8404
+  posterior_active_file_best_other_margin_mean   0.2459
+  posterior_active_file_potential_swap_rate      0.1307
+  recycle_rate                                   0.1927
+  binding_calibrated_std                         0.0000
+  binding_calibrated_margin                      0.0000
+  owm_tracklet_tokens                            0
+  owm_proposal_tokens                            0
+```
+
+Interpretation:
+
+```text
+1. The old posterior_identity_switch_rate is not a reliable object-file metric.
+   It remains high at 0.73 even when active-file self similarity is 0.84 and
+   active-file swap is 0.13. It is observation-row churn plus real uncertainty,
+   not direct proof that every object file swapped.
+
+2. Active object files are not collapsed. Active same-role support overlap is
+   0.012 -> 0.087 -> 0.130 -> 0.158 -> 0.169, which is materially different
+   from raw reserve overlap 0.160 -> 0.373 -> 0.740 -> 0.950 -> 0.921.
+
+3. Reserve/candidate anchors are still highly redundant. This is visible in
+   raw same-role overlap and raw object-core overlap. It should be handled as
+   reserve-capacity/retirement and diagnostics, not as a reason to add another
+   global diversity loss to active files.
+
+4. Pairwise same-object evidence is not consistently available. Early rows
+   have usable calibrated std/margin; later rows are low-dispersion and the
+   calibrator correctly turns the contribution off. This matches the
+   object-binding paper lesson: the pairwise subspace is useful only when the
+   representation contains relative pair information.
+
+5. Tracklet/proposal are still inactive on current CALVIN dataflow
+   (`owm_tracklet_tokens=0`, `owm_proposal_tokens=0`). They cannot be counted
+   as evidence for this run.
+```
+
+Decision:
+
+```text
+Do not deploy all remaining paper-inspired modules as online losses.
+
+The next complete model step should be:
+  A. keep active-owner/posterior-file diagnostics as acceptance metrics;
+  B. treat raw reserve overlap as reserve-pool redundancy, not active collapse;
+  C. if long-run active-file swap stays <= 0.15 and active overlap stays < 0.25,
+     proceed with controlled long training;
+  D. if active-file swap rises > 0.25 or active overlap rises > 0.50, fix
+     posterior file update / reserve retirement before any predictive loss.
+```
+
+This is not a truncated fix. It is the mathematically minimal complete
+decision boundary implied by the data: the active belief files and reserve
+candidate pool are different random variables and must not be optimized or
+judged with one scalar.
+
+### 2026-05-15 anchor overlay color/source correction
+
+A manual inspection concern was raised: orange posterior circles appeared
+clustered, while other colors did not appear as posterior circles.
+
+Code follow-through:
+
+```text
+scripts/picf_core_train.py:
+  _ANCHOR_OVERLAY_ROLE_COLORS =
+    role0 blue
+    role1 orange
+    role2 green
+    role3 purple
+
+  graph anchors:
+    drawn as squares
+    roles come from _mapg_anchor_roles(), which includes role0/1/2/3
+
+  posterior anchors:
+    drawn as circles/crosses
+    roles come from _posterior_role_ids()
+
+src/openpi/picf/core/pipeline.py:
+  _posterior_role_ids():
+    role0 for persistent effector files
+    role1 for all non-effector persistent object files
+```
+
+Therefore:
+
+```text
+Orange posterior circles are non-effector persistent object files.
+Green/purple posterior circles are not expected in the current design because
+role2/role3 are graph-query roles, not persistent posterior file classes.
+```
+
+Latest step200 overlay JSON showed:
+
+```text
+posterior visible:
+  role0 count = 1
+  role1 count = 7
+  role1 pixel spread ~= 2.19 px
+  role1 world spread ~= [0.110, 0.075, 0.065] m
+```
+
+This is a real inspection signal: several non-effector posterior files are
+projecting to very similar static-view pixels. However, it is not equivalent
+to active-object collapse because the old overlay drew all posterior files in
+role color without showing current active/reserve status.
+
+Diagnostic-only fix:
+
+```text
+Posterior overlay now computes a single-frame activity hint:
+  active if alpha >= 0.25 and support_mass >= 0.05 and recycle_gate <= 0.5
+
+Inactive/reserve posterior files are drawn gray and labeled with an `i` suffix,
+matching inactive graph anchors.
+```
+
+This does not change model outputs, loss, optimizer, action path, or posterior
+update. It only makes the overlay consistent with the active-file metrics used
+for acceptance.
+
+### 2026-05-15 active/reserve sanity accepted for 30k launch
+
+Canonical entry remains:
+
+```text
+src/openpi/picf/README_v2.2.md
+```
+
+The diagnostic-only overlay correction was tested on A7 with:
+
+```text
+run:
+  picf_a7_overlay_active_reserve_sanity_120_20260515
+
+metrics:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_active_reserve_sanity_120_20260515/metrics.jsonl
+
+anchor overlays:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_active_reserve_sanity_120_20260515/anchor_overlays/step_000050.png
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_overlay_active_reserve_sanity_120_20260515/anchor_overlays/step_000100.png
+```
+
+The tested contract was:
+
+```text
+unroll_steps=2
+burnin_steps=1
+burnin_mode=state_only
+perception_finetune_mode=frozen
+semantic_trainable=true
+semantic_lr_scale=0.25
+lambda_action_pos/rot/gripper=0.50
+lambda_slot_jepa/support_pred/binding_consistency/aqr_denoising=0
+same_role_support_competition_weight=0.85
+same_role_support_competition_iters=5
+active_slot_max_per_role=2
+active_slot_overlap_threshold=0.40
+active_slot_relative_score_threshold=0.80
+active_slot_geometry_duplicate_threshold=0.45
+posterior_owner_active_min=0.30
+local_refinement=off
+anchor_overlay_interval=50
+```
+
+Step metrics:
+
+```text
+step25:
+  loss_total                                      1.3232
+  loss_action_default_equiv                       0.1368
+  loss_alignment                                  1.2140
+  loss_anchor_pv                                  2.7681
+  aqr_active_same_role_support_overlap_max       0.0172
+  aqr_same_role_support_overlap_max              0.1581
+  aqr_active_same_role_object_core_overlap_max   0.0289
+  posterior_recycle_rate                         0.1350
+  posterior_active_file_potential_swap_rate      0.4530
+
+step50:
+  loss_total                                      1.1977
+  loss_action_default_equiv                       0.0966
+  loss_alignment                                  1.0985
+  loss_anchor_pv                                  2.6818
+  aqr_active_same_role_support_overlap_max       0.0136
+  aqr_same_role_support_overlap_max              0.3706
+  aqr_active_same_role_object_core_overlap_max   0.0438
+  posterior_recycle_rate                         0.0742
+  posterior_active_file_potential_swap_rate      0.4063
+
+step75:
+  loss_total                                      1.2262
+  loss_action_default_equiv                       0.0788
+  loss_alignment                                  1.1315
+  loss_anchor_pv                                  2.6176
+  aqr_active_same_role_support_overlap_max       0.1218
+  aqr_same_role_support_overlap_max              0.5903
+  aqr_active_same_role_object_core_overlap_max   0.1269
+  posterior_recycle_rate                         0.1576
+  posterior_active_file_potential_swap_rate      0.4184
+
+step100:
+  loss_total                                      1.1663
+  loss_action_default_equiv                       0.0714
+  loss_alignment                                  1.0735
+  loss_anchor_pv                                  2.6678
+  aqr_active_same_role_support_overlap_max       0.0479
+  aqr_same_role_support_overlap_max              0.3067
+  aqr_active_same_role_object_core_overlap_max   0.1352
+  posterior_recycle_rate                         0.1515
+  posterior_active_file_potential_swap_rate      0.3773
+
+step120:
+  loss_total                                      1.1723
+  loss_action_default_equiv                       0.0814
+  loss_alignment                                  1.0769
+  loss_anchor_pv                                  2.6120
+  aqr_active_same_role_support_overlap_max       0.0514
+  aqr_same_role_support_overlap_max              0.2809
+  aqr_active_same_role_object_core_overlap_max   0.1059
+  posterior_recycle_rate                         0.1425
+  posterior_active_file_potential_swap_rate      0.4071
+```
+
+Interpretation:
+
+```text
+1. Active same-role overlap stays low through step120. The old visual concern
+   that all visible anchors collapsed was partly a reserve/posterior overlay
+   interpretation problem.
+
+2. Raw same-role overlap can still move because reserve/candidate capacity is
+   intentionally larger than the active set. It should not be used alone as the
+   stop criterion.
+
+3. Action and alignment are trainable under the same contract; no early active
+   collapse was observed.
+
+4. The remaining watch item is posterior_active_file_potential_swap_rate. It is
+   still high in the first 120 steps and must be tracked during the first 300
+   steps of the 30k run.
+```
+
+Decision:
+
+```text
+Proceed to a controlled 30000-step A7 long run.
+
+Use:
+  run_a7_active_reserve_long30k_20260515.sh
+
+Long-run requirements:
+  anchor overlays every 50 steps;
+  metrics printed every 50 steps;
+  checkpoints every 2500 steps;
+  keep_last_checkpoints=3;
+  progress bar enabled;
+  tmux session so SSH disconnect does not stop training.
+
+Do not declare behavior success until the 30k run, checkpoint overlays, and
+CALVIN/video validation are inspected.
+```
+
+Pre-launch local audit for the 30k run:
+
+```text
+PYTHONPATH=src python -m py_compile \
+  scripts/picf_core_train.py \
+  scripts/verify_picf_owm_contract.py \
+  scripts/picf_owm_strict_diagnose.py \
+  scripts/picf_owm_dataflow_trace.py \
+  scripts/picf_owm_professor_grade_audit.py \
+  scripts/picf_binding_dataflow_math_audit.py \
+  scripts/picf_anchor_run_diagnostic_report.py \
+  src/openpi/picf/core/config.py \
+  src/openpi/picf/core/contracts.py \
+  src/openpi/picf/core/pipeline.py \
+  src/openpi/picf/core/training.py
+  PASS
+
+PYTHONPATH=src python scripts/verify_picf_owm_contract.py
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_strict_diagnose.py --fail-on-fail
+  PASS, with expected warnings only when no external runtime/CALVIN artifact is provided.
+
+PYTHONPATH=src python scripts/picf_owm_dataflow_trace.py --fail-on-fail
+  PASS
+
+PYTHONPATH=src python scripts/picf_owm_professor_grade_audit.py --fail-on-fail
+  PASS 16/16
+
+PYTHONPATH=src python scripts/picf_binding_dataflow_math_audit.py --fail-on-fail
+  PASS 17/17
+
+PYTHONPATH=src uv run pytest -q \
+  scripts/picf_anchor_run_diagnostic_report_test.py \
+  scripts/picf_owm_same_object_probe_test.py \
+  scripts/verify_picf_owm_contract_test.py
+  PASS 6/6
+
+git diff --check
+  PASS
+```
+
+This is still a code/dataflow/math pre-launch audit, not behavior acceptance.
+The behavior gate remains the live 30k run plus checkpoint overlays and later
+CALVIN/video evaluation.
+## 2026-05-16 Posterior File Competition Diagnostic
+
+### Trigger
+
+A7 long-run anchor overlays around steps 1600-1700 showed repeated orange
+posterior circles on the same handle/block region. The overlay convention is:
+graph anchors are squares, posterior anchors are circles, role 0 is effector,
+role 1 is object/task-file, role 2 is interaction/contact, and role 3 is
+coverage/context. Therefore repeated orange posterior circles indicate multiple
+role-1 persistent object files updating from the same physical evidence.
+
+### Root Cause Follow-Through
+
+The posterior position is not written directly from a wrist RGB location. The
+geometry update is:
+
+```text
+obs_anchors.x
+  <- point-weighted world geometry from local effector + global scene point pool
+  <- graph/visual/PG/temporal/tactile priors only bias evidence routing
+
+posterior.x_obs
+  = binding[:-1] @ obs_anchors.x / support_mass
+```
+
+Wrist/gripper V-JEPA tokens are typed temporal view evidence. Without calibrated
+wrist-to-static projective geometry, they are intentionally not forced into the
+static-camera geometry grid. The failure was instead in posterior assignment:
+`_sinkhorn_dustbin` had an observation dustbin row but no persistent-file
+no-object decision, so every posterior file row still received measurement mass.
+With fewer real objects than persistent files, several same-role files could all
+update from one contact/handle owner.
+
+### Repair
+
+Added posterior file competition before lifecycle calibration:
+
+```text
+binding logits
+  -> sinkhorn with observation dustbin
+  -> posterior_file_competition
+       same-role support overlap duplicate check
+       same-role geometry duplicate check
+       demote duplicate file rows to dustbin
+  -> lifecycle calibration
+  -> posterior correction/write
+```
+
+This is an assignment-model repair, not a new auxiliary loss. It matches the
+object-file/no-object capacity principle used by Slot Attention explaining-away
+and DETR-style no-object slots: unused capacity should remain a file, not be
+forced to explain the same object.
+
+### Code And Script Checks
+
+Local checks after implementation:
+
+```text
+python -m py_compile src/openpi/picf/core/config.py \
+  src/openpi/picf/core/contracts.py \
+  src/openpi/picf/core/pipeline.py \
+  scripts/picf_core_train.py \
+  scripts/verify_picf_owm_contract.py
+
+uv run pytest -q src/openpi/picf/core/pipeline_test.py \
+  -k "posterior_file_competition or sinkhorn_dustbin or posterior_lifecycle or active_slot_filter"
+  -> 7 passed
+
+python scripts/verify_picf_owm_contract.py
+  -> posterior_file_competition contract PASS
+
+python scripts/picf_owm_strict_diagnose.py --fail-on-fail
+python scripts/picf_owm_dataflow_trace.py --fail-on-fail
+python scripts/picf_binding_dataflow_math_audit.py --fail-on-fail
+python scripts/picf_owm_professor_grade_audit.py --fail-on-fail
+  -> all code/dataflow/math checks pass
+```
+
+### Remote Diagnostic
+
+Stopped the stale A7 run using the old posterior assignment logic and started:
+
+```text
+tmux: picf_a7_file_comp_diag600
+run:  picf_a7_posterior_file_competition_diag600_20260516
+steps: 600
+overlay interval: 50
+checkpoint interval: 300
+```
+
+The run started correctly and reached early optimizer steps. Full acceptance
+requires step-50+ metrics and overlays:
+
+```text
+posterior_file_competition_active_count
+posterior_file_competition_demoted_mass_mean
+posterior_file_competition_duplicate_overlap_max
+posterior_active_file_potential_swap_rate
+posterior role-1 orange circles in anchor_overlays/*.png/json
+```
+
+Acceptance condition: repeated orange posterior role-1 circles should no longer
+occupy one object/contact location when only one distinct role-1 object file is
+supported by the current evidence.
+
+### 2026-05-16 Full Binding Math/Dataflow Audit Update
+
+Added a dedicated follow-through document:
+
+```text
+docs/PICF_AQR_OWM_FULL_BINDING_MATH_DATAFLOW_AUDIT_20260516_TEMP.md
+```
+
+The audit explicitly compares the pulled object-binding paper code against the
+PICF runtime:
+
+```text
+/tmp/vit-object-binding/src/utils/models.py
+  DiagonalQuadraticProbe
+  QuadraticProbe
+  QuadraticFixedRankProbe
+
+/tmp/vit-object-binding/src/trainer.py
+  pairwise BCE over instance-mask IsSameObject labels
+```
+
+Conclusion:
+
+```text
+The paper supports projected/quadratic pairwise same-object evidence.
+It does not justify online weak-label BCE in CALVIN without instance masks.
+The missing model component exposed by the A7 overlays was no-object/file
+capacity for persistent posterior files, now implemented as posterior file
+competition.
+```
+
+Re-run local checks after adding the standalone executable audit:
+
+```text
+python -m py_compile \
+  src/openpi/picf/core/config.py \
+  src/openpi/picf/core/contracts.py \
+  src/openpi/picf/core/pipeline.py \
+  scripts/picf_core_train.py \
+  scripts/verify_picf_owm_contract.py \
+  scripts/picf_posterior_file_competition_audit.py
+  -> PASS
+
+python scripts/verify_picf_owm_contract.py
+  -> all checks PASS, including posterior_file_competition_has_executable_math_audit
+
+uv run python scripts/picf_posterior_file_competition_audit.py
+  -> same_support_duplicate_demotes_one_file PASS
+  -> measurement_mass_is_conserved PASS
+  -> distinct_support_keeps_capacity PASS
+  -> geometry_duplicate_demotes_even_with_distinct_support PASS
+```
+
+The active A7 diagnostic is still pending its first `log_interval=50` metrics
+and anchor overlay. Until those files are inspected, the status is:
+
+```text
+local code/math/dataflow: pass
+remote runtime start: pass
+behavior/overlay acceptance: pending step50+
+```
+
+Step50 inspection found one diagnostic-path issue: the model-side metric
+`posterior_file_competition_active_count=4.65` and
+`posterior_file_competition_demoted_mass_mean=0.262` show file competition is
+active, but the overlay JSON/PNG still displayed all role-1 posterior files as
+active because it used the old alpha/support/recycle heuristic. This could
+create a false visual conclusion that the repair did nothing. The overlay path
+was updated to prefer `posterior.file_competition_active` and record
+`file_competition_demoted_mass` per anchor. Future overlays will gray demoted
+persistent files instead of drawing them as active orange object files.
+
+The same step50 metrics also separate the layers correctly:
+
+```text
+aqr_active_same_role_support_overlap_max = 0.0205
+aqr_same_role_support_overlap_max        = 0.1366
+posterior_file_competition_active_count  = 4.65
+posterior_file_competition_demoted_mean  = 0.262
+posterior_file_competition_duplicate_max = 0.998
+posterior_identity_switch_rate           = 0.699
+posterior_recycle_rate                   = 0.141
+```
+
+Interpretation: the active AQR graph is no longer the collapse source at step50.
+The duplicate evidence is still present in posterior file space, and the new
+competition layer is actively demoting it. The remaining acceptance question is
+whether the demoted files stay visually gray/reserve after the overlay fix and
+whether `posterior_identity_switch_rate` falls as the diagnostic proceeds.
+
+Restarted the short diagnostic with fixed overlay semantics:
+
+```text
+tmux: picf_a7_file_comp_overlayfix_diag300
+run:  picf_a7_posterior_file_competition_overlayfix_diag300_20260516
+steps: 300
+overlay interval: 50
+first expected overlay: step50
+```
+
+Step50 of the fixed-overlay diagnostic has now been inspected:
+
+```text
+aqr_active_same_role_support_overlap_max = 0.0167
+aqr_same_role_support_overlap_max        = 0.1435
+posterior_file_competition_active_count  = 4.47
+posterior_file_competition_demoted_mean  = 0.274
+posterior_file_competition_demoted_max   = 0.675
+posterior_file_competition_duplicate_max = 0.998
+posterior_identity_switch_rate           = 0.704
+posterior_recycle_rate                   = 0.116
+loss_action_default_equiv                = 0.132
+loss_action_active7                      = 0.463
+owm_tracklet_tokens                      = 0
+owm_proposal_tokens                      = 0
+```
+
+The new overlay JSON confirms the diagnostic path is fixed. For visible
+posterior role-1 files:
+
+```text
+visible role-1 posterior files = 7
+active role-1 posterior files  = 3
+demoted role-1 reserve files   = 4
+min active role-1 pixel distance ~= 15.6 px
+min all role-1 pixel distance    = 0.0 px
+```
+
+The sub-pixel duplicates at the same physical point are no longer counted as
+active object files; they carry nonzero `file_competition_demoted_mass` and are
+reserve/dustbin capacity. This resolves the previous overlay false positive.
+
+The remaining issue is not active AQR collapse at step50. The active graph is
+healthy and sparse. The remaining issue is identity continuity: active posterior
+role-1 count is still greater than one on a simple prompt, and
+`posterior_identity_switch_rate` is still high. Therefore the next acceptance
+question is whether the active posterior files stabilize by step100/150, not
+whether the old orange duplicate display still exists.
+
+Step100 of the fixed-overlay diagnostic has also been inspected:
+
+```text
+aqr_active_same_role_support_overlap_max = 0.0115
+aqr_same_role_support_overlap_max        = 0.2462
+posterior_file_competition_active_count  = 4.37
+posterior_file_competition_demoted_mean  = 0.258
+posterior_file_competition_demoted_max   = 0.607
+posterior_file_competition_duplicate_max = 0.999
+posterior_identity_switch_rate           = 0.743
+posterior_identity_switch_rate_stable    = 0.516
+posterior_recycle_rate                   = 0.221
+posterior_active_file_potential_swap_rate= 0.320
+loss_action_default_equiv                = 0.0809
+loss_action_active7                      = 0.351
+```
+
+Overlay JSON for the `turn on the yellow lamp` sample:
+
+```text
+visible posterior role-1 files = 7
+active posterior role-1 files  = 2
+demoted posterior role-1 files = 5
+min active role-1 distance     ~= 40.0 px
+min all role-1 distance        = 0.0 px
+```
+
+Interpretation:
+
+```text
+1. The active AQR graph is still healthy; active same-role support overlap is
+   near zero.
+2. The visible sub-pixel role-1 duplicates are reserve/demoted posterior
+   capacity, not active object files. The fixed overlay path is therefore doing
+   the right diagnostic accounting.
+3. Raw same-role support overlap increased from 0.1435 to 0.2462, but remains
+   far from the previous collapse regime.
+4. The bad signal is posterior lifecycle stability: identity switch and recycle
+   are both still high, and recycle increases as LR reaches the full value.
+```
+
+Current decision:
+
+```text
+Do not launch a 30k run from only step100 evidence.
+Continue this diagnostic at least to step150/300 unless active posterior files
+become visually duplicated again. If the active posterior stays separated but
+identity/recycle remains high, the next repair should target lifecycle
+stability, not AQR support competition.
+```
+
+Step150 is now available:
+
+```text
+aqr_active_same_role_support_overlap_max = 0.0838
+aqr_same_role_support_overlap_max        = 0.5314
+posterior_file_competition_active_count  = 4.11
+posterior_identity_switch_rate           = 0.781
+posterior_recycle_rate                   = 0.309
+posterior_active_file_potential_swap_rate= 0.281
+loss_action_default_equiv                = 0.0773
+```
+
+Overlay JSON for `push the red block towards the right`:
+
+```text
+visible posterior role-1 files = 7
+active posterior role-1 files  = 2
+demoted posterior role-1 files = 5
+min active role-1 distance     ~= 24.6 px
+min all role-1 distance        = 0.0 px
+```
+
+Interpretation after step150:
+
+```text
+1. Active posterior files are still not sub-pixel duplicated. File competition
+   is still preventing the old all-orange duplicate failure.
+2. Raw same-role overlap rose to 0.53 and active overlap rose to 0.084. This is
+   not the previous collapse regime, but it is a warning that inactive reserve
+   capacity is still collecting duplicate evidence.
+3. Identity switch and recycle worsened from step50 -> 100 -> 150. This is the
+   strongest remaining failure signal.
+4. Action loss continues to improve, so action learning alone can hide a
+   posterior lifecycle problem. Do not use action loss as the sole acceptance
+   metric for this run.
+```
+
+Decision after step150:
+
+```text
+The repaired file-competition model fixes the diagnosed no-object assignment
+bug and the overlay false positive, but it does not yet prove posterior
+lifecycle stability. The next model-side repair, if step300 does not recover,
+should target lifecycle hysteresis / identity survival rather than adding more
+support-diversity or local-refinement terms.
+```
+
+Diagnostic refinement after step150:
+
+```text
+posterior_identity_switch_rate / posterior_recycle_rate are still useful raw
+signals, but they average active object files and inactive reserve capacity.
+The code now filters direct file-continuity metrics through
+posterior.file_competition_active and logs active-vs-inactive recycle rates:
+
+  posterior_active_file_recycle_rate
+  posterior_inactive_file_recycle_rate
+
+This is not a model-side rescue patch. It prevents the next decision from
+mistaking reserve-file churn for active-object identity failure.
+```
+
+Follow-through repair after inspecting the anchor image:
+
+```text
+Question:
+  Could the many gray posterior files still absorb tokens or distract action?
+
+Code answer before repair:
+  Yes. They were inactive for overlay/file-competition accounting, but the full
+  posterior token list still flowed into control, predictive state, AQR
+  posterior reread, and cache write.
+
+Repair:
+  Use posterior.file_competition_active as the downstream no-object gate.
+  Inactive/demoted files remain reserve capacity, but their tokens are masked
+  from action/predictive/cache exposure.
+
+Regression:
+  test_posterior_inactive_files_are_gated_from_downstream_reads
+```
+
+This is the correct structural fix if gray files are visually numerous around
+an object. It does not force the active orange file onto a hand-written point;
+it prevents no-object capacity from competing with active object files after
+the posterior has already made the no-object decision.
+
+Overlay diagnostic update:
+
+```text
+New overlay output per checkpoint step:
+  step_xxxxxx__<task>__with_gray.png
+  step_xxxxxx__<task>__active_only.png
+  step_xxxxxx__<task>.json
+```
+
+Use `with_gray` for reserve/no-object capacity auditing and `active_only` for
+the question the user raised: whether action-visible orange posterior files are
+actually on the target object/contact region. The JSON remains full-fidelity and
+retains every gray reserve file with `active`, `file_competition_demoted_mass`,
+support signatures, and binding signatures. This prevents the next inspection
+from mixing two different claims:
+
+```text
+gray reserve files exist:
+  expected with fixed posterior capacity.
+
+gray reserve files influence action:
+  should be false after downstream gating.
+
+active orange files are off-target:
+  still possible; if observed in active_only, the next fault is owner/contact
+  evidence selection rather than reserve-file leakage.
+```
+
+Current A7 downstream-gated diagnostic:
+
+```text
+tmux: picf_a7_downstream_gate_diag300
+name: picf_a7_downstream_gate_diag300_20260516
+log:  /mnt/picf_run_logs/picf_a7_downstream_gate_diag300_20260516.log
+dir:  /mnt/checkpoints/picf_core/picf_core/picf_a7_downstream_gate_diag300_20260516
+```
+
+Startup contract observed:
+
+```text
+world_size=2
+effective_global_batch=2
+num_steps=300
+unroll_steps=2
+burnin_steps=1
+burnin_mode=state_only
+anchor_overlay_interval=50
+visual=encoder frozen
+point=sonata frozen
+tactile=encoder frozen
+semantic=paligemma trainable
+slot_jepa/support_pred/binding/denoise losses = 0
+local_refinement_enabled=False
+posterior_file_competition_enabled=True
+```
+
+The run is healthy at process/GPU level and has entered the training loop.
+At this note, it has not yet emitted step-50 metrics or overlays. The next
+decision must be made from:
+
+```text
+step_000050__<task>__with_gray.png
+step_000050__<task>__active_only.png
+step_000050__<task>.json
+```
+
+Do not add another online loss before this evidence is inspected. If
+`active_only` is clean while `with_gray` is crowded, reserve-file leakage is
+fixed. If `active_only` is off-target, the next fault is owner/contact/point
+evidence selection, not gray no-object capacity.
+
+Step50 evidence:
+
+```text
+prompt:
+  grasp the red block and turn it left
+
+metrics:
+  loss_total                                = 1.3346
+  loss_action_default_equiv                 = 0.1351
+  loss_anchor_pv                            = 2.7720
+  loss_pv_weak                              = 6.3467
+  aqr_active_same_role_support_overlap_max  = 0.0182
+  aqr_same_role_support_overlap_max         = 0.1424
+  aqr_active_same_role_object_core_max      = 0.0266
+  posterior_file_competition_active_count   = 4.65
+  posterior_file_competition_demoted_mean   = 0.2498
+  posterior_active_file_recycle_rate        = 0.0621
+  posterior_inactive_file_recycle_rate      = 0.2911
+  posterior_identity_switch_rate            = 0.7372
+  posterior_active_file_potential_swap_rate = 0.3720
+```
+
+Overlay JSON summary:
+
+```text
+posterior_visible          = 8
+posterior_active_visible   = 5
+posterior_inactive_visible = 3
+posterior_demoted_visible  = 3
+role-1 active visible      = 4
+role-1 inactive visible    = 3
+role-1 min active distance = 10.38 px
+```
+
+Image interpretation:
+
+```text
+with_gray:
+  shows several reserve/demoted files stacked near one object region. This is
+  expected fixed capacity and is no longer evidence that those files reach
+  action/cache/prediction.
+
+active_only:
+  removes the gray reserve files. The remaining active role-1 files are not all
+  exact duplicates, and active same-role overlap is very low. However, there are
+  still multiple active orange files around the red/blue block and gripper
+  neighborhood for a red-block command. This is not the old gray-leak failure;
+  it is a narrower task-target/object-allocation question.
+```
+
+Decision after step50:
+
+```text
+Do not add another loss yet. Continue to step100/150 and inspect whether the
+active role-1 set contracts toward the target/contact object or remains
+multi-object. If active-only stays multi-object while active overlaps remain
+low, the next repair is not duplicate suppression; it is task-conditioned target
+selection / contact-owner evidence.
+```
+
+Operational note for reviewer inspection:
+
+```text
+Use with_gray:
+  To inspect fixed posterior capacity, reserve/demoted rows, and whether file
+  competition is demoting duplicates.
+
+Use active_only:
+  To inspect action-visible object files. This is the only overlay that should
+  be used for the question "is the policy binding the target object?"
+
+Do not infer action corruption from gray files alone:
+  Gray files are expected reserve capacity after posterior file competition.
+  They must be audited through downstream active-gate metrics and the
+  active_only overlay.
+```
+
+Step50 currently supports the following narrower diagnosis:
+
+```text
+Fixed:
+  reserve/no-object rows are separated from active downstream evidence.
+
+Not yet proven:
+  active object files have selected exactly the red block/contact owner for the
+  prompt.
+
+Next evidence gate:
+  step100 and step150 active_only overlays plus active same-role overlap,
+  active recycle, owner score, and action/default-equivalent loss trend.
+```
+
+Historical overlay comparison:
+
+```text
+Older binding-calibrated diagnostic:
+  step50  role-1 active_visible = 7, inactive_visible = 0, min_active_dist = 0.02 px
+  step100 role-1 active_visible = 7, inactive_visible = 0, min_active_dist = 0.73 px
+  step150 role-1 active_visible = 7, inactive_visible = 0, min_active_dist = 0.18 px
+
+Interpretation:
+  The old path treated almost all scene posterior files as active and allowed
+  near-identical active files. This is the "fixed capacity became duplicate
+  object files" failure.
+
+Posterior-file-competition / overlayfix diagnostics:
+  step50  role-1 active_visible = 3, inactive_visible = 4, min_active_dist = 15.58 px
+  step100 role-1 active_visible = 2, inactive_visible = 5, min_active_dist = 39.95 px
+  step150 role-1 active_visible = 2, inactive_visible = 5, min_active_dist = 24.59 px
+
+Current downstream-gated diagnostic:
+  step50  role-1 active_visible = 4, inactive_visible = 3, min_active_dist = 10.38 px
+
+Interpretation:
+  The duplicate-capacity failure is materially improved. The remaining risk is
+  not "every posterior file is active"; it is whether the active object files
+  contract to the correct task/contact owner under action co-training.
+```
+
+This is why the next repair, if needed, should be owner/contact targeting, not
+another duplicate-suppression or diversity loss. Adding more diversity pressure
+would address the old failure, while the current evidence points to a different
+question: target selection among a small active set.
+
+Manual image read, step50:
+
+```text
+with_gray:
+  many gray posterior reserve files are visible near the table/object region.
+  They are marked inactive and are expected with fixed-capacity posterior state.
+
+active_only:
+  the gray files disappear. The remaining visible posterior set is one blue
+  effector file plus four orange object/task files. The orange files are around
+  the red/blue block and gripper neighborhood rather than collapsed to one pixel.
+
+Conclusion:
+  This does not support the old "gray reserve files steal tokens" hypothesis.
+  It supports a narrower hypothesis: the active role-1 set may be representing
+  an interaction candidate region, not yet a single language-conditioned red
+  block owner.
+```
+
+If this pattern persists:
+
+```text
+Bad next move:
+  add a hard diversity or online IsSameObject pseudo-label loss.
+
+Reason:
+  the active files are already not duplicate-overlapped by support metrics; the
+  failure would be target/contact owner selection, not raw duplicate capacity.
+
+Coherent next move:
+  strengthen task-conditioned owner/contact evidence and audit whether the
+  selected active file overlaps contact/point evidence for the manipulated
+  object. Wrist view should remain proximal evidence, not hard object truth.
+```
+
+Step100 downstream-gated diagnostic:
+
+```text
+prompt = turn on the yellow lamp
+posterior_visible = 8
+posterior_active_visible = 4
+posterior_inactive_visible = 4
+role-1 active_visible = 3
+role-1 inactive_visible = 4
+role-1 min_active_dist = 13.73 px
+aqr_active_same_role_support_overlap_max = 0.035
+aqr_same_role_support_overlap_max = 0.319
+posterior_identity_switch_rate = 0.667
+posterior_recycle_rate = 0.235
+```
+
+Image read:
+
+```text
+active_only:
+  one blue effector file and three orange role-1 files are visible around the
+  yellow-lamp/table region. They are not collapsed to one pixel.
+
+with_gray:
+  gray reserve files remain visible near the table/lamp/background. This is
+  expected fixed-capacity reserve state, not action-visible object state.
+```
+
+Code repair made after this audit:
+
+```text
+Posterior inactive files were already downstream-gated.
+AQR graph anchors now use tri-state downstream routing before control graph prefix:
+  graph_tokens = graph_tokens * graph_downstream_weight
+
+Reason:
+  active files are full action object evidence;
+  context files are low-weight scene evidence for real non-target objects;
+  reserve files remain diagnostics/posterior lifecycle capacity,
+  not PI0.5 action-prefix object evidence.
+```
+
+Current interpretation:
+
+```text
+The old all-active duplicate-file failure is still not supported.
+The unresolved issue is identity continuity / target-owner selection:
+  active overlap is low, but identity_switch_rate remains high.
+
+Therefore the next evidence gate is step150+:
+  if active files remain spatially sane and action continues down, continue;
+  if identity switch remains high, target/contact-owner continuity is the next
+  root repair, not more diversity pressure.
+```
+
+## 2026-05-16 Tri-State Context Gate Diagnostic Plan
+
+User critique:
+
+```text
+All tokens should remain readable. Dense slots that describe the same object
+should fuse or demote, distinct objects should separate, and secondary objects
+such as buttons/lamp/table should remain scene context. A binary active/inactive
+gate risks losing real context or misclassifying it as dustbin.
+```
+
+Resolution:
+
+```text
+Reject the binary action graph gate as final semantics.
+Deploy tri-state graph-prefix routing:
+  active object: weight 1.0
+  context object: weight 0.15
+  reserve/dustbin: weight 0.0
+```
+
+This is not a new loss and not an ad-hoc patch. It is the same fixed-capacity
+slot semantics used by modern object-centric models: object slots, context /
+background slots, and empty/no-object capacity must have different downstream
+meaning.
+
+Code/dataflow contract:
+
+```text
+_aqr_active_slot_mask
+  -> active target/contact owners
+
+_aqr_downstream_slot_weights
+  -> active/context/reserve graph-prefix weights
+
+PicfAnchorPriorGraphState.anchor_downstream_weight
+  -> _build_conditioned_control_state
+  -> graph_tokens = graph_tokens * graph_weight
+```
+
+The detailed math and verification plan are in:
+
+```text
+docs/PICF_AQR_OWM_TRISTATE_CONTEXT_ROUTING_20260516_TEMP.md
+scripts/picf_action_visible_reserve_gate_audit.py
+```
+
+Next A7 run:
+
+```text
+picf_a7_tristate_context_gate_diag300_20260516
+```
+
+Acceptance gates:
+
+```text
+aqr_active_same_role_support_overlap_max:
+  should remain low.
+
+aqr_context_anchor_count:
+  should be nonzero when scenes contain real secondary context objects.
+
+aqr_reserve_anchor_fraction:
+  should remain nonzero because fixed capacity exceeds current object count.
+
+loss_action_default_equiv:
+  should not regress relative to the previous downstream-gated diagnostic.
+
+posterior_identity_switch_rate:
+  if still high, the next root issue is target/contact-owner continuity rather
+  than raw duplicate slot capacity.
+```
+
+### 2026-05-16 A7 tri-state context-gate long-run launch
+
+Run launched on A7 / `36.139.225.68:28060` after the context/reserve metrics whitelist fix and remote `py_compile` check.
+
+Run id:
+
+```text
+picf_a7_tristate_context_gate_long30k_20260516
+```
+
+Contract:
+
+```text
+num_train_steps=30000
+save_interval=2500
+keep_last_checkpoints=3
+anchor_overlay_interval=50
+log_interval=50
+unroll_steps=2
+burnin_steps=1
+burnin_mode=state_only
+perception_finetune_mode=frozen
+semantic=paligemma(trainable=True)
+visual=vjepa encoder(trainable=False)
+point=sonata(trainable=False)
+tactile=anytouch(trainable=False)
+lambda_slot_jepa=lambda_support_pred=lambda_binding_consistency=lambda_aqr_denoising=0
+context_slot_enabled=True
+context_slot_weight=0.15
+local_refinement_enabled=False
+```
+
+Rationale:
+
+This is not an unconditional acceptance run. It is a long-run candidate with a 300-step kill gate. The first 300 steps must verify that the newly logged context/reserve metrics explain the high raw same-role overlap without active-object collapse. Required early metrics include `aqr_context_anchor_count`, `aqr_context_downstream_weight_mean`, `aqr_reserve_anchor_fraction`, `aqr_active_same_role_support_overlap_max`, `posterior_recycle_rate`, `posterior_identity_switch_rate`, and `owm_temporal_visual_tokens`.
+
+Tail commands:
+
+```bash
+ssh -p 28060 root@36.139.225.68
+
+tmux attach -t picf_a7_tristate_long30k
+
+tail -f /mnt/picf_run_logs/picf_a7_tristate_context_gate_long30k_20260516.log
+
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_tristate_context_gate_long30k_20260516/metrics.jsonl
+
+ls -lh /mnt/checkpoints/picf_core/picf_core/picf_a7_tristate_context_gate_long30k_20260516/anchor_overlays
+```
+
+### 2026-05-16 local confidence/dataflow cleanup audit
+
+Local reviewer cleanup focused on a semantic risk rather than a new model
+change: `confidence` was overloaded across graph anchors, posterior files, and
+action-prefix routing. The maintained interpretation is now:
+
+```text
+graph.anchor_confidence:
+  measurement quality from typed-support concentration.
+
+posterior.alpha:
+  belief activity / object-file survival after posterior lifecycle calibration.
+
+graph.anchor_downstream_weight:
+  action exposure for active/context/reserve routing.
+```
+
+This matters for the active/context/reserve long run: raw graph overlap and
+gray reserve clutter should not be interpreted as active object probability.
+The active-object acceptance gate remains `aqr_active_same_role_support_overlap`
+plus posterior lifecycle metrics.
+
+Strict local checks rerun:
+
+```text
+py_compile: passed
+verify_picf_owm_contract.py: passed
+picf_action_visible_reserve_gate_audit.py --fail-on-fail: passed
+picf_binding_dataflow_math_audit.py --fail-on-fail: passed
+picf_posterior_file_competition_audit.py --fail-on-fail: passed under uv
+picf_owm_nontruncated_paper_audit.py --fail-on-fail: passed under uv
+picf_owm_professor_grade_audit.py --fail-on-fail: passed under uv
+targeted pytest scripts: 8 passed
+targeted pipeline pytest: 11 passed, 78 deselected
+PaliGemma/V-JEPA wrapper pytest: 38 passed
+```
+
+One bug/false-positive cleanup was applied:
+
+```text
+scripts/picf_action_visible_reserve_gate_audit.py
+```
+
+The audit previously searched for stale overlay note strings even though the
+runtime already emitted the correct dual-view dataflow. It now checks the
+actual implementation markers: `variant_name="with_gray"`,
+`variant_name="active_only"`, `include_inactive=True`, and
+`include_inactive=False`.
+
+### 2026-05-16 proposal/PV/binding repair gate
+
+The previous A7 long run was stopped because it could not validate the current
+repair:
+
+```text
+run: picf_a7_tristate_context_gate_long30k_20260516
+status: archived as pre-repair evidence
+reason:
+  - owm_proposal_tokens=0
+  - old anchor-PV objective was still active
+  - loss_anchor_pv rose while action loss improved
+```
+
+The root mathematical issue is now documented here:
+
+```text
+docs/PICF_AQR_OWM_PROPOSAL_PV_BINDING_REPAIR_20260516_TEMP.md
+```
+
+Repair:
+
+```text
+loss_pv_weak:
+  remains dense point/visual correspondence supervision.
+
+loss_anchor_pv:
+  now uses AQR object-routed point/visual support as a soft gate with floor
+  anchor_pv_object_gate_floor=0.25.
+```
+
+The objective is:
+
+```math
+L_{anchor\_pv}
+=
+\frac{1}{|C|}
+\sum_{p,v}
+1[(p,v)\in C]\,
+P_{pv}\,
+(\rho + (1-\rho)G_{pv})\,
+BCE(R_{pv}, P_{pv})
+```
+
+where `G_pv` is built from `graph.point_priors`, `graph.visual_priors`, and
+`graph.anchor_downstream_weight`.  This preserves global PV supervision while
+preventing object slots from being forced to explain every background
+projective edge.
+
+SAM/proposal sidecar gate:
+
+```text
+remote SAM ViT-B checkpoint:
+  /root/openpi/checkpoints/foundation/sam/sam_vit_b_01ec64.pth
+
+remote sidecar probe:
+  /mnt/picf_sidecars/sam_proposals_vitb_probe
+
+precompute result:
+  32 frames, 981 proposals
+```
+
+Important limitation:
+
+```text
+The 32-frame sidecar proves frame -> SAM -> proposal_* npz dataflow, but it
+does not provide full CALVIN coverage. If a diagnostic run still logs
+owm_proposal_tokens=0, that is sidecar coverage insufficiency, not proof that
+proposal memory is ineffective.
+```
+
+New diagnostics:
+
+```bash
+python scripts/picf_anchor_pv_object_gate_audit.py
+python scripts/archive/picf_sam_proposal_dataflow_audit_legacy.py --external-code-root /tmp/picf_sam_code --fail-on-fail
+```
+
+Both pass locally.  Remote deployment compile and
+`picf_anchor_pv_object_gate_audit.py` also pass.
+
+Current diagnostic launch:
+
+```text
+run: picf_a7_anchor_pv_object_gate_diag300_20260516
+tmux: picf_a7_anchor_pv_object_gate_diag300
+steps: 300
+purpose:
+  - verify anchor_pv no longer rises immediately after action improves
+  - verify active overlap/core overlap remains controlled
+  - verify whether the sparse SAM sidecar is actually sampled
+```
+
+Tail:
+
+```bash
+ssh -p 28060 root@36.139.225.68
+tmux attach -t picf_a7_anchor_pv_object_gate_diag300
+tail -f /mnt/picf_run_logs/picf_a7_anchor_pv_object_gate_diag300_20260516.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_anchor_pv_object_gate_diag300_20260516/metrics.jsonl
+```
+
+### 2026-05-16 anchor-only fast discriminator
+
+The first object-gated PV diagnostic was launched as `picf_trainable_scope=all`.
+That is the correct formal cotrain envelope, but it is not the fastest way to
+answer whether the new `loss_anchor_pv` object gate works.  Historical records
+show two facts that must both be preserved:
+
+```text
+anchor_only is not equivalent to final long cotrain:
+  action/PaliGemma pressure previously reintroduced collapse after cleaner
+  anchor-only or short-window phases.
+
+anchor_only is still the right first discriminator for structural repairs:
+  same-role support overlap, local Jaccard reuse, recycle instability, and
+  anchor/PV pressure failures all appeared in anchor-only/no-action probes
+  before requiring a full behavior run.
+```
+
+Therefore the all-scope 300-step run is stopped before first metrics and
+replaced by:
+
+```text
+run: picf_a7_anchor_pv_object_gate_anchoronly_diag300_20260516
+tmux: picf_a7_anchor_pv_object_gate_anchoronly_diag300
+scope: anchor_only
+action losses: 0
+semantic_lr_scale: 1e-6, because the argument validator requires a positive
+  scale even though anchor_only freezes semantic parameters.
+unroll/burnin: unroll_steps=2, burnin_steps=1
+purpose:
+  isolate whether object-gated anchor_pv improves structural anchor routing
+  without action/PaliGemma cotrain pressure.
+```
+
+The first attempt used `unroll_steps=1,burnin_steps=0` for maximum speed, but
+it produced non-finite gradients in `token_fusion` at the first optimizer step.
+That failure is treated as an invalid diagnostic configuration rather than an
+object-gate verdict: it removed the state-transition context that the current
+PICF v2.2 belief filter expects.  The rerun keeps the formal window contract
+(`unroll_steps=2,burnin_steps=1`) and only changes trainable scope/loss pressure.
+
+Acceptance for this fast gate:
+
+```text
+loss_anchor_pv should not monotonically rise into the old 4.7 collapse zone.
+loss_pv_weak may remain dense and should not be used as object-slot health.
+aqr_same_role_support_overlap_max should stay below the old 0.95-0.99 failure
+  band, with active/core overlap more important than raw inactive slots.
+posterior_recycle_rate should not saturate to 1.0.
+owm_proposal_tokens may remain 0 because the current SAM sidecar covers only
+  32 frames; that is a sidecar coverage limit, not a proposal-memory verdict.
+```
+
+Tail:
+
+```bash
+ssh -p 28060 root@36.139.225.68
+tmux attach -t picf_a7_anchor_pv_object_gate_anchoronly_diag300
+tail -f /mnt/picf_run_logs/picf_a7_anchor_pv_object_gate_anchoronly_diag300_20260516.log
+tail -f /mnt/checkpoints/picf_core/picf_core/picf_a7_anchor_pv_object_gate_anchoronly_diag300_20260516/metrics.jsonl
+```
+
+### 2026-05-19 active-object loss-scope diagnostic
+
+Run:
+
+```text
+picf_a7_active_object_scope_anchor200_20260519
+```
+
+Purpose:
+
+```text
+Validate whether scoping object-level losses to active object rows fixes the
+residual anchor-PV / denoising / routing drift after object-candidate top-k
+ownership and row capacity.
+```
+
+Result summary:
+
+```text
+step  coverage  active_support  active_core  raw_support  raw_core  anchor_pv  denoise  routing
+  50    0.8635          0.0145       0.1363       0.1545   0.1666     0.7839   1.3174   0.6093
+ 100    0.9272          0.0215       0.0644       0.5125   0.6722     1.1843   1.9060   0.6325
+ 150    0.9732          0.0508       0.0127       0.9854   0.9341     1.1729   1.9695   0.6758
+ 200    0.9670          0.1115       0.0203       0.9973   0.9393     1.1778   1.8828   0.7078
+```
+
+Interpretation:
+
+```text
+Positive:
+  active object rows remain well separated;
+  object-candidate coverage stays high;
+  object-candidate duplicate overlap stays zero;
+  active posterior duplicate overlap stays zero;
+  recycle no longer saturates.
+
+Negative:
+  raw reserve/context overlap still saturates;
+  anchor-PV and denoising still rise after the early step-50 point;
+  routing drifts upward and preclip gradient norm increases.
+```
+
+Conclusion:
+
+```text
+The active-object loss-scope repair is a correct cleanup, but it is not the
+complete root fix.  It rules out reserve-row loss contamination as the only
+cause.  The next repair must split active object PV from global PV weak
+coverage and must restrict AQR denoising to confirmed object candidates, or
+keep denoising disabled for production.
 ```

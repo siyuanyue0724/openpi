@@ -36,8 +36,21 @@ class PicfTransitionLossConfig:
     lambda_point_real: float = 0.3
     lambda_semantic_future_aux: float = 0.25
     lambda_anchor_pv: float = 0.1
+    lambda_anchor_object_pull: float = 0.0
+    anchor_object_pull_sigma_m: float = 0.05
+    anchor_object_pull_confirmation_threshold: float = 0.05
+    anchor_object_pull_allowed_roles: tuple[int, ...] = (1, 2)
+    anchor_object_pull_graph_weight: float = 1.0
+    anchor_object_pull_posterior_weight: float = 1.0
     lambda_pv_weak: float = 0.02
     lambda_pt: float = 1.0
+    anchor_pv_object_gate_enabled: bool = True
+    anchor_pv_active_object_gate_only: bool = True
+    anchor_pv_object_gate_floor: float = 0.0
+    anchor_pv_object_normalize_by_object_mass: bool = True
+    anchor_pv_object_distribution_loss: bool = True
+    anchor_pv_object_distribution_confirmed_only: bool = True
+    anchor_pv_object_distribution_confirmation_threshold: float = 0.05
     tau_pv: float = 0.07
     tau_pt: float = 0.07
     tau_route_p: float = 0.1
@@ -78,6 +91,20 @@ class PicfTransitionLossConfig:
     lambda_support_pred: float = 0.0
     lambda_binding_consistency: float = 0.0
     lambda_aqr_denoising: float = 0.0
+    aqr_denoising_active_object_only: bool = True
+    aqr_denoising_confirmed_object_only: bool = True
+    aqr_denoising_confirmation_threshold: float = 0.05
+    lambda_vcap_unexplained: float = 0.0
+    lambda_vcap_duplicate: float = 0.0
+    lambda_vcap_count: float = 0.0
+    lambda_vcap_continuity: float = 0.0
+    lambda_object_explanation_feature: float = 0.0
+    lambda_object_explanation_point: float = 0.0
+    lambda_object_explanation_contact: float = 0.0
+    lambda_object_explanation_duplicate: float = 0.0
+    lambda_object_explanation_background: float = 0.0
+    object_explanation_active_object_only: bool = True
+    object_explanation_duplicate_margin: float = 0.30
     detach_action_loss_from_picf: bool = False
     mapg_siglip_tau: float = 0.07
     mapg_vicreg_var_target: float = 1.0
@@ -99,8 +126,21 @@ class PicfTransitionLossConfig:
 @dataclasses.dataclass(frozen=True)
 class PicfAlignmentLossConfig:
     lambda_anchor_pv: float = 1.0
+    lambda_anchor_object_pull: float = 0.0
+    anchor_object_pull_sigma_m: float = 0.05
+    anchor_object_pull_confirmation_threshold: float = 0.05
+    anchor_object_pull_allowed_roles: tuple[int, ...] = (1, 2)
+    anchor_object_pull_graph_weight: float = 1.0
+    anchor_object_pull_posterior_weight: float = 1.0
     lambda_pv_weak: float = 0.2
     lambda_pt: float = 1.0
+    anchor_pv_object_gate_enabled: bool = True
+    anchor_pv_active_object_gate_only: bool = True
+    anchor_pv_object_gate_floor: float = 0.0
+    anchor_pv_object_normalize_by_object_mass: bool = True
+    anchor_pv_object_distribution_loss: bool = True
+    anchor_pv_object_distribution_confirmed_only: bool = True
+    anchor_pv_object_distribution_confirmation_threshold: float = 0.05
     tau_pv: float = 0.07
     tau_pt: float = 0.07
     tau_route_p: float = 0.1
@@ -138,6 +178,7 @@ class PicfTransitionLossBreakdown:
     alignment_raw: torch.Tensor
     total_minus_action: torch.Tensor
     anchor_pv: torch.Tensor
+    anchor_object_pull: torch.Tensor
     pv_weak: torch.Tensor
     pt: torch.Tensor
     availability: torch.Tensor
@@ -162,6 +203,13 @@ class PicfTransitionLossBreakdown:
     support_pred: torch.Tensor
     binding_consistency: torch.Tensor
     aqr_denoising: torch.Tensor
+    vcap: torch.Tensor
+    object_explanation: torch.Tensor
+    object_explanation_feature: torch.Tensor
+    object_explanation_point: torch.Tensor
+    object_explanation_contact: torch.Tensor
+    object_explanation_duplicate: torch.Tensor
+    object_explanation_background: torch.Tensor
 
     def as_dict(self) -> dict[str, float]:
         return {
@@ -188,6 +236,7 @@ class PicfTransitionLossBreakdown:
             "alignment_raw": float(self.alignment_raw.item()),
             "total_minus_action": float(self.total_minus_action.item()),
             "anchor_pv": float(self.anchor_pv.item()),
+            "anchor_object_pull": float(self.anchor_object_pull.item()),
             "pv_weak": float(self.pv_weak.item()),
             "pt": float(self.pt.item()),
             "physical_aux_budget_scale": float(self.physical_aux_budget_scale.item()),
@@ -211,6 +260,13 @@ class PicfTransitionLossBreakdown:
             "support_pred": float(self.support_pred.item()),
             "binding_consistency": float(self.binding_consistency.item()),
             "aqr_denoising": float(self.aqr_denoising.item()),
+            "vcap": float(self.vcap.item()),
+            "object_explanation": float(self.object_explanation.item()),
+            "object_explanation_feature": float(self.object_explanation_feature.item()),
+            "object_explanation_point": float(self.object_explanation_point.item()),
+            "object_explanation_contact": float(self.object_explanation_contact.item()),
+            "object_explanation_duplicate": float(self.object_explanation_duplicate.item()),
+            "object_explanation_background": float(self.object_explanation_background.item()),
         }
 
 
@@ -218,6 +274,7 @@ class PicfTransitionLossBreakdown:
 class PicfAlignmentLossBreakdown:
     total: torch.Tensor
     anchor_pv: torch.Tensor
+    anchor_object_pull: torch.Tensor
     pv_weak: torch.Tensor
     pt: torch.Tensor
     candidate_edges: int
@@ -227,6 +284,7 @@ class PicfAlignmentLossBreakdown:
         return {
             "total": float(self.total.item()),
             "anchor_pv": float(self.anchor_pv.item()),
+            "anchor_object_pull": float(self.anchor_object_pull.item()),
             "pv_weak": float(self.pv_weak.item()),
             "pt": float(self.pt.item()),
             "candidate_edges": float(self.candidate_edges),
@@ -397,6 +455,9 @@ def _aqr_support_denoising_loss(
     *,
     reference: torch.Tensor,
     eps: float,
+    active_object_only: bool = True,
+    confirmed_object_only: bool = True,
+    confirmation_threshold: float = 0.05,
 ) -> torch.Tensor:
     """Training-only pseudo-target denoising over confident typed supports.
 
@@ -428,6 +489,24 @@ def _aqr_support_denoising_loss(
         peak = prob.max(dim=-1).values.detach()
         uniform = torch.full_like(peak, 1.0 / float(prob.shape[-1]))
         active = (peak > torch.clamp(uniform + 0.05, max=0.95)).to(dtype=prob.dtype)
+        if bool(active_object_only) and prob.ndim == 2:
+            object_weight = _active_object_row_weight(
+                graph,
+                row_count=int(prob.shape[0]),
+                reference=reference,
+            )
+            if object_weight.numel() == active.numel():
+                active = active * object_weight
+        if bool(confirmed_object_only) and prob.ndim == 2:
+            confirmed_weight = _confirmed_object_row_weight(
+                graph,
+                row_count=int(prob.shape[0]),
+                reference=reference,
+                threshold=float(confirmation_threshold),
+                eps=eps,
+            )
+            if confirmed_weight.numel() == active.numel():
+                active = active * confirmed_weight
         if not bool((active.sum() > 0).item()):
             terms.append(_zero_weight_loss(prior, reference))
             continue
@@ -438,6 +517,38 @@ def _aqr_support_denoising_loss(
     if not terms:
         return _zero_like(reference)
     return sum(terms) / float(len(terms))
+
+
+def _vcap_auxiliary_loss(
+    state: PicfCoreState,
+    cfg: PicfTransitionLossConfig,
+    *,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Guarded VCAP proposal health loss.
+
+    This loss is deliberately not an object-detector objective. It only trains
+    the optional proposal allocator to preserve evidence coverage while avoiding
+    duplicate active proposals. Default weights are zero, and posterior files
+    remain the only persistent object state.
+    """
+
+    graph = getattr(state, "anchor_prior_graph", None)
+    proposals = None if graph is None else getattr(graph, "active_proposals", None)
+    if proposals is None:
+        return _zero_like(reference)
+    terms: list[torch.Tensor] = []
+    if float(cfg.lambda_vcap_unexplained) != 0.0 and proposals.unexplained_evidence is not None:
+        terms.append(float(cfg.lambda_vcap_unexplained) * proposals.unexplained_evidence.to(device=reference.device, dtype=reference.dtype).reshape(()))
+    if float(cfg.lambda_vcap_duplicate) != 0.0:
+        terms.append(float(cfg.lambda_vcap_duplicate) * proposals.duplicate_score.to(device=reference.device, dtype=reference.dtype).reshape(()))
+    if float(cfg.lambda_vcap_count) != 0.0 and proposals.count_cost is not None:
+        terms.append(float(cfg.lambda_vcap_count) * proposals.count_cost.to(device=reference.device, dtype=reference.dtype).reshape(()))
+    if float(cfg.lambda_vcap_continuity) != 0.0 and proposals.continuity_cost is not None:
+        terms.append(float(cfg.lambda_vcap_continuity) * proposals.continuity_cost.to(device=reference.device, dtype=reference.dtype).reshape(()))
+    if not terms:
+        return _zero_weight_loss(proposals.tokens, reference)
+    return sum(terms)
 
 
 def future_targets_from_current_targets(
@@ -497,6 +608,184 @@ def _zero_weight_sum(reference: torch.Tensor, *preds: torch.Tensor | None) -> to
     return loss if used else _zero_like(reference)
 
 
+def _active_object_row_weight(
+    graph: Any | None,
+    *,
+    row_count: int,
+    reference: torch.Tensor,
+) -> torch.Tensor:
+    """Return rows that should be optimized as object files.
+
+    Fixed-capacity slot systems deliberately keep reserve/no-object capacity.
+    Those rows are useful context carriers, but object-level losses should not
+    treat them as failed duplicate objects.  `anchor_active` is therefore the
+    authoritative object-file mask.  `anchor_downstream_weight` is only a
+    compatibility fallback for older states: context/reserve rows normally have
+    small nonzero weights, so they are kept out of object losses by thresholding.
+    """
+
+    if row_count <= 0:
+        return torch.zeros((0,), device=reference.device, dtype=reference.dtype)
+    if graph is None:
+        return torch.ones((row_count,), device=reference.device, dtype=reference.dtype)
+    active = getattr(graph, "anchor_active", None)
+    if isinstance(active, torch.Tensor) and active.numel() >= row_count:
+        return torch.clamp(
+            active.to(device=reference.device, dtype=reference.dtype).reshape(-1)[:row_count],
+            min=0.0,
+            max=1.0,
+        )
+    downstream = getattr(graph, "anchor_downstream_weight", None)
+    if isinstance(downstream, torch.Tensor) and downstream.numel() >= row_count:
+        weight = torch.clamp(
+            downstream.to(device=reference.device, dtype=reference.dtype).reshape(-1)[:row_count],
+            min=0.0,
+            max=1.0,
+        )
+        return (weight > 0.5).to(dtype=reference.dtype)
+    return torch.ones((row_count,), device=reference.device, dtype=reference.dtype)
+
+
+def _confirmed_object_row_weight(
+    graph: Any | None,
+    *,
+    row_count: int,
+    reference: torch.Tensor,
+    threshold: float = 0.05,
+    eps: float = 1e-6,
+) -> torch.Tensor:
+    """Rows with explicit object-candidate/point evidence.
+
+    `anchor_active` says which rows are allowed to behave as object files.
+    This helper is stricter: it asks whether an active row is actually
+    confirmed by sidecar/candidate/proposal/3D evidence.  Training-only
+    denoising should not turn every active-but-unconfirmed row into a teacher
+    target simply because one typed support distribution has a sharp peak.
+    """
+
+    active = _active_object_row_weight(graph, row_count=row_count, reference=reference)
+    if row_count <= 0 or graph is None:
+        return active
+
+    device = reference.device
+    dtype = reference.dtype
+    tau = max(float(threshold), 0.0)
+    confirmed = torch.zeros((row_count,), device=device, dtype=dtype)
+
+    def add_row_mass(value: Any | None, *, reduce: str = "sum") -> None:
+        nonlocal confirmed
+        if not isinstance(value, torch.Tensor) or value.numel() == 0 or value.ndim < 2 or value.shape[0] < row_count:
+            return
+        tensor = torch.clamp(value.to(device=device, dtype=dtype)[:row_count], min=0.0)
+        if reduce == "max":
+            mass = tensor.reshape(row_count, -1).max(dim=-1).values
+        else:
+            mass = tensor.reshape(row_count, -1).sum(dim=-1)
+        confirmed = torch.maximum(confirmed, mass)
+
+    # Direct candidate ownership is the strongest confirmation.
+    add_row_mass(getattr(graph, "object_candidate_owner_assignment", None), reduce="sum")
+    add_row_mass(getattr(graph, "object_candidate_owner_point_priors", None), reduce="max")
+    add_row_mass(getattr(graph, "object_candidate_assignment", None), reduce="sum")
+    # Proposal/point bridges are weaker but still explicit object evidence.
+    add_row_mass(getattr(graph, "proposal_priors", None), reduce="max")
+    add_row_mass(getattr(graph, "proposal_point_priors", None), reduce="max")
+    add_row_mass(getattr(graph, "task_owner_point_priors", None), reduce="max")
+
+    if bool((confirmed > eps).any().item()):
+        return active * (confirmed > tau).to(dtype=dtype)
+    return active
+
+
+def _object_explanation_loss(
+    state: PicfCoreState,
+    cfg: PicfTransitionLossConfig,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Guarded object-explanation measurement loss.
+
+    This follows modern slot/OCL practice at the invariant level: slots should
+    coherently explain feature/geometry/contact evidence while a background
+    residual absorbs non-object tokens. It does not create labels and all
+    weights default to zero.
+    """
+
+    oeml = getattr(state, "object_explanation", None)
+    if oeml is None or not bool(oeml.valid.item()):
+        zero = _zero_like(reference)
+        return zero, zero, zero, zero, zero, zero
+    quality = torch.clamp(oeml.anchor_quality.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
+    graph = getattr(state, "anchor_prior_graph", None)
+    if bool(cfg.object_explanation_active_object_only):
+        active_object = _active_object_row_weight(
+            graph,
+            row_count=int(quality.numel()),
+            reference=reference,
+        )
+        if active_object.numel() == quality.numel():
+            quality = quality * active_object
+    denom = torch.clamp(quality.sum(), min=eps)
+
+    feature_raw = oeml.anchor_feature_variance.to(device=reference.device, dtype=reference.dtype).reshape(-1)
+    feature = (feature_raw[: quality.numel()] * quality).sum() / denom if feature_raw.numel() >= quality.numel() else _zero_like(reference)
+
+    point_raw = oeml.point_spatial_variance.to(device=reference.device, dtype=reference.dtype).reshape(-1)
+    point = (point_raw[: quality.numel()] * quality).sum() / denom if point_raw.numel() >= quality.numel() else _zero_like(reference)
+
+    contact_score = torch.clamp(oeml.contact_explanation_score.to(device=reference.device, dtype=reference.dtype).reshape(()), min=0.0, max=1.0)
+    contact_valid = (
+        oeml.object_mask_tactile is not None
+        and oeml.object_mask_tactile.numel() > 0
+        and state.token_field.tactile_contact_prob is not None
+        and state.token_field.tactile_contact_prob.numel() > 0
+        and bool((state.token_field.tactile_contact_prob.to(device=reference.device, dtype=reference.dtype).sum() > eps).item())
+    )
+    contact = (1.0 - contact_score) if contact_valid else _zero_like(reference)
+
+    duplicate_matrix = oeml.anchor_duplicate_overlap.to(device=reference.device, dtype=reference.dtype)
+    if duplicate_matrix.numel() > 0:
+        roles = getattr(graph, "anchor_roles", None)
+        pair_mask = torch.ones_like(duplicate_matrix, dtype=torch.bool)
+        if roles is not None and roles.numel() == duplicate_matrix.shape[0]:
+            roles_t = roles.to(device=reference.device, dtype=torch.long)
+            pair_mask = roles_t[:, None] == roles_t[None, :]
+        pair_mask = torch.triu(pair_mask, diagonal=1)
+        active = quality > 0.0
+        pair_mask = pair_mask & active[:, None] & active[None, :]
+        if bool(pair_mask.any().item()):
+            margin = max(float(cfg.object_explanation_duplicate_margin), 0.0)
+            duplicate = torch.relu(duplicate_matrix[pair_mask] - margin).pow(2).mean()
+        else:
+            duplicate = _zero_like(reference)
+    else:
+        duplicate = _zero_like(reference)
+
+    background_terms: list[torch.Tensor] = []
+    for bg in (
+        oeml.background_mask_visual,
+        oeml.background_mask_temporal,
+        oeml.background_mask_point,
+        oeml.background_mask_tactile,
+        oeml.background_mask_tracklet,
+        oeml.background_mask_proposal,
+    ):
+        if bg is not None and bg.numel() > 0:
+            finite_bg = torch.nan_to_num(bg.to(device=reference.device, dtype=reference.dtype), nan=1.0, posinf=1.0, neginf=0.0)
+            background_terms.append(torch.relu(0.01 - finite_bg).pow(2).mean())
+    background = sum(background_terms) / float(len(background_terms)) if background_terms else _zero_like(reference)
+
+    total = (
+        (float(cfg.lambda_object_explanation_feature) * feature)
+        + (float(cfg.lambda_object_explanation_point) * point)
+        + (float(cfg.lambda_object_explanation_contact) * contact)
+        + (float(cfg.lambda_object_explanation_duplicate) * duplicate)
+        + (float(cfg.lambda_object_explanation_background) * background)
+    )
+    return total, feature, point, contact, duplicate, background
+
+
 def make_action_only_transition_loss(
     *,
     reference: torch.Tensor,
@@ -545,6 +834,7 @@ def make_action_only_transition_loss(
         alignment_raw=zero,
         total_minus_action=zero,
         anchor_pv=zero,
+        anchor_object_pull=zero,
         pv_weak=zero,
         pt=zero,
         availability=availability,
@@ -569,6 +859,13 @@ def make_action_only_transition_loss(
         support_pred=zero,
         binding_consistency=zero,
         aqr_denoising=zero,
+        vcap=zero,
+        object_explanation=zero,
+        object_explanation_feature=zero,
+        object_explanation_point=zero,
+        object_explanation_contact=zero,
+        object_explanation_duplicate=zero,
+        object_explanation_background=zero,
     )
 
 
@@ -1763,6 +2060,297 @@ def _validate_alignment_contract(
             )
 
 
+def _object_projective_distribution_loss(
+    state: PicfCoreState,
+    cfg: PicfAlignmentLossConfig,
+    *,
+    projective: torch.Tensor,
+    candidate_mask: torch.Tensor,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor | None:
+    """Object-row point/visual distribution consistency for anchor-PV.
+
+    Dense point/visual projective correspondence is a perception invariant;
+    object slots should not be trained as if every dense projective edge were
+    an identity label.  For each active/confirmed object row this term compares
+    the row's visual support with its point support transported through the
+    projective geometry, and vice versa:
+
+        v_hat_j = normalize(p_j C)
+        p_hat_j = normalize(v_j C^T)
+        L_j = 0.5 JS(v_j, v_hat_j) + 0.5 JS(p_j, p_hat_j)
+
+    Background/reserve rows stay in context paths and dense `pv_weak`; they do
+    not become object labels here.
+    """
+
+    graph = getattr(state, "anchor_prior_graph", None)
+    if graph is None:
+        return None
+    point_priors = getattr(graph, "point_priors", None)
+    visual_priors = getattr(graph, "visual_priors", None)
+    if (
+        not isinstance(point_priors, torch.Tensor)
+        or not isinstance(visual_priors, torch.Tensor)
+        or point_priors.numel() == 0
+        or visual_priors.numel() == 0
+        or point_priors.ndim != 2
+        or visual_priors.ndim != 2
+        or point_priors.shape[0] != visual_priors.shape[0]
+        or point_priors.shape[1] != projective.shape[0]
+        or visual_priors.shape[1] != projective.shape[1]
+    ):
+        return None
+
+    row_count = int(point_priors.shape[0])
+    if bool(cfg.anchor_pv_object_distribution_confirmed_only):
+        row_weight = _confirmed_object_row_weight(
+            graph,
+            row_count=row_count,
+            reference=reference,
+            threshold=float(cfg.anchor_pv_object_distribution_confirmation_threshold),
+            eps=eps,
+        )
+    else:
+        row_weight = _active_object_row_weight(graph, row_count=row_count, reference=reference)
+    row_weight = torch.clamp(row_weight.to(device=reference.device, dtype=reference.dtype).reshape(-1), min=0.0, max=1.0)
+    if not bool((row_weight > eps).any().item()):
+        return _zero_weight_sum(reference, point_priors, visual_priors)
+
+    compat = torch.clamp(
+        torch.nan_to_num(projective.to(device=reference.device, dtype=reference.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+        min=0.0,
+    )
+    compat = compat * candidate_mask.to(device=reference.device, dtype=reference.dtype)
+    projectable = getattr(state.token_field, "point_projectable_mask", None)
+    if isinstance(projectable, torch.Tensor) and projectable.shape == (compat.shape[0],):
+        compat = compat * projectable.to(device=reference.device, dtype=reference.dtype)[:, None]
+    if not bool((compat.sum() > eps).item()):
+        return _zero_weight_sum(reference, point_priors, visual_priors)
+
+    point = torch.clamp(
+        torch.nan_to_num(point_priors.to(device=reference.device, dtype=reference.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+        min=0.0,
+    )
+    visual = torch.clamp(
+        torch.nan_to_num(visual_priors.to(device=reference.device, dtype=reference.dtype), nan=0.0, posinf=0.0, neginf=0.0),
+        min=0.0,
+    )
+    point_mass = point.sum(dim=-1)
+    visual_mass = visual.sum(dim=-1)
+    point = point / torch.clamp(point_mass[:, None], min=eps)
+    visual = visual / torch.clamp(visual_mass[:, None], min=eps)
+
+    visual_from_point = point @ compat
+    point_from_visual = visual @ compat.T
+    projected_visual_mass = visual_from_point.sum(dim=-1)
+    projected_point_mass = point_from_visual.sum(dim=-1)
+    valid = (
+        (row_weight > eps)
+        & (point_mass > eps)
+        & (visual_mass > eps)
+        & (projected_visual_mass > eps)
+        & (projected_point_mass > eps)
+    )
+    if not bool(valid.any().item()):
+        return _zero_weight_sum(reference, point_priors, visual_priors)
+
+    visual_from_point = visual_from_point / torch.clamp(projected_visual_mass[:, None], min=eps)
+    point_from_visual = point_from_visual / torch.clamp(projected_point_mass[:, None], min=eps)
+    row_loss = 0.5 * (
+        _js_distribution_loss(visual, visual_from_point, eps=eps)
+        + _js_distribution_loss(point, point_from_visual, eps=eps)
+    )
+    weight = row_weight * valid.to(dtype=reference.dtype)
+    return (row_loss * weight).sum() / torch.clamp(weight.sum(), min=eps)
+
+
+def _object_anchor_pull_loss(
+    state: PicfCoreState,
+    cfg: PicfAlignmentLossConfig,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+) -> torch.Tensor:
+    """Directly pull object-confirmed anchor centers to sidecar object points.
+
+    This is a diagnostic supervision term, not a detector replacement.  The
+    target comes only from inspected proposal/contact object evidence that has
+    already been transported into point space.  The target center is detached;
+    gradients therefore test whether AQR point support and anchor state can move
+    toward the object under an isolated pull objective.
+    """
+
+    graph = getattr(state, "anchor_prior_graph", None)
+    token_field = getattr(state, "token_field", None)
+    anchor_x = None if graph is None else getattr(graph, "anchor_x", None)
+    if graph is None or token_field is None or not isinstance(anchor_x, torch.Tensor) or anchor_x.numel() == 0:
+        return _zero_like(reference)
+
+    point_positions = getattr(token_field, "point_positions_world", None)
+    if not isinstance(point_positions, torch.Tensor) or point_positions.numel() == 0:
+        point_positions = getattr(token_field, "point_positions", None)
+    if not isinstance(point_positions, torch.Tensor) or point_positions.numel() == 0:
+        return _zero_weight_sum(reference, anchor_x)
+
+    row_count = min(int(anchor_x.shape[0]), int(getattr(graph, "anchor_tokens", anchor_x).shape[0]))
+    if row_count <= 0:
+        return _zero_weight_sum(reference, anchor_x, point_positions)
+
+    priors: list[torch.Tensor] = []
+    for value in (
+        getattr(graph, "object_candidate_owner_point_priors", None),
+        getattr(graph, "proposal_anchor_seed_priors", None),
+        getattr(graph, "proposal_point_priors", None),
+        getattr(graph, "task_owner_point_priors", None),
+    ):
+        if (
+            isinstance(value, torch.Tensor)
+            and value.ndim == 2
+            and value.shape[0] >= row_count
+            and value.shape[1] == int(point_positions.shape[0])
+            and value.numel() > 0
+        ):
+            priors.append(torch.clamp(value.to(device=reference.device, dtype=reference.dtype)[:row_count], min=0.0))
+    if not priors:
+        return _zero_weight_sum(reference, anchor_x, point_positions)
+
+    target_prior = torch.stack(priors, dim=0).max(dim=0).values
+    target_mass = target_prior.sum(dim=-1)
+    valid = target_mass > eps
+    if bool(cfg.anchor_pv_object_distribution_confirmed_only):
+        row_weight = _confirmed_object_row_weight(
+            graph,
+            row_count=row_count,
+            reference=reference,
+            threshold=float(cfg.anchor_object_pull_confirmation_threshold),
+            eps=eps,
+        )
+    else:
+        row_weight = _active_object_row_weight(graph, row_count=row_count, reference=reference)
+    row_weight = torch.clamp(row_weight.to(device=reference.device, dtype=reference.dtype).reshape(-1)[:row_count], min=0.0, max=1.0)
+    roles = getattr(graph, "anchor_roles", None)
+    allowed_roles = tuple(int(role) for role in getattr(cfg, "anchor_object_pull_allowed_roles", (1,)))
+    if roles is not None and roles.numel() >= row_count and allowed_roles:
+        roles_t = roles.to(device=reference.device, dtype=torch.long).reshape(-1)[:row_count]
+        allowed = torch.zeros((row_count,), device=reference.device, dtype=torch.bool)
+        for role in allowed_roles:
+            allowed = allowed | (roles_t == int(role))
+        row_weight = row_weight * allowed.to(dtype=reference.dtype)
+    row_weight = row_weight * valid.to(dtype=reference.dtype)
+    sigma = max(float(cfg.anchor_object_pull_sigma_m), eps)
+    point_positions_t = point_positions.to(device=reference.device, dtype=reference.dtype)
+
+    def _center_pull_numer_denom(
+        pred_x: torch.Tensor,
+        prior: torch.Tensor,
+        weight: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        if pred_x.numel() == 0 or prior.numel() == 0 or weight.numel() == 0:
+            return _zero_weight_sum(reference, pred_x, prior, weight), reference.new_zeros(())
+        local_count = min(int(pred_x.shape[0]), int(prior.shape[0]), int(weight.numel()))
+        if local_count <= 0:
+            return _zero_weight_sum(reference, pred_x, prior, weight), reference.new_zeros(())
+        prior = torch.clamp(prior.to(device=reference.device, dtype=reference.dtype)[:local_count], min=0.0)
+        target_mass_local = prior.sum(dim=-1)
+        valid_local = target_mass_local > eps
+        weight = torch.clamp(weight.to(device=reference.device, dtype=reference.dtype).reshape(-1)[:local_count], min=0.0)
+        # The row selector is part of the object-assignment scaffold, not a
+        # trainable escape hatch.  Detaching it prevents the model from lowering
+        # active/objectness gates merely to avoid the geometric owner target.
+        weight = (weight * valid_local.to(dtype=reference.dtype)).detach()
+        if not bool((weight > eps).any().item()):
+            return _zero_weight_sum(reference, pred_x, prior, weight), reference.new_zeros(())
+        prior = prior / torch.clamp(target_mass_local[:, None], min=eps)
+        target_x = (prior @ point_positions_t).detach()
+        pred_x = pred_x.to(device=reference.device, dtype=reference.dtype)[:local_count, :3]
+        per_row = fn.smooth_l1_loss(pred_x / sigma, target_x / sigma, reduction="none").sum(dim=-1)
+        return (per_row * weight).sum(), torch.clamp(weight.sum(), min=eps)
+
+    numer = reference.new_zeros(())
+    denom = reference.new_zeros(())
+    graph_weight = max(float(getattr(cfg, "anchor_object_pull_graph_weight", 1.0)), 0.0)
+    if graph_weight > 0.0:
+        graph_numer, graph_denom = _center_pull_numer_denom(
+            anchor_x.to(device=reference.device, dtype=reference.dtype)[:row_count, :3],
+            target_prior,
+            row_weight,
+        )
+        numer = numer + (graph_weight * graph_numer)
+        denom = denom + (graph_weight * graph_denom)
+
+    posterior_weight = max(float(getattr(cfg, "anchor_object_pull_posterior_weight", 1.0)), 0.0)
+    posterior = getattr(state, "posterior", None)
+    obs = getattr(state, "observation_anchors", None)
+    if (
+        posterior_weight > 0.0
+        and posterior is not None
+        and obs is not None
+        and isinstance(getattr(posterior, "x", None), torch.Tensor)
+        and posterior.x.numel() > 0
+    ):
+        post_count = int(posterior.x.shape[0])
+        post_prior = None
+        graph_assignment = getattr(obs, "graph_assignment", None)
+        binding = getattr(posterior, "binding", None)
+        if (
+            isinstance(graph_assignment, torch.Tensor)
+            and isinstance(binding, torch.Tensor)
+            and graph_assignment.ndim == 2
+            and binding.ndim == 2
+            and graph_assignment.shape[0] > 0
+            and binding.shape[0] >= post_count
+            and binding.shape[1] == graph_assignment.shape[0]
+            and graph_assignment.shape[1] >= row_count
+        ):
+            obs_target_prior = torch.clamp(
+                graph_assignment.to(device=reference.device, dtype=reference.dtype)[:, :row_count],
+                min=0.0,
+            ) @ torch.clamp(target_prior.to(device=reference.device, dtype=reference.dtype), min=0.0)
+            post_prior = torch.clamp(
+                binding.to(device=reference.device, dtype=reference.dtype)[:post_count],
+                min=0.0,
+            ) @ obs_target_prior
+        if post_prior is None or post_prior.numel() == 0 or not bool((post_prior.sum(dim=-1) > eps).any().item()):
+            # Fallback for the first few steps of an object-only pull probe:
+            # the measurement graph already identifies the object owner, but
+            # posterior binding may still be untrained.  Use the object prior as
+            # a belief-file target while row competition decides which file is
+            # active.  This closes graph->belief supervision without creating a
+            # new detector or bypassing posterior file competition.
+            global_prior = torch.clamp(target_prior.to(device=reference.device, dtype=reference.dtype), min=0.0).max(dim=0).values
+            post_prior = global_prior[None, :].expand(post_count, -1)
+        post_weight = torch.ones((post_count,), device=reference.device, dtype=reference.dtype)
+        active = getattr(posterior, "file_competition_active", None)
+        if isinstance(active, torch.Tensor) and active.numel() > 0:
+            n = min(post_count, int(active.numel()))
+            post_weight = torch.zeros_like(post_weight)
+            post_weight[:n] = torch.clamp(active.to(device=reference.device, dtype=reference.dtype).reshape(-1)[:n], min=0.0, max=1.0)
+        elif isinstance(getattr(posterior, "alpha", None), torch.Tensor) and posterior.alpha.numel() > 0:
+            n = min(post_count, int(posterior.alpha.numel()))
+            post_weight = torch.zeros_like(post_weight)
+            post_weight[:n] = torch.clamp(posterior.alpha.to(device=reference.device, dtype=reference.dtype).reshape(-1)[:n], min=0.0, max=1.0)
+        post_roles = getattr(posterior, "role_ids", None)
+        if isinstance(post_roles, torch.Tensor) and post_roles.numel() >= post_count and allowed_roles:
+            roles_t = post_roles.to(device=reference.device, dtype=torch.long).reshape(-1)[:post_count]
+            allowed = torch.zeros((post_count,), device=reference.device, dtype=torch.bool)
+            for role in allowed_roles:
+                allowed = allowed | (roles_t == int(role))
+            post_weight = post_weight * allowed.to(dtype=reference.dtype)
+        post_numer, post_denom = _center_pull_numer_denom(
+            posterior.x.to(device=reference.device, dtype=reference.dtype)[:post_count, :3],
+            post_prior,
+            post_weight,
+        )
+        numer = numer + (posterior_weight * post_numer)
+        denom = denom + (posterior_weight * post_denom)
+
+    if not bool((denom > eps).item()):
+        return _zero_weight_sum(reference, anchor_x, point_positions, target_prior)
+    return numer / torch.clamp(denom, min=eps)
+
+
 def compute_alignment_loss(
     state: PicfCoreState,
     *,
@@ -1779,8 +2367,17 @@ def compute_alignment_loss(
             token_field.point_align_embeddings,
             token_field.visual_align_embeddings,
         )
-        total = zero_align + (cfg.lambda_pt * pt)
-        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero_align, pv_weak=zero_align, pt=pt, candidate_edges=0, candidate_density=0.0)
+        anchor_object_pull = _object_anchor_pull_loss(state, cfg, reference=zero, eps=1e-6)
+        total = zero_align + (cfg.lambda_anchor_object_pull * anchor_object_pull) + (cfg.lambda_pt * pt)
+        return PicfAlignmentLossBreakdown(
+            total=total,
+            anchor_pv=zero_align,
+            anchor_object_pull=anchor_object_pull,
+            pv_weak=zero_align,
+            pt=pt,
+            candidate_edges=0,
+            candidate_density=0.0,
+        )
 
     candidate_mask = geometry.projective_candidate_mask
     projective = _sanitize_probability_tensor(geometry.projective_compatibility, eps=1e-6, interior=False)
@@ -1792,8 +2389,17 @@ def compute_alignment_loss(
             token_field.point_align_embeddings,
             token_field.visual_align_embeddings,
         )
-        total = zero_align + (cfg.lambda_pt * pt)
-        return PicfAlignmentLossBreakdown(total=total, anchor_pv=zero_align, pv_weak=zero_align, pt=pt, candidate_edges=0, candidate_density=candidate_density)
+        anchor_object_pull = _object_anchor_pull_loss(state, cfg, reference=zero, eps=1e-6)
+        total = zero_align + (cfg.lambda_anchor_object_pull * anchor_object_pull) + (cfg.lambda_pt * pt)
+        return PicfAlignmentLossBreakdown(
+            total=total,
+            anchor_pv=zero_align,
+            anchor_object_pull=anchor_object_pull,
+            pv_weak=zero_align,
+            pt=pt,
+            candidate_edges=0,
+            candidate_density=candidate_density,
+        )
 
     routing, _, _, _, _ = _routing_consistency(state, config=cfg, eps=1e-6)
     routing = _sanitize_probability_tensor(routing, eps=1e-6, interior=True)
@@ -1804,16 +2410,72 @@ def compute_alignment_loss(
         routing=routing,
     )
     candidate_weight = candidate_mask.to(dtype=projective.dtype)
-    candidate_count = torch.clamp(candidate_weight.sum(), min=1.0)
-    anchor_pv = (
-        fn.binary_cross_entropy(
-            routing,
-            projective,
-            weight=projective,
-            reduction="none",
+    target_weight = candidate_weight * projective
+    distribution_anchor_pv = None
+    if bool(cfg.anchor_pv_object_distribution_loss):
+        distribution_anchor_pv = _object_projective_distribution_loss(
+            state,
+            cfg,
+            projective=projective,
+            candidate_mask=candidate_mask,
+            reference=projective,
+            eps=1e-6,
         )
-        * candidate_weight
-    ).sum() / candidate_count
+
+    if distribution_anchor_pv is None and bool(cfg.anchor_pv_object_gate_enabled):
+        graph = getattr(state, "anchor_prior_graph", None)
+        point_priors = getattr(graph, "point_priors", None) if graph is not None else None
+        visual_priors = getattr(graph, "visual_priors", None) if graph is not None else None
+        if (
+            isinstance(point_priors, torch.Tensor)
+            and isinstance(visual_priors, torch.Tensor)
+            and point_priors.ndim == 2
+            and visual_priors.ndim == 2
+            and point_priors.shape[1] == target_weight.shape[0]
+            and visual_priors.shape[1] == target_weight.shape[1]
+            and point_priors.shape[0] == visual_priors.shape[0]
+            and point_priors.shape[0] > 0
+        ):
+            if bool(cfg.anchor_pv_active_object_gate_only):
+                slot_weight = _active_object_row_weight(
+                    graph,
+                    row_count=int(point_priors.shape[0]),
+                    reference=projective,
+                )
+            else:
+                slot_weight = getattr(graph, "anchor_downstream_weight", None)
+                if isinstance(slot_weight, torch.Tensor) and slot_weight.numel() == point_priors.shape[0]:
+                    slot_weight = torch.clamp(slot_weight.to(device=projective.device, dtype=projective.dtype).reshape(-1), min=0.0, max=1.0)
+                else:
+                    active = getattr(graph, "anchor_active", None)
+                    if isinstance(active, torch.Tensor) and active.numel() == point_priors.shape[0]:
+                        slot_weight = active.to(device=projective.device, dtype=projective.dtype).reshape(-1)
+                    else:
+                        slot_weight = torch.ones((point_priors.shape[0],), device=projective.device, dtype=projective.dtype)
+            if float(slot_weight.sum().detach().item()) > 0.0:
+                point_mass = torch.clamp(point_priors.to(device=projective.device, dtype=projective.dtype), min=0.0)
+                visual_mass = torch.clamp(visual_priors.to(device=projective.device, dtype=projective.dtype), min=0.0)
+                point_mass = point_mass / torch.clamp(point_mass.sum(dim=-1, keepdim=True), min=1e-6)
+                visual_mass = visual_mass / torch.clamp(visual_mass.sum(dim=-1, keepdim=True), min=1e-6)
+                object_pair = (point_mass * slot_weight[:, None]).transpose(0, 1) @ visual_mass
+                object_pair = object_pair / torch.clamp(object_pair.max(), min=1e-6)
+                floor = float(np.clip(cfg.anchor_pv_object_gate_floor, 0.0, 1.0))
+                target_weight = target_weight * (floor + ((1.0 - floor) * object_pair.detach()))
+    if bool(cfg.anchor_pv_object_normalize_by_object_mass) and bool(cfg.anchor_pv_object_gate_enabled):
+        candidate_count = torch.clamp(target_weight.sum(), min=1.0)
+    else:
+        candidate_count = torch.clamp(candidate_weight.sum(), min=1.0)
+    if distribution_anchor_pv is not None:
+        anchor_pv = distribution_anchor_pv
+    else:
+        anchor_pv = (
+            fn.binary_cross_entropy(
+                routing,
+                projective,
+                reduction="none",
+            )
+            * target_weight
+        ).sum() / candidate_count
 
     pv_weak = zero
     tau_pv = max(float(cfg.tau_pv), 1e-6)
@@ -1837,14 +2499,17 @@ def compute_alignment_loss(
     else:
         pv_weak = _zero_weight_sum(zero, point_embed, visual_embed)
 
+    anchor_object_pull = _object_anchor_pull_loss(state, cfg, reference=projective, eps=1e-6)
     total = (
         (cfg.lambda_anchor_pv * anchor_pv)
+        + (cfg.lambda_anchor_object_pull * anchor_object_pull)
         + (cfg.lambda_pv_weak * pv_weak)
         + (cfg.lambda_pt * pt)
     )
     return PicfAlignmentLossBreakdown(
         total=total,
         anchor_pv=anchor_pv,
+        anchor_object_pull=anchor_object_pull,
         pv_weak=pv_weak,
         pt=pt,
         candidate_edges=candidate_edges,
@@ -1880,8 +2545,21 @@ def compute_transition_loss(
         output_t.state,
         config=PicfAlignmentLossConfig(
             lambda_anchor_pv=cfg.lambda_anchor_pv,
+            lambda_anchor_object_pull=cfg.lambda_anchor_object_pull,
+            anchor_object_pull_sigma_m=cfg.anchor_object_pull_sigma_m,
+            anchor_object_pull_confirmation_threshold=cfg.anchor_object_pull_confirmation_threshold,
+            anchor_object_pull_allowed_roles=cfg.anchor_object_pull_allowed_roles,
+            anchor_object_pull_graph_weight=cfg.anchor_object_pull_graph_weight,
+            anchor_object_pull_posterior_weight=cfg.anchor_object_pull_posterior_weight,
             lambda_pv_weak=cfg.lambda_pv_weak,
             lambda_pt=cfg.lambda_pt,
+            anchor_pv_object_gate_enabled=cfg.anchor_pv_object_gate_enabled,
+            anchor_pv_active_object_gate_only=cfg.anchor_pv_active_object_gate_only,
+            anchor_pv_object_gate_floor=cfg.anchor_pv_object_gate_floor,
+            anchor_pv_object_normalize_by_object_mass=cfg.anchor_pv_object_normalize_by_object_mass,
+            anchor_pv_object_distribution_loss=cfg.anchor_pv_object_distribution_loss,
+            anchor_pv_object_distribution_confirmed_only=cfg.anchor_pv_object_distribution_confirmed_only,
+            anchor_pv_object_distribution_confirmation_threshold=cfg.anchor_pv_object_distribution_confirmation_threshold,
             tau_pv=cfg.tau_pv,
             tau_pt=cfg.tau_pt,
             tau_route_p=cfg.tau_route_p,
@@ -2145,6 +2823,27 @@ def compute_transition_loss(
         output_t.state,
         reference=predictive.action,
         eps=float(core.config.epsilon_a),
+        active_object_only=bool(cfg.aqr_denoising_active_object_only),
+        confirmed_object_only=bool(cfg.aqr_denoising_confirmed_object_only),
+        confirmation_threshold=float(cfg.aqr_denoising_confirmation_threshold),
+    )
+    vcap = _vcap_auxiliary_loss(
+        output_t.state,
+        cfg,
+        reference=predictive.action,
+    )
+    (
+        object_explanation,
+        object_explanation_feature,
+        object_explanation_point,
+        object_explanation_contact,
+        object_explanation_duplicate,
+        object_explanation_background,
+    ) = _object_explanation_loss(
+        output_t.state,
+        cfg,
+        reference=predictive.action,
+        eps=float(core.config.epsilon_a),
     )
 
     guarded_owm_aux = (
@@ -2152,6 +2851,8 @@ def compute_transition_loss(
         + (cfg.lambda_support_pred * support_pred)
         + (cfg.lambda_binding_consistency * binding_consistency)
         + (cfg.lambda_aqr_denoising * aqr_denoising)
+        + vcap
+        + object_explanation
     )
     semantic_group = cfg.lambda_semantic_future_aux * semantic_future_aux
     alignment_group = alignment.total + vl_router_raw + mapg_graph_raw + guarded_owm_aux
@@ -2207,6 +2908,7 @@ def compute_transition_loss(
         alignment_raw=alignment.total,
         total_minus_action=total - action_loss,
         anchor_pv=alignment.anchor_pv,
+        anchor_object_pull=alignment.anchor_object_pull,
         pv_weak=alignment.pv_weak,
         pt=alignment.pt,
         availability=future.availability,
@@ -2231,6 +2933,13 @@ def compute_transition_loss(
         support_pred=support_pred,
         binding_consistency=binding_consistency,
         aqr_denoising=aqr_denoising,
+        vcap=vcap,
+        object_explanation=object_explanation,
+        object_explanation_feature=object_explanation_feature,
+        object_explanation_point=object_explanation_point,
+        object_explanation_contact=object_explanation_contact,
+        object_explanation_duplicate=object_explanation_duplicate,
+        object_explanation_background=object_explanation_background,
     )
 
 

@@ -140,6 +140,10 @@ class PicfObservation:
     proposal_objectness: np.ndarray | None = None
     proposal_view_ids: np.ndarray | None = None
     proposal_source_ids: np.ndarray | None = None
+    proposal_age: np.ndarray | None = None
+    proposal_mask_xy: np.ndarray | None = None
+    proposal_mask_weights: np.ndarray | None = None
+    proposal_mask_offsets: np.ndarray | None = None
 
     def __post_init__(self) -> None:
         self.rgb_static = np.asarray(self.rgb_static)
@@ -179,6 +183,14 @@ class PicfObservation:
             self.proposal_view_ids = np.asarray(self.proposal_view_ids, dtype=np.int64).reshape(-1)
         if self.proposal_source_ids is not None:
             self.proposal_source_ids = np.asarray(self.proposal_source_ids, dtype=np.int64).reshape(-1)
+        if self.proposal_age is not None:
+            self.proposal_age = np.asarray(self.proposal_age, dtype=np.float32).reshape(-1)
+        if self.proposal_mask_xy is not None:
+            self.proposal_mask_xy = np.asarray(self.proposal_mask_xy, dtype=np.float32).reshape(-1, 2)
+        if self.proposal_mask_weights is not None:
+            self.proposal_mask_weights = np.asarray(self.proposal_mask_weights, dtype=np.float32).reshape(-1)
+        if self.proposal_mask_offsets is not None:
+            self.proposal_mask_offsets = np.asarray(self.proposal_mask_offsets, dtype=np.int64).reshape(-1)
         if self.action is not None:
             self.action = np.asarray(self.action, dtype=np.float32).reshape(-1)
         if self.action_chunk is not None:

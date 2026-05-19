@@ -821,6 +821,10 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
             proposal_objectness=_optional_array("proposal_objectness", np.float32),
             proposal_view_ids=_optional_array("proposal_view_ids", np.int64),
             proposal_source_ids=_optional_array("proposal_source_ids", np.int64),
+            proposal_age=_optional_array("proposal_age", np.float32),
+            proposal_mask_xy=_optional_array("proposal_mask_xy", np.float32),
+            proposal_mask_weights=_optional_array("proposal_mask_weights", np.float32),
+            proposal_mask_offsets=_optional_array("proposal_mask_offsets", np.int64),
         )
 
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:

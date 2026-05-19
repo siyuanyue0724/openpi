@@ -29,6 +29,7 @@ _MVTRACK_PROPOSAL_KEYS = (
     "proposal_objectness",
     "proposal_view_ids",
     "proposal_source_ids",
+    "proposal_age",
 )
 
 
@@ -165,6 +166,36 @@ def _read_optional_npz_fields(reader, step_id: int, keys: Sequence[str]) -> dict
     return {key: payload[key] for key in keys if key in payload}
 
 
+def _read_mvtrack_sidecar_fields(
+    sidecar_root: str | Path | None,
+    *,
+    split: str,
+    step_id: int,
+    keys: Sequence[str],
+) -> dict[str, np.ndarray]:
+    """Read optional MVTrack fields from a sidecar npz without mutating CALVIN.
+
+    Sidecars are deliberately optional because proposal/tracklet generation is
+    an offline frozen-evidence step. Supported layouts are:
+
+    - <root>/<split>/episode_0000000.npz
+    - <root>/episode_0000000.npz
+    """
+
+    if sidecar_root is None:
+        return {}
+    root = Path(sidecar_root)
+    candidates = (
+        root / split / f"episode_{int(step_id):07d}.npz",
+        root / f"episode_{int(step_id):07d}.npz",
+    )
+    path = next((candidate for candidate in candidates if candidate.exists()), None)
+    if path is None:
+        return {}
+    with np.load(path, allow_pickle=False) as data:
+        return {key: data[key] for key in keys if key in data.files}
+
+
 def _read_npz_required_optional(
     reader,
     step_id: int,
@@ -204,6 +235,7 @@ class CalvinSequentialReplay:
         use_scene_obs: bool = False,
         load_tracklet_fields: bool = True,
         load_proposal_fields: bool = True,
+        mvtrack_sidecar_root: str | Path | None = None,
     ):
         if int(action_horizon) < 1:
             raise ValueError(f"action_horizon must be >= 1, got {action_horizon}")
@@ -237,6 +269,7 @@ class CalvinSequentialReplay:
         self._use_scene_obs = bool(use_scene_obs)
         self._load_tracklet_fields = bool(load_tracklet_fields)
         self._load_proposal_fields = bool(load_proposal_fields)
+        self._mvtrack_sidecar_root = None if mvtrack_sidecar_root is None else Path(mvtrack_sidecar_root)
 
     def __iter__(self) -> Iterator[PicfObservation]:
         for segment_id in self._segment_indices:
@@ -255,6 +288,16 @@ class CalvinSequentialReplay:
                 if self._load_proposal_fields:
                     optional_keys.extend(_MVTRACK_PROPOSAL_KEYS)
                 frame = _read_npz_required_optional(self._reader, step_id, required=keys, optional=optional_keys)
+                if optional_keys:
+                    # Sidecars override only optional MVTrack evidence fields.
+                    frame.update(
+                        _read_mvtrack_sidecar_fields(
+                            self._mvtrack_sidecar_root,
+                            split=self._dataset.split,
+                            step_id=step_id,
+                            keys=optional_keys,
+                        )
+                    )
                 timestamp_s = float(step_id) * self._frame_dt_s
                 action_chunk = _load_action_chunk(
                     self._reader,
@@ -290,6 +333,7 @@ class CalvinSequentialReplay:
                     proposal_objectness=frame.get("proposal_objectness"),
                     proposal_view_ids=frame.get("proposal_view_ids"),
                     proposal_source_ids=frame.get("proposal_source_ids"),
+                    proposal_age=frame.get("proposal_age"),
                     tactile=(
                         _calvin_tactile_packet(
                             frame,

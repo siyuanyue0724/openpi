@@ -2,6 +2,7 @@ from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfControlState
 from openpi.picf.core.contracts import PicfCoreOutput
 from openpi.picf.core.contracts import PicfCoreState
+from openpi.picf.core.contracts import PicfObjectExplanationState
 from openpi.picf.core.contracts import PicfPreviousState
 from openpi.picf.core.contracts import PicfRecurrentCarryState
 from openpi.picf.core.contracts import PicfRecurrentPredictiveState
@@ -39,6 +40,7 @@ __all__ = [
     "PicfCoreOutput",
     "PicfCoreState",
     "PicfFullCore",
+    "PicfObjectExplanationState",
     "PicfObservationAnchorState",
     "PicfPosteriorAnchorState",
     "PicfPreviousState",

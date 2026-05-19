@@ -282,6 +282,48 @@ def test_build_paligemma_with_expert_falls_back_to_legacy_chunk_size(
     assert captured["mlp_chunk_size"] is None
 
 
+def test_build_paligemma_with_expert_omits_chunk_kwargs_for_legacy_constructor(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    encoder.config = PaliGemmaSemanticConfig(
+        projection_chunk_size=96,
+        mlp_chunk_size=48,
+        tokenwise_chunk_size=64,
+    )
+
+    captured: dict[str, int] = {}
+
+    import openpi.picf.paligemma.wrapper as wrapper_mod
+
+    monkeypatch.setattr(wrapper_mod._gemma, "get_config", lambda name: name)
+
+    class _LegacyDummyModel:
+        def __init__(
+            self,
+            paligemma_config,
+            action_expert_config,
+            *,
+            use_adarms,
+            precision,
+        ) -> None:
+            captured["use_adarms"] = int(bool(use_adarms[1]))
+            captured["precision_is_bf16"] = int(precision == "bfloat16")
+
+    monkeypatch.setattr(wrapper_mod, "PaliGemmaWithExpertModel", _LegacyDummyModel)
+
+    _Pi0PaliGemmaSemanticEncoder._build_paligemma_with_expert(
+        encoder,
+        paligemma_variant="gemma_2b",
+        action_expert_variant="gemma_300m",
+        precision="bfloat16",
+        pi05=True,
+    )
+
+    assert captured["use_adarms"] == 1
+    assert captured["precision_is_bf16"] == 1
+
+
 def test_stage_pi0_checkpoint_if_needed_copies_to_local_cache_when_forced(
     tmp_path,
     monkeypatch: pytest.MonkeyPatch,

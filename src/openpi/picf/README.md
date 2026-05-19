@@ -8,25 +8,38 @@ Current PICF documents:
    The current local v2.2 architecture record and implementation audit for the
    live codebase, including the explicit effector/object anchor role split,
    global scene point-pool contract, and PICF-AQR-OWM/MVTrack deployment links.
-2. [`README_PI05_PARITY_AUDIT.md`](./README_PI05_PARITY_AUDIT.md)
+   Current 2026-05-19 default: tracklet/contact-motion sidecars remain enabled;
+   Blind automatic SAM is rejected and archived. Generic `proposal_*` memory
+   remains an explicit sidecar contract only; use inspected contact/task/
+   tracklet-guided sidecars, not blind SAM, when enabling
+   `--proposal-memory-enabled`. The current post-SAM-archive training recipe is
+   documented in `README_v2.2.md` under `Live long-run recipe`.
+2. [`PICF_AQR_OWM_CURRENT_STATE_20260518.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CURRENT_STATE_20260518.md)
+   Compact current-state cleanup report: production-maintained modules,
+   guarded/data-dependent modules, legacy/off-by-default modules, code
+   cleanliness verdict, and verification commands.
+   It now also points to the AR active-anchor proposal audit, which is a
+   vNext capacity-allocation design candidate rather than a current training
+   default.
+3. [`README_PI05_PARITY_AUDIT.md`](./README_PI05_PARITY_AUDIT.md)
    Code-level comparison of reference PI0.5 / PI0.5+Sonata dataflow against
    current PICF enabled and PI0.5-only ablated modes.
-3. [`README_FROZEN_PERCEPTION_AUGMENTATION.md`](./README_FROZEN_PERCEPTION_AUGMENTATION.md)
+4. [`README_FROZEN_PERCEPTION_AUGMENTATION.md`](./README_FROZEN_PERCEPTION_AUGMENTATION.md)
    Design record for the 2x40GB frozen-perception profile and geometry-safe
    augmentation policy.
-4. [`README_VL_GUIDED_ANCHOR_ROUTER.md`](./README_VL_GUIDED_ANCHOR_ROUTER.md)
+5. [`README_VL_GUIDED_ANCHOR_ROUTER.md`](./README_VL_GUIDED_ANCHOR_ROUTER.md)
    Current staged implementation record for the default-off point-centric
    PaliGemma-guided 2D-to-3D anchor prior router.
-5. [`README_MAPG_PICF.md`](./README_MAPG_PICF.md)
+6. [`README_MAPG_PICF.md`](./README_MAPG_PICF.md)
    Current live implementation record for MAPG-PICF, the modality-optional
    anchor prior graph over PaliGemma, V-JEPA, Sonata, AnyTouch, and posterior
    supports. Use this for the MAPG math, code dataflow, graph losses, CLI,
    tests, diagnostics, and the full MAPG launch template.
-6. [`README_v2.1.md`](./README_v2.1.md)
+7. [`README_v2.1.md`](./README_v2.1.md)
    Historical v2.1 deployment record retained for reference.
-7. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
+8. [`PICF_FORMAL_CONTRACT.md`](/home/siyuanyue/Documents/openpi/PICF_FORMAL_CONTRACT.md)
    The executable live-code contract enforced by regression tests.
-8. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
+9. [`CALVIN_VALIDATION_README.md`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md)
    The runtime, training, rollout, and validation workflow.
    Use [`Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
    for the current canonical full PICF long-run training command, and
@@ -42,6 +55,8 @@ Current PICF documents:
    cache diagnostics.
 
 Use `README_v2.2.md` for the current live system,
+`PICF_AQR_OWM_CURRENT_STATE_20260518.md` for the compact cleanup/module
+disposition verdict,
 `README_PI05_PARITY_AUDIT.md` for PI0.5/PICF dataflow comparisons,
 `README_FROZEN_PERCEPTION_AUGMENTATION.md` for frozen-perception and
 augmentation design, `README_VL_GUIDED_ANCHOR_ROUTER.md` for the lower-level
@@ -55,6 +70,10 @@ Fast operator path:
 1. Start with
    [`README_v2.2.md#01-current-training--model-summary`](./README_v2.2.md#01-current-training--model-summary)
    for the current model/training summary.
+   The current switch matrix and active A7 long-run ledger are now recorded near
+   the top of [`README_v2.2.md`](./README_v2.2.md). Keep `README_v2.2.md` as the
+   stable live path during the active run; do not rename it unless all links and
+   experiment notes are migrated together.
 2. Use
    [`CALVIN_VALIDATION_README.md Section 5.1`](/home/siyuanyue/Documents/openpi/docs/CALVIN_VALIDATION_README.md#51-current-canonical-full-picf-long-run-launch)
    for the canonical full-PICF 4x40GB launch.

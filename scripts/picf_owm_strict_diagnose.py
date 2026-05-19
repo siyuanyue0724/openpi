@@ -298,12 +298,17 @@ def run_static_checks() -> list[Finding]:
         _finding(
             "mvtrack_proposal_memory_is_optional_typed_evidence",
             contracts.contains("class PicfPseudoProposalState", "proposal: PicfPseudoProposalState | None")
-            and config.contains("proposal_memory_enabled: bool = True", "proposal_read_weight: float = 0.15")
+            and config.contains(
+                "proposal_memory_enabled: bool = False",
+                "proposal_read_weight: float = 0.0",
+                "proposal_point_bridge_weight: float = 0.0",
+                "task_owner_proposal_bias_weight: float = 0.0",
+            )
             and pipeline.contains("aqr_proposal_reader", "proposal_priors", "graph_proposal_weights", "proposal_signature"),
             severity="fail",
             detail=(
-                "Optional proposal memory must be typed evidence only: no proposal data is a no-op, "
-                "and provided proposal boxes/tokens route through AQR rather than overwriting posterior identity."
+                "Proposal memory must remain typed evidence only and production-default off after blind-SAM diagnostics; "
+                "explicit proposal boxes/tokens may route through AQR for prompted/reranked ablations, but never overwrite posterior identity."
             ),
             evidence=contracts.refs("class PicfPseudoProposalState", "proposal: PicfPseudoProposalState | None")
             + config.refs("proposal_memory_enabled", "proposal_read_weight")

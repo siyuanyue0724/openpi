@@ -13,6 +13,7 @@ from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
+from openpi.picf.core.contracts import PicfPosteriorAnchorState
 from openpi.picf.core.contracts import PicfAnchorPriorGraphState
 from openpi.picf.core.contracts import PicfTemporalVisualSupportState
 from openpi.picf.core.contracts import PicfTokenFieldState
@@ -415,6 +416,103 @@ def test_aqr_same_role_support_competition_amplifies_relative_evidence(tmp_path:
     assert torch.allclose(competed[2], priors[2].to(device=competed.device), atol=1e-5)
 
 
+def test_binding_signature_centering_removes_common_mode(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        binding_signature_dim=2,
+        binding_signature_centering_enabled=True,
+        binding_signature_centering_min_tokens=4,
+    )
+    tokens = torch.zeros((4, core.config.hidden_dim), dtype=torch.float32)
+    tokens[:, 0] = 10.0
+    tokens[:2, 1] = 1.0
+    tokens[2:, 1] = -1.0
+    _ = core._binding_keys(tokens)
+    with torch.no_grad():
+        core.binding_signature_proj.weight.zero_()
+        core.binding_signature_proj.bias.zero_()
+        core.binding_signature_proj.weight[0, 0] = 1.0
+        core.binding_signature_proj.weight[1, 1] = 1.0
+    weights = torch.tensor(
+        [
+            [0.5, 0.5, 0.0, 0.0],
+            [0.0, 0.0, 0.5, 0.5],
+        ],
+        dtype=torch.float32,
+    )
+
+    centered = core._support_binding_signature(weights, tokens)
+    object.__setattr__(core.config, "binding_signature_centering_enabled", False)
+    raw = core._support_binding_signature(weights, tokens)
+
+    assert centered is not None
+    assert raw is not None
+    assert torch.dot(raw[0], raw[1]) > 0.95
+    assert torch.dot(centered[0], centered[1]) < -0.95
+
+
+def test_binding_signature_quadratic_scores_are_pairwise_not_plain_cosine(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        binding_signature_dim=3,
+        binding_low_rank_signature_rank=1,
+    )
+    with torch.no_grad():
+        core.binding_quadratic_diag.copy_(torch.tensor([3.0**0.5, -(3.0**0.5), 3.0**0.5]))
+        core.binding_low_rank_left.weight.zero_()
+        core.binding_low_rank_right.weight.zero_()
+        core.binding_low_rank_left.weight[0, 0] = 1.0
+        core.binding_low_rank_right.weight[0, 1] = 1.0
+
+    prev = torch.eye(3, dtype=torch.float32)[:2]
+    obs = torch.eye(3, dtype=torch.float32)[:2]
+    diag_score, low_rank_score = core._binding_signature_quadratic_scores(prev, obs)
+
+    assert diag_score is not None
+    assert low_rank_score is not None
+    torch.testing.assert_close(diag_score[0, 0], torch.tensor(1.0, device=diag_score.device))
+    torch.testing.assert_close(diag_score[1, 1], torch.tensor(-1.0, device=diag_score.device))
+    assert low_rank_score[0, 1] > low_rank_score[0, 0]
+
+
+def test_binding_signature_score_calibration_drops_common_mode(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        binding_signature_score_calibration_enabled=True,
+        binding_signature_score_calibration_mode="double_center_zscore",
+        binding_signature_score_min_std=0.05,
+    )
+    common = torch.full((3, 4), 0.7, dtype=torch.float32, device=core.device)
+    calibrated = core._calibrate_pairwise_binding_score(common)
+
+    torch.testing.assert_close(calibrated, torch.zeros_like(calibrated))
+
+
+def test_binding_signature_score_calibration_keeps_relative_pairs(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        binding_signature_score_calibration_enabled=True,
+        binding_signature_score_calibration_mode="double_center_zscore",
+        binding_signature_score_min_std=1e-4,
+        binding_signature_score_clip=10.0,
+    )
+    raw = torch.tensor(
+        [
+            [2.0, 0.2, 0.1],
+            [0.1, 2.2, 0.2],
+            [0.0, 0.1, 1.8],
+        ],
+        dtype=torch.float32,
+        device=core.device,
+    )
+    calibrated = core._calibrate_pairwise_binding_score(raw)
+
+    assert torch.argmax(calibrated[0]).item() == 0
+    assert torch.argmax(calibrated[1]).item() == 1
+    assert torch.argmax(calibrated[2]).item() == 2
+    assert float(calibrated.std(unbiased=False).item()) > 0.9
+
+
 def test_aqr_active_slot_filter_deactivates_duplicate_same_role_support(tmp_path: Path) -> None:
     core, _ = _make_core(
         tmp_path,
@@ -591,6 +689,98 @@ def test_aqr_slot_assignment_ignores_inactive_duplicate_anchors(tmp_path: Path) 
     assert assignment.shape == (2, 3)
     assert torch.allclose(assignment[:, 1], torch.zeros((2,), device=assignment.device, dtype=dtype), atol=1e-6)
     assert torch.allclose(assignment.sum(dim=-1), torch.ones((2,), device=assignment.device, dtype=dtype), atol=1e-5)
+
+
+def test_observation_owner_active_uses_margin_and_novelty_not_row_sum(tmp_path: Path) -> None:
+    core, _ = _make_core(tmp_path, aqr_mapg_enabled=True, observation_anchors=4)
+    dtype = core.dtype
+    device = core.device
+    graph = PicfAnchorPriorGraphState(
+        pg_priors=None,
+        visual_priors=torch.zeros((3, 4), dtype=dtype, device=device),
+        point_priors=None,
+        tactile_priors=None,
+        posterior_priors=None,
+        anchor_tokens=torch.zeros((3, core.config.hidden_dim), dtype=dtype, device=device),
+        anchor_roles=torch.ones((3,), dtype=torch.long, device=device),
+        anchor_scores=torch.tensor([3.0, 2.0, 1.0], dtype=dtype, device=device),
+        anchor_confidence=torch.ones((3,), dtype=dtype, device=device),
+        anchor_x=None,
+        anchor_S=None,
+        geometry_valid=torch.zeros((3,), dtype=torch.bool, device=device),
+        obs_slot_assignment=None,
+        task_assignment=None,
+        modality_confidence=torch.ones((3, 10), dtype=dtype, device=device),
+        valid=torch.tensor(True, device=device),
+        anchor_active=torch.tensor([1.0, 1.0, 0.0], dtype=dtype, device=device),
+    )
+    assignment = torch.tensor(
+        [
+            [0.90, 0.10, 0.00],
+            [0.85, 0.15, 0.00],
+            [0.10, 0.90, 0.00],
+            [0.55, 0.45, 0.00],
+        ],
+        dtype=dtype,
+        device=device,
+    )
+    obs_x = torch.tensor(
+        [
+            [0.00, 0.00, 0.0],
+            [0.005, 0.000, 0.0],
+            [0.20, 0.00, 0.0],
+            [0.40, 0.00, 0.0],
+        ],
+        dtype=dtype,
+        device=device,
+    )
+    owner = core._observation_owner_active_from_graph(
+        graph,
+        assignment,
+        torch.ones((4,), dtype=torch.long, device=device),
+        obs_x=obs_x,
+    )
+
+    assert owner is not None
+    torch.testing.assert_close(owner[0], torch.tensor(1.0, dtype=dtype, device=device))
+    torch.testing.assert_close(owner[2], torch.tensor(1.0, dtype=dtype, device=device))
+    assert float(owner[1].item()) < 0.25
+    assert float(owner[3].item()) < 0.25
+    assert float(owner.mean().item()) < 0.70
+
+
+def test_posterior_owner_active_binding_bias_masks_reserve_rows(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        posterior_owner_active_gate_enabled=True,
+        posterior_owner_active_min=0.25,
+        posterior_owner_active_bias=-1234.0,
+    )
+    dtype = core.dtype
+    device = core.device
+    obs = PicfObservationAnchorState(
+        seed_indices=torch.arange(3, dtype=torch.long, device=device),
+        tokens=torch.zeros((3, core.config.hidden_dim), dtype=dtype, device=device),
+        point_weights=torch.zeros((3, 0), dtype=dtype, device=device),
+        routing_mass_point=torch.zeros((3, 0), dtype=dtype, device=device),
+        routing_mass_visual=torch.zeros((3, 0), dtype=dtype, device=device),
+        routing_support_point=torch.zeros((0,), dtype=dtype, device=device),
+        routing_support_visual=torch.zeros((0,), dtype=dtype, device=device),
+        routing_gate_point=torch.zeros((0,), dtype=dtype, device=device),
+        routing_gate_visual=torch.zeros((0,), dtype=dtype, device=device),
+        x=torch.zeros((3, 3), dtype=dtype, device=device),
+        S=torch.eye(3, dtype=dtype, device=device)[None, :, :].expand(3, -1, -1),
+        a=torch.full((3, 3), 0.05, dtype=dtype, device=device),
+        role_ids=torch.ones((3,), dtype=torch.long, device=device),
+        owner_active=torch.tensor([1.0, 0.30, 0.10], dtype=dtype, device=device),
+    )
+
+    bias = core._posterior_owner_active_binding_bias(obs)
+
+    assert bias is not None
+    torch.testing.assert_close(bias[:, 0], torch.zeros_like(bias[:, 0]))
+    torch.testing.assert_close(bias[:, 1], torch.zeros_like(bias[:, 1]))
+    assert torch.all(bias[:, 2:] <= -1234.0)
 
 
 def _visual_override(value: float) -> np.ndarray:
@@ -2749,6 +2939,128 @@ def test_sinkhorn_dustbin_stays_finite_and_backward_stable(tmp_path: Path) -> No
     loss.backward()
     assert logits.grad is not None
     assert torch.isfinite(logits.grad).all()
+
+
+def test_posterior_lifecycle_calibration_protects_stable_supported_slots(tmp_path: Path) -> None:
+    core, _ = _make_core(tmp_path)
+    support_raw = torch.tensor(
+        [
+            [0.84, 0.03, 0.02],
+            [0.10, 0.08, 0.07],
+        ],
+        device=core.device,
+        dtype=core.dtype,
+    )
+    dustbin_raw = torch.tensor([0.02, 0.20, 0.10], device=core.device, dtype=core.dtype)
+    owner_active = torch.tensor([1.0, 0.2, 0.1], device=core.device, dtype=core.dtype)
+    alpha_prior = torch.tensor([0.95, 0.20], device=core.device, dtype=core.dtype)
+    innovation = torch.tensor([0.02, 2.0], device=core.device, dtype=core.dtype)
+    lifecycle = core._posterior_lifecycle_calibration(
+        support_raw,
+        dustbin_raw,
+        owner_active,
+        alpha_prior,
+        innovation,
+    )
+    assert lifecycle["survival_prob"][0] > lifecycle["survival_prob"][1]
+    assert lifecycle["reset_allowance"][0] < lifecycle["reset_allowance"][1]
+    assert lifecycle["unexplained_dustbin_mass"] < dustbin_raw.sum()
+    assert lifecycle["inactive_dustbin_mass"] > 0
+
+
+def test_posterior_file_competition_demotes_duplicate_same_role_files(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        posterior_file_competition_enabled=True,
+        posterior_file_competition_support_overlap_threshold=0.80,
+        posterior_file_competition_geometry_duplicate_enabled=True,
+        posterior_file_competition_geometry_sigma_m=0.05,
+        posterior_file_competition_geometry_threshold=0.60,
+    )
+    support_raw = torch.tensor(
+        [
+            [0.72, 0.20, 0.08],
+            [0.70, 0.22, 0.08],
+            [0.02, 0.18, 0.80],
+        ],
+        device=core.device,
+        dtype=core.dtype,
+    )
+    dustbin = torch.tensor([0.05, 0.05, 0.05], device=core.device, dtype=core.dtype)
+    out = core._posterior_file_competition(
+        support_raw,
+        dustbin,
+        x_prior=torch.tensor(
+            [
+                [0.00, 0.00, 0.00],
+                [0.01, 0.00, 0.00],
+                [0.20, 0.00, 0.00],
+            ],
+            device=core.device,
+            dtype=core.dtype,
+        ),
+        role_ids=torch.ones((3,), device=core.device, dtype=torch.long),
+        alpha_prior=torch.ones((3,), device=core.device, dtype=core.dtype),
+    )
+
+    assert out["active"].to(dtype=torch.bool).tolist() == [True, False, True]
+    assert torch.allclose(out["support_raw"][1], torch.zeros_like(out["support_raw"][1]))
+    assert out["demoted_mass"][1] > 0.0
+    assert torch.all(out["dustbin_raw_all"] > dustbin)
+    assert out["duplicate_overlap_max"] > 0.80
+
+
+def test_posterior_birth_competition_selects_one_reserve_per_role(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        posterior_birth_competition_enabled=True,
+        posterior_birth_competition_max_per_role=1,
+        posterior_birth_competition_min_score=0.05,
+        posterior_birth_competition_inactive_only=True,
+    )
+    birth = core._posterior_birth_competition(
+        torch.tensor([0.60, 0.70, 0.65, 0.20], device=core.device, dtype=core.dtype),
+        file_active=torch.tensor([1.0, 0.0, 0.0, 0.0], device=core.device, dtype=core.dtype),
+        role_ids=torch.tensor([0, 1, 1, 1], device=core.device, dtype=torch.long),
+        alpha_prior=torch.tensor([0.9, 0.1, 0.1, 0.1], device=core.device, dtype=core.dtype),
+    )
+
+    assert birth.tolist() == [0.0, 1.0, 0.0, 0.0]
+
+
+def test_posterior_inactive_files_are_gated_from_downstream_reads(tmp_path: Path) -> None:
+    core, _ = _make_core(tmp_path, persistent_anchors=3)
+    width = core.config.hidden_dim
+    count = 3
+    posterior = PicfPosteriorAnchorState(
+        h=torch.zeros((count, width), device=core.device, dtype=core.dtype),
+        c=torch.zeros((count, width), device=core.device, dtype=core.dtype),
+        mu=torch.zeros((count, 3), device=core.device, dtype=core.dtype),
+        Sigma=torch.eye(3, device=core.device, dtype=core.dtype)[None, :, :].expand(count, -1, -1),
+        x=torch.zeros((count, 3), device=core.device, dtype=core.dtype),
+        S=torch.eye(3, device=core.device, dtype=core.dtype)[None, :, :].expand(count, -1, -1),
+        a=torch.zeros((count, 3), device=core.device, dtype=core.dtype),
+        alpha=torch.ones((count,), device=core.device, dtype=core.dtype),
+        contact_prob=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        support_mass=torch.ones((count,), device=core.device, dtype=core.dtype),
+        recycle_gate=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        binding=torch.zeros((count + 1, 2), device=core.device, dtype=core.dtype),
+        evidence_tokens=torch.zeros((count, width), device=core.device, dtype=core.dtype),
+        tokens=torch.randn((count, width), device=core.device, dtype=core.dtype),
+        global_post=torch.zeros((width,), device=core.device, dtype=core.dtype),
+        role_ids=torch.tensor([0, 1, 1], device=core.device, dtype=torch.long),
+        file_competition_active=torch.tensor([1.0, 0.0, 1.0], device=core.device, dtype=core.dtype),
+    )
+
+    gate = core._posterior_file_active_gate(posterior, count=count, dtype=core.dtype)
+    assert gate.tolist() == [1.0, 0.0, 1.0]
+
+    previous = type("Prev", (), {"posterior": posterior})()
+    bias = core._aqr_posterior_bias(previous, torch.tensor([1], device=core.device, dtype=torch.long))
+    assert bias is not None
+    assert bias.shape == (1, count)
+    assert bias[0, 1] < -1000.0
+    assert bias[0, 2].item() == pytest.approx(0.0)
 
 
 def test_posterior_occupancy_bias_breaks_same_role_centroid_symmetry(tmp_path: Path) -> None:

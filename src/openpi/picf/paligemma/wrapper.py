@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import dataclasses
 import hashlib
+import inspect
 import json
 import logging
 import math
@@ -628,14 +629,32 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         tokenwise_chunk_size = int(getattr(config, "tokenwise_chunk_size", 0))
         projection_chunk_size = getattr(config, "projection_chunk_size", None)
         mlp_chunk_size = getattr(config, "mlp_chunk_size", None)
+        model_kwargs: dict[str, Any] = {
+            "use_adarms": [False, True] if pi05 else [False, False],
+            "precision": precision,
+            "tokenwise_chunk_size": tokenwise_chunk_size,
+            "projection_chunk_size": None if projection_chunk_size is None else int(projection_chunk_size),
+            "mlp_chunk_size": None if mlp_chunk_size is None else int(mlp_chunk_size),
+        }
+        try:
+            signature = inspect.signature(PaliGemmaWithExpertModel)
+            parameters = signature.parameters
+            accepts_var_kwargs = any(
+                parameter.kind == inspect.Parameter.VAR_KEYWORD for parameter in parameters.values()
+            )
+            if not accepts_var_kwargs:
+                model_kwargs = {
+                    name: value for name, value in model_kwargs.items() if name in parameters
+                }
+        except (TypeError, ValueError):
+            # Some wrapped/compiled constructors do not expose a signature. In
+            # that case keep the full modern argument set and let Python report
+            # an actual constructor error if it is incompatible.
+            pass
         model = PaliGemmaWithExpertModel(
             paligemma_config,
             action_expert_config,
-            use_adarms=[False, True] if pi05 else [False, False],
-            precision=precision,
-            tokenwise_chunk_size=tokenwise_chunk_size,
-            projection_chunk_size=None if projection_chunk_size is None else int(projection_chunk_size),
-            mlp_chunk_size=None if mlp_chunk_size is None else int(mlp_chunk_size),
+            **model_kwargs,
         )
         return model
 

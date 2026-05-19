@@ -108,3 +108,73 @@ def test_tactile_acceptance_audit_fails_for_invalid_threshold_order(tmp_path: Pa
     assert result.returncode == 1
     payload = json.loads(result.stdout)
     assert payload["overall_status"] == "fail"
+
+
+def test_tactile_acceptance_audit_accepts_soft_evidence_when_hard_gate_is_rare(tmp_path: Path) -> None:
+    metrics = tmp_path / "metrics.jsonl"
+    metrics.write_text(
+        json.dumps(
+            {
+                "loss_total": 1.0,
+                "loss_action": 0.2,
+                "loss_pt": 0.1,
+                "tactile_contact_prob_mean": 0.36,
+                "tactile_active_rate": 0.0,
+                "tactile_evidence_rate": 0.5,
+                "tactile_evidence_weight_mean": 0.2,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/picf_tactile_acceptance_audit.py",
+            "--metrics",
+            str(metrics),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["overall_status"] == "warn"
+    assert any(check["name"] == "train_active_rate" and check["status"] == "warn" for check in payload["checks"])
+    assert any(check["name"] == "train_evidence_rate" and check["status"] == "pass" for check in payload["checks"])
+
+
+def test_tactile_acceptance_audit_accepts_new_tactile_loss_keys(tmp_path: Path) -> None:
+    metrics = tmp_path / "metrics.jsonl"
+    metrics.write_text(
+        json.dumps(
+            {
+                "loss_total": 1.0,
+                "loss_action": 0.0,
+                "loss_pt": 0.0,
+                "loss_tactile_aux": 3.0,
+                "tactile_contact_prob_mean": 0.36,
+                "tactile_active_rate": 0.0,
+                "tactile_evidence_rate": 0.5,
+                "tactile_evidence_weight_mean": 0.1,
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "scripts/picf_tactile_acceptance_audit.py",
+            "--metrics",
+            str(metrics),
+        ],
+        cwd=Path(__file__).resolve().parents[1],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    payload = json.loads(result.stdout)
+    assert payload["overall_status"] == "warn"
+    assert any(check["name"] == "train_tactile_loss_nonzero_rate" and check["status"] == "pass" for check in payload["checks"])

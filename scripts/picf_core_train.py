@@ -97,6 +97,10 @@ _MVTRACK_PROPOSAL_KEYS = (
     "proposal_objectness",
     "proposal_view_ids",
     "proposal_source_ids",
+    "proposal_age",
+    "proposal_mask_xy",
+    "proposal_mask_weights",
+    "proposal_mask_offsets",
 )
 _SPEC_DEFAULTS = PicfCoreConfig()
 _LOSS_DEFAULTS = PicfTransitionLossConfig()
@@ -144,6 +148,10 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.predictive_semantic_world.*",
     "core.predictive_state_proj.*",
     "core.binding_signature_proj.*",
+    "core.tactile_patch_token_proj.*",
+    "core.binding_quadratic_diag",
+    "core.binding_low_rank_left.*",
+    "core.binding_low_rank_right.*",
     "semantic_prefix_proj.*",
     "posterior_to_control_proj.*",
     "global_post_to_control_proj.*",
@@ -176,6 +184,10 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "predictive_semantic_world.*",
     "predictive_state_proj.*",
     "binding_signature_proj.*",
+    "tactile_patch_token_proj.*",
+    "binding_quadratic_diag",
+    "binding_low_rank_left.*",
+    "binding_low_rank_right.*",
 )
 _COMPAT_ALLOWED_UNEXPECTED_KEYS = (
     "core.semantic_summary_proj.*",
@@ -776,10 +788,17 @@ def _anchor_source_snapshot(
     role_ids: torch.Tensor | None = None,
     confidence: torch.Tensor | None = None,
     active: torch.Tensor | None = None,
+    downstream_weight: torch.Tensor | None = None,
     support_mass: torch.Tensor | None = None,
     recycle_gate: torch.Tensor | None = None,
     geometry_valid: torch.Tensor | None = None,
     address_update_rate: torch.Tensor | None = None,
+    file_competition_demoted_mass: torch.Tensor | None = None,
+    owner_transport_mass: torch.Tensor | None = None,
+    owner_transport_confidence: torch.Tensor | None = None,
+    owner_transport_dist_to_standard: torch.Tensor | None = None,
+    support_signature: torch.Tensor | None = None,
+    binding_signature: torch.Tensor | None = None,
 ) -> dict[str, Any] | None:
     x_cpu = _to_cpu_tensor_or_none(x)
     if x_cpu is None or x_cpu.ndim != 2 or x_cpu.shape[-1] < 3 or x_cpu.shape[0] == 0:
@@ -797,20 +816,40 @@ def _anchor_source_snapshot(
             value_cpu = value_cpu.to(dtype=dtype)
         return value_cpu
 
+    def _aligned_matrix(value: torch.Tensor | None) -> torch.Tensor | None:
+        value_cpu = _to_cpu_tensor_or_none(value)
+        if value_cpu is None or value_cpu.numel() == 0 or value_cpu.ndim != 2:
+            return None
+        if value_cpu.shape[0] != count:
+            return None
+        return value_cpu.to(dtype=torch.float32)
+
     return {
         "name": str(name),
         "x": x_cpu[:, :3].to(dtype=torch.float32),
         "role_ids": _aligned(role_ids, dtype=torch.long),
         "confidence": _aligned(confidence, dtype=torch.float32),
         "active": _aligned(active, dtype=torch.float32),
+        "downstream_weight": _aligned(downstream_weight, dtype=torch.float32),
         "support_mass": _aligned(support_mass, dtype=torch.float32),
         "recycle_gate": _aligned(recycle_gate, dtype=torch.float32),
         "geometry_valid": _aligned(geometry_valid, dtype=torch.bool),
         "address_update_rate": _aligned(address_update_rate, dtype=torch.float32),
+        "file_competition_demoted_mass": _aligned(file_competition_demoted_mass, dtype=torch.float32),
+        "owner_transport_mass": _aligned(owner_transport_mass, dtype=torch.float32),
+        "owner_transport_confidence": _aligned(owner_transport_confidence, dtype=torch.float32),
+        "owner_transport_dist_to_standard": _aligned(owner_transport_dist_to_standard, dtype=torch.float32),
+        "support_signature": _aligned_matrix(support_signature),
+        "binding_signature": _aligned_matrix(binding_signature),
     }
 
 
-def _anchor_overlay_snapshot_from_output(output: Any, observation: PicfObservation) -> dict[str, Any] | None:
+def _anchor_overlay_snapshot_from_output(
+    output: Any,
+    observation: PicfObservation,
+    *,
+    dump_signatures: bool = False,
+) -> dict[str, Any] | None:
     state = getattr(output, "state", None)
     if state is None:
         return None
@@ -823,38 +862,123 @@ def _anchor_overlay_snapshot_from_output(output: Any, observation: PicfObservati
             role_ids=getattr(graph, "anchor_roles", None),
             confidence=getattr(graph, "anchor_confidence", None),
             active=getattr(graph, "anchor_active", None),
+            downstream_weight=getattr(graph, "anchor_downstream_weight", None),
             geometry_valid=getattr(graph, "geometry_valid", None),
+            support_signature=getattr(graph, "support_signature", None) if dump_signatures else None,
+            binding_signature=getattr(graph, "binding_signature", None) if dump_signatures else None,
         )
         if graph_source is not None:
             sources.append(graph_source)
     posterior = getattr(state, "posterior", None)
     if posterior is not None:
+        posterior_active = None
+        file_active = _to_cpu_tensor_or_none(getattr(posterior, "file_competition_active", None))
+        if file_active is not None and file_active.ndim == 1:
+            posterior_active = file_active.to(dtype=torch.float32)
+        posterior_alpha = _to_cpu_tensor_or_none(getattr(posterior, "alpha", None))
+        posterior_support = _to_cpu_tensor_or_none(getattr(posterior, "support_mass", None))
+        posterior_recycle = _to_cpu_tensor_or_none(getattr(posterior, "recycle_gate", None))
+        if (
+            posterior_active is None
+            and posterior_alpha is not None
+            and posterior_support is not None
+            and posterior_recycle is not None
+            and posterior_alpha.numel() == posterior_support.numel() == posterior_recycle.numel()
+        ):
+            # Fallback for old checkpoints without file-competition state. New
+            # runs prefer posterior.file_competition_active so the image shows
+            # no-object demotions instead of treating all persistent capacity
+            # as active object files.
+            posterior_active = (
+                (posterior_alpha.reshape(-1) >= 0.25)
+                & (posterior_support.reshape(-1) >= 0.05)
+                & (posterior_recycle.reshape(-1) <= 0.5)
+            ).to(dtype=torch.float32)
         posterior_source = _anchor_source_snapshot(
             name="posterior",
             x=getattr(posterior, "x", None),
             role_ids=getattr(posterior, "role_ids", None),
             confidence=getattr(posterior, "alpha", None),
+            active=posterior_active,
             support_mass=getattr(posterior, "support_mass", None),
             recycle_gate=getattr(posterior, "recycle_gate", None),
             address_update_rate=getattr(posterior, "address_update_rate", None),
+            file_competition_demoted_mass=getattr(posterior, "file_competition_demoted_mass", None),
+            owner_transport_mass=getattr(posterior, "owner_transport_mass", None),
+            owner_transport_confidence=getattr(posterior, "owner_transport_confidence", None),
+            owner_transport_dist_to_standard=getattr(posterior, "owner_transport_dist_to_standard", None),
+            support_signature=getattr(posterior, "support_signature", None) if dump_signatures else None,
+            binding_signature=getattr(posterior, "binding_signature", None) if dump_signatures else None,
         )
         if posterior_source is not None:
             sources.append(posterior_source)
+    task_readout = getattr(state, "task_readout", None)
+    if task_readout is not None:
+        task_x = getattr(task_readout, "x", None)
+        task_roles = getattr(task_readout, "local_role_ids", None)
+        task_valid = getattr(task_readout, "geometry_valid", None)
+        task_active = None
+        if isinstance(task_valid, torch.Tensor):
+            task_active = task_valid.to(dtype=torch.float32)
+        task_source = _anchor_source_snapshot(
+            name="task",
+            x=task_x,
+            role_ids=task_roles,
+            confidence=task_active,
+            active=task_active,
+            geometry_valid=task_valid,
+        )
+        if task_source is not None:
+            sources.append(task_source)
     if not sources:
         return None
     debug = {}
     debug_map = getattr(output, "debug", {}) or {}
     for key in (
         "aqr_same_role_support_overlap_max",
+        "aqr_active_same_role_support_overlap_max",
+        "aqr_same_role_object_core_overlap_max",
+        "aqr_active_same_role_object_core_overlap_max",
         "aqr_effective_anchor_count",
+        "aqr_active_anchor_count",
+        "aqr_context_anchor_count",
+        "aqr_context_downstream_weight_mean",
+        "aqr_reserve_anchor_fraction",
         "posterior_recycle_rate",
         "posterior_identity_switch_rate",
+        "posterior_file_competition_duplicate_overlap_max",
+        "posterior_file_competition_active_count",
+        "posterior_file_competition_birth_count",
+        "posterior_support_mass_final_mean",
+        "posterior_owner_transport_mass_max",
+        "posterior_owner_transport_confidence_max",
+        "posterior_owner_transport_applied_fraction",
+        "owm_proposal_tokens",
         "aqr_temporal_view_mass_0",
         "aqr_temporal_view_mass_1",
     ):
         value = _json_scalar(debug_map.get(key))
         if value is not None:
             debug[key] = value
+    proposals: dict[str, torch.Tensor] = {}
+    token_field = getattr(state, "token_field", None)
+    proposal = getattr(token_field, "proposal", None) if token_field is not None else None
+    if proposal is not None:
+        for key, attr in (
+            ("centers_xy", "centers_xy"),
+            ("boxes_xyxy", "boxes_xyxy"),
+            ("objectness", "objectness"),
+            ("view_ids", "view_ids"),
+            ("source_ids", "source_ids"),
+            ("age", "age"),
+            ("mask_xy", "mask_xy"),
+            ("mask_weights", "mask_weights"),
+            ("mask_offsets", "mask_offsets"),
+        ):
+            value = getattr(proposal, attr, None)
+            value_cpu = _to_cpu_tensor_or_none(value)
+            if value_cpu is not None:
+                proposals[key] = value_cpu
     return {
         "image": _rgb_uint8(observation.rgb_static),
         "segment_id": int(observation.segment_id),
@@ -863,6 +987,7 @@ def _anchor_overlay_snapshot_from_output(output: Any, observation: PicfObservati
         "prompt": str(observation.prompt or ""),
         "sources": sources,
         "debug": debug,
+        "proposals": proposals,
     }
 
 
@@ -928,11 +1053,118 @@ def _save_anchor_overlay_diagnostic(
     overlay_dir = output_dir / "anchor_overlays"
     overlay_dir.mkdir(parents=True, exist_ok=True)
     image = np.asarray(snapshot["image"], dtype=np.uint8)
-    pil = Image.fromarray(image.copy())
-    draw = ImageDraw.Draw(pil)
     records: list[dict[str, Any]] = []
-    radius_by_source = {"graph": 4, "posterior": 6}
-    total_drawn = 0
+    draw_items: list[dict[str, Any]] = []
+    radius_by_source = {"graph": 4, "posterior": 6, "task": 5}
+
+    proposal_records: list[dict[str, Any]] = []
+    proposal_draw_items: list[dict[str, Any]] = []
+    proposals = snapshot.get("proposals", {})
+    if isinstance(proposals, dict):
+        centers = proposals.get("centers_xy")
+        boxes = proposals.get("boxes_xyxy")
+        objectness = proposals.get("objectness")
+        view_ids = proposals.get("view_ids")
+        source_ids = proposals.get("source_ids")
+        age = proposals.get("age")
+        mask_xy = proposals.get("mask_xy")
+        mask_weights = proposals.get("mask_weights")
+        mask_offsets = proposals.get("mask_offsets")
+        if isinstance(centers, torch.Tensor) and isinstance(boxes, torch.Tensor):
+            centers_np = np.asarray(centers.detach().to(device="cpu", dtype=torch.float32), dtype=np.float32)
+            boxes_np = np.asarray(boxes.detach().to(device="cpu", dtype=torch.float32), dtype=np.float32)
+            objectness_np = (
+                np.asarray(objectness.detach().to(device="cpu", dtype=torch.float32), dtype=np.float32).reshape(-1)
+                if isinstance(objectness, torch.Tensor)
+                else np.zeros((centers_np.shape[0],), dtype=np.float32)
+            )
+            view_ids_np = (
+                np.asarray(view_ids.detach().to(device="cpu", dtype=torch.long), dtype=np.int64).reshape(-1)
+                if isinstance(view_ids, torch.Tensor)
+                else np.zeros((centers_np.shape[0],), dtype=np.int64)
+            )
+            source_ids_np = (
+                np.asarray(source_ids.detach().to(device="cpu", dtype=torch.long), dtype=np.int64).reshape(-1)
+                if isinstance(source_ids, torch.Tensor)
+                else np.zeros((centers_np.shape[0],), dtype=np.int64)
+            )
+            age_np = (
+                np.asarray(age.detach().to(device="cpu", dtype=torch.float32), dtype=np.float32).reshape(-1)
+                if isinstance(age, torch.Tensor)
+                else np.zeros((centers_np.shape[0],), dtype=np.float32)
+            )
+            mask_xy_np = (
+                np.asarray(mask_xy.detach().to(device="cpu", dtype=torch.float32), dtype=np.float32).reshape(-1, 2)
+                if isinstance(mask_xy, torch.Tensor) and mask_xy.numel() > 0
+                else np.zeros((0, 2), dtype=np.float32)
+            )
+            mask_weights_np = (
+                np.asarray(mask_weights.detach().to(device="cpu", dtype=torch.float32), dtype=np.float32).reshape(-1)
+                if isinstance(mask_weights, torch.Tensor) and mask_weights.numel() > 0
+                else np.zeros((0,), dtype=np.float32)
+            )
+            mask_offsets_np = (
+                np.asarray(mask_offsets.detach().to(device="cpu", dtype=torch.long), dtype=np.int64).reshape(-1)
+                if isinstance(mask_offsets, torch.Tensor) and mask_offsets.numel() > 0
+                else np.zeros((0,), dtype=np.int64)
+            )
+            h, w = int(image.shape[0]), int(image.shape[1])
+            count = min(int(centers_np.shape[0]), int(boxes_np.shape[0]))
+            for idx in range(count):
+                # Overlay only static-view proposals on the static RGB image. Wrist
+                # proposals stay in JSON because drawing them in static pixels would
+                # imply an extrinsic calibration we do not have.
+                view_id = int(view_ids_np[idx]) if idx < view_ids_np.shape[0] else 0
+                score = float(objectness_np[idx]) if idx < objectness_np.shape[0] else 0.0
+                box = np.clip(boxes_np[idx], 0.0, 1.0)
+                center = np.clip(centers_np[idx], 0.0, 1.0)
+                rec = {
+                    "index": int(idx),
+                    "center_xy_norm": [float(center[0]), float(center[1])],
+                    "box_xyxy_norm": [float(v) for v in box.tolist()],
+                    "objectness": score,
+                    "age": float(age_np[idx]) if idx < age_np.shape[0] else 0.0,
+                    "view_id": view_id,
+                    "source_id": int(source_ids_np[idx]) if idx < source_ids_np.shape[0] else -1,
+                }
+                mask_points: list[tuple[int, int, float]] = []
+                if mask_offsets_np.shape[0] >= count + 1 and mask_xy_np.shape[0] == mask_weights_np.shape[0]:
+                    start = int(mask_offsets_np[idx])
+                    end = int(mask_offsets_np[idx + 1])
+                    start = max(0, min(start, int(mask_xy_np.shape[0])))
+                    end = max(start, min(end, int(mask_xy_np.shape[0])))
+                    if end > start:
+                        rec["mask_sample_count"] = int(end - start)
+                        for xy, weight in zip(mask_xy_np[start:end], mask_weights_np[start:end], strict=False):
+                            x_pix = int(round(float(np.clip(xy[0], 0.0, 1.0)) * max(w - 1, 1)))
+                            y_pix = int(round(float(np.clip(xy[1], 0.0, 1.0)) * max(h - 1, 1)))
+                            mask_points.append((x_pix, y_pix, float(np.clip(weight, 0.0, 1.0))))
+                    else:
+                        rec["mask_sample_count"] = 0
+                else:
+                    rec["mask_sample_count"] = 0
+                proposal_records.append(rec)
+                if view_id != 0:
+                    continue
+                x0, y0, x1, y1 = box.tolist()
+                proposal_draw_items.append(
+                    {
+                        "index": int(idx),
+                        "box": (
+                            int(round(x0 * max(w - 1, 1))),
+                            int(round(y0 * max(h - 1, 1))),
+                            int(round(x1 * max(w - 1, 1))),
+                            int(round(y1 * max(h - 1, 1))),
+                        ),
+                        "center": (
+                            int(round(float(center[0]) * max(w - 1, 1))),
+                            int(round(float(center[1]) * max(h - 1, 1))),
+                        ),
+                        "objectness": score,
+                        "age": float(age_np[idx]) if idx < age_np.shape[0] else 0.0,
+                        "mask_points": mask_points,
+                    }
+                )
 
     for source_index, source in enumerate(snapshot.get("sources", [])):
         name = str(source.get("name", f"source{source_index}"))
@@ -948,6 +1180,13 @@ def _save_anchor_overlay_diagnostic(
         recycle_gate = source.get("recycle_gate")
         geometry_valid = source.get("geometry_valid")
         address_update_rate = source.get("address_update_rate")
+        file_competition_demoted_mass = source.get("file_competition_demoted_mass")
+        owner_transport_mass = source.get("owner_transport_mass")
+        owner_transport_confidence = source.get("owner_transport_confidence")
+        owner_transport_dist_to_standard = source.get("owner_transport_dist_to_standard")
+        support_signature = source.get("support_signature")
+        binding_signature = source.get("binding_signature")
+        downstream_weight = source.get("downstream_weight")
         for idx in range(count):
             role = int(roles[idx].item()) if isinstance(roles, torch.Tensor) else -1
             color = _ANCHOR_OVERLAY_ROLE_COLORS[role % len(_ANCHOR_OVERLAY_ROLE_COLORS)] if role >= 0 else (245, 245, 245)
@@ -963,40 +1202,216 @@ def _save_anchor_overlay_diagnostic(
                 "visible": is_visible,
                 "confidence": float(confidence[idx].item()) if isinstance(confidence, torch.Tensor) else None,
                 "active": float(active[idx].item()) if isinstance(active, torch.Tensor) else None,
+                "downstream_weight": float(downstream_weight[idx].item()) if isinstance(downstream_weight, torch.Tensor) else None,
                 "support_mass": float(support_mass[idx].item()) if isinstance(support_mass, torch.Tensor) else None,
                 "recycle_gate": float(recycle_gate[idx].item()) if isinstance(recycle_gate, torch.Tensor) else None,
                 "geometry_valid": bool(geometry_valid[idx].item()) if isinstance(geometry_valid, torch.Tensor) else None,
                 "address_update_rate": (
                     float(address_update_rate[idx].item()) if isinstance(address_update_rate, torch.Tensor) else None
                 ),
+                "file_competition_demoted_mass": (
+                    float(file_competition_demoted_mass[idx].item())
+                    if isinstance(file_competition_demoted_mass, torch.Tensor)
+                    else None
+                ),
+                "owner_transport_mass": (
+                    float(owner_transport_mass[idx].item()) if isinstance(owner_transport_mass, torch.Tensor) else None
+                ),
+                "owner_transport_confidence": (
+                    float(owner_transport_confidence[idx].item())
+                    if isinstance(owner_transport_confidence, torch.Tensor)
+                    else None
+                ),
+                "owner_transport_dist_to_standard": (
+                    float(owner_transport_dist_to_standard[idx].item())
+                    if isinstance(owner_transport_dist_to_standard, torch.Tensor)
+                    else None
+                ),
             }
+            if isinstance(support_signature, torch.Tensor):
+                rec["support_signature"] = [float(v) for v in support_signature[idx].tolist()]
+            if isinstance(binding_signature, torch.Tensor):
+                rec["binding_signature"] = [float(v) for v in binding_signature[idx].tolist()]
             records.append(rec)
             if not is_visible:
                 continue
-            radius = int(radius_by_source.get(name, 5))
-            x0, y0 = int(round(px)), int(round(py))
             active_value = float(active[idx].item()) if isinstance(active, torch.Tensor) else 1.0
             is_active = active_value > 0.5
-            outline = color if (name != "graph" or is_active) else (130, 130, 130)
-            if name == "posterior":
-                draw.ellipse((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=2)
-                draw.line((x0 - radius, y0, x0 + radius, y0), fill=outline, width=1)
-                draw.line((x0, y0 - radius, x0, y0 + radius), fill=outline, width=1)
-            else:
-                width = 2 if is_active else 1
-                draw.rectangle((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=width)
-            label = ("p" if name == "posterior" else "g") + str(idx)
-            if name == "graph" and not is_active:
-                label += "i"
-            draw.text((x0 + radius + 2, y0 - radius - 2), label, fill=outline)
-            total_drawn += 1
+            downstream_value = float(downstream_weight[idx].item()) if isinstance(downstream_weight, torch.Tensor) else active_value
+            draw_items.append(
+                {
+                    "source": name,
+                    "index": int(idx),
+                    "role": int(role),
+                    "color": tuple(int(v) for v in color),
+                    "pixel_xy": (int(round(px)), int(round(py))),
+                    "active": bool(is_active),
+                    "downstream_weight": downstream_value,
+                    "radius": int(radius_by_source.get(name, 5)),
+                }
+            )
 
-    header = f"step {int(step)} | visible anchors {total_drawn} | graph square, posterior circle"
-    draw.rectangle((0, 0, min(pil.width, max(420, 8 * len(header))), 18), fill=(0, 0, 0))
-    draw.text((4, 3), header, fill=(255, 255, 255))
-    image_path = overlay_dir / f"step_{int(step):06d}.png"
-    metadata_path = overlay_dir / f"step_{int(step):06d}.json"
-    pil.save(image_path)
+    prompt = str(snapshot.get("prompt", "")).strip().lower()
+    safe_prompt = "".join(ch if ch.isalnum() else "_" for ch in prompt)
+    safe_prompt = "_".join(part for part in safe_prompt.split("_") if part)[:80]
+    suffix = f"__{safe_prompt}" if safe_prompt else ""
+    image_variants: dict[str, str] = {}
+
+    def _draw_proposals(draw: ImageDraw.ImageDraw, *, draw_boxes: bool, draw_masks: bool) -> None:
+        if not proposal_draw_items:
+            return
+        mask_palette = (
+            (40, 220, 90),
+            (255, 190, 40),
+            (80, 170, 255),
+            (235, 80, 255),
+            (255, 90, 90),
+            (90, 230, 230),
+        )
+        for prop in proposal_draw_items:
+            color = mask_palette[int(prop["index"]) % len(mask_palette)]
+            if draw_masks:
+                for x_pix, y_pix, weight in prop.get("mask_points", []):
+                    radius = max(1, int(round(1.5 + (2.5 * float(weight)))))
+                    fill = tuple(int((0.35 + 0.65 * float(weight)) * channel) for channel in color)
+                    draw.ellipse((x_pix - radius, y_pix - radius, x_pix + radius, y_pix + radius), fill=fill)
+            if not draw_boxes:
+                continue
+            x0, y0, x1, y1 = prop["box"]
+            score = float(prop["objectness"])
+            box_color = color if score >= 0.85 else tuple(max(0, int(channel * 0.75)) for channel in color)
+            draw.rectangle((x0, y0, x1, y1), outline=box_color, width=1)
+            cx, cy = prop["center"]
+            draw.ellipse((cx - 2, cy - 2, cx + 2, cy + 2), outline=box_color, width=1)
+            age = float(prop.get("age", 0.0))
+            age_tag = f"/a{age:.0f}" if age > 0.0 else ""
+            draw.text((x0 + 1, max(y0 - 10, 0)), f"s{int(prop['index'])}:{score:.2f}{age_tag}", fill=box_color)
+
+    def _render_overlay_variant(
+        *,
+        include_inactive: bool,
+        variant_name: str,
+        variant_note: str,
+        draw_anchors: bool = True,
+        draw_boxes: bool = True,
+        draw_masks: bool = False,
+        dim_background: bool = False,
+    ) -> None:
+        base = image.copy()
+        if dim_background:
+            base = np.asarray(base, dtype=np.float32)
+            base = np.clip(base * 0.35, 0.0, 255.0).astype(np.uint8)
+        pil = Image.fromarray(base)
+        draw = ImageDraw.Draw(pil)
+        _draw_proposals(draw, draw_boxes=draw_boxes, draw_masks=draw_masks)
+        total_drawn = 0
+        if draw_anchors:
+            for item in draw_items:
+                is_active = bool(item["active"])
+                if not is_active and not include_inactive:
+                    continue
+                x0, y0 = item["pixel_xy"]
+                radius = int(item["radius"])
+                name = str(item["source"])
+                outline = item["color"] if is_active else (130, 130, 130)
+                if name == "posterior":
+                    draw.ellipse((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=2)
+                    draw.line((x0 - radius, y0, x0 + radius, y0), fill=outline, width=1)
+                    draw.line((x0, y0 - radius, x0, y0 + radius), fill=outline, width=1)
+                elif name == "task":
+                    draw.polygon(
+                        ((x0, y0 - radius), (x0 + radius, y0), (x0, y0 + radius), (x0 - radius, y0)),
+                        outline=outline,
+                    )
+                else:
+                    width = 2 if is_active else 1
+                    draw.rectangle((x0 - radius, y0 - radius, x0 + radius, y0 + radius), outline=outline, width=width)
+                if name == "posterior":
+                    prefix = "p"
+                elif name == "task":
+                    prefix = "t"
+                else:
+                    prefix = "g"
+                label = prefix + str(int(item["index"]))
+                if not is_active:
+                    label += "i"
+                if name == "graph" and float(item.get("downstream_weight", 0.0)) > 0.0 and not is_active:
+                    label += "c"
+                draw.text((x0 + radius + 2, y0 - radius - 2), label, fill=outline)
+                total_drawn += 1
+        header = (
+            f"step {int(step)} | {variant_name} | visible anchors {total_drawn} | "
+            "graph square, posterior circle"
+        )
+        draw.rectangle((0, 0, min(pil.width, max(420, 8 * len(header))), 18), fill=(0, 0, 0))
+        draw.text((4, 3), header, fill=(255, 255, 255))
+        image_path = overlay_dir / f"step_{int(step):06d}{suffix}__{variant_name}.png"
+        pil.save(image_path)
+        image_variants[variant_name] = str(image_path.name)
+        note_path = overlay_dir / f"step_{int(step):06d}{suffix}__{variant_name}.txt"
+        note_path.write_text(variant_note + "\n", encoding="utf-8")
+
+    _render_overlay_variant(
+        include_inactive=True,
+        variant_name="with_gray",
+        variant_note=(
+            "Includes context and reserve/no-object files in gray. Use this view to audit fixed posterior capacity, "
+            "duplicate demotion, and whether reserve files are accumulating near an object."
+        ),
+    )
+    _render_overlay_variant(
+        include_inactive=False,
+        variant_name="active_only",
+        variant_note=(
+            "Hides context/reserve no-object files. Use this view to judge full-weight active object binding and "
+            "posterior files without gray reserve clutter."
+        ),
+    )
+    if proposal_draw_items:
+        _render_overlay_variant(
+            include_inactive=False,
+            variant_name="sidecar_proposals",
+            variant_note=(
+                "Draws static-view sidecar proposal boxes and active object files. Wrist proposals are recorded in JSON "
+                "but not projected into static pixels without an explicit wrist-to-static calibration."
+            ),
+        )
+        _render_overlay_variant(
+            include_inactive=False,
+            variant_name="mask_only",
+            variant_note=(
+                "Dims the RGB image and draws only static-view sidecar mask samples, colored by proposal id and "
+                "weighted by sidecar support intensity. Use this to judge whether the sidecar mask itself is clean."
+            ),
+            draw_anchors=False,
+            draw_boxes=True,
+            draw_masks=True,
+            dim_background=True,
+        )
+        _render_overlay_variant(
+            include_inactive=False,
+            variant_name="mask_active",
+            variant_note=(
+                "Sidecar mask samples plus full-weight active graph/posterior/task anchors. Use this to judge "
+                "whether active anchors bind to the sidecar object support."
+            ),
+            draw_boxes=True,
+            draw_masks=True,
+            dim_background=True,
+        )
+        _render_overlay_variant(
+            include_inactive=True,
+            variant_name="mask_with_gray",
+            variant_note=(
+                "Sidecar mask samples plus all visible anchors, including gray reserve/context rows. Use this to "
+                "diagnose whether reserve files compete with object files."
+            ),
+            draw_boxes=True,
+            draw_masks=True,
+            dim_background=True,
+        )
+
+    metadata_path = overlay_dir / f"step_{int(step):06d}{suffix}.json"
     metadata = {
         "step": int(step),
         "segment_id": int(snapshot.get("segment_id", -1)),
@@ -1005,11 +1420,15 @@ def _save_anchor_overlay_diagnostic(
         "prompt": str(snapshot.get("prompt", "")),
         "image_shape": [int(v) for v in image.shape],
         "max_anchors_per_source": int(max_anchors),
+        "image_variants": image_variants,
         "debug": dict(snapshot.get("debug", {})),
         "anchors": records,
+        "proposals": proposal_records,
         "note": (
             "Static-view projection of graph and posterior 3D anchors. "
-            "Invisible anchors are retained in JSON but not drawn. Inactive graph anchors are gray and labeled with an 'i' suffix. "
+            "Invisible anchors are retained in JSON but not drawn. with_gray includes context/reserve graph or posterior "
+            "anchors in gray and labels them with an 'i' suffix; active_only hides those non-full-weight files. "
+            "Sidecar proposal boxes are frozen offline proposal evidence; they do not overwrite posterior identity. "
             "This is a training diagnostic only and does not change the loss or forward path."
         ),
     }
@@ -1123,6 +1542,26 @@ def _parse_tactile_sensor_names(raw: str | tuple[str, ...] | list[str]) -> tuple
     return names
 
 
+def _parse_int_tuple(raw: str | tuple[int, ...] | list[int]) -> tuple[int, ...]:
+    if isinstance(raw, (list, tuple)):
+        values = tuple(int(part) for part in raw)
+    else:
+        parsed = None
+        text = str(raw).strip()
+        if not text:
+            return tuple()
+        if text.startswith(("(", "[")):
+            try:
+                parsed = ast.literal_eval(text)
+            except (SyntaxError, ValueError):
+                parsed = None
+        if isinstance(parsed, (list, tuple)):
+            values = tuple(int(part) for part in parsed)
+        else:
+            values = tuple(int(part.strip()) for part in text.split(",") if part.strip())
+    return values
+
+
 def _parse_tactile_sensor_offsets(
     raw: str | tuple[tuple[float, float, float], ...] | list[tuple[float, float, float]]
 ) -> tuple[tuple[float, float, float], ...]:
@@ -1195,6 +1634,29 @@ def _apply_foundation_profile(args: argparse.Namespace) -> None:
     args.point_backbone_trainable = True
     args.semantic_trainable = True
     args.diagnostic_interval = 0
+
+
+def _looks_like_legacy_blind_sam_sidecar(path: str | Path | None) -> bool:
+    """Return true for archived blind-SAM sidecar roots.
+
+    Generic proposal_* sidecars remain part of the MVTrack contract.  The
+    rejected path is specifically the class-agnostic automatic SAM producer,
+    whose outputs repeatedly included wall, robot, and drawer fragments.
+    """
+
+    if path is None:
+        return False
+    text = str(path).lower()
+    legacy_needles = (
+        "sam_proposal",
+        "sam-proposal",
+        "sam_proposals",
+        "sam-proposals",
+        "blind_sam",
+        "blind-sam",
+        "segment-anything",
+    )
+    return any(needle in text for needle in legacy_needles)
 
 
 def _normalize_train_args(args: argparse.Namespace) -> None:
@@ -1395,11 +1857,15 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_vjepa_temporal_tokens",
         "aqr_active_slot_min_per_role",
         "aqr_active_slot_max_per_role",
+        "posterior_file_competition_min_per_role",
+        "posterior_file_competition_max_per_role",
         "evidence_cache_len",
         "vjepa_max_views",
         "tracklet_max_tokens",
         "proposal_max_tokens",
         "binding_signature_dim",
+        "binding_low_rank_signature_rank",
+        "binding_signature_centering_min_tokens",
         "local_refinement_topk",
     ):
         if getattr(args, _name, None) is None:
@@ -1408,15 +1874,24 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.aqr_vjepa_temporal_mode = str(_SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
     if getattr(args, "recycle_residual_norm_mode", None) is None:
         args.recycle_residual_norm_mode = str(_SPEC_DEFAULTS.recycle_residual_norm_mode)
+    if getattr(args, "binding_signature_score_calibration_mode", None) is None:
+        args.binding_signature_score_calibration_mode = str(_SPEC_DEFAULTS.binding_signature_score_calibration_mode)
     for _name in (
         "aqr_vjepa_temporal_include_delta",
         "vjepa_multiview_enabled",
         "aqr_ownership_prior_enabled",
         "aqr_active_slot_filter_enabled",
         "aqr_active_slot_geometry_duplicate_enabled",
+        "posterior_owner_active_gate_enabled",
+        "posterior_file_competition_enabled",
+        "posterior_file_competition_geometry_duplicate_enabled",
         "evidence_cache_enabled",
         "tracklet_memory_enabled",
         "proposal_memory_enabled",
+        "binding_signature_centering_enabled",
+        "binding_signature_score_calibration_enabled",
+        "posterior_binding_signature_memory_enabled",
+        "posterior_binding_signature_dispersion_gate_enabled",
         "legacy_local_refinement_opt_in",
         "local_refinement_enabled",
         "slot_jepa_enabled",
@@ -1444,17 +1919,44 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_active_slot_relative_score_threshold",
         "aqr_active_slot_geometry_duplicate_sigma_m",
         "aqr_active_slot_geometry_duplicate_threshold",
+        "posterior_owner_active_min",
+        "posterior_owner_active_bias",
+        "posterior_file_competition_min_support",
+        "posterior_file_competition_relative_score_threshold",
+        "posterior_file_competition_support_overlap_threshold",
+        "posterior_file_competition_geometry_sigma_m",
+        "posterior_file_competition_geometry_threshold",
         "evidence_cache_read_weight",
         "evidence_cache_innovation_downweight",
         "evidence_cache_address_weight",
         "evidence_cache_content_weight",
         "evidence_cache_role_weight",
+        "tactile_evidence_prob_floor",
         "tracklet_confidence_floor",
         "tracklet_read_weight",
         "proposal_confidence_floor",
         "proposal_read_weight",
+        "proposal_age_decay_steps",
+        "proposal_point_bridge_weight",
+        "proposal_point_bridge_edge_tau",
+        "task_owner_proposal_point_bridge_weight",
+        "task_owner_visual_bias_weight",
+        "task_owner_proposal_bias_weight",
+        "task_owner_proposal_point_bias_weight",
+        "task_owner_proposal_objectness_power",
         "bind_support_signature_weight",
         "bind_embedding_signature_weight",
+        "bind_quadratic_signature_weight",
+        "bind_low_rank_signature_weight",
+        "binding_signature_score_min_std",
+        "binding_signature_score_clip",
+        "posterior_binding_signature_update_rate",
+        "posterior_binding_signature_update_max_rate",
+        "posterior_binding_signature_min_support",
+        "posterior_binding_signature_owner_weight",
+        "posterior_binding_signature_measurement_min_std",
+        "posterior_binding_signature_measurement_margin_min",
+        "posterior_binding_signature_measurement_margin_temperature",
         "bind_address_weight",
         "bind_address_innovation_downweight",
         "address_update_rate",
@@ -1609,6 +2111,14 @@ def _validate_train_args(args: argparse.Namespace) -> None:
             "picf_mode must be one of {'enabled', 'ablated'}, "
             f"got {getattr(args, 'picf_mode', None)!r}."
         )
+    args.aqr_role_layout = str(
+        getattr(args, "aqr_role_layout", _SPEC_DEFAULTS.aqr_role_layout)
+    ).lower().replace("-", "_")
+    if args.aqr_role_layout not in {"structured", "no_effector", "object_contact_context", "object_only", "object"}:
+        raise ValueError(
+            "aqr_role_layout must be one of {'structured', 'no_effector', 'object_contact_context', 'object_only'}, "
+            f"got {getattr(args, 'aqr_role_layout', None)!r}."
+        )
     positive_int_fields = (
         "num_train_steps",
         "log_interval",
@@ -1638,8 +2148,6 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "future_hidden_dim",
         "persistent_anchors",
         "observation_anchors",
-        "effector_persistent_anchors",
-        "effector_observation_anchors",
         "global_scene_point_cap",
         "fusion_layers",
         "posterior_layers",
@@ -1648,7 +2156,6 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         "control_query_tokens",
         "predictive_query_tokens",
         "task_local_queries",
-        "task_effector_queries",
         "task_global_queries",
         "task_instruction_queries",
         "task_self_layers",
@@ -1669,6 +2176,23 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         value = int(getattr(args, name))
         if value < 1:
             raise ValueError(f"{name} must be >= 1, got {value}.")
+    no_effector_probe_fields = (
+        "effector_persistent_anchors",
+        "effector_observation_anchors",
+        "task_effector_queries",
+    )
+    for name in no_effector_probe_fields:
+        value = int(getattr(args, name))
+        if value < 0:
+            raise ValueError(f"{name} must be >= 0, got {value}.")
+    if args.aqr_role_layout == "structured":
+        for name in no_effector_probe_fields:
+            value = int(getattr(args, name))
+            if value < 1:
+                raise ValueError(
+                    f"{name} must be >= 1 for structured aqr_role_layout; "
+                    "use --aqr-role-layout object_only/no_effector for a clean no-effector probe."
+                )
     if int(getattr(args, "burnin_steps", 0)) < 0:
         raise ValueError(f"burnin_steps must be >= 0, got {args.burnin_steps}.")
     if str(getattr(args, "burnin_mode", "full")) not in {"full", "state_only"}:
@@ -1700,6 +2224,16 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError("aqr_mapg_enabled requires semantic_mode=paligemma for typed support memory and weak PaliGemma priors.")
     if bool(getattr(args, "aqr_mapg_enabled", False)) and bool(getattr(args, "mapg_enabled", False)):
         raise ValueError("aqr_mapg_enabled is the direct-final graph path; do not enable legacy mapg_enabled at the same time.")
+    if (
+        _looks_like_legacy_blind_sam_sidecar(getattr(args, "mvtrack_sidecar_root", None))
+        and not bool(getattr(args, "allow_legacy_blind_sam_sidecar", False))
+    ):
+        raise ValueError(
+            "mvtrack_sidecar_root appears to be an archived blind-SAM proposal root. "
+            "Blind automatic SAM proposals are rejected for current PICF-AQR-OWM training. "
+            "Use contact/task/tracklet-aware sidecars instead, or pass "
+            "--allow-legacy-blind-sam-sidecar only for historical reproduction."
+        )
     if int(args.warmup_steps) < 0:
         raise ValueError(f"warmup_steps must be >= 0, got {args.warmup_steps}.")
     if int(getattr(args, "keep_last_checkpoints", 0)) < 0:
@@ -1797,6 +2331,8 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError(
             f"anchor_overlay_max_anchors must be >= 0, got {getattr(args, 'anchor_overlay_max_anchors', None)}."
         )
+    if bool(getattr(args, "anchor_overlay_dump_signatures", False)) and int(getattr(args, "anchor_overlay_interval", 0)) <= 0:
+        raise ValueError("--anchor-overlay-dump-signatures requires --anchor-overlay-interval > 0.")
     for name in ("point_backbone_lr_scale", "visual_lr_scale", "tactile_lr_scale", "semantic_lr_scale"):
         value = float(getattr(args, name))
         if value <= 0.0:
@@ -1853,6 +2389,15 @@ def _validate_train_args(args: argparse.Namespace) -> None:
     if float(args.tactile_anchor_prob_on) < 0.0 or float(args.tactile_anchor_prob_on) > 1.0:
         raise ValueError(
             f"tactile_anchor_prob_on must be in [0, 1], got {args.tactile_anchor_prob_on}."
+        )
+    if float(args.tactile_evidence_prob_floor) < 0.0 or float(args.tactile_evidence_prob_floor) > 1.0:
+        raise ValueError(
+            f"tactile_evidence_prob_floor must be in [0, 1], got {args.tactile_evidence_prob_floor}."
+        )
+    if float(args.tactile_evidence_prob_floor) > float(args.tactile_anchor_prob_on):
+        raise ValueError(
+            "tactile_evidence_prob_floor must be <= tactile_anchor_prob_on; "
+            f"got floor={args.tactile_evidence_prob_floor} on={args.tactile_anchor_prob_on}."
         )
     if int(args.hidden_dim) % int(args.attention_heads) != 0:
         raise ValueError(
@@ -2791,6 +3336,77 @@ def _read_npz_required_optional(
     return frame
 
 
+def _read_mvtrack_sidecar_fields(
+    sidecar_root: str | Path | None,
+    *,
+    split: str,
+    step_id: int,
+    keys: Sequence[str],
+    proposal_nearest_max_gap: int = 0,
+) -> dict[str, np.ndarray]:
+    """Read optional tracklet/proposal sidecar arrays for one CALVIN frame.
+
+    The main CALVIN zip/directory remains immutable. Offline contact/task/
+    tracklet sidecar jobs can write npz files with the same episode ids; the
+    trainer then merges only optional MVTrack fields into the frame. Archived
+    blind-SAM roots are rejected by argument validation unless explicitly
+    allowed for historical reproduction.
+    """
+
+    if sidecar_root is None:
+        return {}
+    root = Path(sidecar_root)
+    candidates = (
+        root / split / f"episode_{int(step_id):07d}.npz",
+        root / f"episode_{int(step_id):07d}.npz",
+    )
+    path = next((candidate for candidate in candidates if candidate.exists()), None)
+    temporal_gap = 0
+    if path is None:
+        max_gap = max(int(proposal_nearest_max_gap), 0)
+        if max_gap <= 0 or not any(str(key).startswith("proposal_") for key in keys):
+            return {}
+        proposal_key_set = {str(key) for key in _MVTRACK_PROPOSAL_KEYS if str(key) != "proposal_age"}
+        best: tuple[int, Path] | None = None
+        for gap in range(1, max_gap + 1):
+            for signed_gap in (-gap, gap):
+                for candidate in (
+                    root / split / f"episode_{int(step_id + signed_gap):07d}.npz",
+                    root / f"episode_{int(step_id + signed_gap):07d}.npz",
+                ):
+                    if not candidate.exists():
+                        continue
+                    with np.load(candidate, allow_pickle=False) as data:
+                        if not any(key in data.files for key in proposal_key_set):
+                            continue
+                    best = (abs(int(signed_gap)), candidate)
+                    break
+                if best is not None:
+                    break
+            if best is not None:
+                break
+        if best is None:
+            return {}
+        temporal_gap, path = best
+    with np.load(path, allow_pickle=False) as data:
+        frame = {key: data[key] for key in keys if key in data.files}
+    if temporal_gap > 0 and any(key in frame for key in ("proposal_centers_xy", "proposal_boxes_xyxy")):
+        count = 0
+        if "proposal_centers_xy" in frame:
+            count = int(np.asarray(frame["proposal_centers_xy"]).reshape(-1, 2).shape[0])
+        elif "proposal_boxes_xyxy" in frame:
+            count = int(np.asarray(frame["proposal_boxes_xyxy"]).reshape(-1, 4).shape[0])
+        frame["proposal_age"] = np.full((count,), float(temporal_gap), dtype=np.float32)
+    elif any(key in frame for key in ("proposal_centers_xy", "proposal_boxes_xyxy")):
+        count = 0
+        if "proposal_centers_xy" in frame:
+            count = int(np.asarray(frame["proposal_centers_xy"]).reshape(-1, 2).shape[0])
+        elif "proposal_boxes_xyxy" in frame:
+            count = int(np.asarray(frame["proposal_boxes_xyxy"]).reshape(-1, 4).shape[0])
+        frame.setdefault("proposal_age", np.zeros((count,), dtype=np.float32))
+    return frame
+
+
 class _CalvinTransitionSource:
     def __init__(
         self,
@@ -2813,6 +3429,9 @@ class _CalvinTransitionSource:
         action_normalizer: PicfActionNormalizer | None = None,
         augmentation_mode: str = "off",
         photometric_strength: str = "conservative",
+        mvtrack_sidecar_root: str | Path | None = None,
+        mvtrack_sidecar_proposal_nearest_max_gap: int = 0,
+        segment_indices: Sequence[int] | None = None,
     ) -> None:
         if int(unroll_steps) < 1:
             raise ValueError(f"unroll_steps must be >= 1, got {unroll_steps}")
@@ -2854,6 +3473,8 @@ class _CalvinTransitionSource:
         self.action_normalizer = action_normalizer
         self.augmentation_mode = str(augmentation_mode).lower().replace("-", "_")
         self.photometric_strength = str(photometric_strength).lower().replace("-", "_")
+        self.mvtrack_sidecar_root = None if mvtrack_sidecar_root is None else Path(mvtrack_sidecar_root)
+        self.mvtrack_sidecar_proposal_nearest_max_gap = int(mvtrack_sidecar_proposal_nearest_max_gap)
         if self.augmentation_mode not in {"off", "photometric", "multimodal_geometry"}:
             raise ValueError(
                 "augmentation_mode must be one of {'off', 'photometric', 'multimodal_geometry'}, "
@@ -2870,10 +3491,14 @@ class _CalvinTransitionSource:
         # historical CALVIN dataset contract more closely.
         self.window_index: list[tuple[int, int]] = []
         self.segment_sampling_slots: list[_SegmentSamplingSlot] = []
-        for segment_id, segment in enumerate(self.segments):
+        selected_segment_ids = list(range(len(self.segments))) if segment_indices is None else [int(value) for value in segment_indices]
+        for segment_id in selected_segment_ids:
+            if segment_id < 0 or segment_id >= len(self.segments):
+                raise ValueError(f"calvin_segment_indices contains out-of-range segment id {segment_id}; valid [0,{len(self.segments)-1}].")
+            segment = self.segments[int(segment_id)]
             max_start_exclusive = segment.end - (self.unroll_steps + self.action_horizon - 1)
             for step_id in range(segment.start, max_start_exclusive):
-                self.window_index.append((segment_id, step_id))
+                self.window_index.append((int(segment_id), step_id))
             if segment.start < max_start_exclusive:
                 self.segment_sampling_slots.append(
                     _SegmentSamplingSlot(
@@ -2916,6 +3541,18 @@ class _CalvinTransitionSource:
         if self.load_proposal_fields:
             optional_keys.extend(_MVTRACK_PROPOSAL_KEYS)
         frame = _read_npz_required_optional(self.reader, step_id, required=keys, optional=optional_keys)
+        if optional_keys:
+            frame.update(
+                _read_mvtrack_sidecar_fields(
+                    self.mvtrack_sidecar_root,
+                    split=self.split,
+                    step_id=step_id,
+                    keys=optional_keys,
+                    proposal_nearest_max_gap=(
+                        self.mvtrack_sidecar_proposal_nearest_max_gap if self.load_proposal_fields else 0
+                    ),
+                )
+            )
         if self.augmentation_mode == "photometric":
             jitter_rng = rng if rng is not None else np.random.default_rng()
             frame["rgb_static"] = _apply_picf_photometric_augmentation(
@@ -2982,6 +3619,10 @@ class _CalvinTransitionSource:
             proposal_objectness=frame.get("proposal_objectness"),
             proposal_view_ids=frame.get("proposal_view_ids"),
             proposal_source_ids=frame.get("proposal_source_ids"),
+            proposal_age=frame.get("proposal_age"),
+            proposal_mask_xy=frame.get("proposal_mask_xy"),
+            proposal_mask_weights=frame.get("proposal_mask_weights"),
+            proposal_mask_offsets=frame.get("proposal_mask_offsets"),
         )
 
     def sample_window_metadata(
@@ -3041,6 +3682,42 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_tracklet_support_max",
     "aqr_proposal_support_entropy_mean",
     "aqr_proposal_support_max",
+    "aqr_proposal_shape_quality_mean",
+    "aqr_proposal_shape_quality_max",
+    "aqr_proposal_shape_quality_nonzero_fraction",
+    "aqr_proposal_point_bridge_entropy_mean",
+    "aqr_proposal_point_bridge_max",
+    "aqr_task_owner_point_bridge_entropy_mean",
+    "aqr_task_owner_point_bridge_max",
+    "aqr_task_owner_point_bridge_nonzero_fraction",
+    "aqr_proposal_anchor_seed_row_count",
+    "aqr_proposal_anchor_seed_nonzero_fraction",
+    "aqr_proposal_anchor_seed_point_max",
+    "aqr_proposal_anchor_seed_entropy_mean",
+    "aqr_proposal_anchor_seed_assignment_max",
+    "aqr_object_candidate_assigned_row_count",
+    "aqr_object_candidate_assigned_candidate_count",
+    "aqr_object_candidate_assignment_max",
+    "aqr_object_candidate_owner_row_count",
+    "aqr_object_candidate_owner_candidate_count",
+    "aqr_object_candidate_owner_assignment_max",
+    "aqr_object_candidate_owner_point_row_count",
+    "aqr_object_candidate_owner_point_max",
+    "aqr_object_candidate_coverage_mean",
+    "aqr_object_candidate_coverage_max",
+    "aqr_object_candidate_background_mean",
+    "aqr_object_candidate_duplicate_overlap_max",
+    "aqr_task_owner_visual_prior_entropy",
+    "aqr_task_owner_visual_prior_max",
+    "aqr_task_owner_proposal_score_max",
+    "aqr_task_owner_proposal_score_mean",
+    "aqr_task_owner_proposal_score_nonzero_fraction",
+    "aqr_task_owner_proposal_score_entropy",
+    "aqr_task_owner_proposal_selected_count",
+    "aqr_task_owner_proposal_shape_quality_mean",
+    "aqr_task_owner_anchor_score_max",
+    "aqr_task_owner_anchor_score_mean",
+    "aqr_task_owner_anchor_score_nonzero_fraction",
     "aqr_local_support_entropy_mean",
     "aqr_same_role_local_overlap_max",
     "aqr_same_role_local_true_overlap_max",
@@ -3060,8 +3737,21 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_same_role_support_overlap_max",
     "aqr_same_role_object_core_overlap_max",
     "aqr_same_role_object_core_overlap_mean",
+    "oeml_valid",
+    "oeml_anchor_quality_mean",
+    "oeml_anchor_quality_max",
+    "oeml_duplicate_overlap_max",
+    "oeml_duplicate_overlap_mean",
+    "oeml_feature_variance_mean",
+    "oeml_point_spatial_variance_mean",
+    "oeml_contact_explanation_score",
+    "oeml_visual_background_mean",
+    "oeml_point_background_mean",
     "aqr_active_anchor_count",
     "aqr_inactive_anchor_fraction",
+    "aqr_context_anchor_count",
+    "aqr_context_downstream_weight_mean",
+    "aqr_reserve_anchor_fraction",
     "aqr_active_same_role_support_overlap_max",
     "aqr_active_same_role_support_overlap_mean",
     "aqr_active_same_role_object_core_overlap_max",
@@ -3070,6 +3760,18 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_active_anchor_count_role_1",
     "aqr_active_anchor_count_role_2",
     "aqr_active_anchor_count_role_3",
+    "vcap_enabled",
+    "vcap_proposal_count",
+    "vcap_stop_entropy",
+    "vcap_active_prob_mean",
+    "vcap_unexplained_evidence",
+    "vcap_duplicate_cost",
+    "vcap_count_cost",
+    "vcap_continuity_cost",
+    "vcap_matched_old_file_fraction",
+    "vcap_birth_fraction",
+    "vcap_noobject_fraction",
+    "vcap_action_grad_scale",
     "aqr_ownership_prior_enabled",
     "aqr_ownership_prior_weight",
     "aqr_ownership_point_prior_weight",
@@ -3085,9 +3787,44 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "posterior_binding_top1_margin_mean",
     "posterior_binding_top1_margin_min",
     "posterior_binding_top1_margin_stable_mean",
+    "posterior_file_self_signature_sim_mean",
+    "posterior_file_best_other_signature_margin_mean",
+    "posterior_file_potential_swap_rate",
+    "posterior_file_calibrated_self_signature_sim_mean",
+    "posterior_file_calibrated_best_other_signature_margin_mean",
+    "posterior_file_calibrated_potential_swap_rate",
+    "posterior_file_calibrated_signature_score_std",
+    "posterior_active_file_fraction",
+    "posterior_active_file_self_signature_sim_mean",
+    "posterior_active_file_best_other_signature_margin_mean",
+    "posterior_active_file_potential_swap_rate",
+    "posterior_active_file_calibrated_self_signature_sim_mean",
+    "posterior_active_file_calibrated_best_other_signature_margin_mean",
+    "posterior_active_file_calibrated_potential_swap_rate",
+    "posterior_binding_signature_linear_score_mean",
+    "posterior_binding_signature_linear_score_abs_mean",
+    "posterior_binding_signature_quadratic_score_mean",
+    "posterior_binding_signature_quadratic_score_abs_mean",
+    "posterior_binding_signature_low_rank_score_mean",
+    "posterior_binding_signature_low_rank_score_abs_mean",
+    "posterior_binding_signature_combined_score_mean",
+    "posterior_binding_signature_combined_score_abs_mean",
+    "posterior_binding_signature_calibrated_score_mean",
+    "posterior_binding_signature_calibrated_score_abs_mean",
+    "posterior_binding_signature_calibrated_score_std",
+    "posterior_binding_signature_calibrated_top1_margin_mean",
+    "posterior_binding_signature_gate_mean",
+    "posterior_binding_signature_update_rate_mean",
+    "posterior_binding_signature_measurement_trust_mean",
+    "posterior_binding_signature_memory_keep_rate_mean",
+    "posterior_binding_signature_measurement_score_std",
+    "posterior_binding_signature_measurement_margin_mean",
+    "posterior_binding_signature_measurement_dispersion_gate_mean",
     "posterior_recycle_rate",
     "posterior_recycle_rate_effector",
     "posterior_recycle_rate_scene",
+    "posterior_active_file_recycle_rate",
+    "posterior_inactive_file_recycle_rate",
     "posterior_recycle_gate_std",
     "posterior_recycle_gate_min",
     "posterior_recycle_gate_max",
@@ -3102,9 +3839,40 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "posterior_residual_summary_norm",
     "posterior_dustbin_mass_raw",
     "posterior_dustbin_mass_final",
+    "posterior_lifecycle_assignment_confidence_mean",
+    "posterior_lifecycle_support_entropy_mean",
+    "posterior_lifecycle_support_margin_mean",
+    "posterior_lifecycle_owner_reliability_mean",
+    "posterior_lifecycle_survival_prob_mean",
+    "posterior_lifecycle_reset_allowance_mean",
+    "posterior_lifecycle_recycle_raw_mean",
+    "posterior_lifecycle_inactive_dustbin_mass",
+    "posterior_lifecycle_unexplained_dustbin_mass",
+    "posterior_file_competition_active_mean",
+    "posterior_file_competition_active_count",
+    "posterior_file_competition_demoted_mass_mean",
+    "posterior_file_competition_demoted_mass_max",
+    "posterior_file_competition_duplicate_overlap_max",
+    "posterior_file_competition_active_duplicate_overlap_max",
+    "posterior_file_competition_birth_active_mean",
+    "posterior_file_competition_birth_count",
+    "posterior_file_competition_birth_share_mean",
+    "posterior_file_competition_birth_share_max",
     "posterior_identity_innovation_risk",
     "posterior_address_update_rate_mean",
     "posterior_address_update_rate_max",
+    "posterior_owner_transport_mass_mean",
+    "posterior_owner_transport_mass_max",
+    "posterior_owner_transport_confidence_mean",
+    "posterior_owner_transport_confidence_max",
+    "posterior_owner_transport_dist_to_standard_mean",
+    "posterior_owner_transport_dist_to_standard_max",
+    "posterior_owner_transport_applied_fraction",
+    "posterior_owner_active_gate_enabled",
+    "posterior_owner_active_score_mean",
+    "posterior_owner_active_score_max",
+    "posterior_owner_active_eligible_fraction",
+    "owm_temporal_visual_tokens",
     "owm_tracklet_tokens",
     "owm_tracklet_valid_fraction",
     "owm_proposal_tokens",
@@ -3113,6 +3881,10 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "owm_posterior_binding_signature_norm_mean",
     "evidence_cache_trust_mean",
     "evidence_cache_age_mean",
+    "tactile_contact_prob_max",
+    "tactile_evidence_rate",
+    "tactile_evidence_weight_mean",
+    "tactile_evidence_weight_max",
     "innovation_norm_visual",
     "innovation_norm_point",
     "innovation_norm_tactile",
@@ -3163,6 +3935,7 @@ class _MetricAccumulator:
     loss_alignment_raw: float = 0.0
     loss_total_minus_action: float = 0.0
     loss_anchor_pv: float = 0.0
+    loss_anchor_object_pull: float = 0.0
     loss_pv_weak: float = 0.0
     loss_pt: float = 0.0
     loss_vl_router: float = 0.0
@@ -3183,6 +3956,13 @@ class _MetricAccumulator:
     loss_support_pred: float = 0.0
     loss_binding_consistency: float = 0.0
     loss_aqr_denoising: float = 0.0
+    loss_vcap: float = 0.0
+    loss_object_explanation: float = 0.0
+    loss_object_explanation_feature: float = 0.0
+    loss_object_explanation_point: float = 0.0
+    loss_object_explanation_contact: float = 0.0
+    loss_object_explanation_duplicate: float = 0.0
+    loss_object_explanation_background: float = 0.0
     physical_aux_budget_scale: float = 0.0
     semantic_aux_budget_scale: float = 0.0
     alignment_budget_scale: float = 0.0
@@ -3223,6 +4003,7 @@ class _MetricAccumulator:
         self.loss_alignment_raw += float(losses.alignment_raw.item())
         self.loss_total_minus_action += float(losses.total_minus_action.item())
         self.loss_anchor_pv += float(losses.anchor_pv.item())
+        self.loss_anchor_object_pull += float(losses.anchor_object_pull.item())
         self.loss_pv_weak += float(losses.pv_weak.item())
         self.loss_pt += float(losses.pt.item())
         self.loss_vl_router += float(losses.vl_router.item())
@@ -3243,6 +4024,13 @@ class _MetricAccumulator:
         self.loss_support_pred += float(_loss_component_or_zero(losses, "support_pred").item())
         self.loss_binding_consistency += float(_loss_component_or_zero(losses, "binding_consistency").item())
         self.loss_aqr_denoising += float(_loss_component_or_zero(losses, "aqr_denoising").item())
+        self.loss_vcap += float(_loss_component_or_zero(losses, "vcap").item())
+        self.loss_object_explanation += float(_loss_component_or_zero(losses, "object_explanation").item())
+        self.loss_object_explanation_feature += float(_loss_component_or_zero(losses, "object_explanation_feature").item())
+        self.loss_object_explanation_point += float(_loss_component_or_zero(losses, "object_explanation_point").item())
+        self.loss_object_explanation_contact += float(_loss_component_or_zero(losses, "object_explanation_contact").item())
+        self.loss_object_explanation_duplicate += float(_loss_component_or_zero(losses, "object_explanation_duplicate").item())
+        self.loss_object_explanation_background += float(_loss_component_or_zero(losses, "object_explanation_background").item())
         self.physical_aux_budget_scale += float(losses.physical_aux_budget_scale.item())
         self.semantic_aux_budget_scale += float(losses.semantic_aux_budget_scale.item())
         self.alignment_budget_scale += float(losses.alignment_budget_scale.item())
@@ -3275,6 +4063,7 @@ class _MetricAccumulator:
         self.loss_alignment_raw += float(outputs["loss_alignment_raw"].detach().item())
         self.loss_total_minus_action += float(outputs["loss_total_minus_action"].detach().item())
         self.loss_anchor_pv += float(outputs["loss_anchor_pv"].detach().item())
+        self.loss_anchor_object_pull += float(outputs["loss_anchor_object_pull"].detach().item())
         self.loss_pv_weak += float(outputs["loss_pv_weak"].detach().item())
         self.loss_pt += float(outputs["loss_pt"].detach().item())
         self.loss_vl_router += float(outputs.get("loss_vl_router", outputs["loss_pt"] * 0.0).detach().item())
@@ -3295,6 +4084,13 @@ class _MetricAccumulator:
         self.loss_support_pred += float(outputs.get("loss_support_pred", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_binding_consistency += float(outputs.get("loss_binding_consistency", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_aqr_denoising += float(outputs.get("loss_aqr_denoising", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_vcap += float(outputs.get("loss_vcap", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_object_explanation += float(outputs.get("loss_object_explanation", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_object_explanation_feature += float(outputs.get("loss_object_explanation_feature", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_object_explanation_point += float(outputs.get("loss_object_explanation_point", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_object_explanation_contact += float(outputs.get("loss_object_explanation_contact", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_object_explanation_duplicate += float(outputs.get("loss_object_explanation_duplicate", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_object_explanation_background += float(outputs.get("loss_object_explanation_background", outputs["loss_pt"] * 0.0).detach().item())
         self.physical_aux_budget_scale += float(outputs["physical_aux_budget_scale"].detach().item())
         self.semantic_aux_budget_scale += float(outputs["semantic_aux_budget_scale"].detach().item())
         self.alignment_budget_scale += float(outputs["alignment_budget_scale"].detach().item())
@@ -3333,6 +4129,7 @@ class _MetricAccumulator:
             "loss_alignment_raw": self.loss_alignment_raw / denom,
             "loss_total_minus_action": self.loss_total_minus_action / denom,
             "loss_anchor_pv": self.loss_anchor_pv / denom,
+            "loss_anchor_object_pull": self.loss_anchor_object_pull / denom,
             "loss_pv_weak": self.loss_pv_weak / denom,
             "loss_pt": self.loss_pt / denom,
             "loss_vl_router": self.loss_vl_router / denom,
@@ -3353,6 +4150,13 @@ class _MetricAccumulator:
             "loss_support_pred": self.loss_support_pred / denom,
             "loss_binding_consistency": self.loss_binding_consistency / denom,
             "loss_aqr_denoising": self.loss_aqr_denoising / denom,
+            "loss_vcap": self.loss_vcap / denom,
+            "loss_object_explanation": self.loss_object_explanation / denom,
+            "loss_object_explanation_feature": self.loss_object_explanation_feature / denom,
+            "loss_object_explanation_point": self.loss_object_explanation_point / denom,
+            "loss_object_explanation_contact": self.loss_object_explanation_contact / denom,
+            "loss_object_explanation_duplicate": self.loss_object_explanation_duplicate / denom,
+            "loss_object_explanation_background": self.loss_object_explanation_background / denom,
             "physical_aux_budget_scale": self.physical_aux_budget_scale / denom,
             "semantic_aux_budget_scale": self.semantic_aux_budget_scale / denom,
             "alignment_budget_scale": self.alignment_budget_scale / denom,
@@ -3432,6 +4236,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_alignment_raw": losses.alignment_raw,
             "loss_total_minus_action": losses.total_minus_action,
             "loss_anchor_pv": losses.anchor_pv,
+            "loss_anchor_object_pull": losses.anchor_object_pull,
             "loss_pv_weak": losses.pv_weak,
             "loss_pt": losses.pt,
             "loss_vl_router": losses.vl_router,
@@ -3452,6 +4257,13 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
             "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
             "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
+            "loss_vcap": _loss_component_or_zero(losses, "vcap"),
+            "loss_object_explanation": _loss_component_or_zero(losses, "object_explanation"),
+            "loss_object_explanation_feature": _loss_component_or_zero(losses, "object_explanation_feature"),
+            "loss_object_explanation_point": _loss_component_or_zero(losses, "object_explanation_point"),
+            "loss_object_explanation_contact": _loss_component_or_zero(losses, "object_explanation_contact"),
+            "loss_object_explanation_duplicate": _loss_component_or_zero(losses, "object_explanation_duplicate"),
+            "loss_object_explanation_background": _loss_component_or_zero(losses, "object_explanation_background"),
             "physical_aux_budget_scale": losses.physical_aux_budget_scale,
             "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
             "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3477,6 +4289,7 @@ class _PicfWindowTrainer(torch.nn.Module):
         *,
         capture_visual_diagnostics: bool = False,
         capture_anchor_overlay: bool = False,
+        capture_anchor_overlay_signatures: bool = False,
         debug_phase_label: str | None = None,
     ) -> dict[str, Any]:
         totals: list[torch.Tensor] = []
@@ -3550,6 +4363,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_alignment_raw": metrics["loss_alignment_raw"] / denom,
             "loss_total_minus_action": metrics["loss_total_minus_action"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
+            "loss_anchor_object_pull": metrics["loss_anchor_object_pull"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
             "loss_vl_router": metrics["loss_vl_router"] / denom,
@@ -3570,6 +4384,13 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
             "loss_aqr_denoising": metrics["loss_aqr_denoising"] / denom,
+            "loss_vcap": metrics["loss_vcap"] / denom,
+            "loss_object_explanation": metrics["loss_object_explanation"] / denom,
+            "loss_object_explanation_feature": metrics["loss_object_explanation_feature"] / denom,
+            "loss_object_explanation_point": metrics["loss_object_explanation_point"] / denom,
+            "loss_object_explanation_contact": metrics["loss_object_explanation_contact"] / denom,
+            "loss_object_explanation_duplicate": metrics["loss_object_explanation_duplicate"] / denom,
+            "loss_object_explanation_background": metrics["loss_object_explanation_background"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -3593,6 +4414,7 @@ class _PicfWindowTrainer(torch.nn.Module):
         *,
         capture_visual_diagnostics: bool = False,
         capture_anchor_overlay: bool = False,
+        capture_anchor_overlay_signatures: bool = False,
         debug_phase_label: str | None = None,
     ) -> dict[str, Any]:
         if not bool(getattr(self.policy, "picf_enabled", True)):
@@ -3600,6 +4422,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                 window,
                 capture_visual_diagnostics=capture_visual_diagnostics,
                 capture_anchor_overlay=capture_anchor_overlay,
+                capture_anchor_overlay_signatures=capture_anchor_overlay_signatures,
                 debug_phase_label=debug_phase_label,
             )
         previous = None
@@ -3674,7 +4497,11 @@ class _PicfWindowTrainer(torch.nn.Module):
             )
             output = policy_forward.output
             if capture_anchor_overlay:
-                anchor_overlay_snapshot = _anchor_overlay_snapshot_from_output(output, current)
+                anchor_overlay_snapshot = _anchor_overlay_snapshot_from_output(
+                    output,
+                    current,
+                    dump_signatures=capture_anchor_overlay_signatures,
+                )
             flow_override = policy_forward.flow_override
             policy_forward_sec = time.perf_counter() - step_start
             if debug_phase_label is not None:
@@ -3783,6 +4610,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_alignment_raw": losses.alignment_raw,
                     "loss_total_minus_action": losses.total_minus_action,
                     "loss_anchor_pv": losses.anchor_pv,
+                    "loss_anchor_object_pull": losses.anchor_object_pull,
                     "loss_pv_weak": losses.pv_weak,
                     "loss_pt": losses.pt,
                     "loss_vl_router": losses.vl_router,
@@ -3803,6 +4631,13 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
                     "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
+                    "loss_vcap": _loss_component_or_zero(losses, "vcap"),
+                    "loss_object_explanation": _loss_component_or_zero(losses, "object_explanation"),
+                    "loss_object_explanation_feature": _loss_component_or_zero(losses, "object_explanation_feature"),
+                    "loss_object_explanation_point": _loss_component_or_zero(losses, "object_explanation_point"),
+                    "loss_object_explanation_contact": _loss_component_or_zero(losses, "object_explanation_contact"),
+                    "loss_object_explanation_duplicate": _loss_component_or_zero(losses, "object_explanation_duplicate"),
+                    "loss_object_explanation_background": _loss_component_or_zero(losses, "object_explanation_background"),
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3837,6 +4672,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_alignment_raw"] = metrics["loss_alignment_raw"] + losses.alignment_raw
                 metrics["loss_total_minus_action"] = metrics["loss_total_minus_action"] + losses.total_minus_action
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
+                metrics["loss_anchor_object_pull"] = metrics["loss_anchor_object_pull"] + losses.anchor_object_pull
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
                 metrics["loss_vl_router"] = metrics["loss_vl_router"] + losses.vl_router
@@ -3860,6 +4696,25 @@ class _PicfWindowTrainer(torch.nn.Module):
                 )
                 metrics["loss_aqr_denoising"] = metrics["loss_aqr_denoising"] + _loss_component_or_zero(
                     losses, "aqr_denoising"
+                )
+                metrics["loss_vcap"] = metrics["loss_vcap"] + _loss_component_or_zero(losses, "vcap")
+                metrics["loss_object_explanation"] = metrics["loss_object_explanation"] + _loss_component_or_zero(
+                    losses, "object_explanation"
+                )
+                metrics["loss_object_explanation_feature"] = metrics["loss_object_explanation_feature"] + _loss_component_or_zero(
+                    losses, "object_explanation_feature"
+                )
+                metrics["loss_object_explanation_point"] = metrics["loss_object_explanation_point"] + _loss_component_or_zero(
+                    losses, "object_explanation_point"
+                )
+                metrics["loss_object_explanation_contact"] = metrics["loss_object_explanation_contact"] + _loss_component_or_zero(
+                    losses, "object_explanation_contact"
+                )
+                metrics["loss_object_explanation_duplicate"] = metrics["loss_object_explanation_duplicate"] + _loss_component_or_zero(
+                    losses, "object_explanation_duplicate"
+                )
+                metrics["loss_object_explanation_background"] = metrics["loss_object_explanation_background"] + _loss_component_or_zero(
+                    losses, "object_explanation_background"
                 )
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
@@ -3918,6 +4773,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_alignment_raw": losses.alignment_raw,
                     "loss_total_minus_action": losses.total_minus_action,
                     "loss_anchor_pv": losses.anchor_pv,
+                    "loss_anchor_object_pull": losses.anchor_object_pull,
                     "loss_pv_weak": losses.pv_weak,
                     "loss_pt": losses.pt,
                     "loss_vl_router": losses.vl_router,
@@ -3938,6 +4794,13 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
                     "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
+                    "loss_vcap": _loss_component_or_zero(losses, "vcap"),
+                    "loss_object_explanation": _loss_component_or_zero(losses, "object_explanation"),
+                    "loss_object_explanation_feature": _loss_component_or_zero(losses, "object_explanation_feature"),
+                    "loss_object_explanation_point": _loss_component_or_zero(losses, "object_explanation_point"),
+                    "loss_object_explanation_contact": _loss_component_or_zero(losses, "object_explanation_contact"),
+                    "loss_object_explanation_duplicate": _loss_component_or_zero(losses, "object_explanation_duplicate"),
+                    "loss_object_explanation_background": _loss_component_or_zero(losses, "object_explanation_background"),
                     "physical_aux_budget_scale": losses.physical_aux_budget_scale,
                     "semantic_aux_budget_scale": losses.semantic_aux_budget_scale,
                     "alignment_budget_scale": losses.alignment_budget_scale,
@@ -3969,6 +4832,7 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_alignment_raw"] = metrics["loss_alignment_raw"] + losses.alignment_raw
                 metrics["loss_total_minus_action"] = metrics["loss_total_minus_action"] + losses.total_minus_action
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
+                metrics["loss_anchor_object_pull"] = metrics["loss_anchor_object_pull"] + losses.anchor_object_pull
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
                 metrics["loss_vl_router"] = metrics["loss_vl_router"] + losses.vl_router
@@ -3992,6 +4856,25 @@ class _PicfWindowTrainer(torch.nn.Module):
                 )
                 metrics["loss_aqr_denoising"] = metrics["loss_aqr_denoising"] + _loss_component_or_zero(
                     losses, "aqr_denoising"
+                )
+                metrics["loss_vcap"] = metrics["loss_vcap"] + _loss_component_or_zero(losses, "vcap")
+                metrics["loss_object_explanation"] = metrics["loss_object_explanation"] + _loss_component_or_zero(
+                    losses, "object_explanation"
+                )
+                metrics["loss_object_explanation_feature"] = metrics["loss_object_explanation_feature"] + _loss_component_or_zero(
+                    losses, "object_explanation_feature"
+                )
+                metrics["loss_object_explanation_point"] = metrics["loss_object_explanation_point"] + _loss_component_or_zero(
+                    losses, "object_explanation_point"
+                )
+                metrics["loss_object_explanation_contact"] = metrics["loss_object_explanation_contact"] + _loss_component_or_zero(
+                    losses, "object_explanation_contact"
+                )
+                metrics["loss_object_explanation_duplicate"] = metrics["loss_object_explanation_duplicate"] + _loss_component_or_zero(
+                    losses, "object_explanation_duplicate"
+                )
+                metrics["loss_object_explanation_background"] = metrics["loss_object_explanation_background"] + _loss_component_or_zero(
+                    losses, "object_explanation_background"
                 )
                 metrics["physical_aux_budget_scale"] = metrics["physical_aux_budget_scale"] + losses.physical_aux_budget_scale
                 metrics["semantic_aux_budget_scale"] = metrics["semantic_aux_budget_scale"] + losses.semantic_aux_budget_scale
@@ -4028,6 +4911,7 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_alignment_raw": metrics["loss_alignment_raw"] / denom,
             "loss_total_minus_action": metrics["loss_total_minus_action"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
+            "loss_anchor_object_pull": metrics["loss_anchor_object_pull"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
             "loss_vl_router": metrics["loss_vl_router"] / denom,
@@ -4048,6 +4932,13 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
             "loss_aqr_denoising": metrics["loss_aqr_denoising"] / denom,
+            "loss_vcap": metrics["loss_vcap"] / denom,
+            "loss_object_explanation": metrics["loss_object_explanation"] / denom,
+            "loss_object_explanation_feature": metrics["loss_object_explanation_feature"] / denom,
+            "loss_object_explanation_point": metrics["loss_object_explanation_point"] / denom,
+            "loss_object_explanation_contact": metrics["loss_object_explanation_contact"] / denom,
+            "loss_object_explanation_duplicate": metrics["loss_object_explanation_duplicate"] / denom,
+            "loss_object_explanation_background": metrics["loss_object_explanation_background"] / denom,
             "physical_aux_budget_scale": metrics["physical_aux_budget_scale"] / denom,
             "semantic_aux_budget_scale": metrics["semantic_aux_budget_scale"] / denom,
             "alignment_budget_scale": metrics["alignment_budget_scale"] / denom,
@@ -4089,6 +4980,7 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_alignment_raw",
     "loss_total_minus_action",
     "loss_anchor_pv",
+    "loss_anchor_object_pull",
     "loss_pv_weak",
     "loss_pt",
     "loss_vl_router",
@@ -4109,6 +5001,13 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_support_pred",
     "loss_binding_consistency",
     "loss_aqr_denoising",
+    "loss_vcap",
+    "loss_object_explanation",
+    "loss_object_explanation_feature",
+    "loss_object_explanation_point",
+    "loss_object_explanation_contact",
+    "loss_object_explanation_duplicate",
+    "loss_object_explanation_background",
     "physical_aux_budget_scale",
     "semantic_aux_budget_scale",
     "alignment_budget_scale",
@@ -4950,7 +5849,13 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         tactile_contact_ema_beta=float(
             _arg_or_default("tactile_contact_ema_beta", _SPEC_DEFAULTS.tactile_contact_ema_beta)
         ),
+        tactile_evidence_prob_floor=float(
+            _arg_or_default("tactile_evidence_prob_floor", _SPEC_DEFAULTS.tactile_evidence_prob_floor)
+        ),
         tactile_anchor_prob_on=float(_arg_or_default("tactile_anchor_prob_on", _SPEC_DEFAULTS.tactile_anchor_prob_on)),
+        tactile_attach_to_object_owner=bool(
+            _arg_or_default("tactile_attach_to_object_owner", _SPEC_DEFAULTS.tactile_attach_to_object_owner)
+        ),
         task_visual_reread_topk=int(_arg_or_default("task_visual_reread_topk", _SPEC_DEFAULTS.task_visual_reread_topk)),
         task_tactile_reread_groups=int(
             _arg_or_default("task_tactile_reread_groups", _SPEC_DEFAULTS.task_tactile_reread_groups)
@@ -5019,6 +5924,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default("aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)
         ),
         aqr_query_count_task=int(_arg_or_default("aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
+        aqr_role_layout=str(_arg_or_default("aqr_role_layout", _SPEC_DEFAULTS.aqr_role_layout)),
         aqr_query_rounds=int(_arg_or_default("aqr_query_rounds", _SPEC_DEFAULTS.aqr_query_rounds)),
         aqr_sinkhorn_iters=int(_arg_or_default("aqr_sinkhorn_iters", _SPEC_DEFAULTS.aqr_sinkhorn_iters)),
         aqr_sinkhorn_temperature=float(
@@ -5124,6 +6030,46 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 _SPEC_DEFAULTS.aqr_active_slot_geometry_duplicate_threshold,
             )
         ),
+        vcap_enabled=bool(_arg_or_default("vcap_enabled", _SPEC_DEFAULTS.vcap_enabled)),
+        vcap_max_active=int(_arg_or_default("vcap_max_active", _SPEC_DEFAULTS.vcap_max_active)),
+        vcap_min_active=int(_arg_or_default("vcap_min_active", _SPEC_DEFAULTS.vcap_min_active)),
+        vcap_stop_threshold=float(_arg_or_default("vcap_stop_threshold", _SPEC_DEFAULTS.vcap_stop_threshold)),
+        vcap_action_grad_scale=float(
+            _arg_or_default("vcap_action_grad_scale", _SPEC_DEFAULTS.vcap_action_grad_scale)
+        ),
+        aqr_context_slot_enabled=bool(
+            _arg_or_default("aqr_context_slot_enabled", _SPEC_DEFAULTS.aqr_context_slot_enabled)
+        ),
+        aqr_context_slot_weight=float(
+            _arg_or_default("aqr_context_slot_weight", _SPEC_DEFAULTS.aqr_context_slot_weight)
+        ),
+        aqr_context_slot_min_confidence=float(
+            _arg_or_default(
+                "aqr_context_slot_min_confidence",
+                _SPEC_DEFAULTS.aqr_context_slot_min_confidence,
+            )
+        ),
+        aqr_context_slot_min_score=float(
+            _arg_or_default("aqr_context_slot_min_score", _SPEC_DEFAULTS.aqr_context_slot_min_score)
+        ),
+        aqr_context_slot_duplicate_overlap_threshold=float(
+            _arg_or_default(
+                "aqr_context_slot_duplicate_overlap_threshold",
+                _SPEC_DEFAULTS.aqr_context_slot_duplicate_overlap_threshold,
+            )
+        ),
+        posterior_owner_active_gate_enabled=bool(
+            _arg_or_default(
+                "posterior_owner_active_gate_enabled",
+                _SPEC_DEFAULTS.posterior_owner_active_gate_enabled,
+            )
+        ),
+        posterior_owner_active_min=float(
+            _arg_or_default("posterior_owner_active_min", _SPEC_DEFAULTS.posterior_owner_active_min)
+        ),
+        posterior_owner_active_bias=float(
+            _arg_or_default("posterior_owner_active_bias", _SPEC_DEFAULTS.posterior_owner_active_bias)
+        ),
         aqr_vjepa_temporal_mode=str(
             _arg_or_default("aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)
         ),
@@ -5187,13 +6133,286 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default("proposal_confidence_floor", _SPEC_DEFAULTS.proposal_confidence_floor)
         ),
         proposal_read_weight=float(_arg_or_default("proposal_read_weight", _SPEC_DEFAULTS.proposal_read_weight)),
+        proposal_age_decay_steps=float(
+            _arg_or_default("proposal_age_decay_steps", _SPEC_DEFAULTS.proposal_age_decay_steps)
+        ),
+        proposal_shape_quality_enabled=bool(
+            _arg_or_default("proposal_shape_quality_enabled", _SPEC_DEFAULTS.proposal_shape_quality_enabled)
+        ),
+        proposal_shape_area_min=float(
+            _arg_or_default("proposal_shape_area_min", _SPEC_DEFAULTS.proposal_shape_area_min)
+        ),
+        proposal_shape_area_max=float(
+            _arg_or_default("proposal_shape_area_max", _SPEC_DEFAULTS.proposal_shape_area_max)
+        ),
+        proposal_shape_aspect_min=float(
+            _arg_or_default("proposal_shape_aspect_min", _SPEC_DEFAULTS.proposal_shape_aspect_min)
+        ),
+        proposal_context_quality_power=float(
+            _arg_or_default("proposal_context_quality_power", _SPEC_DEFAULTS.proposal_context_quality_power)
+        ),
+        proposal_point_bridge_weight=float(
+            _arg_or_default("proposal_point_bridge_weight", _SPEC_DEFAULTS.proposal_point_bridge_weight)
+        ),
+        proposal_point_bridge_edge_tau=float(
+            _arg_or_default("proposal_point_bridge_edge_tau", _SPEC_DEFAULTS.proposal_point_bridge_edge_tau)
+        ),
+        proposal_mask_point_tau=float(
+            _arg_or_default("proposal_mask_point_tau", _SPEC_DEFAULTS.proposal_mask_point_tau)
+        ),
+        proposal_anchor_seed_enabled=bool(
+            _arg_or_default("proposal_anchor_seed_enabled", _SPEC_DEFAULTS.proposal_anchor_seed_enabled)
+        ),
+        proposal_anchor_seed_rows=int(
+            _arg_or_default("proposal_anchor_seed_rows", _SPEC_DEFAULTS.proposal_anchor_seed_rows)
+        ),
+        proposal_anchor_seed_weight=float(
+            _arg_or_default("proposal_anchor_seed_weight", _SPEC_DEFAULTS.proposal_anchor_seed_weight)
+        ),
+        proposal_anchor_seed_token_weight=float(
+            _arg_or_default("proposal_anchor_seed_token_weight", _SPEC_DEFAULTS.proposal_anchor_seed_token_weight)
+        ),
+        proposal_anchor_seed_score_floor=float(
+            _arg_or_default("proposal_anchor_seed_score_floor", _SPEC_DEFAULTS.proposal_anchor_seed_score_floor)
+        ),
+        proposal_anchor_seed_point_topk=int(
+            _arg_or_default("proposal_anchor_seed_point_topk", _SPEC_DEFAULTS.proposal_anchor_seed_point_topk)
+        ),
+        proposal_anchor_seed_point_power=float(
+            _arg_or_default("proposal_anchor_seed_point_power", _SPEC_DEFAULTS.proposal_anchor_seed_point_power)
+        ),
+        object_candidate_assignment_enabled=bool(
+            _arg_or_default(
+                "object_candidate_assignment_enabled",
+                _SPEC_DEFAULTS.object_candidate_assignment_enabled,
+            )
+        ),
+        object_candidate_assignment_temperature=float(
+            _arg_or_default(
+                "object_candidate_assignment_temperature",
+                _SPEC_DEFAULTS.object_candidate_assignment_temperature,
+            )
+        ),
+        object_candidate_background_prior=float(
+            _arg_or_default("object_candidate_background_prior", _SPEC_DEFAULTS.object_candidate_background_prior)
+        ),
+        object_candidate_background_quality_weight=float(
+            _arg_or_default(
+                "object_candidate_background_quality_weight",
+                _SPEC_DEFAULTS.object_candidate_background_quality_weight,
+            )
+        ),
+        object_candidate_row_support_floor=float(
+            _arg_or_default(
+                "object_candidate_row_support_floor",
+                _SPEC_DEFAULTS.object_candidate_row_support_floor,
+            )
+        ),
+        object_candidate_eligible_roles=_parse_int_tuple(
+            _arg_or_default(
+                "object_candidate_eligible_roles",
+                _SPEC_DEFAULTS.object_candidate_eligible_roles,
+            )
+        ),
+        object_candidate_max_rows_per_candidate=int(
+            _arg_or_default(
+                "object_candidate_max_rows_per_candidate",
+                _SPEC_DEFAULTS.object_candidate_max_rows_per_candidate,
+            )
+        ),
+        object_candidate_row_capacity=float(
+            _arg_or_default("object_candidate_row_capacity", _SPEC_DEFAULTS.object_candidate_row_capacity)
+        ),
+        object_candidate_row_capacity_iters=int(
+            _arg_or_default(
+                "object_candidate_row_capacity_iters",
+                _SPEC_DEFAULTS.object_candidate_row_capacity_iters,
+            )
+        ),
+        object_candidate_point_weight=float(
+            _arg_or_default("object_candidate_point_weight", _SPEC_DEFAULTS.object_candidate_point_weight)
+        ),
+        object_candidate_proposal_weight=float(
+            _arg_or_default("object_candidate_proposal_weight", _SPEC_DEFAULTS.object_candidate_proposal_weight)
+        ),
+        object_candidate_seed_weight=float(
+            _arg_or_default("object_candidate_seed_weight", _SPEC_DEFAULTS.object_candidate_seed_weight)
+        ),
+        object_candidate_task_owner_weight=float(
+            _arg_or_default("object_candidate_task_owner_weight", _SPEC_DEFAULTS.object_candidate_task_owner_weight)
+        ),
+        object_candidate_anchor_score_weight=float(
+            _arg_or_default(
+                "object_candidate_anchor_score_weight",
+                _SPEC_DEFAULTS.object_candidate_anchor_score_weight,
+            )
+        ),
+        object_candidate_point_mix=float(
+            _arg_or_default("object_candidate_point_mix", _SPEC_DEFAULTS.object_candidate_point_mix)
+        ),
+        object_candidate_proposal_mix=float(
+            _arg_or_default("object_candidate_proposal_mix", _SPEC_DEFAULTS.object_candidate_proposal_mix)
+        ),
+        object_candidate_min_shape_quality=float(
+            _arg_or_default("object_candidate_min_shape_quality", _SPEC_DEFAULTS.object_candidate_min_shape_quality)
+        ),
+        object_candidate_owner_transport_enabled=bool(
+            _arg_or_default(
+                "object_candidate_owner_transport_enabled",
+                _SPEC_DEFAULTS.object_candidate_owner_transport_enabled,
+            )
+        ),
+        object_candidate_owner_roles=_parse_int_tuple(
+            _arg_or_default(
+                "object_candidate_owner_roles",
+                _SPEC_DEFAULTS.object_candidate_owner_roles,
+            )
+        ),
+        object_candidate_owner_min_share=float(
+            _arg_or_default("object_candidate_owner_min_share", _SPEC_DEFAULTS.object_candidate_owner_min_share)
+        ),
+        object_candidate_owner_point_mix=float(
+            _arg_or_default("object_candidate_owner_point_mix", _SPEC_DEFAULTS.object_candidate_owner_point_mix)
+        ),
+        task_owner_proposal_point_bridge_weight=float(
+            _arg_or_default(
+                "task_owner_proposal_point_bridge_weight",
+                _SPEC_DEFAULTS.task_owner_proposal_point_bridge_weight,
+            )
+        ),
+        task_owner_bias_enabled=bool(
+            _arg_or_default("task_owner_bias_enabled", _SPEC_DEFAULTS.task_owner_bias_enabled)
+        ),
+        task_owner_visual_bias_weight=float(
+            _arg_or_default("task_owner_visual_bias_weight", _SPEC_DEFAULTS.task_owner_visual_bias_weight)
+        ),
+        task_owner_proposal_bias_weight=float(
+            _arg_or_default("task_owner_proposal_bias_weight", _SPEC_DEFAULTS.task_owner_proposal_bias_weight)
+        ),
+        task_owner_proposal_point_bias_weight=float(
+            _arg_or_default(
+                "task_owner_proposal_point_bias_weight",
+                _SPEC_DEFAULTS.task_owner_proposal_point_bias_weight,
+            )
+        ),
+        task_owner_proposal_objectness_power=float(
+            _arg_or_default("task_owner_proposal_objectness_power", _SPEC_DEFAULTS.task_owner_proposal_objectness_power)
+        ),
+        task_owner_proposal_static_only=bool(
+            _arg_or_default("task_owner_proposal_static_only", _SPEC_DEFAULTS.task_owner_proposal_static_only)
+        ),
+        task_owner_proposal_topk=int(
+            _arg_or_default("task_owner_proposal_topk", _SPEC_DEFAULTS.task_owner_proposal_topk)
+        ),
+        task_owner_proposal_score_floor=float(
+            _arg_or_default("task_owner_proposal_score_floor", _SPEC_DEFAULTS.task_owner_proposal_score_floor)
+        ),
         bind_support_signature_weight=float(
             _arg_or_default("bind_support_signature_weight", _SPEC_DEFAULTS.bind_support_signature_weight)
         ),
         bind_embedding_signature_weight=float(
             _arg_or_default("bind_embedding_signature_weight", _SPEC_DEFAULTS.bind_embedding_signature_weight)
         ),
+        bind_quadratic_signature_weight=float(
+            _arg_or_default("bind_quadratic_signature_weight", _SPEC_DEFAULTS.bind_quadratic_signature_weight)
+        ),
+        bind_low_rank_signature_weight=float(
+            _arg_or_default("bind_low_rank_signature_weight", _SPEC_DEFAULTS.bind_low_rank_signature_weight)
+        ),
         binding_signature_dim=int(_arg_or_default("binding_signature_dim", _SPEC_DEFAULTS.binding_signature_dim)),
+        binding_low_rank_signature_rank=int(
+            _arg_or_default("binding_low_rank_signature_rank", _SPEC_DEFAULTS.binding_low_rank_signature_rank)
+        ),
+        binding_signature_centering_enabled=bool(
+            _arg_or_default(
+                "binding_signature_centering_enabled",
+                _SPEC_DEFAULTS.binding_signature_centering_enabled,
+            )
+        ),
+        binding_signature_centering_min_tokens=int(
+            _arg_or_default(
+                "binding_signature_centering_min_tokens",
+                _SPEC_DEFAULTS.binding_signature_centering_min_tokens,
+            )
+        ),
+        binding_signature_score_calibration_enabled=bool(
+            _arg_or_default(
+                "binding_signature_score_calibration_enabled",
+                _SPEC_DEFAULTS.binding_signature_score_calibration_enabled,
+            )
+        ),
+        binding_signature_score_calibration_mode=str(
+            _arg_or_default(
+                "binding_signature_score_calibration_mode",
+                _SPEC_DEFAULTS.binding_signature_score_calibration_mode,
+            )
+        ),
+        binding_signature_score_min_std=float(
+            _arg_or_default(
+                "binding_signature_score_min_std",
+                _SPEC_DEFAULTS.binding_signature_score_min_std,
+            )
+        ),
+        binding_signature_score_clip=float(
+            _arg_or_default(
+                "binding_signature_score_clip",
+                _SPEC_DEFAULTS.binding_signature_score_clip,
+            )
+        ),
+        posterior_binding_signature_memory_enabled=bool(
+            _arg_or_default(
+                "posterior_binding_signature_memory_enabled",
+                _SPEC_DEFAULTS.posterior_binding_signature_memory_enabled,
+            )
+        ),
+        posterior_binding_signature_dispersion_gate_enabled=bool(
+            _arg_or_default(
+                "posterior_binding_signature_dispersion_gate_enabled",
+                _SPEC_DEFAULTS.posterior_binding_signature_dispersion_gate_enabled,
+            )
+        ),
+        posterior_binding_signature_update_rate=float(
+            _arg_or_default(
+                "posterior_binding_signature_update_rate",
+                _SPEC_DEFAULTS.posterior_binding_signature_update_rate,
+            )
+        ),
+        posterior_binding_signature_update_max_rate=float(
+            _arg_or_default(
+                "posterior_binding_signature_update_max_rate",
+                _SPEC_DEFAULTS.posterior_binding_signature_update_max_rate,
+            )
+        ),
+        posterior_binding_signature_min_support=float(
+            _arg_or_default(
+                "posterior_binding_signature_min_support",
+                _SPEC_DEFAULTS.posterior_binding_signature_min_support,
+            )
+        ),
+        posterior_binding_signature_owner_weight=float(
+            _arg_or_default(
+                "posterior_binding_signature_owner_weight",
+                _SPEC_DEFAULTS.posterior_binding_signature_owner_weight,
+            )
+        ),
+        posterior_binding_signature_measurement_min_std=float(
+            _arg_or_default(
+                "posterior_binding_signature_measurement_min_std",
+                _SPEC_DEFAULTS.posterior_binding_signature_measurement_min_std,
+            )
+        ),
+        posterior_binding_signature_measurement_margin_min=float(
+            _arg_or_default(
+                "posterior_binding_signature_measurement_margin_min",
+                _SPEC_DEFAULTS.posterior_binding_signature_measurement_margin_min,
+            )
+        ),
+        posterior_binding_signature_measurement_margin_temperature=float(
+            _arg_or_default(
+                "posterior_binding_signature_measurement_margin_temperature",
+                _SPEC_DEFAULTS.posterior_binding_signature_measurement_margin_temperature,
+            )
+        ),
         bind_address_weight=float(_arg_or_default("bind_address_weight", _SPEC_DEFAULTS.bind_address_weight)),
         bind_address_innovation_downweight=float(
             _arg_or_default("bind_address_innovation_downweight", _SPEC_DEFAULTS.bind_address_innovation_downweight)
@@ -5246,6 +6465,210 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default(
                 "posterior_slotwise_recycle_residual",
                 _SPEC_DEFAULTS.posterior_slotwise_recycle_residual,
+            )
+        ),
+        posterior_lifecycle_calibration_enabled=bool(
+            _arg_or_default(
+                "posterior_lifecycle_calibration_enabled",
+                _SPEC_DEFAULTS.posterior_lifecycle_calibration_enabled,
+            )
+        ),
+        posterior_lifecycle_support_min=float(
+            _arg_or_default(
+                "posterior_lifecycle_support_min",
+                _SPEC_DEFAULTS.posterior_lifecycle_support_min,
+            )
+        ),
+        posterior_lifecycle_support_temperature=float(
+            _arg_or_default(
+                "posterior_lifecycle_support_temperature",
+                _SPEC_DEFAULTS.posterior_lifecycle_support_temperature,
+            )
+        ),
+        posterior_lifecycle_margin_min=float(
+            _arg_or_default(
+                "posterior_lifecycle_margin_min",
+                _SPEC_DEFAULTS.posterior_lifecycle_margin_min,
+            )
+        ),
+        posterior_lifecycle_margin_temperature=float(
+            _arg_or_default(
+                "posterior_lifecycle_margin_temperature",
+                _SPEC_DEFAULTS.posterior_lifecycle_margin_temperature,
+            )
+        ),
+        posterior_lifecycle_entropy_weight=float(
+            _arg_or_default(
+                "posterior_lifecycle_entropy_weight",
+                _SPEC_DEFAULTS.posterior_lifecycle_entropy_weight,
+            )
+        ),
+        posterior_lifecycle_owner_weight=float(
+            _arg_or_default(
+                "posterior_lifecycle_owner_weight",
+                _SPEC_DEFAULTS.posterior_lifecycle_owner_weight,
+            )
+        ),
+        posterior_lifecycle_innovation_downweight=float(
+            _arg_or_default(
+                "posterior_lifecycle_innovation_downweight",
+                _SPEC_DEFAULTS.posterior_lifecycle_innovation_downweight,
+            )
+        ),
+        posterior_owner_transport_enabled=bool(
+            _arg_or_default(
+                "posterior_owner_transport_enabled",
+                _SPEC_DEFAULTS.posterior_owner_transport_enabled,
+            )
+        ),
+        posterior_owner_transport_roles=_parse_int_tuple(
+            _arg_or_default(
+                "posterior_owner_transport_roles",
+                _SPEC_DEFAULTS.posterior_owner_transport_roles,
+            )
+        ),
+        posterior_owner_transport_max_per_role=int(
+            _arg_or_default(
+                "posterior_owner_transport_max_per_role",
+                _SPEC_DEFAULTS.posterior_owner_transport_max_per_role,
+            )
+        ),
+        posterior_owner_transport_max_rate=float(
+            _arg_or_default(
+                "posterior_owner_transport_max_rate",
+                _SPEC_DEFAULTS.posterior_owner_transport_max_rate,
+            )
+        ),
+        posterior_owner_transport_precision_gain=float(
+            _arg_or_default(
+                "posterior_owner_transport_precision_gain",
+                _SPEC_DEFAULTS.posterior_owner_transport_precision_gain,
+            )
+        ),
+        posterior_owner_transport_min_mass=float(
+            _arg_or_default(
+                "posterior_owner_transport_min_mass",
+                _SPEC_DEFAULTS.posterior_owner_transport_min_mass,
+            )
+        ),
+        posterior_owner_transport_assignment_floor=float(
+            _arg_or_default(
+                "posterior_owner_transport_assignment_floor",
+                _SPEC_DEFAULTS.posterior_owner_transport_assignment_floor,
+            )
+        ),
+        posterior_owner_transport_reliability_floor=float(
+            _arg_or_default(
+                "posterior_owner_transport_reliability_floor",
+                _SPEC_DEFAULTS.posterior_owner_transport_reliability_floor,
+            )
+        ),
+        posterior_owner_transport_covariance_scale=float(
+            _arg_or_default(
+                "posterior_owner_transport_covariance_scale",
+                _SPEC_DEFAULTS.posterior_owner_transport_covariance_scale,
+            )
+        ),
+        posterior_owner_transport_inactive_prior=float(
+            _arg_or_default(
+                "posterior_owner_transport_inactive_prior",
+                _SPEC_DEFAULTS.posterior_owner_transport_inactive_prior,
+            )
+        ),
+        posterior_owner_transport_activates_file=bool(
+            _arg_or_default(
+                "posterior_owner_transport_activates_file",
+                _SPEC_DEFAULTS.posterior_owner_transport_activates_file,
+            )
+        ),
+        posterior_owner_transport_active_threshold=float(
+            _arg_or_default(
+                "posterior_owner_transport_active_threshold",
+                _SPEC_DEFAULTS.posterior_owner_transport_active_threshold,
+            )
+        ),
+        posterior_file_competition_enabled=bool(
+            _arg_or_default(
+                "posterior_file_competition_enabled",
+                _SPEC_DEFAULTS.posterior_file_competition_enabled,
+            )
+        ),
+        posterior_file_competition_min_per_role=int(
+            _arg_or_default(
+                "posterior_file_competition_min_per_role",
+                _SPEC_DEFAULTS.posterior_file_competition_min_per_role,
+            )
+        ),
+        posterior_file_competition_max_per_role=int(
+            _arg_or_default(
+                "posterior_file_competition_max_per_role",
+                _SPEC_DEFAULTS.posterior_file_competition_max_per_role,
+            )
+        ),
+        posterior_file_competition_min_support=float(
+            _arg_or_default(
+                "posterior_file_competition_min_support",
+                _SPEC_DEFAULTS.posterior_file_competition_min_support,
+            )
+        ),
+        posterior_file_competition_relative_score_threshold=float(
+            _arg_or_default(
+                "posterior_file_competition_relative_score_threshold",
+                _SPEC_DEFAULTS.posterior_file_competition_relative_score_threshold,
+            )
+        ),
+        posterior_file_competition_support_overlap_threshold=float(
+            _arg_or_default(
+                "posterior_file_competition_support_overlap_threshold",
+                _SPEC_DEFAULTS.posterior_file_competition_support_overlap_threshold,
+            )
+        ),
+        posterior_file_competition_geometry_duplicate_enabled=bool(
+            _arg_or_default(
+                "posterior_file_competition_geometry_duplicate_enabled",
+                _SPEC_DEFAULTS.posterior_file_competition_geometry_duplicate_enabled,
+            )
+        ),
+        posterior_file_competition_geometry_sigma_m=float(
+            _arg_or_default(
+                "posterior_file_competition_geometry_sigma_m",
+                _SPEC_DEFAULTS.posterior_file_competition_geometry_sigma_m,
+            )
+        ),
+        posterior_file_competition_geometry_threshold=float(
+            _arg_or_default(
+                "posterior_file_competition_geometry_threshold",
+                _SPEC_DEFAULTS.posterior_file_competition_geometry_threshold,
+            )
+        ),
+        posterior_birth_competition_enabled=bool(
+            _arg_or_default(
+                "posterior_birth_competition_enabled",
+                _SPEC_DEFAULTS.posterior_birth_competition_enabled,
+            )
+        ),
+        posterior_birth_competition_max_per_role=int(
+            _arg_or_default(
+                "posterior_birth_competition_max_per_role",
+                _SPEC_DEFAULTS.posterior_birth_competition_max_per_role,
+            )
+        ),
+        posterior_birth_competition_min_score=float(
+            _arg_or_default(
+                "posterior_birth_competition_min_score",
+                _SPEC_DEFAULTS.posterior_birth_competition_min_score,
+            )
+        ),
+        posterior_birth_competition_inactive_only=bool(
+            _arg_or_default(
+                "posterior_birth_competition_inactive_only",
+                _SPEC_DEFAULTS.posterior_birth_competition_inactive_only,
+            )
+        ),
+        posterior_birth_alpha_suppression_power=float(
+            _arg_or_default(
+                "posterior_birth_alpha_suppression_power",
+                _SPEC_DEFAULTS.posterior_birth_alpha_suppression_power,
             )
         ),
         legacy_local_refinement_opt_in=bool(
@@ -5411,8 +6834,55 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_point_real=float(getattr(args, "lambda_point_real", defaults.lambda_point_real)),
         lambda_semantic_future_aux=float(getattr(args, "lambda_semantic_future_aux", defaults.lambda_semantic_future_aux)),
         lambda_anchor_pv=float(getattr(args, "lambda_anchor_pv", defaults.lambda_anchor_pv)),
+        lambda_anchor_object_pull=float(getattr(args, "lambda_anchor_object_pull", defaults.lambda_anchor_object_pull)),
+        anchor_object_pull_sigma_m=float(getattr(args, "anchor_object_pull_sigma_m", defaults.anchor_object_pull_sigma_m)),
+        anchor_object_pull_confirmation_threshold=float(
+            getattr(args, "anchor_object_pull_confirmation_threshold", defaults.anchor_object_pull_confirmation_threshold)
+        ),
+        anchor_object_pull_allowed_roles=_parse_int_tuple(
+            getattr(args, "anchor_object_pull_allowed_roles", defaults.anchor_object_pull_allowed_roles)
+        ),
+        anchor_object_pull_graph_weight=float(
+            getattr(args, "anchor_object_pull_graph_weight", defaults.anchor_object_pull_graph_weight)
+        ),
+        anchor_object_pull_posterior_weight=float(
+            getattr(args, "anchor_object_pull_posterior_weight", defaults.anchor_object_pull_posterior_weight)
+        ),
         lambda_pv_weak=float(getattr(args, "lambda_pv_weak", defaults.lambda_pv_weak)),
         lambda_pt=float(getattr(args, "lambda_pt", defaults.lambda_pt)),
+        anchor_pv_object_gate_enabled=bool(
+            getattr(args, "anchor_pv_object_gate_enabled", defaults.anchor_pv_object_gate_enabled)
+        ),
+        anchor_pv_active_object_gate_only=bool(
+            getattr(args, "anchor_pv_active_object_gate_only", defaults.anchor_pv_active_object_gate_only)
+        ),
+        anchor_pv_object_gate_floor=float(
+            getattr(args, "anchor_pv_object_gate_floor", defaults.anchor_pv_object_gate_floor)
+        ),
+        anchor_pv_object_normalize_by_object_mass=bool(
+            getattr(
+                args,
+                "anchor_pv_object_normalize_by_object_mass",
+                defaults.anchor_pv_object_normalize_by_object_mass,
+            )
+        ),
+        anchor_pv_object_distribution_loss=bool(
+            getattr(args, "anchor_pv_object_distribution_loss", defaults.anchor_pv_object_distribution_loss)
+        ),
+        anchor_pv_object_distribution_confirmed_only=bool(
+            getattr(
+                args,
+                "anchor_pv_object_distribution_confirmed_only",
+                defaults.anchor_pv_object_distribution_confirmed_only,
+            )
+        ),
+        anchor_pv_object_distribution_confirmation_threshold=float(
+            getattr(
+                args,
+                "anchor_pv_object_distribution_confirmation_threshold",
+                defaults.anchor_pv_object_distribution_confirmation_threshold,
+            )
+        ),
         tau_pv=float(getattr(args, "tau_pv", defaults.tau_pv)),
         tau_pt=float(getattr(args, "tau_pt", defaults.tau_pt)),
         tau_route_p=float(getattr(args, "tau_route_p", defaults.tau_route_p)),
@@ -5453,6 +6923,40 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         lambda_support_pred=float(getattr(args, "lambda_support_pred", defaults.lambda_support_pred)),
         lambda_binding_consistency=float(getattr(args, "lambda_binding_consistency", defaults.lambda_binding_consistency)),
         lambda_aqr_denoising=float(getattr(args, "lambda_aqr_denoising", defaults.lambda_aqr_denoising)),
+        aqr_denoising_active_object_only=bool(
+            getattr(args, "aqr_denoising_active_object_only", defaults.aqr_denoising_active_object_only)
+        ),
+        aqr_denoising_confirmed_object_only=bool(
+            getattr(args, "aqr_denoising_confirmed_object_only", defaults.aqr_denoising_confirmed_object_only)
+        ),
+        aqr_denoising_confirmation_threshold=float(
+            getattr(args, "aqr_denoising_confirmation_threshold", defaults.aqr_denoising_confirmation_threshold)
+        ),
+        lambda_vcap_unexplained=float(getattr(args, "lambda_vcap_unexplained", defaults.lambda_vcap_unexplained)),
+        lambda_vcap_duplicate=float(getattr(args, "lambda_vcap_duplicate", defaults.lambda_vcap_duplicate)),
+        lambda_vcap_count=float(getattr(args, "lambda_vcap_count", defaults.lambda_vcap_count)),
+        lambda_vcap_continuity=float(getattr(args, "lambda_vcap_continuity", defaults.lambda_vcap_continuity)),
+        lambda_object_explanation_feature=float(
+            getattr(args, "lambda_object_explanation_feature", defaults.lambda_object_explanation_feature)
+        ),
+        lambda_object_explanation_point=float(
+            getattr(args, "lambda_object_explanation_point", defaults.lambda_object_explanation_point)
+        ),
+        lambda_object_explanation_contact=float(
+            getattr(args, "lambda_object_explanation_contact", defaults.lambda_object_explanation_contact)
+        ),
+        lambda_object_explanation_duplicate=float(
+            getattr(args, "lambda_object_explanation_duplicate", defaults.lambda_object_explanation_duplicate)
+        ),
+        lambda_object_explanation_background=float(
+            getattr(args, "lambda_object_explanation_background", defaults.lambda_object_explanation_background)
+        ),
+        object_explanation_active_object_only=bool(
+            getattr(args, "object_explanation_active_object_only", defaults.object_explanation_active_object_only)
+        ),
+        object_explanation_duplicate_margin=float(
+            getattr(args, "object_explanation_duplicate_margin", defaults.object_explanation_duplicate_margin)
+        ),
         detach_action_loss_from_picf=bool(getattr(args, "detach_action_loss_from_picf", defaults.detach_action_loss_from_picf)),
         mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", defaults.mapg_siglip_tau)),
         mapg_vicreg_var_target=float(getattr(args, "mapg_vicreg_var_target", defaults.mapg_vicreg_var_target)),
@@ -5668,23 +7172,17 @@ def _materialize_model_parameters(
 
 
 def _infer_tactile_dense_dim(core: torch.nn.Module) -> int:
-    """Infer the private AnyTouch dense token width used by tactile reread.
+    """Return the PICF-space tactile dense width used by tactile rereads.
 
-    The tactile public trunk runs at `hidden_dim`, but the dense group memory
-    stored by the AnyTouch encoder stays at the encoder-native token width
-    (currently CLIP-B/16 hidden size, 768). Warmup materialization must respect
-    that native width; forcing `hidden_dim` here will incorrectly initialize the
-    lazy reread projections and crash once real tactile groups appear.
+    AnyTouch patch tokens are encoder-native when they leave the tactile
+    backbone, but PICF immediately maps them through
+    `core.tactile_patch_token_proj` before storing them in dense tactile memory.
+    The lazy reread blocks therefore must be materialized at `hidden_dim`.
+    Initializing them with the AnyTouch native width makes the warmup contract
+    disagree with the real forward path and crashes on the first dense contact.
     """
 
-    tactile_encoder = getattr(core, "tactile_encoder", None)
-    model = getattr(tactile_encoder, "model", None)
-    config = getattr(model, "config", None)
-    vision_config = getattr(config, "vision_config", None)
-    hidden_size = getattr(vision_config, "hidden_size", None)
-    if isinstance(hidden_size, int) and hidden_size > 0:
-        return int(hidden_size)
-    return 768
+    return int(getattr(core.config, "hidden_dim", 512))
 
 
 def _prepare_output_dir(
@@ -5738,6 +7236,9 @@ _ANCHOR_ONLY_TRAINABLE_PATTERNS: tuple[str, ...] = (
     "core.visual_align_proj.*",
     "core.tactile_align_proj.*",
     "core.binding_signature_proj.*",
+    "core.binding_quadratic_diag",
+    "core.binding_low_rank_left.*",
+    "core.binding_low_rank_right.*",
     "core.temporal_visual_time_proj.*",
     "core.temporal_visual_view_embedding.*",
     "core.projective_bias_head.*",
@@ -6076,6 +7577,9 @@ def train(args: argparse.Namespace) -> None:
             fault_dump_handle = None
         fault_dump_registered = _register_fault_dump_handler(stream=fault_dump_handle)
         action_normalizer = _resolve_action_normalizer(args)
+        calvin_segment_indices = None
+        if args.calvin_segment_indices:
+            calvin_segment_indices = [int(part) for part in str(args.calvin_segment_indices).split(",") if part.strip()]
         source = _CalvinTransitionSource(
             args.calvin_root,
             split=args.split,
@@ -6090,9 +7594,14 @@ def train(args: argparse.Namespace) -> None:
             use_scene_obs=bool(args.use_scene_obs),
             load_tracklet_fields=bool(getattr(args, "tracklet_memory_enabled", _SPEC_DEFAULTS.tracklet_memory_enabled)),
             load_proposal_fields=bool(getattr(args, "proposal_memory_enabled", _SPEC_DEFAULTS.proposal_memory_enabled)),
+            mvtrack_sidecar_root=args.mvtrack_sidecar_root,
+            mvtrack_sidecar_proposal_nearest_max_gap=int(
+                getattr(args, "mvtrack_sidecar_proposal_nearest_max_gap", 0)
+            ),
             action_normalizer=action_normalizer,
             augmentation_mode=args.picf_augmentation_mode,
             photometric_strength=args.picf_photometric_strength,
+            segment_indices=calvin_segment_indices,
         )
 
         core, semantic_encoder, use_visual_override = _build_model_sequential_across_ranks(
@@ -6209,7 +7718,7 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s anchor_overlay_dump_signatures=%s wandb=%s",
                 world_size,
                 args.training_strategy,
                 args.picf_mode,
@@ -6232,6 +7741,7 @@ def train(args: argparse.Namespace) -> None:
                 bool(getattr(args, "window_activation_checkpointing", False)),
                 int(getattr(args, "anchor_overlay_interval", 0)),
                 int(getattr(args, "anchor_overlay_max_anchors", 64)),
+                bool(getattr(args, "anchor_overlay_dump_signatures", False)),
                 bool(args.wandb_enabled and args.wandb_mode != "disabled"),
             )
             logging.info(
@@ -6358,7 +7868,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_point_prior_weight=%s ownership_point_prior_sigma_m=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s same_role_support_competition_enabled=%s same_role_support_competition_weight=%s same_role_support_competition_iters=%s same_role_support_competition_physical_only=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s active_slot_relative_score_threshold=%s active_slot_geometry_duplicate_enabled=%s active_slot_geometry_duplicate_sigma_m=%s active_slot_geometry_duplicate_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_point_prior_weight=%s ownership_point_prior_sigma_m=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s same_role_support_competition_enabled=%s same_role_support_competition_weight=%s same_role_support_competition_iters=%s same_role_support_competition_physical_only=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s active_slot_relative_score_threshold=%s active_slot_geometry_duplicate_enabled=%s active_slot_geometry_duplicate_sigma_m=%s active_slot_geometry_duplicate_threshold=%s context_slot_enabled=%s context_slot_weight=%s context_slot_min_confidence=%s context_slot_min_score=%s context_slot_duplicate_overlap_threshold=%s posterior_owner_active_gate_enabled=%s posterior_owner_active_min=%s posterior_owner_active_bias=%s posterior_file_competition_enabled=%s posterior_file_competition_min_per_role=%s posterior_file_competition_max_per_role=%s posterior_file_competition_min_support=%s posterior_file_competition_overlap_threshold=%s posterior_file_competition_geometry_duplicate_enabled=%s posterior_file_competition_geometry_sigma_m=%s posterior_file_competition_geometry_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -6457,6 +7967,64 @@ def train(args: argparse.Namespace) -> None:
                         _SPEC_DEFAULTS.aqr_active_slot_geometry_duplicate_threshold,
                     )
                 ),
+                bool(getattr(args, "aqr_context_slot_enabled", _SPEC_DEFAULTS.aqr_context_slot_enabled)),
+                float(getattr(args, "aqr_context_slot_weight", _SPEC_DEFAULTS.aqr_context_slot_weight)),
+                float(
+                    getattr(
+                        args,
+                        "aqr_context_slot_min_confidence",
+                        _SPEC_DEFAULTS.aqr_context_slot_min_confidence,
+                    )
+                ),
+                float(getattr(args, "aqr_context_slot_min_score", _SPEC_DEFAULTS.aqr_context_slot_min_score)),
+                float(
+                    getattr(
+                        args,
+                        "aqr_context_slot_duplicate_overlap_threshold",
+                        _SPEC_DEFAULTS.aqr_context_slot_duplicate_overlap_threshold,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "posterior_owner_active_gate_enabled",
+                        _SPEC_DEFAULTS.posterior_owner_active_gate_enabled,
+                    )
+                ),
+                float(getattr(args, "posterior_owner_active_min", _SPEC_DEFAULTS.posterior_owner_active_min)),
+                float(getattr(args, "posterior_owner_active_bias", _SPEC_DEFAULTS.posterior_owner_active_bias)),
+                bool(getattr(args, "posterior_file_competition_enabled", _SPEC_DEFAULTS.posterior_file_competition_enabled)),
+                int(getattr(args, "posterior_file_competition_min_per_role", _SPEC_DEFAULTS.posterior_file_competition_min_per_role)),
+                int(getattr(args, "posterior_file_competition_max_per_role", _SPEC_DEFAULTS.posterior_file_competition_max_per_role)),
+                float(getattr(args, "posterior_file_competition_min_support", _SPEC_DEFAULTS.posterior_file_competition_min_support)),
+                float(
+                    getattr(
+                        args,
+                        "posterior_file_competition_support_overlap_threshold",
+                        _SPEC_DEFAULTS.posterior_file_competition_support_overlap_threshold,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "posterior_file_competition_geometry_duplicate_enabled",
+                        _SPEC_DEFAULTS.posterior_file_competition_geometry_duplicate_enabled,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_file_competition_geometry_sigma_m",
+                        _SPEC_DEFAULTS.posterior_file_competition_geometry_sigma_m,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_file_competition_geometry_threshold",
+                        _SPEC_DEFAULTS.posterior_file_competition_geometry_threshold,
+                    )
+                ),
                 str(getattr(args, "aqr_vjepa_temporal_mode", _SPEC_DEFAULTS.aqr_vjepa_temporal_mode)),
                 int(getattr(args, "aqr_vjepa_temporal_tokens", _SPEC_DEFAULTS.aqr_vjepa_temporal_tokens)),
                 bool(
@@ -6522,6 +8090,121 @@ def train(args: argparse.Namespace) -> None:
                 bool(getattr(args, "vl_anchor_router_enabled", False)),
             )
             logging.info(
+                "Posterior owner-transport contract: enabled=%s roles=%s max_per_role=%s max_rate=%s precision_gain=%s min_mass=%s assignment_floor=%s reliability_floor=%s covariance_scale=%s inactive_prior=%s activates_file=%s active_threshold=%s. "
+                "Accepted object/contact responsibility is closed into posterior object-file geometry instead of staying only in the transient graph.",
+                bool(getattr(args, "posterior_owner_transport_enabled", _SPEC_DEFAULTS.posterior_owner_transport_enabled)),
+                str(getattr(args, "posterior_owner_transport_roles", _SPEC_DEFAULTS.posterior_owner_transport_roles)),
+                int(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_max_per_role",
+                        _SPEC_DEFAULTS.posterior_owner_transport_max_per_role,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_max_rate",
+                        _SPEC_DEFAULTS.posterior_owner_transport_max_rate,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_precision_gain",
+                        _SPEC_DEFAULTS.posterior_owner_transport_precision_gain,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_min_mass",
+                        _SPEC_DEFAULTS.posterior_owner_transport_min_mass,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_assignment_floor",
+                        _SPEC_DEFAULTS.posterior_owner_transport_assignment_floor,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_reliability_floor",
+                        _SPEC_DEFAULTS.posterior_owner_transport_reliability_floor,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_covariance_scale",
+                        _SPEC_DEFAULTS.posterior_owner_transport_covariance_scale,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_inactive_prior",
+                        _SPEC_DEFAULTS.posterior_owner_transport_inactive_prior,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_activates_file",
+                        _SPEC_DEFAULTS.posterior_owner_transport_activates_file,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_active_threshold",
+                        _SPEC_DEFAULTS.posterior_owner_transport_active_threshold,
+                    )
+                ),
+            )
+            logging.info(
+                "Posterior birth transport contract: enabled=%s max_per_role=%s min_score=%s inactive_only=%s alpha_suppression_power=%s. "
+                "Dustbin residual can only feed bounded reserve births; it is not broadcast into every inactive posterior file.",
+                bool(
+                    getattr(
+                        args,
+                        "posterior_birth_competition_enabled",
+                        _SPEC_DEFAULTS.posterior_birth_competition_enabled,
+                    )
+                ),
+                int(
+                    getattr(
+                        args,
+                        "posterior_birth_competition_max_per_role",
+                        _SPEC_DEFAULTS.posterior_birth_competition_max_per_role,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_birth_competition_min_score",
+                        _SPEC_DEFAULTS.posterior_birth_competition_min_score,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "posterior_birth_competition_inactive_only",
+                        _SPEC_DEFAULTS.posterior_birth_competition_inactive_only,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_birth_alpha_suppression_power",
+                        _SPEC_DEFAULTS.posterior_birth_alpha_suppression_power,
+                    )
+                ),
+            )
+            logging.info(
                 "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),
@@ -6533,6 +8216,22 @@ def train(args: argparse.Namespace) -> None:
                 bool(args.tactile_trainable),
                 args.semantic_mode,
                 bool(args.semantic_trainable),
+            )
+            logging.info(
+                "MVTrack sidecar contract: mvtrack_sidecar_root=%s proposal_nearest_max_gap=%s proposal_age_decay_steps=%s; optional tracklet/proposal arrays are offline typed evidence and do not mutate CALVIN frames.",
+                args.mvtrack_sidecar_root,
+                int(getattr(args, "mvtrack_sidecar_proposal_nearest_max_gap", 0)),
+                float(getattr(args, "proposal_age_decay_steps", _SPEC_DEFAULTS.proposal_age_decay_steps)),
+            )
+            logging.info(
+                "Proposal reference-anchor seed contract: enabled=%s rows=%s weight=%s token_weight=%s score_floor=%s point_topk=%s point_power=%s; sidecar proposals seed physical measurement rows but do not bypass AQR/posterior.",
+                bool(getattr(args, "proposal_anchor_seed_enabled", _SPEC_DEFAULTS.proposal_anchor_seed_enabled)),
+                int(getattr(args, "proposal_anchor_seed_rows", _SPEC_DEFAULTS.proposal_anchor_seed_rows)),
+                float(getattr(args, "proposal_anchor_seed_weight", _SPEC_DEFAULTS.proposal_anchor_seed_weight)),
+                float(getattr(args, "proposal_anchor_seed_token_weight", _SPEC_DEFAULTS.proposal_anchor_seed_token_weight)),
+                float(getattr(args, "proposal_anchor_seed_score_floor", _SPEC_DEFAULTS.proposal_anchor_seed_score_floor)),
+                int(getattr(args, "proposal_anchor_seed_point_topk", _SPEC_DEFAULTS.proposal_anchor_seed_point_topk)),
+                float(getattr(args, "proposal_anchor_seed_point_power", _SPEC_DEFAULTS.proposal_anchor_seed_point_power)),
             )
             logging.info(
                 "Frozen-perception/augmentation contract: perception_finetune_mode=%s picf_augmentation_mode=%s photometric_strength=%s semantic_max_length=%s",
@@ -6777,6 +8476,7 @@ def train(args: argparse.Namespace) -> None:
                                     window,
                                     capture_visual_diagnostics=False,
                                     capture_anchor_overlay=False,
+                                    capture_anchor_overlay_signatures=False,
                                     debug_phase_label=None,
                                 )
                                 outputs = dict(outputs)
@@ -6798,6 +8498,9 @@ def train(args: argparse.Namespace) -> None:
                                 window,
                                 capture_visual_diagnostics=capture_visual_diagnostics,
                                 capture_anchor_overlay=capture_anchor_overlay,
+                                capture_anchor_overlay_signatures=bool(
+                                    getattr(args, "anchor_overlay_dump_signatures", False)
+                                ),
                                 debug_phase_label=forward_label,
                             )
                         if debug_phase_enabled:
@@ -7000,6 +8703,15 @@ def main() -> None:
     parser.add_argument("--calvin-root", required=True)
     parser.add_argument("--split", default="training", choices=["training", "validation"])
     parser.add_argument("--backend", default="dir", choices=["dir", "zip"])
+    parser.add_argument(
+        "--calvin-segment-indices",
+        default=None,
+        help=(
+            "Optional comma-separated CALVIN segment ids for diagnostics. "
+            "Production training should leave this unset; inspected proposal sidecar diagnostics may restrict "
+            "sampling to segments that have precomputed proposal coverage."
+        ),
+    )
     parser.add_argument("--checkpoint-base-dir", required=True)
     parser.add_argument("--exp-name", required=True)
     parser.add_argument("--resume", action="store_true")
@@ -7034,6 +8746,15 @@ def main() -> None:
         type=int,
         default=64,
         help="Maximum graph/posterior anchors per source to draw in each anchor overlay image.",
+    )
+    parser.add_argument(
+        "--anchor-overlay-dump-signatures",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Also write support_signature and binding_signature vectors into anchor overlay JSON. "
+            "This is intended for short IsSameObject diagnostics and is off by default to avoid large long-run JSON files."
+        ),
     )
     parser.add_argument("--accum-steps", type=int, default=1)
     parser.add_argument("--max-empty-window-retries", type=int, default=32)
@@ -7154,8 +8875,88 @@ def main() -> None:
     parser.add_argument("--lambda-point-real", type=float, default=_LOSS_DEFAULTS.lambda_point_real)
     parser.add_argument("--lambda-semantic-future-aux", type=float, default=_LOSS_DEFAULTS.lambda_semantic_future_aux)
     parser.add_argument("--lambda-anchor-pv", type=float, default=_LOSS_DEFAULTS.lambda_anchor_pv)
+    parser.add_argument("--lambda-anchor-object-pull", type=float, default=_LOSS_DEFAULTS.lambda_anchor_object_pull)
+    parser.add_argument("--anchor-object-pull-sigma-m", type=float, default=_LOSS_DEFAULTS.anchor_object_pull_sigma_m)
+    parser.add_argument(
+        "--anchor-object-pull-confirmation-threshold",
+        type=float,
+        default=_LOSS_DEFAULTS.anchor_object_pull_confirmation_threshold,
+    )
+    parser.add_argument(
+        "--anchor-object-pull-allowed-roles",
+        type=str,
+        default=",".join(str(role) for role in _LOSS_DEFAULTS.anchor_object_pull_allowed_roles),
+        help=(
+            "Comma-separated anchor roles allowed to receive the diagnostic object-pull loss. "
+            "Default 1 keeps object sidecar supervision on task-object rows and prevents "
+            "effector/gripper rows from being pulled onto the object."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-object-pull-graph-weight",
+        type=float,
+        default=_LOSS_DEFAULTS.anchor_object_pull_graph_weight,
+        help="Weight of the measurement-graph center term inside anchor_object_pull.",
+    )
+    parser.add_argument(
+        "--anchor-object-pull-posterior-weight",
+        type=float,
+        default=_LOSS_DEFAULTS.anchor_object_pull_posterior_weight,
+        help=(
+            "Weight of the posterior belief-file center term inside anchor_object_pull. "
+            "This closes graph->posterior ownership supervision in object-owner probes."
+        ),
+    )
     parser.add_argument("--lambda-pv-weak", type=float, default=_LOSS_DEFAULTS.lambda_pv_weak)
     parser.add_argument("--lambda-pt", type=float, default=_LOSS_DEFAULTS.lambda_pt)
+    parser.add_argument(
+        "--anchor-pv-object-gate-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.anchor_pv_object_gate_enabled,
+        help=(
+            "Gate the anchor-PV object loss by AQR object-routed point/visual support. "
+            "Dense background evidence is supervised separately by pv_weak."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-pv-active-object-gate-only",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.anchor_pv_active_object_gate_only,
+        help=(
+            "Use only active object files, not reserve/context rows, when building the object gate for anchor-PV. "
+            "Dense background still remains visible through the global PV floor and pv_weak."
+        ),
+    )
+    parser.add_argument("--anchor-pv-object-gate-floor", type=float, default=_LOSS_DEFAULTS.anchor_pv_object_gate_floor)
+    parser.add_argument(
+        "--anchor-pv-object-normalize-by-object-mass",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.anchor_pv_object_normalize_by_object_mass,
+        help=(
+            "Normalize anchor-PV object loss over object-confirmed edges instead of all dense projective edges. "
+            "Global dense coverage remains in loss_pv_weak."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-pv-object-distribution-loss",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.anchor_pv_object_distribution_loss,
+        help=(
+            "Use per-object-row point/visual distribution consistency for anchor-PV instead of dense edge BCE. "
+            "This keeps dense/background PV in pv_weak and trains object slots only on their own support distributions."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-pv-object-distribution-confirmed-only",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.anchor_pv_object_distribution_confirmed_only,
+        help="Apply distributional anchor-PV only to active rows confirmed by sidecar/proposal/point evidence.",
+    )
+    parser.add_argument(
+        "--anchor-pv-object-distribution-confirmation-threshold",
+        type=float,
+        default=_LOSS_DEFAULTS.anchor_pv_object_distribution_confirmation_threshold,
+    )
     parser.add_argument("--lambda-vl-heatmap-task", type=float, default=_LOSS_DEFAULTS.lambda_vl_heatmap_task)
     parser.add_argument("--lambda-vl-heatmap-effector", type=float, default=_LOSS_DEFAULTS.lambda_vl_heatmap_effector)
     parser.add_argument("--lambda-vl-heatmap-interaction", type=float, default=_LOSS_DEFAULTS.lambda_vl_heatmap_interaction)
@@ -7175,6 +8976,41 @@ def main() -> None:
     parser.add_argument("--lambda-support-pred", type=float, default=_LOSS_DEFAULTS.lambda_support_pred)
     parser.add_argument("--lambda-binding-consistency", type=float, default=_LOSS_DEFAULTS.lambda_binding_consistency)
     parser.add_argument("--lambda-aqr-denoising", type=float, default=_LOSS_DEFAULTS.lambda_aqr_denoising)
+    parser.add_argument(
+        "--aqr-denoising-active-object-only",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.aqr_denoising_active_object_only,
+        help="Apply AQR support denoising only to active object files, excluding reserve/no-object rows.",
+    )
+    parser.add_argument(
+        "--aqr-denoising-confirmed-object-only",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.aqr_denoising_confirmed_object_only,
+        help=(
+            "Apply AQR support denoising only to active rows confirmed by object-candidate/proposal/point evidence."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-denoising-confirmation-threshold",
+        type=float,
+        default=_LOSS_DEFAULTS.aqr_denoising_confirmation_threshold,
+    )
+    parser.add_argument("--lambda-vcap-unexplained", type=float, default=_LOSS_DEFAULTS.lambda_vcap_unexplained)
+    parser.add_argument("--lambda-vcap-duplicate", type=float, default=_LOSS_DEFAULTS.lambda_vcap_duplicate)
+    parser.add_argument("--lambda-vcap-count", type=float, default=_LOSS_DEFAULTS.lambda_vcap_count)
+    parser.add_argument("--lambda-vcap-continuity", type=float, default=_LOSS_DEFAULTS.lambda_vcap_continuity)
+    parser.add_argument("--lambda-object-explanation-feature", type=float, default=_LOSS_DEFAULTS.lambda_object_explanation_feature)
+    parser.add_argument("--lambda-object-explanation-point", type=float, default=_LOSS_DEFAULTS.lambda_object_explanation_point)
+    parser.add_argument("--lambda-object-explanation-contact", type=float, default=_LOSS_DEFAULTS.lambda_object_explanation_contact)
+    parser.add_argument("--lambda-object-explanation-duplicate", type=float, default=_LOSS_DEFAULTS.lambda_object_explanation_duplicate)
+    parser.add_argument("--lambda-object-explanation-background", type=float, default=_LOSS_DEFAULTS.lambda_object_explanation_background)
+    parser.add_argument(
+        "--object-explanation-active-object-only",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.object_explanation_active_object_only,
+        help="Compute object-explanation feature/duplicate terms over active object files only.",
+    )
+    parser.add_argument("--object-explanation-duplicate-margin", type=float, default=_LOSS_DEFAULTS.object_explanation_duplicate_margin)
     parser.add_argument(
         "--picf-action-detach-from-anchor",
         dest="detach_action_loss_from_picf",
@@ -7330,7 +9166,17 @@ def main() -> None:
     parser.add_argument("--tactile-contact-tau-off", type=float, default=None)
     parser.add_argument("--tactile-contact-temperature", type=float, default=None)
     parser.add_argument("--tactile-contact-ema-beta", type=float, default=_SPEC_DEFAULTS.tactile_contact_ema_beta)
+    parser.add_argument("--tactile-evidence-prob-floor", type=float, default=_SPEC_DEFAULTS.tactile_evidence_prob_floor)
     parser.add_argument("--tactile-anchor-prob-on", type=float, default=_SPEC_DEFAULTS.tactile_anchor_prob_on)
+    parser.add_argument(
+        "--tactile-attach-to-object-owner",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.tactile_attach_to_object_owner,
+        help=(
+            "Route tactile/contact tokens to role-1 object owners during assignment. "
+            "This treats touch as evidence about the contacted object rather than an independent effector owner."
+        ),
+    )
     parser.add_argument("--use-scene-obs", action="store_true")
     parser.add_argument(
         "--semantic-mode",
@@ -7469,6 +9315,16 @@ def main() -> None:
     )
     parser.add_argument("--aqr-query-count-physical", type=int, default=_SPEC_DEFAULTS.aqr_query_count_physical)
     parser.add_argument("--aqr-query-count-task", type=int, default=_SPEC_DEFAULTS.aqr_query_count_task)
+    parser.add_argument(
+        "--aqr-role-layout",
+        type=str,
+        default=_SPEC_DEFAULTS.aqr_role_layout,
+        choices=("structured", "no_effector", "object_contact_context", "object_only", "object"),
+        help=(
+            "AQR graph role layout. structured keeps the historical blue effector role; "
+            "object_only makes every AQR graph row a role-1 object-owner row for isolated binding probes."
+        ),
+    )
     parser.add_argument("--aqr-query-rounds", type=int, default=_SPEC_DEFAULTS.aqr_query_rounds)
     parser.add_argument("--aqr-sinkhorn-iters", type=int, default=_SPEC_DEFAULTS.aqr_sinkhorn_iters)
     parser.add_argument("--aqr-sinkhorn-temperature", type=float, default=_SPEC_DEFAULTS.aqr_sinkhorn_temperature)
@@ -7593,6 +9449,51 @@ def main() -> None:
         default=_SPEC_DEFAULTS.aqr_active_slot_geometry_duplicate_threshold,
     )
     parser.add_argument(
+        "--vcap-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.vcap_enabled,
+        help=(
+            "Enable the disabled-by-default Variable-Cardinality Active Proposal allocator. "
+            "VCAP only initializes active AQR proposal rows; it must not replace dense memory or posterior correction."
+        ),
+    )
+    parser.add_argument("--vcap-max-active", type=int, default=_SPEC_DEFAULTS.vcap_max_active)
+    parser.add_argument("--vcap-min-active", type=int, default=_SPEC_DEFAULTS.vcap_min_active)
+    parser.add_argument("--vcap-stop-threshold", type=float, default=_SPEC_DEFAULTS.vcap_stop_threshold)
+    parser.add_argument("--vcap-action-grad-scale", type=float, default=_SPEC_DEFAULTS.vcap_action_grad_scale)
+    parser.add_argument(
+        "--aqr-context-slot-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_context_slot_enabled,
+        help=(
+            "Route inactive-but-real scene anchors as low-weight action context instead of forcing "
+            "every non-active anchor into a zero-weight reserve/dustbin path."
+        ),
+    )
+    parser.add_argument("--aqr-context-slot-weight", type=float, default=_SPEC_DEFAULTS.aqr_context_slot_weight)
+    parser.add_argument(
+        "--aqr-context-slot-min-confidence",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_context_slot_min_confidence,
+    )
+    parser.add_argument("--aqr-context-slot-min-score", type=float, default=_SPEC_DEFAULTS.aqr_context_slot_min_score)
+    parser.add_argument(
+        "--aqr-context-slot-duplicate-overlap-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_context_slot_duplicate_overlap_threshold,
+    )
+    parser.add_argument(
+        "--posterior-owner-active-gate-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_owner_active_gate_enabled,
+        help=(
+            "Carry active-slot owner/reserve selection into posterior binding so inactive "
+            "reserve observation anchors route to dustbin instead of object files."
+        ),
+    )
+    parser.add_argument("--posterior-owner-active-min", type=float, default=_SPEC_DEFAULTS.posterior_owner_active_min)
+    parser.add_argument("--posterior-owner-active-bias", type=float, default=_SPEC_DEFAULTS.posterior_owner_active_bias)
+    parser.add_argument(
         "--aqr-vjepa-temporal-mode",
         default=_SPEC_DEFAULTS.aqr_vjepa_temporal_mode,
         choices=["disabled", "last_only", "last_two_tokens", "last_mean_delta", "last4_tokens"],
@@ -7640,14 +9541,283 @@ def main() -> None:
         "--proposal-memory-enabled",
         action=argparse.BooleanOptionalAction,
         default=_SPEC_DEFAULTS.proposal_memory_enabled,
-        help="Enable optional pseudo-proposal typed memory. Missing proposal data remains a no-op.",
+        help=(
+            "Enable optional pseudo-proposal typed memory. Default is off for production "
+            "because blind automatic mask proposals were noisy in task-object binding diagnostics; "
+            "turn this on only for contact/task-guided proposal sidecars or explicit ablations."
+        ),
     )
     parser.add_argument("--proposal-max-tokens", type=int, default=_SPEC_DEFAULTS.proposal_max_tokens)
     parser.add_argument("--proposal-confidence-floor", type=float, default=_SPEC_DEFAULTS.proposal_confidence_floor)
     parser.add_argument("--proposal-read-weight", type=float, default=_SPEC_DEFAULTS.proposal_read_weight)
+    parser.add_argument("--proposal-age-decay-steps", type=float, default=_SPEC_DEFAULTS.proposal_age_decay_steps)
+    parser.add_argument(
+        "--proposal-shape-quality-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.proposal_shape_quality_enabled,
+        help="Softly downweight wall/edge/robot-fragment sidecar proposals before they affect proposal reads or task-owner point bridges.",
+    )
+    parser.add_argument("--proposal-shape-area-min", type=float, default=_SPEC_DEFAULTS.proposal_shape_area_min)
+    parser.add_argument("--proposal-shape-area-max", type=float, default=_SPEC_DEFAULTS.proposal_shape_area_max)
+    parser.add_argument("--proposal-shape-aspect-min", type=float, default=_SPEC_DEFAULTS.proposal_shape_aspect_min)
+    parser.add_argument("--proposal-context-quality-power", type=float, default=_SPEC_DEFAULTS.proposal_context_quality_power)
+    parser.add_argument("--proposal-point-bridge-weight", type=float, default=_SPEC_DEFAULTS.proposal_point_bridge_weight)
+    parser.add_argument("--proposal-point-bridge-edge-tau", type=float, default=_SPEC_DEFAULTS.proposal_point_bridge_edge_tau)
+    parser.add_argument("--proposal-mask-point-tau", type=float, default=_SPEC_DEFAULTS.proposal_mask_point_tau)
+    parser.add_argument(
+        "--proposal-anchor-seed-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.proposal_anchor_seed_enabled,
+        help=(
+            "Turn inspected task/contact proposals into bounded physical-row reference point priors. "
+            "This is a reference-query transport path, not a hard label or dense-token pruning."
+        ),
+    )
+    parser.add_argument("--proposal-anchor-seed-rows", type=int, default=_SPEC_DEFAULTS.proposal_anchor_seed_rows)
+    parser.add_argument("--proposal-anchor-seed-weight", type=float, default=_SPEC_DEFAULTS.proposal_anchor_seed_weight)
+    parser.add_argument("--proposal-anchor-seed-token-weight", type=float, default=_SPEC_DEFAULTS.proposal_anchor_seed_token_weight)
+    parser.add_argument("--proposal-anchor-seed-score-floor", type=float, default=_SPEC_DEFAULTS.proposal_anchor_seed_score_floor)
+    parser.add_argument("--proposal-anchor-seed-point-topk", type=int, default=_SPEC_DEFAULTS.proposal_anchor_seed_point_topk)
+    parser.add_argument("--proposal-anchor-seed-point-power", type=float, default=_SPEC_DEFAULTS.proposal_anchor_seed_point_power)
+    parser.add_argument(
+        "--object-candidate-assignment-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.object_candidate_assignment_enabled,
+        help=(
+            "Let inspected sidecar proposal masks compete for physical object slots with a background residual. "
+            "This is soft object-candidate measurement routing, not a hard mask label."
+        ),
+    )
+    parser.add_argument(
+        "--object-candidate-assignment-temperature",
+        type=float,
+        default=_SPEC_DEFAULTS.object_candidate_assignment_temperature,
+    )
+    parser.add_argument("--object-candidate-background-prior", type=float, default=_SPEC_DEFAULTS.object_candidate_background_prior)
+    parser.add_argument(
+        "--object-candidate-background-quality-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.object_candidate_background_quality_weight,
+    )
+    parser.add_argument(
+        "--object-candidate-row-support-floor",
+        type=float,
+        default=_SPEC_DEFAULTS.object_candidate_row_support_floor,
+    )
+    parser.add_argument(
+        "--object-candidate-eligible-roles",
+        type=str,
+        default=",".join(str(role) for role in _SPEC_DEFAULTS.object_candidate_eligible_roles),
+        help=(
+            "Comma-separated physical roles allowed to explain sidecar object candidates. "
+            "Default 1,2 means task-object rows plus contact/interaction rows; role 0 effector "
+            "is intentionally excluded from object ownership."
+        ),
+    )
+    parser.add_argument(
+        "--object-candidate-max-rows-per-candidate",
+        type=int,
+        default=_SPEC_DEFAULTS.object_candidate_max_rows_per_candidate,
+        help=(
+            "Maximum physical rows allowed to explain one proposal candidate. "
+            "Default 2 permits one task-object owner plus one contact/interaction bridge while still preventing raw clones."
+        ),
+    )
+    parser.add_argument(
+        "--object-candidate-row-capacity",
+        type=float,
+        default=_SPEC_DEFAULTS.object_candidate_row_capacity,
+        help="Soft capacity on total proposal-candidate mass per physical row before background residual absorbs overflow.",
+    )
+    parser.add_argument(
+        "--object-candidate-row-capacity-iters",
+        type=int,
+        default=_SPEC_DEFAULTS.object_candidate_row_capacity_iters,
+        help="Number of row-capacity normalization passes for proposal-candidate assignment.",
+    )
+    parser.add_argument("--object-candidate-point-weight", type=float, default=_SPEC_DEFAULTS.object_candidate_point_weight)
+    parser.add_argument("--object-candidate-proposal-weight", type=float, default=_SPEC_DEFAULTS.object_candidate_proposal_weight)
+    parser.add_argument("--object-candidate-seed-weight", type=float, default=_SPEC_DEFAULTS.object_candidate_seed_weight)
+    parser.add_argument("--object-candidate-task-owner-weight", type=float, default=_SPEC_DEFAULTS.object_candidate_task_owner_weight)
+    parser.add_argument("--object-candidate-anchor-score-weight", type=float, default=_SPEC_DEFAULTS.object_candidate_anchor_score_weight)
+    parser.add_argument("--object-candidate-point-mix", type=float, default=_SPEC_DEFAULTS.object_candidate_point_mix)
+    parser.add_argument("--object-candidate-proposal-mix", type=float, default=_SPEC_DEFAULTS.object_candidate_proposal_mix)
+    parser.add_argument("--object-candidate-min-shape-quality", type=float, default=_SPEC_DEFAULTS.object_candidate_min_shape_quality)
+    parser.add_argument(
+        "--object-candidate-owner-transport-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.object_candidate_owner_transport_enabled,
+        help=(
+            "Transport accepted object/contact candidates into role-1 object-owner geometry. "
+            "This keeps role-2 as contact bridge without letting it replace the object file."
+        ),
+    )
+    parser.add_argument(
+        "--object-candidate-owner-roles",
+        type=str,
+        default=",".join(str(role) for role in _SPEC_DEFAULTS.object_candidate_owner_roles),
+        help="Comma-separated physical roles that may receive object-owner transport. Default 1.",
+    )
+    parser.add_argument(
+        "--object-candidate-owner-min-share",
+        type=float,
+        default=_SPEC_DEFAULTS.object_candidate_owner_min_share,
+        help="Minimum covered candidate mass copied into the selected object-owner row.",
+    )
+    parser.add_argument(
+        "--object-candidate-owner-point-mix",
+        type=float,
+        default=_SPEC_DEFAULTS.object_candidate_owner_point_mix,
+        help="Mix ratio for owner transport point priors into the candidate point prior.",
+    )
+    parser.add_argument(
+        "--task-owner-proposal-point-bridge-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.task_owner_proposal_point_bridge_weight,
+    )
+    parser.add_argument(
+        "--task-owner-bias-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.task_owner_bias_enabled,
+        help="Transfer task-query visual support into physical scene object/proposal reads as soft measurement bias.",
+    )
+    parser.add_argument("--task-owner-visual-bias-weight", type=float, default=_SPEC_DEFAULTS.task_owner_visual_bias_weight)
+    parser.add_argument("--task-owner-proposal-bias-weight", type=float, default=_SPEC_DEFAULTS.task_owner_proposal_bias_weight)
+    parser.add_argument(
+        "--task-owner-proposal-point-bias-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.task_owner_proposal_point_bias_weight,
+    )
+    parser.add_argument(
+        "--task-owner-proposal-objectness-power",
+        type=float,
+        default=_SPEC_DEFAULTS.task_owner_proposal_objectness_power,
+    )
+    parser.add_argument(
+        "--task-owner-proposal-static-only",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.task_owner_proposal_static_only,
+        help="Restrict task-owner proposal projection to static-view proposals unless view geometry is explicitly available.",
+    )
+    parser.add_argument("--task-owner-proposal-topk", type=int, default=_SPEC_DEFAULTS.task_owner_proposal_topk)
+    parser.add_argument("--task-owner-proposal-score-floor", type=float, default=_SPEC_DEFAULTS.task_owner_proposal_score_floor)
+    parser.add_argument(
+        "--mvtrack-sidecar-root",
+        type=str,
+        default=None,
+        help=(
+            "Optional root containing per-frame MVTrack sidecar npz files with tracklet_* "
+            "and/or proposal_* arrays. Supported layouts: <root>/<split>/episode_XXXXXXX.npz "
+            "or <root>/episode_XXXXXXX.npz. Proposal generation stays offline and sidecar-only."
+        ),
+    )
+    parser.add_argument(
+        "--allow-legacy-blind-sam-sidecar",
+        action="store_true",
+        default=False,
+        help=(
+            "Historical reproduction only. Allows mvtrack sidecar roots whose names look like "
+            "archived blind automatic SAM proposal outputs. Do not use for current training."
+        ),
+    )
+    parser.add_argument(
+        "--mvtrack-sidecar-proposal-nearest-max-gap",
+        type=int,
+        default=0,
+        help=(
+            "Allow sparse proposal sidecars to serve the nearest proposal frame within this many CALVIN steps. "
+            "Borrowed proposal objectness is exponentially decayed by proposal_age_decay_steps and recorded as proposal_age."
+        ),
+    )
     parser.add_argument("--bind-support-signature-weight", type=float, default=_SPEC_DEFAULTS.bind_support_signature_weight)
     parser.add_argument("--bind-embedding-signature-weight", type=float, default=_SPEC_DEFAULTS.bind_embedding_signature_weight)
+    parser.add_argument("--bind-quadratic-signature-weight", type=float, default=_SPEC_DEFAULTS.bind_quadratic_signature_weight)
+    parser.add_argument("--bind-low-rank-signature-weight", type=float, default=_SPEC_DEFAULTS.bind_low_rank_signature_weight)
     parser.add_argument("--binding-signature-dim", type=int, default=_SPEC_DEFAULTS.binding_signature_dim)
+    parser.add_argument("--binding-low-rank-signature-rank", type=int, default=_SPEC_DEFAULTS.binding_low_rank_signature_rank)
+    parser.add_argument(
+        "--binding-signature-centering-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.binding_signature_centering_enabled,
+        help="Center projected typed-memory binding keys before support pooling to remove scene/modality common-mode.",
+    )
+    parser.add_argument(
+        "--binding-signature-centering-min-tokens",
+        type=int,
+        default=_SPEC_DEFAULTS.binding_signature_centering_min_tokens,
+    )
+    parser.add_argument(
+        "--binding-signature-score-calibration-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.binding_signature_score_calibration_enabled,
+        help="Calibrate pairwise binding-signature scores into relative IsSameObject assignment logits.",
+    )
+    parser.add_argument(
+        "--binding-signature-score-calibration-mode",
+        type=str,
+        default=_SPEC_DEFAULTS.binding_signature_score_calibration_mode,
+        choices=("double_center_zscore", "double_center", "row_zscore", "row_center", "global_center", "zscore"),
+    )
+    parser.add_argument(
+        "--binding-signature-score-min-std",
+        type=float,
+        default=_SPEC_DEFAULTS.binding_signature_score_min_std,
+    )
+    parser.add_argument(
+        "--binding-signature-score-clip",
+        type=float,
+        default=_SPEC_DEFAULTS.binding_signature_score_clip,
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-memory-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_memory_enabled,
+        help="Keep posterior object-file binding signatures as a trusted-memory state instead of overwriting them every frame.",
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-update-rate",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_update_rate,
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-update-max-rate",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_update_max_rate,
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-min-support",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_min_support,
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-owner-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_owner_weight,
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-dispersion-gate-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_dispersion_gate_enabled,
+        help=(
+            "Require the current binding-signature measurement to have relative IsSameObject "
+            "dispersion before it can update posterior file identity memory."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-measurement-min-std",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_measurement_min_std,
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-measurement-margin-min",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_measurement_margin_min,
+    )
+    parser.add_argument(
+        "--posterior-binding-signature-measurement-margin-temperature",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_binding_signature_measurement_margin_temperature,
+    )
     parser.add_argument("--bind-address-weight", type=float, default=_SPEC_DEFAULTS.bind_address_weight)
     parser.add_argument(
         "--bind-address-innovation-downweight",
@@ -7717,6 +9887,213 @@ def main() -> None:
             "Use each posterior slot's own raw measurement mixture for recycle/reset residuals. "
             "The default avoids resetting multiple same-role object files from one global dustbin vector."
         ),
+    )
+    parser.add_argument(
+        "--posterior-lifecycle-calibration-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_lifecycle_calibration_enabled,
+        help=(
+            "Factor posterior survival/reset/dustbin calibration from raw recycle logits. "
+            "Stable high-support low-innovation object files are protected from reset."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-lifecycle-support-min",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_lifecycle_support_min,
+    )
+    parser.add_argument(
+        "--posterior-lifecycle-support-temperature",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_lifecycle_support_temperature,
+    )
+    parser.add_argument(
+        "--posterior-lifecycle-margin-min",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_lifecycle_margin_min,
+    )
+    parser.add_argument(
+        "--posterior-lifecycle-margin-temperature",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_lifecycle_margin_temperature,
+    )
+    parser.add_argument(
+        "--posterior-lifecycle-entropy-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_lifecycle_entropy_weight,
+    )
+    parser.add_argument(
+        "--posterior-lifecycle-owner-weight",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_lifecycle_owner_weight,
+    )
+    parser.add_argument(
+        "--posterior-lifecycle-innovation-downweight",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_lifecycle_innovation_downweight,
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_enabled,
+        help=(
+            "Close graph/object-owner responsibility into posterior object-file geometry. "
+            "This is the belief-write closure for sidecar/contact object masks, not an auxiliary loss."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-roles",
+        type=str,
+        default=",".join(str(role) for role in _SPEC_DEFAULTS.posterior_owner_transport_roles),
+        help="Comma-separated posterior physical roles allowed to accept object-owner transported geometry.",
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-max-per-role",
+        type=int,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_max_per_role,
+        help="Maximum posterior files per role that may accept transported owner geometry in one update.",
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-max-rate",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_max_rate,
+        help="Maximum confidence cap for transported owner geometry before precision fusion.",
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-precision-gain",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_precision_gain,
+        help=(
+            "Precision multiplier for accepted owner geometry. "
+            "This makes sidecar/contact ownership a high-precision posterior measurement rather than a weak convex interpolation."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-min-mass",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_min_mass,
+        help="Minimum transported owner mass required before posterior geometry can be rewritten.",
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-assignment-floor",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_assignment_floor,
+        help="Lifecycle assignment confidence floor for accepting transported owner geometry.",
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-reliability-floor",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_reliability_floor,
+        help="Lifecycle owner reliability floor for accepting transported owner geometry.",
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-covariance-scale",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_covariance_scale,
+        help="Covariance scale applied to transported owner geometry before posterior fusion.",
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-inactive-prior",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_inactive_prior,
+        help=(
+            "Soft prior for an inactive file that receives transported owner responsibility. "
+            "This prevents lifecycle gates from hard-blocking a newly explained object file."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-activates-file",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_activates_file,
+        help=(
+            "Allow transported owner responsibility to make the selected posterior file action-visible "
+            "before the final per-role file cap."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-active-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_active_threshold,
+        help="Owner-transport confidence that maps to a full downstream active file gate.",
+    )
+    parser.add_argument(
+        "--posterior-file-competition-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_file_competition_enabled,
+        help=(
+            "Demote duplicate same-role posterior object-file assignments into no-object/dustbin before posterior write. "
+            "This is an object-file explaining-away step, not an auxiliary loss."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-file-competition-min-per-role",
+        type=int,
+        default=_SPEC_DEFAULTS.posterior_file_competition_min_per_role,
+    )
+    parser.add_argument(
+        "--posterior-file-competition-max-per-role",
+        type=int,
+        default=_SPEC_DEFAULTS.posterior_file_competition_max_per_role,
+        help="Maximum active posterior files per role after duplicate demotion; 0 disables this cap.",
+    )
+    parser.add_argument(
+        "--posterior-file-competition-min-support",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_file_competition_min_support,
+    )
+    parser.add_argument(
+        "--posterior-file-competition-relative-score-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_file_competition_relative_score_threshold,
+    )
+    parser.add_argument(
+        "--posterior-file-competition-support-overlap-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_file_competition_support_overlap_threshold,
+    )
+    parser.add_argument(
+        "--posterior-file-competition-geometry-duplicate-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_file_competition_geometry_duplicate_enabled,
+    )
+    parser.add_argument(
+        "--posterior-file-competition-geometry-sigma-m",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_file_competition_geometry_sigma_m,
+    )
+    parser.add_argument(
+        "--posterior-file-competition-geometry-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_file_competition_geometry_threshold,
+    )
+    parser.add_argument(
+        "--posterior-birth-competition-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_birth_competition_enabled,
+        help=(
+            "Select a bounded number of inactive reserve files that may consume demoted dustbin evidence. "
+            "This prevents one no-object residual from being broadcast into every recycled posterior file."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-birth-competition-max-per-role",
+        type=int,
+        default=_SPEC_DEFAULTS.posterior_birth_competition_max_per_role,
+    )
+    parser.add_argument(
+        "--posterior-birth-competition-min-score",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_birth_competition_min_score,
+    )
+    parser.add_argument(
+        "--posterior-birth-competition-inactive-only",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_birth_competition_inactive_only,
+    )
+    parser.add_argument(
+        "--posterior-birth-alpha-suppression-power",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_birth_alpha_suppression_power,
     )
     parser.add_argument(
         "--legacy-local-refinement-opt-in",

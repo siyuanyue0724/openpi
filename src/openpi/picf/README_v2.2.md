@@ -7,6 +7,387 @@ action/control contract rewrite, the frozen-perception bring-up, the
 VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
 AQR-MAPG direct-final graph replacement.
 
+2026-05-18 cleanup/audit update: use
+[`docs/PICF_AQR_OWM_CURRENT_STATE_20260518.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CURRENT_STATE_20260518.md)
+as the compact current-state and module-disposition report. This file remains
+the stable live entry, but historical `*_TEMP.md` notes are now treated as
+evidence ledgers unless this README or the current-state report explicitly
+promotes them. Root-level A7/A5 diagnostic launch scripts have been archived
+under `scripts/experiments/picf_aqr_owm_202605_archive/`; canonical launch
+recipes should be copied into this README or `docs/CALVIN_VALIDATION_README.md`
+instead of left in the repository root.
+
+2026-05-19 SAM disposition: Blind automatic SAM is rejected for current
+PICF-AQR-OWM training. It was tested as class-agnostic proposal evidence and
+was too noisy for task-object binding in CALVIN. Do not use or reconsider it
+for production long runs. Historical reproduction code and notes are archived
+under `scripts/archive/` and
+`docs/archive/picf_aqr_owm_202605/sam_rejected_20260519/`. Keep the generic
+`proposal_*` sidecar schema only for inspected contact/task/tracklet-aware
+sources.
+
+2026-05-19 posterior continuity metric update: use
+[`temp/audits_20260519/posterior_file_continuity_metric_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/posterior_file_continuity_metric_followthrough.md)
+for the current object-file continuity audit. The important correction is that
+runtime binding uses calibrated IsSameObject-style relative scores, while the
+old `posterior_active_file_potential_swap_rate` was raw cosine and could mark
+common-mode task/background signatures as file swaps. Keep the raw metric for
+compatibility, but judge posterior object-file continuity with
+`posterior_active_file_calibrated_potential_swap_rate` and
+`posterior_file_calibrated_signature_score_std`.
+
+2026-05-19 posterior binding-signature memory update: the same follow-through
+file now records the V8b fix. `binding_signature` is no longer a blind
+per-frame overwrite from current observation anchors; it is a posterior
+object-file state updated by assignment confidence, owner reliability, support
+mass, recycle/birth state, calibrated pairwise measurement dispersion, and a
+bounded EMA. Common-mode current signatures are rejected rather than slowly
+polluting the file descriptor. Track
+`posterior_binding_signature_update_rate_mean`,
+`posterior_binding_signature_measurement_trust_mean`, and
+`posterior_binding_signature_memory_keep_rate_mean`,
+`posterior_binding_signature_measurement_score_std`, and
+`posterior_binding_signature_measurement_dispersion_gate_mean` together with
+calibrated file-swap metrics.
+
+2026-05-19 tactile/object slot binding audit: use
+[`temp/audits_20260519/tactile_object_slot_binding_paper_audit_and_posterior_closure_plan.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/tactile_object_slot_binding_paper_audit_and_posterior_closure_plan.md)
+for the current paper-aligned failure analysis. The key conclusion is that the
+graph-side object candidate can already find the inspected object, so the
+remaining repair belongs in posterior belief write-through rather than another
+generic loss term. Current code closes
+`graph object responsibility -> observation responsibility -> posterior file
+geometry`, and the 2026-05-19 V2 repair also removes the remaining circular
+gate: transported owner responsibility may activate the selected object file
+before the final per-role file cap. Overlay JSON now records per-posterior
+`owner_transport_mass`, `owner_transport_confidence`, and
+`owner_transport_dist_to_standard`; use these fields to verify that the active
+posterior file, not only the transient graph anchor, inherits the sidecar/contact
+object measurement.
+
+2026-05-19 owner-transport precision-fusion repair: step-50 owner-priority
+selection put the active posterior near the sidecar/mask center, but step 100
+showed the selected file could drift because owner confidence was used as a
+linear interpolation coefficient. Current code treats accepted owner/contact
+geometry as a posterior measurement:
+
+```math
+\Lambda^+=(S^{std})^{-1}+\kappa c^{owner}(S^{owner})^{-1},
+\quad
+x^+=(\Lambda^+)^{-1}
+\left((S^{std})^{-1}x^{std}+\kappa c^{owner}(S^{owner})^{-1}x^{owner}\right).
+```
+
+This preserves the PICF belief-filter contract: sidecar/contact ownership is
+not a hard label and not a new auxiliary loss, but when accepted it has
+measurement covariance and can dominate stale posterior geometry through
+precision. Track `posterior_owner_transport_confidence_*`,
+`posterior_owner_transport_dist_to_standard_*`, active posterior distance in
+overlay JSON, and `aqr_active_same_role_support_overlap_max` together.
+
+2026-05-19 strict advanced-slot/tactile comparison update: use
+[`temp/audits_20260519/picf_current_slot_binding_file_by_file_audit_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/picf_current_slot_binding_file_by_file_audit_20260519.md)
+for the current implementation file-by-file audit, and
+[`temp/audits_20260519/advanced_slot_tactile_binding_methods_gap_audit_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/advanced_slot_tactile_binding_methods_gap_audit_20260519.md)
+for the comparison against MetaSlot/QASA/Object-Binding/SlotVLA/OA-WAM/OmniVTA
+and local paper-code repositories. The strict conclusion is deliberately not
+"all solved": PICF has absorbed the core belief-state-compatible principles
+(typed evidence competition, object/background residual, same-object binding
+subspace, posterior file competition, tactile-to-object owner routing, and
+precision owner transport), but it still lacks a MetaSlot/QASA-level learned
+adaptive slot-quality/prototype selector and still needs latest-artifact
+IsSameObject plus full sidecar/tracklet coverage validation before claiming
+mature object-slot parity.
+
+2026-05-19 object-pull-only capability probe: the current failure under review
+is not whether sidecar evidence reaches the model, but whether trainable AQR
+anchor rows can move their point-derived center onto the inspected task object
+when every unrelated objective is removed.  The diagnostic loss is
+`loss_anchor_object_pull`, implemented as:
+
+```math
+x^{target}_j=\operatorname{stopgrad}\left(
+  \frac{\sum_i p^{sidecar}_{j,i}x_i}{\sum_i p^{sidecar}_{j,i}}
+\right),
+\quad
+L_{pull}=\sum_j w_j\,\operatorname{Huber}\left(
+  \frac{x^{anchor}_j-x^{target}_j}{\sigma}
+\right).
+```
+
+The target prior uses only proposal-anchor seed / proposal-point / task-owner
+point evidence that has already passed sidecar and object-candidate routing.
+It is not a hard detector label and is disabled by default
+(`lambda_anchor_object_pull=0`).  The pull is also role-scoped by default:
+`anchor_object_pull_allowed_roles=(1,2)`, so inspected object/contact sidecar
+evidence can pull task-object rows and interaction/contact rows, but not role-0
+effector/gripper rows.  This follows the PICF factorization
+`effector / task-object / contact` without turning it into a rigid hand-coded
+object taxonomy: effector rows provide robot/proprioceptive context; task-object
+rows own the manipulated object; contact rows bridge tactile/contact evidence
+to the object.  Tactile evidence must still be allowed to pull the contacted
+object through role-2/contact support.  What is forbidden is letting the
+effector row itself become the object file.  The maintained diagnostic launcher is
+[`run_a7_anchor_object_pull_only_1000_20260519.sh`](/home/siyuanyue/Documents/openpi/run_a7_anchor_object_pull_only_1000_20260519.sh):
+freeze action, semantic, perception, predictive and unrelated auxiliary
+objectives; train only the anchor/PICF allowlist; set all other loss weights to
+zero; and check whether `loss_anchor_object_pull` and the overlay prove that
+anchors can physically move onto the green proposal/mask.  If this fails, the
+root cause is in query/support/assignment trainability or dataflow.  If it
+succeeds, the previous failures are caused by objective conflict rather than
+lack of anchor capacity.
+
+2026-05-19 role-leakage correction: step-100 overlays from
+`picf_a7_anchor_object_pull_only_1000_20260519` showed blue role-0 effector
+rows competing for the task object.  The cause was not the task-owner routing
+path, which already selects role-1 physical rows, but the diagnostic
+`loss_anchor_object_pull`: its confirmation helper treated generic
+`proposal_priors` as object confirmation, so an effector row that had already
+grabbed proposal mass could be pulled further into the object.  The fix is to
+scope the diagnostic target to roles 1 and 2 by default.  This preserves the
+ability for contact/tactile rows to pull toward the contacted object while
+excluding role 0 from object ownership.  If a future ablation intentionally
+wants to test effector/object leakage, it must opt in with
+`--anchor-object-pull-allowed-roles 0,1,2` and report role-separated overlays.
+
+Overlay diagnostics now have six maintained views when sidecar proposals are
+present:
+
+```text
+with_gray:
+  all visible graph/posterior/task anchors, gray reserve/context included.
+active_only:
+  only full-weight active anchors, sidecar boxes visible.
+sidecar_proposals:
+  proposal boxes plus active anchors.
+mask_only:
+  dimmed RGB plus proposal mask support samples, no anchors.
+mask_active:
+  sidecar mask support plus active anchors.
+mask_with_gray:
+  sidecar mask support plus active and gray reserve/context anchors.
+```
+
+Use
+[`scripts/picf_anchor_overlay_make_gifs.py`](/home/siyuanyue/Documents/openpi/scripts/picf_anchor_overlay_make_gifs.py)
+to turn per-step PNGs into GIFs:
+
+```bash
+python scripts/picf_anchor_overlay_make_gifs.py \
+  --overlay-dir /mnt/checkpoints/picf_core/picf_core/<exp>/anchor_overlays
+```
+
+2026-05-18 final local audit update: use
+[`docs/PICF_AQR_OWM_FINAL_LOCAL_AUDIT_20260518_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_FINAL_LOCAL_AUDIT_20260518_TEMP.md)
+for the local-only paper-code/math/dataflow verification that preceded the
+current A7 guarded 30k run. It records the object-binding quadratic-probe
+boundary, the SlotContrast/slot-index boundary, the full PICF dataflow, the
+loss-role decomposition, the exact strict scripts run, and the conditions that
+would require stopping the 30k. The conclusion is code/dataflow GO for the
+running 30k, not behavior acceptance.
+
+2026-05-18 3D slot-method selection update: use
+[`docs/PICF_3D_SLOT_METHOD_SELECTION_20260518.md`](/home/siyuanyue/Documents/openpi/docs/PICF_3D_SLOT_METHOD_SELECTION_20260518.md)
+for the current replacement plan for failed motion-owner heuristics. The
+maintained conclusion is that CALVIN is a static+wrist RGB-D/point-cloud
+manipulation setting, not a SlotLifter-style many-view NeRF setting.
+SlotLifter is therefore used as paper-code evidence for point/ray-to-slot
+lifting and explicit empty/background slots, not as a direct training recipe.
+The next correct direction is a SlotLifter-inspired few-view RGB-D
+Object3D-slot support module that produces typed object evidence under
+posterior authority. SAM, optical-flow coloring, and hand-written motion-owner
+clustering remain rejected as production-default object binding.
+The first diagnostic implementation and A7 video are recorded there as a
+negative result: the code/dataflow runs, but the empty-aware decoder collapses
+to background (`background_mean_final` about `0.929`) and the object-only
+SlotAttention view does not reliably isolate the red block. Therefore
+`object3d_slot_lifter.py` is diagnostic-only and must stay off the PICF
+training path until task/contact/temporal grouping constraints pass visual
+inspection.
+
+2026-05-18 contact-scaffold anchor-only trial: use
+[`docs/PICF_CONTACT_SCAFFOLD_ANCHORONLY_TRIAL_20260518_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_CONTACT_SCAFFOLD_ANCHORONLY_TRIAL_20260518_TEMP.md)
+for the current 1000-step diagnostic that freezes PaliGemma/semantic and
+PI0.5 action/control heads via `--picf-trainable-scope anchor_only`, generates
+current-frame causal contact/task proposal sidecars, and tests whether the
+anchor/posterior path can absorb weak task-object evidence.  This is not a SAM
+revival and not a behavior acceptance run.  The generated sidecars write only
+the existing `proposal_*` MVTrack contract and remain soft typed evidence under
+posterior authority.
+
+2026-05-18 proposal reference-anchor transport update: the step-100
+mask-sidecar diagnostic showed that task/contact proposal masks were selected
+(`aqr_proposal_support_max` high) but their point transport remained too weak
+(`aqr_proposal_point_bridge_max` only about `0.02-0.04`), so physical anchors
+could still miss the green task-object proposal.  The maintained fix is not a
+minimal bias increase.  It copies the mature reference-query invariant from
+Deformable-DETR/DINO-style query systems into the PICF belief filter:
+top task-owner proposal masks may seed a small number of physical measurement
+rows through `proposal_anchor_seed_*`, creating bounded point priors and weak
+proposal-token transport before the normal AQR competition and posterior
+correction.  Dense V-JEPA/PaliGemma/point/tactile tokens are not pruned,
+proposal masks are not hard labels, and posterior remains authoritative.  The
+diagnostic acceptance keys are:
+`aqr_proposal_anchor_seed_row_count`,
+`aqr_proposal_anchor_seed_point_max`,
+`aqr_proposal_anchor_seed_entropy_mean`, and
+`aqr_proposal_anchor_seed_assignment_max`.
+
+2026-05-19 V6 slot-paper/runtime follow-through: the current maintained
+diagnostic note is
+[`temp/audits_20260519/v6_slot_paper_runtime_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/v6_slot_paper_runtime_followthrough.md).
+It reconciles the A7 V6 200-step run with MetaSlot / SlotAttention /
+SlotContrast-style invariants.  The accepted fix is distributional object-PV:
+active object rows compare their own point and visual support distributions
+through projective compatibility, while dense/background coverage remains in
+`loss_pv_weak`.  The remaining live target is posterior active-file
+continuity, not raw reserve/context overlap.
+
+2026-05-19 object-candidate slot-binding update: the sidecar-mask path is no
+longer documented as merely a weak proposal seed. The current deployment plan
+and math/dataflow follow-through are
+[`docs/PICF_AQR_OWM_OBJECT_CANDIDATE_SLOT_BINDING_20260519_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_OBJECT_CANDIDATE_SLOT_BINDING_20260519_TEMP.md).
+The maintained invariant is copied at the SlotAttention/SlotContrast level:
+candidate object masks must be explained by physical scene slots or by an
+explicit background/no-object residual.  Implementation adds
+`_proposal_object_candidate_assignment(...)`, `object_candidate_*` graph fields,
+and `aqr_object_candidate_*` / `oeml_candidate_*` diagnostics.  This remains
+soft measurement routing, not a hard sidecar label: dense V-JEPA/point/tactile
+memory is not pruned, noisy proposals may go to background, and posterior
+correction remains authoritative.  A short run is accepted only if candidate
+coverage is nonzero for inspected task/contact proposals and same-role overlap
+does not keep rising while anchors miss the proposal mask.
+The 2026-05-19 runtime-scale repair in that document replaces the old
+multiplicative log-evidence model with additive positive slot evidence plus
+quality-adaptive background.  Weak projected point overlap is now weak positive
+support, not a veto that sends real task/contact candidates to background.
+The 2026-05-19 v3 repair in the same document adds object-candidate ownership
+capacity: by default each sidecar object candidate keeps only its strongest
+physical row owner, with an optional soft row-capacity normalization for
+ablations.  This follows the SlotAttention/MetaSlot invariant that a
+measurement candidate should be explained by one or a small mixture of object
+slots plus background, instead of being cloned across many same-role raw
+anchors before posterior file competition can demote them.
+The 2026-05-19 v4 repair keeps the v3 assignment but fixes the loss scope:
+`loss_anchor_pv`, AQR support denoising, and OEML object terms now default to
+active-object rows only.  Reserve/context/no-object rows remain visible in raw
+telemetry and can carry peripheral evidence, but they are no longer trained as
+failed duplicate objects.  The dense-token path is not pruned: global PV
+coverage remains through `loss_pv_weak`.
+The 2026-05-19 v5 repair then removes the object-loss floor itself:
+`anchor_pv_object_gate_floor=0.0` and object anchor-PV is normalized over
+object-confirmed edges, while AQR denoising defaults to confirmed
+object-candidate/proposal/point rows only.  This is the maintained split:
+object slots train on object evidence; dense/background PV stays in
+`loss_pv_weak`.
+The 2026-05-19 v6 repair replaces the remaining dense-edge object-PV BCE with
+per-object distributional point/visual consistency:
+`v_hat_j = normalize(p_j C)` and `p_hat_j = normalize(v_j C^T)`, optimized with
+JS divergence over active/confirmed object rows.  This is now the maintained
+object-PV target because it compares one slot's point support to the same slot's
+visual support, while dense/background projective coverage remains in
+`loss_pv_weak`.  The explicit knobs are
+`--anchor-pv-object-distribution-loss`,
+`--anchor-pv-object-distribution-confirmed-only`, and
+`--anchor-pv-object-distribution-confirmation-threshold`.
+
+Runtime note: the A7 200-step anchor-only diagnostic
+`picf_a7_v6_distribution_object_pv_anchor200_20260519` accepted this repair for
+the object-PV root cause.  `loss_anchor_pv` stayed low
+(`0.5684 -> 0.5516`) while total/alignment/PV-weak losses decreased.  Active
+same-role support overlap remained below `0.10`; raw support overlap still rose
+because reserve/context/background rows are included in the raw metric.  Treat
+active-overlap as the object-binding acceptance metric and raw-overlap as a
+background-capacity diagnostic.
+The concrete A7 1000-step diagnostic, tail commands, acceptance metrics, and
+next-step decision tree are recorded in that document under
+`Current A7 1000-Step Diagnostic`; the launch script is
+[`run_a7_object_candidate_anchor1000_20260519.sh`](/home/siyuanyue/Documents/openpi/run_a7_object_candidate_anchor1000_20260519.sh).
+
+2026-05-19 object/contact dual-role repair: the maintained sidecar candidate
+path now uses `object_candidate_eligible_roles=(1,2)` and
+`object_candidate_max_rows_per_candidate=2`.  This is intentional.  Role 1 is
+the task/object file; role 2 is the interaction/contact bridge that lets
+tactile/contact evidence attach to the same object.  Role 0 remains excluded so
+the gripper/effector context cannot become the object owner.  The corresponding
+proposal, point, visual-bias, anchor-seed, and object-candidate assignment paths
+all use `_object_candidate_physical_rows(...)`; this is the invariant checked by
+[`scripts/picf_object_candidate_slot_binding_audit.py`](/home/siyuanyue/Documents/openpi/scripts/picf_object_candidate_slot_binding_audit.py).
+Overlay export now also writes a 2x3
+`combined_6view.gif` through
+[`scripts/picf_anchor_overlay_make_gifs.py`](/home/siyuanyue/Documents/openpi/scripts/picf_anchor_overlay_make_gifs.py),
+containing with-gray, active-only, proposal-box, mask-only, mask-active, and
+mask-with-gray views.  The mathematical/dataflow follow-through for this
+repair is
+[`temp/audits_20260519/object_contact_dual_role_candidate_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/object_contact_dual_role_candidate_followthrough.md).
+
+2026-05-19 pre-30k mask-sidecar generation gate: do not launch the next
+30000-step train from the 1000-frame diagnostic sidecar root. The generation
+contract, math role, acceptance gates, and A7 command are tracked in
+[`docs/PICF_AQR_OWM_CONTACT_MOTION_MASK_GENERATION_20260519_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CONTACT_MOTION_MASK_GENERATION_20260519_TEMP.md).
+The maintained long-run rule is:
+use a sufficiently large inspected contact-motion proposal root, keep blind
+SAM archived, and pass `--calvin-segment-indices "$(cat
+<sidecar_root>/calvin_segment_indices.txt)"` so training samples from the same
+segment set that has sidecar coverage.
+
+2026-05-18 slot/object-centric audit correction: the maintained theoretical
+reference is not blind SAM.  Use
+[`temp/audits_20260518/slot_object_centric_2025_2026_math_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260518/slot_object_centric_2025_2026_math_followthrough.md)
+for the current paper-code/math/dataflow comparison against MetaSlot,
+SlotContrast, and QASA-style adaptive slot principles. The retained invariants
+are evidence competition, adaptive active/context/reserve slots, duplicate
+demotion, explicit background capacity, and guarded temporal consistency under
+posterior authority.  The code should not blindly transplant an image-OCL VQ
+codebook or revive blind SAM proposals; PICF is an action-conditioned belief
+filter, so the correct copy is invariant-level alignment, not wholesale module
+replacement.  The next acceptance gate is the dual-GPU 1000-step mask-sidecar
+anchor-only run: raw reserve overlap may remain high, but active same-role
+object-core overlap, posterior recycle, proposal-mask readout, and task-object
+overlays must pass.
+
+2026-05-18/19 object-explanation deployment plan: use
+[`docs/PICF_AQR_OWM_OBJECT_EXPLANATION_DEPLOYMENT_PLAN_20260518_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_OBJECT_EXPLANATION_DEPLOYMENT_PLAN_20260518_TEMP.md)
+for the current non-truncated repair contract. The maintained conclusion is
+that PICF's posterior-centered typed-memory router is coherent, and now has a
+code-level Object Explanation Measurement Layer (OEML): per-slot
+object/background masks over dense typed evidence, object-explanation quality
+fed back into graph assignment, and guarded feature/point/contact/duplicate
+loss hooks. This is the paper-aligned repair from OCL/MetaSlot/AdaSlot/
+SlotContrast/DINO-style code. It replaces blind SAM revival, count-only anchor
+losses, stop-token-only anchor generation, and isolated overlap penalties as
+the canonical measurement-layer repair. Behavior acceptance is still separate:
+fresh short/long runs must show healthy `oeml_*`, active same-role overlap,
+posterior recycle/file-competition, anchor overlay, and CALVIN/video metrics.
+The mathematical/dataflow follow-through is tracked in
+[`temp/audits_20260519/oeml_math_dataflow_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/oeml_math_dataflow_followthrough.md).
+
+2026-05-18 AR active-anchor proposal audit: the recurring fixed-query capacity
+question is now documented in
+[`docs/PICF_AQR_OWM_AR_ANCHOR_PROPOSAL_AUDIT_20260518_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_AR_ANCHOR_PROPOSAL_AUDIT_20260518_TEMP.md).
+The audited conclusion is narrow: autoregressive anchor generation is
+mathematically coherent only as a variable-cardinality measurement proposal /
+birth-prior layer under posterior authority. It must not replace dense V-JEPA /
+PaliGemma / point / tactile typed memory, posterior correction, posterior file
+competition, posterior birth competition, active/context/reserve routing, or
+the PI0.5 action path. The proposal is not enabled in the current default; it
+is a vNext candidate for replacing the fixed overcomplete active candidate
+allocator if future short diagnostics prove coverage is preserved while active
+same-role duplication falls.
+The audit also records the rejection tests: if proposal count collapses,
+unexplained evidence rises, dense typed memory is pruned, proposal index becomes
+identity, or posterior competition is bypassed, the idea is considered
+mathematically invalid for PICF rather than merely under-tuned.
+The one-step final change plan is named `VCAP` in that audit. The current code
+contains the disabled-by-default runtime prototype: it generates padded
+variable-cardinality active proposal rows, keeps dense typed memory intact,
+feeds the unchanged AQR/posterior stack, exposes proposal health metrics, and
+keeps action gradients into the generator off by default
+(`vcap_action_grad_scale=0`). VCAP is not the production default and must pass
+short fixed-vs-VCAP diagnostics before any 30k claim. Do not implement or use a
+smaller stop-token-only or count-loss-only variant; those are explicitly
+rejected as non-self-consistent half-measures.
+
 2026-05-09 update: the maintained direct-final graph path is now **AQR-MAPG**
 and is the default PICF graph path (`aqr_mapg_enabled=True`,
 `mapg_enabled=False`, `vl_anchor_router_enabled=False`). AQR-MAPG replaces
@@ -47,6 +428,37 @@ stay zero-weight until their diagnostics justify activation. All train-time
 loss defaults are sourced from `PicfTransitionLossConfig`, not duplicated in
 the CLI parser.
 
+2026-05-16 confidence-semantics cleanup: reviewer discussions exposed that the
+word `confidence` was overloaded. The maintained mathematical interpretation is
+now:
+
+```text
+graph anchor_confidence:
+  measurement_quality. It is computed from typed support concentration across
+  visual / temporal / PG / point / tactile / posterior / cache / optional
+  tracklet/proposal reads. It is not an object-existence probability.
+
+posterior alpha:
+  belief_activity. It is the object-file survival/activity belief after
+  posterior correction, support mass, assignment margin, entropy, owner
+  eligibility, innovation, and recycle/lifecycle calibration.
+
+anchor_downstream_weight:
+  action exposure. Active anchors enter the graph prefix at weight 1.0,
+  context anchors enter at low weight, and reserve/no-object capacity enters at
+  0.0. This is not another confidence estimate.
+```
+
+This keeps the design as a three-stage belief filter:
+
+```math
+measurement\ quality \rightarrow belief\ activity \rightarrow action\ exposure
+```
+
+Do not read all three as one calibrated probability. If future code needs a
+calibrated object probability, it must add an explicit calibration audit rather
+than reusing `anchor_confidence`.
+
 Serving compatibility is intentionally conservative: checkpoints whose
 metadata predates the OWM default and records `semantic_mode=zero` are not
 silently promoted into `aqr_mapg_enabled=True` at serve time. New training uses
@@ -65,8 +477,418 @@ permutation-tolerant binding consistency, gated weak ordinal diagnostics, and
 training-only support denoising. It explicitly separates code-level runtime
 completion from behavior-level CALVIN/video acceptance; code-level runtime completion
 does not imply CALVIN/video behavior completion. SAM/DINO proposal generation is
-intentionally not part of this maintained pass; proposal tensors are consumed
-only if an upstream source provides them.
+intentionally not part of this maintained pass. 2026-05-17 diagnostics showed
+that blind SAM proposals are too noisy to be production-default evidence, so
+proposal tensors are consumed only when an upstream source provides them and
+`--proposal-memory-enabled` is explicitly set.
+
+Blind automatic SAM is rejected and archived. `--proposal-memory-enabled` means
+"consume an explicitly supplied, inspected proposal sidecar"; it does not mean
+"run or trust SAM". The maintained producer is contact/task/tracklet-aware
+sidecar evidence, currently
+[`scripts/picf_contact_motion_sidecar_precompute.py`](/home/siyuanyue/Documents/openpi/scripts/picf_contact_motion_sidecar_precompute.py).
+Legacy SAM roots are rejected by `scripts/picf_core_train.py` unless the
+operator passes `--allow-legacy-blind-sam-sidecar` for historical reproduction.
+Existing artifacts named `sam_proposals` are filename-only legacy outputs.
+
+2026-05-18 proposal-to-point bridge status: the bridge remains active for
+generic sidecar proposals because the original dataflow bug was independent of
+SAM. Proposal priors can influence proposal reads, and bounded
+`proposal_point_bridge_weight`, `proposal_point_bridge_edge_tau`,
+`task_owner_proposal_point_bridge_weight`, and
+`task_owner_proposal_point_bias_weight` transport task-owner sidecar evidence
+into point-reader logits and projected point support. A sidecar proposal still
+does not become a hard object label or overwrite posterior belief. See
+[`docs/PICF_AQR_OWM_PROPOSAL_POINT_BRIDGE_FOLLOWTHROUGH_20260517_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_PROPOSAL_POINT_BRIDGE_FOLLOWTHROUGH_20260517_TEMP.md)
+and tracker issue `I14` for the historical repair.
+
+2026-05-18 contact-scaffold diagnostic update: the current maintained fast
+validation run is `picf_a7_contact_scaffold_anchoronly_1000_20260518`. It
+freezes PaliGemma, V-JEPA, Sonata, AnyTouch, and the PI0.5 action/control heads,
+tests whether contact-motion proposal sidecars plus proposal-seeded tracklets
+produce nonzero `owm_proposal_tokens` and `owm_tracklet_tokens` without using
+blind SAM. The detailed dataflow, math contract, and launch guards are recorded
+in
+[`docs/PICF_CONTACT_SCAFFOLD_ANCHORONLY_TRIAL_20260518_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_CONTACT_SCAFFOLD_ANCHORONLY_TRIAL_20260518_TEMP.md).
+If action lambdas are nonzero, action loss is still a diagnostic gradient on the
+trainable PICF anchor/router/posterior path even though the action head itself is
+frozen.
+
+2026-05-18 proposal-mask strengthening update: proposal evidence is now an
+object-support measurement, not just a box.  The maintained sidecar generator no
+longer wraps all high-score points in a single event-level box.  It clusters
+high-score contact/task pixels into compact components, emits up to three
+proposals per frame, stores a tight reference box, and also stores sparse
+soft-mask samples:
+
+Detailed dataflow, math, paper alignment, and verification are recorded in
+[`docs/PICF_AQR_OWM_PROPOSAL_MASK_SUPPORT_20260518_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_PROPOSAL_MASK_SUPPORT_20260518_TEMP.md).
+
+```text
+proposal_mask_xy:      [S,2] normalized static-view support samples
+proposal_mask_weights: [S]   soft support intensity
+proposal_mask_offsets: [K+1] CSR offsets from proposal id to support samples
+```
+
+At runtime the mask is the preferred point bridge.  The box remains only a
+fallback bounded measurement likelihood:
+
+```math
+L_i^{box}(b_k)=
+\sigma((x_i-x^0_k)/\tau)
+\cdot\sigma((x^1_k-x_i)/\tau)
+\cdot\sigma((y_i-y^0_k)/\tau)
+\cdot\sigma((y^1_k-y_i)/\tau)
+```
+
+with proposal quality
+
+```math
+q_k = objectness_k \cdot shape\_quality_k \cdot exp(-age_k/T).
+```
+
+The mask bridge uses current training point tokens after projection, so it does
+not rely on stale sidecar point-row ids:
+
+```math
+L_i^{mask}(k)=
+\frac{
+  \sum_{s \in \mathcal S_k} w_s
+  \exp(-\|u_i-u_s\|^2/(2\tau_m^2))
+}{
+  \sum_{s \in \mathcal S_k} w_s + \epsilon
+}
+```
+
+This follows the reference-box philosophy of Deformable DETR / DINO, the
+prompt-mask philosophy of SAM-style segmentation, and Slot-Attention-style
+competition: masks are strong spatial measurements, not hard labels. Dense
+V-JEPA/PG/point tokens remain intact, and the posterior remains authoritative.
+Oversized event boxes are a rejected scaffold because they dilute point support
+and can make `task_owner_proposal_selected_count` decay to zero.
+
+2026-05-16 anchor-PV object-gate repair: use
+[`docs/PICF_AQR_OWM_PROPOSAL_PV_BINDING_REPAIR_20260516_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_PROPOSAL_PV_BINDING_REPAIR_20260516_TEMP.md)
+for the current math/dataflow contract. The maintained split is: dense PV
+correspondence remains supervised by `loss_pv_weak`, while `loss_anchor_pv`
+is gated by AQR object-routed point/visual support with no object-loss floor.
+Background/projective coverage is intentionally not lost; it is carried by
+`loss_pv_weak`, not by forcing active object slots to reconstruct every
+projective edge.
+The A7 anchor-only diagnostic shows active object overlap controlled but raw
+reserve/context overlap still high; do not judge object binding from gray
+reserve files alone.
+This prevents object slots from being forced to reconstruct every background
+projective edge, without deleting dense V-JEPA/PG/point evidence.
+
+2026-05-15 owner/reserve correction update: the earlier A7 long-run
+`picf_a7_dustbin_router_cotrain_u2b1_a05_30000_d163d18_long30k` is no longer
+accepted as 30k-ready. At step300, active graph anchors remained reasonably
+separated, but the raw reserve pool and posterior scene slots still collapsed
+(`aqr_same_role_support_overlap_max=0.9851`, posterior role1 min distance about
+`4.69 px`). The root cause was a dataflow mismatch: `anchor_active` selected
+active graph owners, but posterior binding still saw duplicate observation
+anchors as ordinary object-file measurements. The maintained repair is now an
+owner/reserve posterior gate:
+
+```math
+owner_i = \operatorname{GreedyMatch}(A_{obs\rightarrow graph}, active_{graph})_i
+```
+
+```math
+\ell^{post}_{j,i}
+\leftarrow
+\ell^{post}_{j,i}
+
+\begin{cases}
+0, & owner_i=1 \\
+-10^4, & owner_i=0
+\end{cases}
+```
+
+This is not a new loss and does not rewrite PI0.5 action flow. It carries the
+existing active-slot owner decision into the belief update, so reserve anchors
+remain capacity/dustbin candidates instead of becoming persistent object files.
+It does not create missing object evidence, solve sub-token ordinal grounding,
+or replace CALVIN/video behavior acceptance; it only fixes the object-file
+measurement eligibility leak that made inactive reserve rows update posterior
+slots.
+A7 storage cleanup removed about `276.20GB` of non-current May `model.pt` files
+while preserving metrics, metadata, logs, overlays, April baselines, and the
+active experiment records.
+Use
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md)
+for the live run ledger and cleanup record.
+Use
+[`docs/PICF_AQR_OWM_OWNER_GATE_FOLLOWTHROUGH_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_OWNER_GATE_FOLLOWTHROUGH_20260515_TEMP.md)
+and `scripts/picf_owm_owner_gate_followthrough_audit.py` for the dedicated
+owner/reserve mathematical and dataflow follow-through audit.
+Use
+[`docs/PICF_AQR_OWM_OWNER_GATE_RECYCLE_DIAGNOSIS_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_OWNER_GATE_RECYCLE_DIAGNOSIS_20260515_TEMP.md)
+for the step50/100 long-run diagnosis that separates the fixed active-support
+ownership leak from the still-unproven posterior recycle/trust channel.
+2026-05-15 step150/750 follow-up refined the failure again: the first owner-gate
+was too hard, but the first soft-owner repair over-corrected. Because
+`_mapg_slot_assignment` restricts rows to active graph anchors and then
+renormalizes each row, `sum_k A_{ik}=1` over active anchors is a tautology and
+made `posterior_owner_active_eligible_fraction=1.0`. The maintained repair no
+longer uses row-sum owner mass. It computes owner reliability from unique active
+graph-column peaks, winner margin, and same-object duplicate novelty:
+
+```math
+p_i=\max_{k\in\mathcal A} A_{ik},\quad
+m_i={p_i-p_i^{(2)} \over \max(p_i,\epsilon)}
+```
+
+```math
+d_i=\max_{u\in U, role(u)=role(i)}
+\left[
+  sim_{geom}(i,u),\ sim_{bind}(i,u),\ sim_{point}(i,u)
+\right]
+```
+
+```math
+owner_i =
+\begin{cases}
+1, & i\in U \\
+p_i\,m_i\,(1-d_i), & otherwise
+\end{cases}
+```
+
+where `U` is the greedy set of unique active graph-owner rows. This is still not
+a new loss and does not rewrite PI0.5; it is the posterior measurement
+eligibility model. The first acceptance metric for this repair is
+`posterior_owner_active_eligible_fraction`: it must be materially below `1.0`
+during the restarted run, otherwise reserve rows are still reaching posterior
+binding as ordinary measurements.
+
+2026-05-16 posterior file-competition repair: the A7 overlay/metrics showed a
+second, deeper capacity issue. Active graph owners were mostly distinct, but
+multiple role-1 **posterior object files** could still project to the same
+pixels. The root cause was the posterior binding transport: it had an
+observation dustbin row but no file/no-object decision, so uniform row
+marginals forced every persistent file to receive some measurement mass.
+
+The maintained repair is now documented in
+[`docs/PICF_AQR_OWM_POSTERIOR_FILE_COMPETITION_FOLLOWTHROUGH_20260516_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_POSTERIOR_FILE_COMPETITION_FOLLOWTHROUGH_20260516_TEMP.md).
+The full paper-code/math/dataflow audit is
+[`docs/PICF_AQR_OWM_FULL_BINDING_MATH_DATAFLOW_AUDIT_20260516_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_FULL_BINDING_MATH_DATAFLOW_AUDIT_20260516_TEMP.md).
+The action-prefix routing refinement is
+[`docs/PICF_AQR_OWM_TRISTATE_CONTEXT_ROUTING_20260516_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_TRISTATE_CONTEXT_ROUTING_20260516_TEMP.md):
+active object anchors enter the graph prefix with full weight, real non-target
+context anchors enter with low weight, and duplicate/no-object reserve anchors
+remain diagnostics/lifecycle capacity. This replaces the rejected binary
+`active`/`inactive` graph-prefix gate while preserving typed background memory.
+It adds an assignment-model step before posterior write:
+
+```text
+support_raw, dustbin_raw
+  -> same-role support/geometry duplicate check
+  -> duplicate persistent files demoted to no-object/dustbin
+  -> lifecycle calibration
+  -> posterior update
+```
+
+This is aligned with Slot Attention explaining-away and DETR-style no-object
+capacity. It is not a new auxiliary loss. Acceptance now requires the overlay
+JSON/PNG to show role-1 posterior files no longer duplicating at the same
+object/contact location, and metrics such as
+`posterior_file_competition_active_count`,
+`posterior_file_competition_demoted_mass_mean`, and
+`posterior_active_file_potential_swap_rate` to move in the expected direction.
+Anchor overlay diagnostics now prefer `posterior.file_competition_active` for
+posterior circle activity and write `file_competition_demoted_mass` into JSON,
+so demoted persistent capacity is gray rather than falsely drawn as an active
+object file.
+
+Current operator switch matrix:
+
+```text
+Canonical entry:
+  keep this file as README_v2.2.md for now.
+  Do not rename it during the active A7 behavior-acceptance run because many
+  docs, scripts, and experiment notes link to this exact path. If the project
+  needs a stable name later, add a small README_CURRENT.md pointer rather than
+  moving this file.
+
+Live long-run recipe:
+  purpose:
+    current 30k behavior-acceptance run, not anchor-only diagnosis and not
+    blind-SAM legacy ablation.
+  --picf-mode enabled
+  --picf-trainable-scope all
+  --use-foundation-backbones
+  --perception-finetune-mode frozen
+  --visual-mode encoder
+  --visual-feature-mode hierarchical
+  --point-backbone sonata
+  --tactile-mode encoder
+  --use-tactile
+  --semantic-mode paligemma
+  --semantic-trainable
+  --semantic-lr-scale 0.25
+  --training-strategy fsdp_full_shard
+  --optimizer-sharding none
+  --accum-steps 1
+  --num-train-steps 30000
+  --unroll-steps 2
+  --burnin-steps 1
+  --burnin-mode state_only
+  --lambda-action-pos 0.50
+  --lambda-action-rot 0.50
+  --lambda-action-gripper 0.50
+  --picf-action-prefix-stopgrad
+  --log-interval 50
+  --save-interval 2500
+  --keep-last-checkpoints 3
+  --anchor-overlay-interval 50
+  --anchor-overlay-max-anchors 64
+  --progress
+
+Trainability contract:
+  freeze pretrained perception backbones:
+    V-JEPA visual encoder
+    Sonata point encoder
+    AnyTouch tactile encoder
+  train:
+    PaliGemma / PI0.5 semantic-action stack
+    PICF AQR/posterior/task/control adapters
+    action-side and prediction heads
+
+Sidecar contract:
+  --tracklet-memory-enabled may stay on, but only pass --mvtrack-sidecar-root
+  after a tracklet sidecar root has passed manifest/coverage checks. Missing
+  tracklets are a safe no-op.
+
+  Do not enable blind SAM memory in the production long run. Generic proposal
+  memory may be enabled only for contact/task-guided sidecar roots that pass
+  manifest and overlay inspection:
+    do not pass --proposal-memory-enabled for blind SAM roots
+    keep proposal_read_weight = 0.0 unless an inspected sidecar root is active
+    keep proposal_point_bridge_weight = 0.0 unless an inspected sidecar root is active
+    keep task_owner_proposal_* weights = 0.0 unless an inspected sidecar root is active
+
+  Proposal memory is reserved for prompted/reranked/contact-guided sidecar
+  ablations. Blind automatic SAM masks were tested, archived, and are too noisy to be
+  production-default task-object evidence.
+
+Guarded OWM auxiliary losses:
+  keep these at zero in the live long run:
+    --lambda-slot-jepa 0.0
+    --lambda-support-pred 0.0
+    --lambda-binding-consistency 0.0
+    --lambda-aqr-denoising 0.0
+
+Sidecar-precondition frozen-PaliGemma action diagnostic:
+  purpose:
+    short 300-step A7 diagnosis before tracklet sidecar generation finishes.
+    It isolates whether action training remains stable when PaliGemma is
+    frozen, so it is not the production long-run recipe.
+  launch rule:
+    do not pass --use-foundation-backbones for this diagnostic, because that
+    helper intentionally forces --semantic-trainable. Instead spell out the
+    same foundation backbones manually:
+      --point-backbone sonata
+      --visual-mode encoder
+      --visual-feature-mode hierarchical
+      --tactile-mode encoder
+      --use-tactile
+      --semantic-mode paligemma
+      --perception-finetune-mode frozen
+      no --semantic-trainable
+  trainability:
+    frozen: V-JEPA, Sonata, AnyTouch, PaliGemma / PI0.5 foundation weights
+    train: PICF AQR/posterior/task/control/action-side adapters and heads
+  proposal contract:
+    explicitly pass the --no-proposal-memory-enabled family on any stale
+    remote checkout whose config default is still proposal_memory_enabled=True.
+  acceptance:
+    loss_action_default_equiv should decrease or stay within short-run noise;
+    aqr_active_same_role_support_overlap_max should not re-collapse;
+    posterior_recycle_rate should not saturate;
+    step50/100/150/200/300 overlays should keep active posterior evidence near
+    the task object region. If this fails while semantic-trainable cotrain is
+    healthy, the answer is that PaliGemma cotrain is structurally needed rather
+    than that the sidecar-free AQR path is invalid.
+  result:
+    the frozen-PaliGemma diagnostic reached step300 with action loss improving
+    but anchor structure degrading: loss_anchor_pv rose from 0.698 to 1.177,
+    raw same-role overlap returned to about 0.98, and recycle fell to near
+    zero.  Therefore frozen PaliGemma is not the maintained production recipe.
+    A matched no-sidecar trainable-PaliGemma control run is the active
+    follow-up; if it remains healthier, production should keep PaliGemma
+    cotrain enabled until sidecar evidence replaces that semantic adaptation.
+
+Maintained AQR/MVTrack switches:
+  --aqr-ownership-prior-enabled
+  --aqr-ownership-prior-weight 0.70
+  --aqr-ownership-point-prior-weight 0.70
+  --aqr-same-role-support-competition-enabled
+  --aqr-same-role-support-competition-weight 0.85
+  --aqr-same-role-support-competition-iters 5
+  --aqr-active-slot-filter-enabled
+  --aqr-active-slot-max-per-role 2
+  --aqr-active-slot-overlap-threshold 0.40
+  --aqr-active-slot-relative-score-threshold 0.80
+  --aqr-active-slot-geometry-duplicate-threshold 0.45
+  --posterior-owner-active-gate-enabled
+  --posterior-owner-active-min 0.30
+  --posterior-owner-active-bias -10000.0
+  --posterior-occupancy-prior-enabled
+  --posterior-occupancy-prior-weight 1.0
+  --posterior-slotwise-recycle-residual
+  --recycle-residual-norm-mode layernorm
+  --evidence-cache-enabled
+  --evidence-cache-read-weight 0.05
+
+Archived or diagnostic-only switches:
+  --legacy-local-refinement-opt-in:
+    off in production; required before --local-refinement-enabled can do
+    anything. Previous local-refinement evidence was not clean enough for the
+    maintained path.
+  --lambda-slot-jepa / --lambda-support-pred / --lambda-binding-consistency /
+  --lambda-aqr-denoising:
+    keep at 0 for the active long run. These hooks are diagnostic/teacher
+    paths until identity/recycle stability is proven by long-run evidence.
+  --picf-trainable-scope anchor_only:
+    diagnostic only; use to isolate anchor learning, not as a deployment or
+    behavior-acceptance run.
+  --picf-action-detach-from-anchor:
+    diagnostic only; useful for proving action-gradient damage, not for final
+    cotrain unless a new failure demands isolation.
+
+Comparison rule:
+  compare current action against older ablations with loss_action_default_equiv
+  and loss_action_active7. Do not compare the raw current loss_action to 4-22
+  ablation directly, because the current run deliberately applies a 0.25 action
+  weight scale before adding the action term into loss_total.
+
+2026-05-15 30k active/reserve long-run launch contract:
+
+```text
+run script:
+  /home/siyuanyue/Documents/openpi/run_a7_active_reserve_long30k_20260515.sh
+
+remote session:
+  tmux: picf_a7_active_reserve_long30k
+
+remote output:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_active_reserve_cotrain_u2b1_a05_30000_20260515
+  /mnt/picf_run_logs/picf_a7_active_reserve_cotrain_u2b1_a05_30000_20260515.log
+
+acceptance gates before treating the run as healthy:
+  step 50/100/150/200/300:
+    loss_action_default_equiv decreases or stays within short-run noise;
+    aqr_active_same_role_support_overlap_max stays below 0.25;
+    aqr_active_same_role_object_core_overlap_max stays below 0.25;
+    posterior_recycle_rate does not saturate;
+    posterior_active_file_potential_swap_rate trends below 0.25;
+    anchor overlays do not show multiple active same-role files co-located.
+
+behavior acceptance:
+  pending this 30k run, checkpoint overlays, and later CALVIN/video evaluation.
+```
+```
 
 2026-05-13 experiment-gate update: the live anchor diagnosis is tracked in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
@@ -351,6 +1173,37 @@ anchor/recycle health. Both runs use `save_interval=2500` and
   repairs and short-run evidence from still-pending behavior acceptance, and to
   avoid treating scalar action-loss improvement as anchor-health proof when
   same-role support overlap remains high.
+- [`docs/PICF_AQR_OWM_TRISTATE_CONTEXT_ROUTING_20260516_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_TRISTATE_CONTEXT_ROUTING_20260516_TEMP.md)
+  2026-05-16 follow-through for the active/context/reserve routing repair. It
+  records why the binary action-visible graph gate was too coarse, gives the
+  tri-state math, traces the code dataflow from AQR priors to PI0.5 control
+  prefix, and lists the metrics needed to verify that real scene context remains
+  available without letting reserve files become full object evidence.
+- [`docs/PICF_AQR_OWM_SLOT_THEORY_GAP_ANALYSIS_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SLOT_THEORY_GAP_ANALYSIS_20260515_TEMP.md)
+  2026-05-15 theory/dataflow audit that splits the architecture into typed
+  evidence, AQR routing, support signatures, posterior binding, recycle/dustbin,
+  address/cache, and loss layers. It compares the implementation with 2025-2026
+  object-binding and slot papers and records the current boundary: active
+  support collapse and binding-signature common mode are substantially repaired,
+  while posterior lifecycle calibration and an offline IsSameObject probe remain
+  the main scientific gaps before claiming mature object slots.
+- [`docs/PICF_AQR_OWM_VNEXT_FULL_MODEL_DESIGN_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_VNEXT_FULL_MODEL_DESIGN_20260515_TEMP.md)
+  2026-05-15 vNext design note for the remaining object-file gaps. It defines
+  the full non-label-dependent repair path: factored posterior lifecycle
+  calibration, IsSameObject-style binding subspace audit, SlotContrast-style
+  guarded temporal identity teacher, typed-evidence objectness coverage, and
+  lifecycle-gated address/content routing. This is the reference for deciding
+  what to implement next without copying paper code blindly or adding
+  incoherent auxiliary losses.
+- [`docs/PICF_AQR_OWM_ADVANCED_SLOT_THEORY_AUDIT_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ADVANCED_SLOT_THEORY_AUDIT_20260515_TEMP.md)
+  2026-05-15 advanced slot-method audit. It rebuilds the PICF object-file model
+  from a POMDP belief equation, compares it layer-by-layer with Slot Attention,
+  SAVi/video slots, SlotContrast, SlotMatch, slot merging/curriculum,
+  correspondence-based temporal consistency, and OA-WAM-style address/content
+  routing, then states which gaps are runtime blockers and which are later
+  scientific audits. Use this document when deciding whether a proposed change
+  is a coherent lifecycle/evidence/correspondence repair or an incoherent extra
+  module.
 - [`docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_DEPLOYMENT_STATUS_TEMP.md)
   Temporary live deployment ledger for the OWM implementation. Use this while
   reviewing the current branch because it records which final README contract
@@ -365,6 +1218,12 @@ anchor/recycle health. Both runs use `save_interval=2500` and
   the paper-to-math assumptions, the full data follow-through, the exact script
   checks executed, the stale test isolation fix, and the boundary between
   code-level proof and pending A7 30k behavior acceptance.
+- [`docs/PICF_AQR_OWM_PROFESSOR_GRADE_INTERACTION_AUDIT_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_PROFESSOR_GRADE_INTERACTION_AUDIT_TEMP.md)
+  Script-generated interaction audit for the professor critique. It checks
+  cross-module invariants rather than isolated field existence: multiview
+  temporal evidence without wrist geometry leakage, cache residual/address
+  gating, support/address binding trust, active/dustbin capacity control,
+  guarded future teachers, action-loss comparability, and diagnostic coverage.
 - [`docs/PICF_AQR_OWM_REMOTE_CALVIN_AUDIT_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_REMOTE_CALVIN_AUDIT_TEMP.md)
   Remote audit of the older `8fdb16f` CALVIN run. It records why that checkpoint
   remains a failing anchor-quality baseline and why it cannot be used as proof
@@ -4094,14 +4953,132 @@ When enabled on the main rank, the trainer reuses the real training forward for
 that optimizer step and writes:
 
 ```text
-<run_dir>/anchor_overlays/step_000100.png
-<run_dir>/anchor_overlays/step_000100.json
+<run_dir>/anchor_overlays/step_000100__<sanitized_task>__with_gray.png
+<run_dir>/anchor_overlays/step_000100__<sanitized_task>__active_only.png
+<run_dir>/anchor_overlays/step_000100__<sanitized_task>.json
 ```
 
-The PNG draws graph anchors as squares and posterior anchors as circles on the
-main static RGB image. The JSON keeps projected and non-projected anchors with
-world coordinates, pixel coordinates when visible, role id, confidence, support
-mass, recycle gate, geometry validity, and address-update rate.
+The `with_gray` PNG draws graph anchors as squares and posterior anchors as
+circles on the main static RGB image, including inactive/reserve no-object
+capacity in gray with an `i` suffix. The `active_only` PNG hides those gray
+reserve files and should be used to judge the action-visible object binding.
+The JSON keeps projected and non-projected anchors with world coordinates, pixel
+coordinates when visible, role id, confidence, support mass, recycle gate,
+geometry validity, address-update rate, and `image_variants` pointing to both
+PNG views.
+Role colors are fixed for fast visual triage: role 0 is effector/gripper,
+role 1 is object/task-file, role 2 is interaction/contact query, and role 3 is
+coverage/context query. Repeated orange posterior circles at one handle/block
+therefore indicate duplicate role-1 persistent files, not merely a harmless
+visualization artifact.
+
+The current professor-grade binding follow-through is recorded in
+`docs/PICF_AQR_OWM_PROFESSOR_GRADE_BINDING_FOLLOWTHROUGH_20260516_TEMP.md`.
+That temp document compares the object-binding paper code against PICF runtime
+math, explains why online IsSameObject BCE is not enabled without labels, and
+defines the step-50 `active_only` overlay acceptance gate for the A7 downstream
+active-file diagnostic.
+
+For short IsSameObject-style diagnostics, explicitly add:
+
+```bash
+--anchor-overlay-dump-signatures
+```
+
+For quantitative overlay triage, summarize the JSON sidecars:
+
+```bash
+python scripts/picf_anchor_overlay_summary.py \
+  <run_dir>/anchor_overlays/step_000050__<task>.json
+```
+
+The summary reports active/inactive posterior counts and role-wise minimum
+active pixel distances so reserve-file clutter is not confused with active
+object binding.
+
+This writes `support_signature` and `binding_signature` into the overlay JSON so
+the same probe used on CALVIN eval `anchor_debug.jsonl` can also audit training
+overlays:
+
+```bash
+python scripts/picf_owm_same_object_probe.py \
+  --anchor-overlays <run_dir>/anchor_overlays \
+  --quadratic-probe all \
+  --overlay-source posterior \
+  --output <run_dir>/same_object_probe_overlay.json
+```
+
+Strict no-shortcut audit:
+
+```bash
+PYTHONPATH=src python scripts/picf_owm_nontruncated_paper_audit.py --fail-on-fail
+```
+
+This checks external paper-code provenance, the native quadratic probe family,
+training-overlay signature export, runtime binding-signature use, and the
+explicit ban on using weak adjacent-frame labels as an online identity loss.
+
+`--quadratic-probe all` trains the no-label weak IsSameObject probes that match
+the object-binding paper's core finding more closely than raw cosine:
+
+```text
+diag_quadratic:
+  score(x,y)=sum_k w_k x_k y_k + b
+
+low_rank_quadratic:
+  score(x,y)=0.5(<A x, B y> + <A y, B x>) / sqrt(rank) + b
+
+full_quadratic:
+  score(x,y)=x^T 0.5(W+W^T) y / sqrt(d) + b
+```
+
+Runtime binding now uses the same principle natively. Posterior binding keeps
+the existing hidden/geometry/support/address terms, but `binding_signature`
+also enters a gated diagonal-plus-low-rank quadratic score:
+
+```text
+score_quad(prev, obs)
+  = (prev * d)^T obs / sqrt(D)
+    + 0.5(<A prev, B obs> + <A obs, B prev>) / sqrt(R)
+
+binding_logit
+  += gate(alpha, recycle, innovation)
+     * (bind_quadratic_signature_weight * score_diag
+        + bind_low_rank_signature_weight * score_low_rank)
+```
+
+The diagonal term starts as identity-equivalent in the centered
+`binding_signature` subspace, so this is not a new weak-label loss and not a
+hard assignment shortcut. The low-rank term is small by default and trainable
+under the same PICF/anchor scopes. Weak same-object pairs remain offline audit
+data only.
+
+Paper-code provenance:
+
+```text
+Inspected:
+  /tmp/picf_paper_code_20260515/vit-object-binding
+  /tmp/picf_paper_code_20260515/slotcontrast
+
+vit-object-binding:
+  no LICENSE file was found in the cloned code snapshot, so PICF does not copy
+  model or trainer code from it. PICF reimplements the published
+  IsSameObject/pairwise-quadratic probe protocol natively over exported PICF
+  artifacts.
+
+slotcontrast:
+  MIT licensed and useful as temporal slot-contrast evidence, but PICF still
+  keeps a native implementation because its state is posterior object files plus
+  typed memory, not a standalone video slot model.
+```
+
+Weak labels are generated only from adjacent-frame geometry/pixel proximity.
+They are not task labels and not used as training loss. This is a scientific
+instrument: if a quadratic probe cannot separate weak same/different pairs, the
+current binding features should not be trusted as an object identity substrate.
+
+The signature dump is off by default to avoid large 30k-run JSON files; it is a
+diagnostic data export, not a model/loss change.
 
 This diagnostic is intentionally not a model change. It adds no loss, runs no
 extra forward pass, and does not advance V-JEPA/tactile buffers outside the
@@ -5186,3 +6163,246 @@ active overlap, and the 100-step anchor overlays as acceptance signals.
 
 Detailed numbers and tail commands are tracked in
 [`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md).
+
+2026-05-15 binding-signature centering diagnostic:
+
+```text
+Phase B strict capacity reached step100 with healthy active ownership:
+  aqr_active_same_role_support_overlap_max = 0.0085
+  aqr_active_same_role_object_core_overlap = 0.0627
+
+But observation binding signatures were still common-mode dominated:
+  aqr_same_role_obs_binding_signature_overlap_mean = 0.9846
+
+The next diagnostic repair therefore centers projected binding keys inside
+each typed memory before support pooling. This follows the IsSameObject/object
+binding literature: same-object evidence should be read as a projected pairwise
+subspace, not as raw token-average cosine.
+```
+
+Implementation and math follow-through:
+[`docs/PICF_AQR_OWM_BINDING_SIGNATURE_CENTERING_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_BINDING_SIGNATURE_CENTERING_20260515_TEMP.md).
+
+2026-05-15 runtime quadratic binding observability update:
+
+```text
+The nontruncated same-object repair is now observable in normal training logs.
+The posterior state carries scalar diagnostics for:
+  posterior_binding_signature_linear_score_mean
+  posterior_binding_signature_linear_score_abs_mean
+  posterior_binding_signature_quadratic_score_mean
+  posterior_binding_signature_quadratic_score_abs_mean
+  posterior_binding_signature_low_rank_score_mean
+  posterior_binding_signature_low_rank_score_abs_mean
+  posterior_binding_signature_gate_mean
+
+This does not add a loss and does not change the action path. It only exposes
+whether the runtime pairwise/quadratic same-object subspace is actually
+contributing to posterior binding.
+```
+
+Acceptance rule:
+
+```text
+If active support remains healthy but identity switch / observation binding
+signature overlap remains high, inspect the quadratic/low-rank score metrics
+before adding any new module. If these metrics are near zero or gate is near
+zero, the same-object signal is not reaching posterior binding. If they are
+active but behavior still fails, the failure is downstream assignment/lifecycle,
+not missing runtime same-object readout.
+```
+
+2026-05-15 binding-logit calibration update:
+
+```text
+A7 r2 exposed a model-level gap rather than a missing loss:
+  posterior_binding_signature_linear_score_abs_mean    ~= 0.465
+  posterior_binding_signature_quadratic_score_abs_mean ~= 0.465
+  posterior_binding_signature_low_rank_score_abs_mean  ~= 0.00026
+
+The diagonal quadratic path was numerically identical to linear cosine at
+initialization, and the low-rank path was effectively inactive. The external
+IsSameObject paper code trains pairwise quadratic probes as calibrated BCE
+logits; PICF had been feeding raw positive pairwise scores directly into
+posterior binding.
+```
+
+The runtime binding path now aggregates linear, diagonal-quadratic, and
+low-rank-quadratic scores, double-centers the pairwise matrix, gates out
+near-constant/no-separation matrices, z-normalizes the remaining relative
+assignment evidence, and clips it before applying the existing
+alpha/recycle/innovation gate. This is not a new auxiliary loss and does not
+require mask labels; it prevents common-mode ViT/PICF signatures from being
+misread as object identity.
+
+New diagnostics:
+
+```text
+posterior_binding_signature_combined_score_abs_mean
+posterior_binding_signature_calibrated_score_abs_mean
+posterior_binding_signature_calibrated_score_std
+posterior_binding_signature_calibrated_top1_margin_mean
+```
+
+Detailed math and code follow-through:
+[`docs/PICF_AQR_OWM_BINDING_LOGIT_CALIBRATION_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_BINDING_LOGIT_CALIBRATION_20260515_TEMP.md).
+
+Strict paper-code/dataflow/matrix audit:
+[`docs/PICF_AQR_OWM_BINDING_DATAFLOW_MATH_FOLLOWTHROUGH_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_BINDING_DATAFLOW_MATH_FOLLOWTHROUGH_20260515_TEMP.md).
+
+Run-level diagnostic report:
+`scripts/picf_anchor_run_diagnostic_report.py` summarizes a completed
+metrics/overlay directory and explicitly separates raw same-role overlap from
+active-owner overlap. The A7 calibrated 180-step run shows the remaining issue:
+active owners remain separated, but raw reserve overlap and posterior
+identity-switch remain high. Therefore the next required audit is
+active-owner/posterior-object-file continuity, not another auxiliary loss sweep.
+
+2026-05-15 posterior object-file continuity metric:
+
+```text
+The old posterior_identity_switch_rate compares observation-anchor row argmaxes
+across timesteps. Those rows are regenerated each step and are not stable
+object ids. It remains useful as churn telemetry, but it is not sufficient to
+claim an object-file swap.
+
+The runtime now also logs posterior file self-continuity over binding
+signatures:
+  posterior_file_self_signature_sim_mean
+  posterior_file_best_other_signature_margin_mean
+  posterior_file_potential_swap_rate
+  posterior_active_file_fraction
+  posterior_active_file_self_signature_sim_mean
+  posterior_active_file_best_other_signature_margin_mean
+  posterior_active_file_potential_swap_rate
+
+Use the active-file metrics before proposing any new binding loss or module.
+High row-id switch with low active-file swap means the old metric over-reported
+identity churn. High active-file swap means the posterior file update is the
+remaining target.
+```
+
+The math/dataflow derivation is in
+[`docs/PICF_AQR_OWM_BINDING_DATAFLOW_MATH_FOLLOWTHROUGH_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_BINDING_DATAFLOW_MATH_FOLLOWTHROUGH_20260515_TEMP.md).
+
+2026-05-15 A7 posterior-file continuity result:
+
+```text
+The calibrated 220-step diagnostic separates raw reserve/candidate overlap
+from active posterior object-file continuity. At step220, raw same-role support
+overlap is high (0.9207), but active same-role support overlap is 0.1694 and
+posterior_active_file_potential_swap_rate is 0.1307. The old
+posterior_identity_switch_rate remains high (0.7319), so it must not be used
+alone as an object-swap acceptance metric.
+
+The same-object pairwise binding subspace is guarded: when the calibrated
+score matrix has near-zero relative dispersion, the binding contribution is
+zero rather than hallucinating identity evidence.
+```
+
+Run notes and decision rules are recorded in
+[`docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_REPORT_20260511_TEMP.md)
+and the strict math follow-through above.
+
+Anchor overlay interpretation note:
+
+```text
+Training overlays use shape for source and color for role.
+
+Shape:
+  square = AQR graph anchor
+  circle/cross = posterior object file
+
+Training role colors:
+  blue   = role 0 / effector
+  orange = role 1 / task-or-object file
+  green  = role 2 / interaction graph query
+  purple = role 3 / coverage graph query
+
+Current posterior files are intentionally role 0 plus role 1 only:
+  role 0 = persistent effector file
+  role 1 = all non-effector persistent object files
+
+Therefore the absence of green/purple posterior circles is expected and is not
+by itself a failure. Green/purple are AQR graph-query roles, not separate
+persistent posterior file classes in this version.
+
+Inactive/reserve graph and posterior anchors are gray and suffixed with `i`.
+This prevents reserve posterior capacity from being mistaken for active object
+collapse in overlay inspection.
+
+2026-05-17 tactile/proposal repair note:
+
+```text
+The current contract distinguishes hard tactile anchors from soft tactile
+evidence.  Calibrated contact probability above
+`tactile_evidence_prob_floor` contributes weighted sensor-level tactile
+evidence to point/tactile alignment and binding signatures; only probability
+above `tactile_anchor_prob_on` opens the dense AnyTouch patch reread.  This
+prevents tactile from being an all-or-nothing branch.
+
+Posterior tactile reread is additionally gated by bound tactile routing mass:
+slots with zero tactile mass keep a zero tactile evidence vector.  This prevents
+top-k over all-zero tactile weights from fabricating contact evidence for every
+posterior slot.
+
+Posterior file competition now logs both raw duplicate overlap and active-file
+duplicate overlap.  Raw duplicate overlap includes reserve/context capacity and
+is telemetry; `posterior_file_competition_active_duplicate_overlap_max` is the
+acceptance metric for active object-file duplication.
+```
+
+Full dataflow and math follow-through are in
+[`docs/PICF_AQR_OWM_PROPOSAL_PV_BINDING_REPAIR_20260516_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_PROPOSAL_PV_BINDING_REPAIR_20260516_TEMP.md).
+
+The task-owner proposal repair math audit is
+[`docs/PICF_AQR_OWM_TASK_OWNER_DATAFLOW_MATH_20260517_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_TASK_OWNER_DATAFLOW_MATH_20260517_TEMP.md).
+It documents the soft path from task-query visual support to physical
+scene-object proposal bias.  The repair does not drop tokens, does not hard-mask
+sidecar proposals into posterior truth, and keeps proposals as measurement evidence
+inside AQR.
+
+The current open issue ledger is
+[`docs/PICF_AQR_OWM_OPEN_ISSUE_TRACKER_20260517_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_OPEN_ISSUE_TRACKER_20260517_TEMP.md).
+It tracks closed engineering bugs separately from items that still require
+long-run behavior evidence, proposal/tracklet sidecars, or unavailable labels.
+
+The current experiment note for the task-owner/sidecar/tracklet cleanup is
+[`docs/PICF_AQR_OWM_EXPERIMENT_NOTE_20260517_TASK_OWNER_SIDECAREDS_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_NOTE_20260517_TASK_OWNER_SIDECAREDS_TEMP.md).
+It archives completed engineering repairs, records the step-50/100/150/200/250/300
+diagnostic trends, and lists the remaining sidecar/behavior acceptance work.
+
+The current loss-family audit is
+[`docs/PICF_AQR_OWM_LOSS_AUDIT_20260517_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_LOSS_AUDIT_20260517_TEMP.md).
+It separates active objective terms from raw diagnostics, explains why
+`loss_pv_weak` can improve while `loss_anchor_pv` and same-role graph support
+overlap regress, and records which guarded OWM losses must remain disabled.
+
+The current object-candidate / active-object loss-scope audit is
+[`docs/PICF_AQR_OWM_OBJECT_CANDIDATE_SLOT_BINDING_20260519_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_OBJECT_CANDIDATE_SLOT_BINDING_20260519_TEMP.md).
+It records that object-candidate ownership and active-object duplication are
+fixed, while the 200-step active-scope diagnostic still leaves
+`loss_anchor_pv`, `loss_aqr_denoising`, and raw reserve/context overlap open.
+Do not treat raw duplicate telemetry as active-object failure, but also do not
+claim anchor-PV/denoising are solved until the active-object PV / global
+PV-weak split is validated.
+
+The posterior birth/no-object transport repair is
+[`docs/PICF_AQR_OWM_POSTERIOR_BIRTH_TRANSPORT_FOLLOWTHROUGH_20260517_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_POSTERIOR_BIRTH_TRANSPORT_FOLLOWTHROUGH_20260517_TEMP.md).
+It documents the step300 finding that file competition demoted duplicate
+support correctly, but the recycle path still broadcast the same dustbin
+residual into multiple inactive files.  The maintained fix is a second
+birth/no-object competition: existing files update from their owned support,
+only a bounded number of reserve files may consume dustbin residual as new
+object birth evidence, and all other inactive files remain null capacity.
+
+Every new training overlay writes two PNG variants:
+
+  `__with_gray.png`:
+    includes inactive/reserve no-object capacity. Use this to inspect whether
+    the fixed posterior capacity is being demoted as intended.
+
+  `__active_only.png`:
+    hides gray reserve files. Use this to judge whether active object files are
+    actually bound to the target/contact region.
+```

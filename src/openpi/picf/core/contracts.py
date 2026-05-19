@@ -69,10 +69,18 @@ class PicfAnchorPriorGraphState:
     modality_confidence: torch.Tensor
     valid: torch.Tensor
     anchor_active: torch.Tensor | None = None
+    anchor_downstream_weight: torch.Tensor | None = None
     vjepa_temporal_priors: torch.Tensor | None = None
     cache_priors: torch.Tensor | None = None
     tracklet_priors: torch.Tensor | None = None
     proposal_priors: torch.Tensor | None = None
+    proposal_point_priors: torch.Tensor | None = None
+    task_owner_point_priors: torch.Tensor | None = None
+    proposal_anchor_seed_priors: torch.Tensor | None = None
+    proposal_anchor_seed_assignment: torch.Tensor | None = None
+    task_owner_visual_prior: torch.Tensor | None = None
+    task_owner_proposal_score: torch.Tensor | None = None
+    task_owner_anchor_score: torch.Tensor | None = None
     local_priors: torch.Tensor | None = None
     local_token_indices: torch.Tensor | None = None
     local_source_ids: torch.Tensor | None = None
@@ -83,6 +91,43 @@ class PicfAnchorPriorGraphState:
     binding_signature: torch.Tensor | None = None
     binding_support_score: torch.Tensor | None = None
     binding_address_score: torch.Tensor | None = None
+    active_proposals: "PicfActiveProposalState | None" = None
+    proposal_to_graph_assignment: torch.Tensor | None = None
+    proposal_unexplained_evidence: torch.Tensor | None = None
+    proposal_duplicate_cost: torch.Tensor | None = None
+    proposal_count: torch.Tensor | None = None
+    object_candidate_assignment: torch.Tensor | None = None
+    object_candidate_owner_assignment: torch.Tensor | None = None
+    object_candidate_owner_point_priors: torch.Tensor | None = None
+    object_candidate_coverage: torch.Tensor | None = None
+    object_candidate_background: torch.Tensor | None = None
+    object_candidate_duplicate_overlap: torch.Tensor | None = None
+    object_explanation_quality: torch.Tensor | None = None
+    object_explanation_duplicate_overlap: torch.Tensor | None = None
+
+
+@dataclasses.dataclass
+class PicfActiveProposalState:
+    """Variable-cardinality active measurement proposals.
+
+    These tensors describe proposal/query initializers only. They are not
+    posterior truth and must be matched by the existing posterior file/birth
+    competition before they can affect persistent object state.
+    """
+
+    tokens: torch.Tensor
+    stop_logits: torch.Tensor
+    active_prob: torch.Tensor
+    role_logits: torch.Tensor
+    address_seed: torch.Tensor
+    geometry_seed: torch.Tensor
+    support_signature_seed: torch.Tensor
+    coverage_score: torch.Tensor
+    duplicate_score: torch.Tensor
+    valid: torch.Tensor
+    unexplained_evidence: torch.Tensor | None = None
+    count_cost: torch.Tensor | None = None
+    continuity_cost: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -120,7 +165,11 @@ class PicfPseudoProposalState:
     objectness: torch.Tensor
     view_ids: torch.Tensor
     source_ids: torch.Tensor
+    age: torch.Tensor
     valid: torch.Tensor
+    mask_xy: torch.Tensor | None = None
+    mask_weights: torch.Tensor | None = None
+    mask_offsets: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -152,6 +201,39 @@ class PicfCacheReadState:
 
 
 @dataclasses.dataclass
+class PicfObjectExplanationState:
+    """Object/background explanation over typed evidence.
+
+    The masks are column-normalized over object slots plus a background
+    residual. They are measurements used to judge whether AQR anchors actually
+    explain dense evidence; they are not segmentation labels and never replace
+    the posterior belief state.
+    """
+
+    object_mask_visual: torch.Tensor | None
+    background_mask_visual: torch.Tensor | None
+    object_mask_temporal: torch.Tensor | None
+    background_mask_temporal: torch.Tensor | None
+    object_mask_point: torch.Tensor | None
+    background_mask_point: torch.Tensor | None
+    object_mask_tactile: torch.Tensor | None
+    background_mask_tactile: torch.Tensor | None
+    object_mask_tracklet: torch.Tensor | None
+    background_mask_tracklet: torch.Tensor | None
+    object_mask_proposal: torch.Tensor | None
+    background_mask_proposal: torch.Tensor | None
+    anchor_quality: torch.Tensor
+    anchor_duplicate_overlap: torch.Tensor
+    anchor_feature_variance: torch.Tensor
+    point_spatial_variance: torch.Tensor
+    contact_explanation_score: torch.Tensor
+    valid: torch.Tensor
+    candidate_coverage: torch.Tensor | None = None
+    candidate_background: torch.Tensor | None = None
+    candidate_duplicate_overlap: torch.Tensor | None = None
+
+
+@dataclasses.dataclass
 class PicfTokenFieldState:
     point_tokens: torch.Tensor
     visual_tokens: torch.Tensor
@@ -169,6 +251,8 @@ class PicfTokenFieldState:
     tactile_tokens_active: torch.Tensor | None = None
     tactile_group_ids: torch.Tensor | None = None
     tactile_contact_prob: torch.Tensor | None = None
+    tactile_evidence_mask: torch.Tensor | None = None
+    tactile_evidence_weight: torch.Tensor | None = None
     tactile_anchor_mask: torch.Tensor | None = None
     tactile_normals_world: torch.Tensor | None = None
     tactile_contact_score: torch.Tensor | None = None
@@ -217,6 +301,7 @@ class PicfObservationAnchorState:
     graph_tracklet_weights: torch.Tensor | None = None
     graph_proposal_weights: torch.Tensor | None = None
     anchor_address: torch.Tensor | None = None
+    owner_active: torch.Tensor | None = None
     support_signature: torch.Tensor | None = None
     binding_signature: torch.Tensor | None = None
 
@@ -304,6 +389,25 @@ class PicfPosteriorAnchorState:
     proposal_signature: torch.Tensor | None = None
     support_signature: torch.Tensor | None = None
     binding_signature: torch.Tensor | None = None
+    binding_signature_linear_score_mean: torch.Tensor | None = None
+    binding_signature_linear_score_abs_mean: torch.Tensor | None = None
+    binding_signature_quadratic_score_mean: torch.Tensor | None = None
+    binding_signature_quadratic_score_abs_mean: torch.Tensor | None = None
+    binding_signature_low_rank_score_mean: torch.Tensor | None = None
+    binding_signature_low_rank_score_abs_mean: torch.Tensor | None = None
+    binding_signature_combined_score_mean: torch.Tensor | None = None
+    binding_signature_combined_score_abs_mean: torch.Tensor | None = None
+    binding_signature_calibrated_score_mean: torch.Tensor | None = None
+    binding_signature_calibrated_score_abs_mean: torch.Tensor | None = None
+    binding_signature_calibrated_score_std: torch.Tensor | None = None
+    binding_signature_calibrated_top1_margin_mean: torch.Tensor | None = None
+    binding_signature_gate_mean: torch.Tensor | None = None
+    binding_signature_update_rate: torch.Tensor | None = None
+    binding_signature_measurement_trust: torch.Tensor | None = None
+    binding_signature_memory_keep_rate: torch.Tensor | None = None
+    binding_signature_measurement_score_std: torch.Tensor | None = None
+    binding_signature_measurement_margin: torch.Tensor | None = None
+    binding_signature_measurement_dispersion_gate: torch.Tensor | None = None
     recycle_logits: torch.Tensor | None = None
     recycle_support_mass_raw: torch.Tensor | None = None
     recycle_prior_var_mean: torch.Tensor | None = None
@@ -311,8 +415,27 @@ class PicfPosteriorAnchorState:
     recycle_residual_summary_norm: torch.Tensor | None = None
     recycle_dustbin_raw_mass: torch.Tensor | None = None
     recycle_dustbin_final_mass: torch.Tensor | None = None
+    lifecycle_assignment_confidence: torch.Tensor | None = None
+    lifecycle_support_entropy: torch.Tensor | None = None
+    lifecycle_support_margin: torch.Tensor | None = None
+    lifecycle_owner_reliability: torch.Tensor | None = None
+    lifecycle_survival_prob: torch.Tensor | None = None
+    lifecycle_reset_allowance: torch.Tensor | None = None
+    lifecycle_recycle_raw: torch.Tensor | None = None
+    lifecycle_inactive_dustbin_mass: torch.Tensor | None = None
+    lifecycle_unexplained_dustbin_mass: torch.Tensor | None = None
+    file_competition_active: torch.Tensor | None = None
+    file_competition_demoted_mass: torch.Tensor | None = None
+    file_competition_duplicate_overlap_max: torch.Tensor | None = None
+    file_competition_active_duplicate_overlap_max: torch.Tensor | None = None
+    file_competition_birth_active: torch.Tensor | None = None
+    file_competition_birth_share: torch.Tensor | None = None
     identity_innovation_risk: torch.Tensor | None = None
     address_update_rate: torch.Tensor | None = None
+    owner_transport_mass: torch.Tensor | None = None
+    owner_transport_confidence: torch.Tensor | None = None
+    owner_transport_applied_fraction: torch.Tensor | None = None
+    owner_transport_dist_to_standard: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -365,6 +488,7 @@ class PicfCoreState:
     last_prompt: str | None = None
     vl_grounding: PicfVLGroundingState | None = None
     anchor_prior_graph: PicfAnchorPriorGraphState | None = None
+    object_explanation: PicfObjectExplanationState | None = None
 
 
 @dataclasses.dataclass

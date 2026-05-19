@@ -40,13 +40,13 @@ Evidence:
 
 ### PASS: mvtrack_proposal_memory_is_optional_typed_evidence
 
-Optional proposal memory must be typed evidence only: no proposal data is a no-op, and provided proposal boxes/tokens route through AQR rather than overwriting posterior identity.
+Optional proposal memory must be typed evidence only: no proposal data is a no-op, provided proposal boxes/tokens route through AQR rather than overwriting posterior identity, and blind proposal influence is production-default off after the 2026-05-17 diagnostics.
 
 Evidence:
 - `src/openpi/picf/core/contracts.py:112: class PicfPseudoProposalState:`
 - `src/openpi/picf/core/contracts.py:179: proposal: PicfPseudoProposalState | None = None`
-- `src/openpi/picf/core/config.py:184: proposal_memory_enabled: bool = True`
-- `src/openpi/picf/core/config.py:187: proposal_read_weight: float = 0.15`
+- `src/openpi/picf/core/config.py:262: proposal_memory_enabled: bool = False`
+- `src/openpi/picf/core/config.py:265: proposal_read_weight: float = 0.0`
 - `src/openpi/picf/core/pipeline.py:1291: self.aqr_proposal_reader = CrossAttentionRead(`
 - `src/openpi/picf/core/pipeline.py:2952: proposal_priors = torch.zeros((anchor_count, proposal_count), device=self.device, dtype=self.dtype) if proposal_count > 0 else None`
 - `src/openpi/picf/core/pipeline.py:5038: graph_proposal_weights = None`

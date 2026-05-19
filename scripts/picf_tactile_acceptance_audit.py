@@ -113,7 +113,24 @@ def main() -> None:
     if metric_rows:
         tactile_prob_rows = [float(row.get("tactile_contact_prob_mean", 0.0)) for row in metric_rows if "tactile_contact_prob_mean" in row]
         tactile_active_rows = [float(row.get("tactile_active_rate", 0.0)) for row in metric_rows if "tactile_active_rate" in row]
-        loss_pt_rows = [float(row.get("loss_pt", 0.0)) for row in metric_rows if "loss_pt" in row]
+        tactile_evidence_rows = [float(row.get("tactile_evidence_rate", 0.0)) for row in metric_rows if "tactile_evidence_rate" in row]
+        tactile_evidence_weight_rows = [
+            float(row.get("tactile_evidence_weight_mean", 0.0))
+            for row in metric_rows
+            if "tactile_evidence_weight_mean" in row
+        ]
+        tactile_loss_keys = (
+            "loss_pt",
+            "loss_tactile_aux",
+            "loss_tactile_map",
+            "loss_tactile_real",
+            "loss_physical_aux",
+        )
+        tactile_loss_rows = [
+            max(abs(float(row.get(key, 0.0))) for key in tactile_loss_keys)
+            for row in metric_rows
+            if any(key in row for key in tactile_loss_keys)
+        ]
         loss_action_rows = [float(row.get("loss_action", 0.0)) for row in metric_rows if "loss_action" in row]
         loss_total_rows = [float(row.get("loss_total", 0.0)) for row in metric_rows if "loss_total" in row]
 
@@ -123,12 +140,63 @@ def main() -> None:
             checks.append(_check(status, "train_contact_prob_mean", f"mean tactile_contact_prob_mean={mean_prob:.6f}", value=mean_prob))
         if tactile_active_rows:
             mean_active = mean(tactile_active_rows)
-            status = "pass" if 0.05 <= mean_active <= 0.95 else "fail"
-            checks.append(_check(status, "train_active_rate", f"mean tactile_active_rate={mean_active:.6f}", value=mean_active))
-        if loss_pt_rows:
-            nonzero_rate = mean(1.0 if abs(value) > 1e-8 else 0.0 for value in loss_pt_rows)
+            mean_evidence = mean(tactile_evidence_rows) if tactile_evidence_rows else 0.0
+            if 0.05 <= mean_active <= 0.95:
+                status = "pass"
+                detail = f"mean tactile_active_rate={mean_active:.6f}"
+            elif mean_active < 0.05 and mean_evidence >= 0.05:
+                status = "warn"
+                detail = (
+                    f"mean tactile_active_rate={mean_active:.6f}; hard tactile anchors are rare, "
+                    f"but soft evidence is active at {mean_evidence:.6f}"
+                )
+            else:
+                status = "fail"
+                detail = f"mean tactile_active_rate={mean_active:.6f}"
+            checks.append(_check(status, "train_active_rate", detail, value=mean_active))
+        if tactile_evidence_rows:
+            mean_evidence = mean(tactile_evidence_rows)
+            status = "pass" if 0.05 <= mean_evidence <= 0.95 else "fail"
+            checks.append(_check(status, "train_evidence_rate", f"mean tactile_evidence_rate={mean_evidence:.6f}", value=mean_evidence))
+        if tactile_evidence_weight_rows:
+            mean_evidence_weight = mean(tactile_evidence_weight_rows)
+            status = "pass" if 0.01 <= mean_evidence_weight <= 0.95 else "fail"
+            checks.append(
+                _check(
+                    status,
+                    "train_evidence_weight_mean",
+                    f"mean tactile_evidence_weight_mean={mean_evidence_weight:.6f}",
+                    value=mean_evidence_weight,
+                )
+            )
+        if tactile_prob_rows and tactile_active_rows:
+            mean_prob = mean(tactile_prob_rows)
+            mean_active = mean(tactile_active_rows)
+            mean_evidence = mean(tactile_evidence_rows) if tactile_evidence_rows else 0.0
+            if mean_prob >= 0.05 and mean_active < 0.05 and mean_evidence < 0.05:
+                checks.append(
+                    _check(
+                        "fail",
+                        "train_tactile_prob_without_evidence",
+                        (
+                            "calibrated tactile probability is nonzero but neither hard tactile anchors nor "
+                            f"soft tactile evidence are active: prob={mean_prob:.6f} active={mean_active:.6f} "
+                            f"evidence={mean_evidence:.6f}"
+                        ),
+                        value=mean_prob,
+                    )
+                )
+        if tactile_loss_rows:
+            nonzero_rate = mean(1.0 if abs(value) > 1e-8 else 0.0 for value in tactile_loss_rows)
             status = "pass" if nonzero_rate > 0.1 else "fail"
-            checks.append(_check(status, "train_loss_pt_nonzero_rate", f"loss_pt_nonzero_rate={nonzero_rate:.6f}", value=nonzero_rate))
+            checks.append(
+                _check(
+                    status,
+                    "train_tactile_loss_nonzero_rate",
+                    f"tactile_loss_nonzero_rate={nonzero_rate:.6f}",
+                    value=nonzero_rate,
+                )
+            )
         if loss_action_rows and loss_total_rows:
             action_ratio = mean(loss_action_rows) / max(mean(loss_total_rows), 1e-9)
             if action_ratio <= 0.9:

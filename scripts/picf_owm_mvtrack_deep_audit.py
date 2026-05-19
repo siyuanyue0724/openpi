@@ -206,7 +206,10 @@ def run_static_checks() -> list[Finding]:
                 "aqr_pg_grounding_enabled: bool = False",
                 "evidence_cache_read_weight: float = 0.05",
                 "tracklet_memory_enabled: bool = True",
-                "proposal_memory_enabled: bool = True",
+                "proposal_memory_enabled: bool = False",
+                "proposal_read_weight: float = 0.0",
+                "proposal_point_bridge_weight: float = 0.0",
+                "task_owner_proposal_bias_weight: float = 0.0",
                 "aqr_same_role_support_competition_enabled: bool = True",
                 "aqr_same_role_support_competition_weight: float = 0.35",
                 'recycle_residual_norm_mode: str = "layernorm"',
@@ -220,9 +223,14 @@ def run_static_checks() -> list[Finding]:
                 "lambda_support_pred: float = 0.0",
                 "lambda_binding_consistency: float = 0.0",
                 "lambda_aqr_denoising: float = 0.0",
+            )
+            and trainer.contains(
+                "def _looks_like_legacy_blind_sam_sidecar",
+                "--allow-legacy-blind-sam-sidecar",
+                "Blind automatic SAM proposals are rejected",
             ),
             severity="fail",
-            detail="Runtime evidence branches may default on, archived local refinement must stay off, and high-risk OWM training losses must stay zero by default.",
+            detail="Tracklet evidence may default on, blind SAM proposal roots must be rejected unless explicitly reproduced as legacy, archived local refinement must stay off, and high-risk OWM training losses must stay zero by default.",
             evidence=config.refs("aqr_mapg_enabled", "tracklet_memory_enabled", "proposal_memory_enabled", "lambda_aqr_denoising")
             + training.refs("lambda_slot_jepa", "lambda_aqr_denoising"),
         )
@@ -450,7 +458,7 @@ def run_static_checks() -> list[Finding]:
             "base_address" in posterior
             and "obs_address = binding_cond @ obs_anchors.anchor_address" in posterior
             and "address_update_rate" in posterior
-            and "1.0 - recycle.clamp" in posterior
+            and ("1.0 - recycle.clamp" in posterior or "1.0 - recycle_update.clamp" in posterior)
             and "_measurement_innovation_norm(x_prior, S_prior, obs_anchors)" in posterior
             and "_innovation_risk_scalar(identity_innovation_norm)" in posterior
             and "address_update_max_rate" in posterior
