@@ -54,6 +54,32 @@ anchor probe, the queued slot-comprehensive frozen-policy validation, and then
 a guarded 30000-step co-training run.  The executable closure check is
 [`scripts/picf_latest_slot_deployment_audit.py`](/home/siyuanyue/Documents/openpi/scripts/picf_latest_slot_deployment_audit.py).
 
+2026-05-19 multimodal prototype / reconstruction-aux roadmap: use
+[`docs/PICF_AQR_OWM_MULTIMODAL_PROTOTYPE_RECON_ROADMAP_20260519.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MULTIMODAL_PROTOTYPE_RECON_ROADMAP_20260519.md)
+as the canonical handoff note for the two deferred upgrades after latest-slot
+closure. The strict decision is:
+
+```text
+MetaSlot-style VQ/prototypes:
+  do not copy hard visual VQ posterior truth.
+  if needed, implement a multimodal prototype bank only as birth/proposal/
+  dedup prior that still passes through AQR support competition, owner
+  transport, and posterior file gates.
+
+Reconstruction decoder:
+  do not add full RGB/image reconstruction as action-time truth.
+  if needed, add masked frozen-feature/object-explanation reconstruction aux,
+  budgeted and training-only.
+```
+
+Current PICF already has useful cross-modal/future auxiliaries: physical and
+semantic future caches predict `visual_latent`, `visual_real`, `tactile_real`,
+and `point_real`; guarded `slot_jepa`, `support_pred`, `vcap`, and
+`object_explanation` hooks also exist. These are not a full per-slot masked
+object decoder: they help dynamics and cross-modal prediction, but do not by
+themselves prove that slot `j` owns object token `i`, and they must never
+overwrite posterior truth.
+
 2026-05-19 posterior continuity metric update: use
 [`temp/audits_20260519/posterior_file_continuity_metric_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/posterior_file_continuity_metric_followthrough.md)
 for the current object-file continuity audit. The important correction is that
