@@ -299,8 +299,14 @@ def run_audit() -> list[AuditResult]:
     config_text = (repo_root / "src/openpi/picf/core/config.py").read_text(encoding="utf-8")
     pipeline_text = (repo_root / "src/openpi/picf/core/pipeline.py").read_text(encoding="utf-8")
     train_text = (repo_root / "scripts/picf_core_train.py").read_text(encoding="utf-8")
-    owner_probe_script = repo_root / "run_a7_object_owner_only_pull_probe_1000_20260519.sh"
-    owner_probe_text = owner_probe_script.read_text(encoding="utf-8") if owner_probe_script.exists() else ""
+    owner_probe_scripts = (
+        repo_root / "run_a7_object_owner_only_pull_probe_1000_20260519.sh",
+        repo_root / "run_a7_conditional_slot_initializer_anchor1000_20260519.sh",
+        repo_root / "run_a7_slot_quality_selector_anchor1000_20260519.sh",
+    )
+    owner_probe_text = "\n".join(
+        path.read_text(encoding="utf-8") for path in owner_probe_scripts if path.exists()
+    )
 
     results.append(
         AuditResult(
