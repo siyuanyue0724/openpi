@@ -39,6 +39,21 @@ non-trainable PaliGemma, zero action losses, and PICF slot/router/posterior/OEML
 modules trainable. The read-only classifier is
 [`scripts/picf_run_contract_audit.py`](/home/siyuanyue/Documents/openpi/scripts/picf_run_contract_audit.py).
 
+2026-05-19 latest-slot full deployment closure: use
+[`temp/audits_20260519/latest_slot_full_deployment_closure_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/latest_slot_full_deployment_closure_20260519.md)
+for the current strict verdict against recent slot / object-binding /
+visuo-tactile methods.  The conclusion is intentionally two-part.  Code-level
+deployment is complete for the PICF belief-filter-compatible mechanisms:
+slot-axis competition, explicit background residual, QASA-style slot quality,
+MetaSlot-style duplicate/dynamic active-file gating without hard VQ posterior
+truth, Object-Binding-style pairwise/quadratic binding subspace, persistent
+binding-signature memory, SlotVLA-style optional proposal/tracklet sidecar
+measurements, tactile-to-object owner routing, and precision-fused posterior
+owner transport.  Behavior-level acceptance is still pending the active A7
+anchor probe, the queued slot-comprehensive frozen-policy validation, and then
+a guarded 30000-step co-training run.  The executable closure check is
+[`scripts/picf_latest_slot_deployment_audit.py`](/home/siyuanyue/Documents/openpi/scripts/picf_latest_slot_deployment_audit.py).
+
 2026-05-19 posterior continuity metric update: use
 [`temp/audits_20260519/posterior_file_continuity_metric_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/posterior_file_continuity_metric_followthrough.md)
 for the current object-file continuity audit. The important correction is that
