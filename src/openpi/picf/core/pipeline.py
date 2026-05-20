@@ -1220,6 +1220,8 @@ class PicfFullCore(nn.Module):
             self.mapg_task_visual_proj = nn.Linear(hidden_dim, hidden_dim)
             self.mapg_to_control_proj = nn.Linear(hidden_dim, semantic_trunk_dim)
             self.mapg_control_role_embedding = nn.Embedding(1, semantic_trunk_dim)
+            self.mapg_control_state_embedding = nn.Embedding(3, semantic_trunk_dim)
+            nn.init.zeros_(self.mapg_control_state_embedding.weight)
             obs_gate_init = float(self.config.aqr_obs_gate_init) if bool(self.config.aqr_mapg_enabled) else float(self.config.mapg_obs_gate_init)
             task_gate_init = float(self.config.aqr_task_gate_init) if bool(self.config.aqr_mapg_enabled) else float(self.config.mapg_task_gate_init)
             posterior_gate_init = float(self.config.aqr_posterior_gate_init) if bool(self.config.aqr_mapg_enabled) else float(self.config.mapg_posterior_gate_init)
@@ -1240,6 +1242,7 @@ class PicfFullCore(nn.Module):
             self.mapg_task_visual_proj = None
             self.mapg_to_control_proj = None
             self.mapg_control_role_embedding = None
+            self.mapg_control_state_embedding = None
             self.mapg_obs_gate_logit = None
             self.mapg_task_gate_logit = None
             self.mapg_posterior_gate_logit = None
@@ -2478,10 +2481,18 @@ class PicfFullCore(nn.Module):
         eps = float(self.config.epsilon_a)
 
         evidence = torch.zeros((row_count,), device=self.device, dtype=self.dtype)
+        owner_evidence = torch.zeros_like(evidence)
         evidence = torch.maximum(evidence, self._row_strength_vector(object_candidate_row_strength, row_count=row_count))
         evidence = torch.maximum(evidence, self._row_strength_vector(object_candidate_assignment, row_count=row_count, reduce="sum"))
-        evidence = torch.maximum(evidence, self._row_strength_vector(object_candidate_owner_assignment, row_count=row_count, reduce="sum"))
-        evidence = torch.maximum(evidence, self._row_strength_vector(object_candidate_owner_point_priors, row_count=row_count, reduce="max"))
+        owner_evidence = torch.maximum(
+            owner_evidence,
+            self._row_strength_vector(object_candidate_owner_assignment, row_count=row_count, reduce="sum"),
+        )
+        owner_evidence = torch.maximum(
+            owner_evidence,
+            self._row_strength_vector(object_candidate_owner_point_priors, row_count=row_count, reduce="max"),
+        )
+        evidence = torch.maximum(evidence, owner_evidence)
         evidence = torch.maximum(evidence, self._row_strength_vector(proposal_anchor_seed_strength, row_count=row_count))
         evidence = torch.maximum(evidence, self._row_strength_vector(proposal_anchor_seed_assignment, row_count=row_count, reduce="sum"))
         evidence = torch.maximum(evidence, self._row_strength_vector(task_owner_anchor_score, row_count=row_count))
@@ -2526,6 +2537,7 @@ class PicfFullCore(nn.Module):
         if not bool(eligible.any().item()):
             eligible = query_types_t == 0
         evidence = torch.where(eligible, evidence, torch.zeros_like(evidence))
+        owner_evidence = torch.where(eligible, owner_evidence, torch.zeros_like(owner_evidence))
         duplicate = torch.where(eligible, duplicate, torch.ones_like(duplicate))
 
         smooth = min(max(float(getattr(self.config, "aqr_slot_quality_target_smoothing", 0.02)), 0.0), 0.49)
@@ -2573,7 +2585,10 @@ class PicfFullCore(nn.Module):
         no_object_prob = torch.sigmoid(logits[:, 1])
         duplicate_prob = torch.sigmoid(logits[:, 2])
         floor = min(max(float(getattr(self.config, "aqr_slot_quality_floor", 0.05)), 0.0), 1.0)
+        owner_floor = min(max(float(getattr(self.config, "aqr_slot_quality_owner_active_floor", 0.55)), 0.0), 1.0)
         active_weight = torch.clamp(object_quality * (1.0 - no_object_prob) * (1.0 - duplicate_prob), min=0.0, max=1.0)
+        if owner_floor > 0.0:
+            active_weight = torch.maximum(active_weight, torch.clamp(owner_floor * owner_evidence, min=0.0, max=1.0))
         active_weight = torch.where(eligible, torch.clamp(active_weight, min=floor, max=1.0), torch.zeros_like(active_weight))
         context_scale = min(max(float(getattr(self.config, "aqr_slot_quality_context_scale", 0.25)), 0.0), 1.0)
         context_weight = torch.clamp(context_scale * object_quality * (1.0 - duplicate_prob), min=0.0, max=1.0)
@@ -2770,6 +2785,9 @@ class PicfFullCore(nn.Module):
         min_conf = max(float(getattr(self.config, "aqr_context_slot_min_confidence", 0.05)), 0.0)
         min_score = max(float(getattr(self.config, "aqr_context_slot_min_score", 0.01)), 0.0)
         context_candidate = (active < 0.5) & (confidence >= min_conf) & (object_score >= min_score)
+        support_overlap = self._support_overlap_matrix(priors)
+        if support_overlap is not None and support_overlap.shape[0] != count:
+            support_overlap = None
 
         overlap = self._object_core_overlap_matrix(
             priors,
@@ -2804,7 +2822,91 @@ class PicfFullCore(nn.Module):
                 1.0,
             )
             context_candidate = context_candidate & (max_to_active < duplicate_threshold)
+            if (
+                bool(getattr(self.config, "aqr_context_slot_active_support_overlap_enabled", True))
+                and support_overlap is not None
+            ):
+                active_support_threshold = min(
+                    max(
+                        float(
+                            getattr(
+                                self.config,
+                                "aqr_context_slot_active_support_overlap_threshold",
+                                getattr(self.config, "aqr_context_slot_self_support_overlap_threshold", 0.70),
+                            )
+                        ),
+                        0.0,
+                    ),
+                    1.0,
+                )
+                max_support_to_active = support_overlap.to(device=self.device, dtype=self.dtype)[:, active_bool].max(dim=-1).values
+                context_candidate = context_candidate & (max_support_to_active < active_support_threshold)
+        if bool(getattr(self.config, "aqr_context_slot_deduplicate_enabled", True)) and bool(context_candidate.any().item()):
+            context_keep = torch.zeros_like(context_candidate)
+            roles_t = roles.to(device=self.device, dtype=torch.long).reshape(-1)[:count]
+            if roles_t.numel() < count:
+                roles_t = fn.pad(roles_t, (0, count - int(roles_t.numel())), value=1)
+            context_threshold = min(
+                max(
+                    float(
+                        getattr(
+                            self.config,
+                            "aqr_context_slot_self_overlap_threshold",
+                            getattr(self.config, "aqr_context_slot_duplicate_overlap_threshold", 0.75),
+                        )
+                    ),
+                    0.0,
+                ),
+                1.0,
+            )
+            max_per_role = int(getattr(self.config, "aqr_context_slot_max_per_role", 8))
+            support_dedup_enabled = bool(
+                getattr(self.config, "aqr_context_slot_self_support_overlap_enabled", True)
+            )
+            support_threshold = min(
+                max(
+                    float(
+                        getattr(
+                            self.config,
+                            "aqr_context_slot_self_support_overlap_threshold",
+                            context_threshold,
+                        )
+                    ),
+                    0.0,
+                ),
+                1.0,
+            )
+            context_score = torch.clamp(object_score, min=0.0)
+            for role_value in tuple(torch.unique(roles_t[context_candidate], sorted=True).tolist()):
+                role_mask = context_candidate & (roles_t == int(role_value))
+                role_indices = torch.nonzero(role_mask, as_tuple=False).squeeze(-1)
+                if role_indices.numel() == 0:
+                    continue
+                local_score = context_score.index_select(0, role_indices)
+                order = torch.argsort(local_score, descending=True)
+                kept: list[int] = []
+                for local_rank in order.tolist():
+                    if max_per_role > 0 and len(kept) >= max_per_role:
+                        break
+                    idx = int(role_indices[int(local_rank)].item())
+                    if kept:
+                        kept_t = torch.as_tensor(kept, device=self.device, dtype=torch.long)
+                        max_core_overlap = float(duplicate_overlap[idx, kept_t].max().item())
+                        max_support_overlap = 0.0
+                        if support_dedup_enabled and support_overlap is not None:
+                            max_support_overlap = float(
+                                support_overlap.to(device=self.device, dtype=self.dtype)[idx, kept_t].max().item()
+                            )
+                        if max_core_overlap > context_threshold or max_support_overlap > support_threshold:
+                            continue
+                    kept.append(idx)
+                if kept:
+                    context_keep[torch.as_tensor(kept, device=self.device, dtype=torch.long)] = True
+            context_candidate = context_keep
         context_scale = min(max(float(getattr(self.config, "aqr_context_slot_weight", 0.15)), 0.0), 1.0)
+        context_quality_gate_enabled = bool(getattr(self.config, "aqr_context_slot_quality_gate_enabled", False))
+        if not context_quality_gate_enabled:
+            quality_context = torch.ones_like(quality_context)
         context = context_candidate.to(dtype=self.dtype) * context_scale * quality_context
         return torch.clamp(torch.maximum(active, context), min=0.0, max=1.0)
 
@@ -3740,6 +3842,48 @@ class PicfFullCore(nn.Module):
         out = torch.zeros((int(roles.numel()), int(point_count)), device=self.device, dtype=self.dtype)
         out.index_copy_(0, rows, bias_row[None, :].expand(int(rows.numel()), -1))
         return out
+
+    def _object_candidate_owner_geometry(
+        self,
+        *,
+        token_field: PicfTokenFieldState,
+        owner_point_priors: torch.Tensor | None,
+        row_count: int,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor] | None:
+        """Return accepted owner-candidate geometry as a soft measurement.
+
+        Proposal/contact masks are not labels, but once they pass the
+        object-candidate background/row-capacity assignment they are valid
+        measurement hypotheses.  Their point-mask center must therefore be
+        available to graph active selection and posterior owner transport
+        directly, instead of only being diluted through later attention priors.
+        """
+
+        if owner_point_priors is None or owner_point_priors.numel() == 0 or int(row_count) <= 0:
+            return None
+        point_positions = self._world_point_positions(token_field)
+        if point_positions.numel() == 0 or owner_point_priors.shape[-1] != point_positions.shape[0]:
+            return None
+        priors = torch.clamp(owner_point_priors.to(device=self.device, dtype=self.dtype), min=0.0)
+        if priors.shape[0] < int(row_count):
+            pad = torch.zeros(
+                (int(row_count) - int(priors.shape[0]), int(priors.shape[-1])),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            priors = torch.cat([priors, pad], dim=0)
+        priors = priors[: int(row_count)]
+        valid = _row_has_mass(priors, eps=self.config.epsilon_a)
+        if not bool(valid.any().item()):
+            return None
+        priors_norm = torch.where(
+            valid[:, None],
+            _normalize_rows(priors, eps=self.config.epsilon_a),
+            torch.zeros_like(priors),
+        )
+        owner_x = priors_norm @ point_positions.to(device=self.device, dtype=self.dtype)
+        owner_S = _weighted_cov(point_positions.to(device=self.device, dtype=self.dtype), priors_norm, owner_x, self.config)
+        return owner_x, owner_S, valid
 
     def _task_owner_anchor_score(
         self,
@@ -5070,6 +5214,8 @@ class PicfFullCore(nn.Module):
         object_candidate_assignment = None
         object_candidate_owner_assignment = None
         object_candidate_owner_point_priors = None
+        object_candidate_owner_x = None
+        object_candidate_owner_S = None
         object_candidate_coverage = None
         object_candidate_background = None
         object_candidate_duplicate_overlap = None
@@ -5599,6 +5745,33 @@ class PicfFullCore(nn.Module):
             anchor_x = posterior_priors @ previous.posterior.x.to(device=self.device, dtype=self.dtype)
             anchor_S = torch.eye(3, device=self.device, dtype=self.dtype)[None, :, :].expand(anchor_count, -1, -1).clone()
             geometry_valid = _row_has_mass(posterior_priors, eps=self.config.epsilon_a)
+        owner_geometry = self._object_candidate_owner_geometry(
+            token_field=token_field,
+            owner_point_priors=object_candidate_owner_point_priors,
+            row_count=anchor_count,
+        )
+        if owner_geometry is not None:
+            object_candidate_owner_x, object_candidate_owner_S, owner_geometry_valid = owner_geometry
+            owner_mix = min(
+                max(float(getattr(self.config, "object_candidate_owner_geometry_mix", 0.90)), 0.0),
+                1.0,
+            )
+            if anchor_x is None or anchor_S is None:
+                anchor_x = object_candidate_owner_x
+                anchor_S = object_candidate_owner_S
+                geometry_valid = owner_geometry_valid
+            elif owner_mix > 0.0:
+                anchor_x = torch.where(
+                    owner_geometry_valid[:, None],
+                    ((1.0 - owner_mix) * anchor_x) + (owner_mix * object_candidate_owner_x),
+                    anchor_x,
+                )
+                anchor_S = torch.where(
+                    owner_geometry_valid[:, None, None],
+                    ((1.0 - owner_mix) * anchor_S) + (owner_mix * object_candidate_owner_S),
+                    anchor_S,
+                )
+                geometry_valid = geometry_valid | owner_geometry_valid
         slot_quality = self._build_slot_quality_state(
             anchor_tokens=anchor_tokens,
             roles=roles,
@@ -5706,6 +5879,8 @@ class PicfFullCore(nn.Module):
             object_candidate_assignment=object_candidate_assignment,
             object_candidate_owner_assignment=object_candidate_owner_assignment,
             object_candidate_owner_point_priors=object_candidate_owner_point_priors,
+            object_candidate_owner_x=object_candidate_owner_x,
+            object_candidate_owner_S=object_candidate_owner_S,
             object_candidate_coverage=object_candidate_coverage,
             object_candidate_background=object_candidate_background,
             object_candidate_duplicate_overlap=object_candidate_duplicate_overlap,
@@ -5763,6 +5938,25 @@ class PicfFullCore(nn.Module):
         if points.numel() == 0 or mask.shape[-1] != points.shape[0]:
             return None
         m = torch.clamp(mask.to(device=self.device, dtype=self.dtype), min=0.0)
+        core_mass = min(max(float(getattr(self.config, "object_explanation_point_core_mass", 1.0)), 0.0), 1.0)
+        core_topk = int(getattr(self.config, "object_explanation_point_core_topk", 0))
+        if (core_mass < 1.0 or core_topk > 0) and m.ndim == 2 and m.shape[-1] > 0:
+            k = m.shape[-1] if core_topk <= 0 else min(core_topk, int(m.shape[-1]))
+            values, indices = torch.topk(m, k=k, dim=-1, largest=True, sorted=True)
+            if core_mass < 1.0:
+                target_mass = torch.clamp(m.sum(dim=-1, keepdim=True) * core_mass, min=self.config.epsilon_a)
+                cumulative = torch.cumsum(values, dim=-1)
+                prev_cumulative = torch.cat([torch.zeros_like(cumulative[:, :1]), cumulative[:, :-1]], dim=-1)
+                keep = prev_cumulative < target_mass
+                keep = keep & (values > self.config.epsilon_a)
+            else:
+                keep = values > self.config.epsilon_a
+            core = torch.zeros_like(m)
+            core.scatter_(dim=-1, index=indices, src=values * keep.to(dtype=values.dtype))
+            # If a row had only numerical dust, keep the original zero-ish row;
+            # otherwise use the high-confidence object core for compactness.
+            has_core = core.sum(dim=-1, keepdim=True) > self.config.epsilon_a
+            m = torch.where(has_core, core, m)
         x = points.to(device=self.device, dtype=self.dtype)
         mass = torch.clamp(m.sum(dim=-1, keepdim=True), min=self.config.epsilon_a)
         center = (m @ x) / mass
@@ -6896,36 +7090,116 @@ class PicfFullCore(nn.Module):
                 and anchor_graph.anchor_downstream_weight.numel() == graph_tokens.shape[0]
             ):
                 graph_weight = torch.clamp(
-                    anchor_graph.anchor_downstream_weight.to(device=self.device, dtype=self.dtype).reshape(-1, 1),
+                    anchor_graph.anchor_downstream_weight.to(device=self.device, dtype=self.dtype).reshape(-1),
                     min=0.0,
                     max=1.0,
                 )
             elif anchor_graph.anchor_active is not None and anchor_graph.anchor_active.numel() == graph_tokens.shape[0]:
                 graph_weight = torch.clamp(
-                    anchor_graph.anchor_active.to(device=self.device, dtype=self.dtype).reshape(-1, 1),
+                    anchor_graph.anchor_active.to(device=self.device, dtype=self.dtype).reshape(-1),
                     min=0.0,
                     max=1.0,
                 )
             if graph_weight is not None:
-                # Active object anchors are full action evidence, context
-                # anchors are low-weight scene evidence, and reserve/dustbin
-                # anchors remain diagnostics/capacity rather than object
-                # prefix tokens. This gates the graph prefix only; typed
-                # visual/semantic/temporal memories remain readable upstream.
-                graph_tokens = graph_tokens * graph_weight
+                if (
+                    bool(getattr(self.config, "aqr_control_graph_state_embedding_enabled", True))
+                    and self.mapg_control_state_embedding is not None
+                ):
+                    state_ids = torch.zeros_like(graph_weight, dtype=torch.long)
+                    state_ids = torch.where(
+                        graph_weight >= 0.5,
+                        torch.full_like(state_ids, 2),
+                        torch.where(
+                            graph_weight > self.config.epsilon_a,
+                            torch.full_like(state_ids, 1),
+                            state_ids,
+                        ),
+                    )
+                    graph_tokens = graph_tokens + self.mapg_control_state_embedding(state_ids)
+                if bool(getattr(self.config, "aqr_control_graph_token_scaling_enabled", False)):
+                    # Legacy behavior, kept only as an explicit opt-in.  The
+                    # maintained path below keeps slot content intact and
+                    # expresses reliability as attention bias.
+                    graph_tokens = graph_tokens * graph_weight[:, None]
             graph_tokens = mapg_control_gate * graph_tokens
         conditioned_control_queries = self.control_query_tokens.to(device=self.device, dtype=self.dtype)
         prefix_parts = [base_tokens, task_tokens]
+        graph_start = int(base_tokens.shape[0] + task_tokens.shape[0])
+        graph_weight_for_bias = None
         if graph_tokens is not None:
             prefix_parts.append(graph_tokens)
+            if (
+                anchor_graph is not None
+                and anchor_graph.anchor_downstream_weight is not None
+                and anchor_graph.anchor_downstream_weight.numel() == graph_tokens.shape[0]
+            ):
+                graph_weight_for_bias = torch.clamp(
+                    anchor_graph.anchor_downstream_weight.to(device=self.device, dtype=self.dtype).reshape(-1),
+                    min=0.0,
+                    max=1.0,
+                )
+            elif anchor_graph is not None and anchor_graph.anchor_active is not None and anchor_graph.anchor_active.numel() == graph_tokens.shape[0]:
+                graph_weight_for_bias = torch.clamp(
+                    anchor_graph.anchor_active.to(device=self.device, dtype=self.dtype).reshape(-1),
+                    min=0.0,
+                    max=1.0,
+                )
         prefix_parts.append(_add_role_embedding(conditioned_control_queries, self.control_role_embedding, 7))
         control_prefix = torch.cat(prefix_parts, dim=0)
-        control_tokens = self.control_world(control_prefix[None, :])[0]
+        control_attn_bias = None
+        graph_bias = None
+        if (
+            bool(getattr(self.config, "aqr_control_graph_attention_bias_enabled", True))
+            and graph_tokens is not None
+            and graph_weight_for_bias is not None
+            and graph_weight_for_bias.numel() == graph_tokens.shape[0]
+        ):
+            bias_min = max(float(getattr(self.config, "aqr_control_graph_bias_min", 1.0e-4)), self.config.epsilon_a)
+            graph_bias = torch.log(torch.clamp(graph_weight_for_bias, min=bias_min, max=1.0))
+            graph_end = graph_start + int(graph_tokens.shape[0])
+            control_attn_bias = torch.zeros(
+                (int(control_prefix.shape[0]), int(control_prefix.shape[0])),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            control_attn_bias[:, graph_start:graph_end] = graph_bias[None, :]
+        if control_attn_bias is not None:
+            control_tokens = self.control_world(control_prefix[None, :], attn_bias=control_attn_bias)[0]
+        else:
+            control_tokens = self.control_world(control_prefix[None, :])[0]
         query_state = _mean_query_state(control_tokens, num_query_tokens=self.control_query_tokens.shape[0])
         pi_queries = self.pi_prefix_query_tokens.to(device=self.device, dtype=self.dtype)[None, :]
-        pi_prefix_tokens, _ = self.pi_prefix_reader(pi_queries, control_tokens[None, :])
+        pi_reader_bias = None
+        if graph_bias is not None and graph_tokens is not None:
+            graph_end = graph_start + int(graph_tokens.shape[0])
+            pi_reader_bias = torch.zeros(
+                (int(pi_queries.shape[1]), int(control_tokens.shape[0])),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            pi_reader_bias[:, graph_start:graph_end] = graph_bias[None, :]
+        if pi_reader_bias is not None:
+            pi_prefix_tokens, _ = self.pi_prefix_reader(pi_queries, control_tokens[None, :], attn_bias=pi_reader_bias)
+        else:
+            pi_prefix_tokens, _ = self.pi_prefix_reader(pi_queries, control_tokens[None, :])
         future_queries = self.predictive_query_tokens.to(device=self.device, dtype=self.dtype)[None, :]
-        future_condition_tokens, _ = self.future_condition_reader(future_queries, control_tokens[None, :])
+        future_reader_bias = None
+        if graph_bias is not None and graph_tokens is not None:
+            graph_end = graph_start + int(graph_tokens.shape[0])
+            future_reader_bias = torch.zeros(
+                (int(future_queries.shape[1]), int(control_tokens.shape[0])),
+                device=self.device,
+                dtype=self.dtype,
+            )
+            future_reader_bias[:, graph_start:graph_end] = graph_bias[None, :]
+        if future_reader_bias is not None:
+            future_condition_tokens, _ = self.future_condition_reader(
+                future_queries,
+                control_tokens[None, :],
+                attn_bias=future_reader_bias,
+            )
+        else:
+            future_condition_tokens, _ = self.future_condition_reader(future_queries, control_tokens[None, :])
         return PicfConditionedControlState(
             base_tokens=base_tokens,
             task_tokens=task_tokens,
@@ -9133,6 +9407,41 @@ class PicfFullCore(nn.Module):
             graph_S = anchor_graph.anchor_S.to(device=self.device, dtype=self.dtype)[:graph_count]
         else:
             graph_S = torch.eye(3, device=self.device, dtype=self.dtype)[None, :, :].expand(graph_count, -1, -1).clone()
+        if (
+            anchor_graph.object_candidate_owner_x is not None
+            and anchor_graph.object_candidate_owner_x.numel() > 0
+            and anchor_graph.object_candidate_owner_x.shape[0] >= graph_count
+        ):
+            owner_geom_x = anchor_graph.object_candidate_owner_x.to(device=self.device, dtype=self.dtype)[:graph_count, :3]
+            owner_geom_valid = (
+                anchor_graph.object_candidate_owner_point_priors is not None
+                and anchor_graph.object_candidate_owner_point_priors.numel() > 0
+                and anchor_graph.object_candidate_owner_point_priors.shape[0] >= graph_count
+            )
+            if owner_geom_valid:
+                owner_valid = _row_has_mass(
+                    anchor_graph.object_candidate_owner_point_priors.to(device=self.device, dtype=self.dtype)[:graph_count],
+                    eps=self.config.epsilon_a,
+                )
+            else:
+                owner_valid = torch.ones((graph_count,), device=self.device, dtype=torch.bool)
+            mix = min(
+                max(float(getattr(self.config, "posterior_owner_transport_candidate_geometry_mix", 1.0)), 0.0),
+                1.0,
+            )
+            if mix > 0.0:
+                graph_x = torch.where(owner_valid[:, None], ((1.0 - mix) * graph_x) + (mix * owner_geom_x), graph_x)
+                if (
+                    anchor_graph.object_candidate_owner_S is not None
+                    and anchor_graph.object_candidate_owner_S.numel() > 0
+                    and anchor_graph.object_candidate_owner_S.shape[0] >= graph_count
+                ):
+                    owner_geom_S = anchor_graph.object_candidate_owner_S.to(device=self.device, dtype=self.dtype)[:graph_count]
+                    graph_S = torch.where(
+                        owner_valid[:, None, None],
+                        ((1.0 - mix) * graph_S) + (mix * owner_geom_S),
+                        graph_S,
+                    )
 
         row_strength = torch.zeros((graph_count,), device=self.device, dtype=self.dtype)
 
@@ -9233,18 +9542,94 @@ class PicfFullCore(nn.Module):
         assignment_floor = min(max(float(getattr(self.config, "posterior_owner_transport_assignment_floor", 0.50)), 0.0), 1.0)
         reliability_floor = min(max(float(getattr(self.config, "posterior_owner_transport_reliability_floor", 0.50)), 0.0), 1.0)
         max_rate = min(max(float(getattr(self.config, "posterior_owner_transport_max_rate", 0.85)), 0.0), 1.0)
-        confidence = torch.clamp(post_owner_mass, min=0.0, max=1.0)
         inactive_prior = min(
             max(float(getattr(self.config, "posterior_owner_transport_inactive_prior", 0.35)), 0.0),
             1.0,
         )
         activity_prior = inactive_prior + ((1.0 - inactive_prior) * torch.clamp(active_gate, min=0.0, max=1.0))
-        confidence = confidence * role_gate * activity_prior * (1.0 - demoted)
-        confidence = confidence * (assignment_floor + ((1.0 - assignment_floor) * assignment_conf))
-        confidence = confidence * (reliability_floor + ((1.0 - reliability_floor) * owner_rel))
+        slot_reliability_gate = role_gate * activity_prior * (1.0 - demoted)
+        slot_reliability_gate = slot_reliability_gate * (
+            assignment_floor + ((1.0 - assignment_floor) * assignment_conf)
+        )
+        slot_reliability_gate = slot_reliability_gate * (
+            reliability_floor + ((1.0 - reliability_floor) * owner_rel)
+        )
+        confidence = torch.clamp(post_owner_mass, min=0.0, max=1.0) * slot_reliability_gate
         confidence = torch.where(post_owner_mass >= min_mass, confidence, torch.zeros_like(confidence))
 
         max_per_role = max(int(getattr(self.config, "posterior_owner_transport_max_per_role", 1)), 0)
+        if bool(getattr(self.config, "posterior_owner_transport_direct_candidate_assignment", True)):
+            direct_min_score = max(
+                float(getattr(self.config, "posterior_owner_transport_direct_candidate_min_score", min_mass)),
+                0.0,
+            )
+            slot_graph_weight = torch.clamp(binding_support.to(device=self.device, dtype=self.dtype), min=0.0) @ obs_owner_weight
+            slot_graph_score = torch.clamp(slot_graph_weight, min=0.0, max=1.0)
+            slot_graph_score = slot_graph_score * slot_reliability_gate[:, None]
+            slot_graph_score = torch.where(graph_role_mask[None, :], slot_graph_score, torch.zeros_like(slot_graph_score))
+            direct_confidence = torch.zeros_like(confidence)
+            direct_mass = torch.zeros_like(post_owner_mass)
+            direct_role_has_assignment = torch.zeros_like(confidence, dtype=torch.bool)
+            direct_limit = max_per_role if max_per_role > 0 else slot_count
+            selected_slots: list[int] = []
+            selected_graphs: list[int] = []
+            selected_scores: list[torch.Tensor] = []
+            for role_value in owner_roles:
+                slot_rows = torch.nonzero((roles == int(role_value)) & (slot_reliability_gate > 0.0), as_tuple=False).squeeze(-1)
+                graph_rows = torch.nonzero(
+                    (graph_roles == int(role_value))
+                    & graph_role_mask
+                    & (row_strength > self.config.epsilon_a),
+                    as_tuple=False,
+                ).squeeze(-1)
+                if slot_rows.numel() == 0 or graph_rows.numel() == 0:
+                    continue
+                local = slot_graph_score.index_select(0, slot_rows).index_select(1, graph_rows)
+                if not bool((local >= direct_min_score).any().item()):
+                    continue
+                take = min(int(direct_limit), int(slot_rows.numel()), int(graph_rows.numel()))
+                if take <= 0:
+                    continue
+                flat_values, flat_order = torch.sort(local.reshape(-1), descending=True)
+                used_slots: set[int] = set()
+                used_graphs: set[int] = set()
+                selected = 0
+                for flat_value, flat_index in zip(flat_values, flat_order):
+                    score_value = float(flat_value.item())
+                    if score_value < direct_min_score:
+                        break
+                    local_slot = int((flat_index // graph_rows.numel()).item())
+                    local_graph = int((flat_index % graph_rows.numel()).item())
+                    slot_index = int(slot_rows[local_slot].item())
+                    graph_index = int(graph_rows[local_graph].item())
+                    if slot_index in used_slots or graph_index in used_graphs:
+                        continue
+                    used_slots.add(slot_index)
+                    used_graphs.add(graph_index)
+                    selected_slots.append(slot_index)
+                    selected_graphs.append(graph_index)
+                    selected_scores.append(flat_value.to(device=self.device, dtype=self.dtype))
+                    direct_role_has_assignment[slot_rows] = True
+                    selected += 1
+                    if selected >= take:
+                        break
+            if selected_slots:
+                selected_slots_t = torch.as_tensor(selected_slots, device=self.device, dtype=torch.long)
+                selected_graphs_t = torch.as_tensor(selected_graphs, device=self.device, dtype=torch.long)
+                selected_scores_t = torch.stack(selected_scores, dim=0).to(device=self.device, dtype=self.dtype)
+                direct_confidence = direct_confidence.index_copy(0, selected_slots_t, selected_scores_t)
+                direct_mass = direct_mass.index_copy(0, selected_slots_t, selected_scores_t)
+                direct_x = post_owner_x.index_copy(0, selected_slots_t, graph_x.index_select(0, selected_graphs_t))
+                direct_S = post_owner_S.index_copy(0, selected_slots_t, graph_S.index_select(0, selected_graphs_t))
+                # When a validated graph-owner candidate exists for a role, it is
+                # the primary write-through measurement for that role.  The older
+                # obs-averaged path remains only as fallback for roles/candidates
+                # that have no direct responsibility match.
+                confidence = torch.where(direct_role_has_assignment, direct_confidence, confidence)
+                post_owner_mass = torch.where(direct_confidence > 0.0, direct_mass, post_owner_mass)
+                post_owner_x = torch.where((direct_confidence > 0.0)[:, None], direct_x, post_owner_x)
+                post_owner_S = torch.where((direct_confidence > 0.0)[:, None, None], direct_S, post_owner_S)
+
         if max_per_role > 0 and confidence.numel() > 0:
             keep = torch.zeros_like(confidence, dtype=torch.bool)
             for role_value in torch.unique(roles, sorted=True).tolist():
@@ -9658,6 +10043,7 @@ class PicfFullCore(nn.Module):
         owner_transport_confidence = torch.zeros_like(owner_transport_mass)
         owner_transport_applied_fraction = torch.zeros((), device=self.device, dtype=self.dtype)
         owner_transport_dist_to_standard = torch.zeros_like(owner_transport_mass)
+        owner_transport_dist_after_fusion = torch.zeros_like(owner_transport_mass)
         owner_transport = self._posterior_owner_transport_measurement(
             obs_anchors=obs_anchors,
             anchor_graph=anchor_graph,
@@ -9710,6 +10096,7 @@ class PicfFullCore(nn.Module):
                 x = torch.where(owner_active[:, None], fused_x, x)
                 S = torch.where(owner_active[:, None, None], fused_S, S)
                 a = torch.where(owner_active[:, None], _extent_from_cov(S, self.config), a)
+            owner_transport_dist_after_fusion = torch.linalg.norm(owner_x_aligned[: x.shape[0], :3] - x[:, :3], dim=-1)
             owner_transport_confidence = owner_conf
             owner_transport_applied_fraction = (owner_conf > self.config.epsilon_a).to(dtype=self.dtype).mean().reshape(())
             if bool(getattr(self.config, "posterior_owner_transport_activates_file", True)):
@@ -10079,6 +10466,7 @@ class PicfFullCore(nn.Module):
             owner_transport_confidence=owner_transport_confidence,
             owner_transport_applied_fraction=owner_transport_applied_fraction,
             owner_transport_dist_to_standard=owner_transport_dist_to_standard,
+            owner_transport_dist_after_fusion=owner_transport_dist_after_fusion,
         )
 
     @staticmethod
@@ -11174,6 +11562,40 @@ class PicfFullCore(nn.Module):
                             debug["aqr_context_downstream_weight_mean"] = float(downstream[context_bool].mean().item())
                         else:
                             debug["aqr_context_downstream_weight_mean"] = 0.0
+                        downstream_pair_mask = pair_mask & (downstream > self.config.epsilon_a)[:, None] & (
+                            downstream > self.config.epsilon_a
+                        )[None, :]
+                        context_pair_mask = pair_mask & context_bool[:, None] & context_bool[None, :]
+                        if bool(downstream_pair_mask.any().item()):
+                            debug["aqr_downstream_same_role_support_overlap_max"] = float(overlap[downstream_pair_mask].max().item())
+                            debug["aqr_downstream_same_role_support_overlap_mean"] = float(overlap[downstream_pair_mask].mean().item())
+                            if object_core_overlap is not None:
+                                debug["aqr_downstream_same_role_object_core_overlap_max"] = float(
+                                    object_core_overlap[downstream_pair_mask].max().item()
+                                )
+                                debug["aqr_downstream_same_role_object_core_overlap_mean"] = float(
+                                    object_core_overlap[downstream_pair_mask].mean().item()
+                                )
+                        else:
+                            debug["aqr_downstream_same_role_support_overlap_max"] = 0.0
+                            debug["aqr_downstream_same_role_support_overlap_mean"] = 0.0
+                            debug["aqr_downstream_same_role_object_core_overlap_max"] = 0.0
+                            debug["aqr_downstream_same_role_object_core_overlap_mean"] = 0.0
+                        if bool(context_pair_mask.any().item()):
+                            debug["aqr_context_same_role_support_overlap_max"] = float(overlap[context_pair_mask].max().item())
+                            debug["aqr_context_same_role_support_overlap_mean"] = float(overlap[context_pair_mask].mean().item())
+                            if object_core_overlap is not None:
+                                debug["aqr_context_same_role_object_core_overlap_max"] = float(
+                                    object_core_overlap[context_pair_mask].max().item()
+                                )
+                                debug["aqr_context_same_role_object_core_overlap_mean"] = float(
+                                    object_core_overlap[context_pair_mask].mean().item()
+                                )
+                        else:
+                            debug["aqr_context_same_role_support_overlap_max"] = 0.0
+                            debug["aqr_context_same_role_support_overlap_mean"] = 0.0
+                            debug["aqr_context_same_role_object_core_overlap_max"] = 0.0
+                            debug["aqr_context_same_role_object_core_overlap_mean"] = 0.0
                     active_pair_mask = pair_mask & active_bool[:, None] & active_bool[None, :]
                     if bool(active_pair_mask.any().item()):
                         debug["aqr_active_same_role_support_overlap_max"] = float(overlap[active_pair_mask].max().item())
@@ -11202,6 +11624,42 @@ class PicfFullCore(nn.Module):
         if observed.token_field.proposal is not None:
             debug["owm_proposal_tokens"] = float(observed.token_field.proposal.tokens.shape[0])
             debug["owm_proposal_valid_fraction"] = float(observed.token_field.proposal.valid.to(dtype=self.dtype).mean().item())
+        if (
+            observed.anchor_prior_graph is not None
+            and observed.anchor_prior_graph.object_candidate_owner_x is not None
+            and observed.anchor_prior_graph.object_candidate_owner_x.numel() > 0
+            and observed.anchor_prior_graph.anchor_x is not None
+            and observed.anchor_prior_graph.anchor_x.numel() > 0
+        ):
+            graph = observed.anchor_prior_graph
+            row_count = min(int(graph.anchor_x.shape[0]), int(graph.object_candidate_owner_x.shape[0]))
+            owner_valid = torch.ones((row_count,), device=self.device, dtype=torch.bool)
+            if (
+                graph.object_candidate_owner_point_priors is not None
+                and graph.object_candidate_owner_point_priors.numel() > 0
+                and graph.object_candidate_owner_point_priors.shape[0] >= row_count
+            ):
+                owner_valid = _row_has_mass(
+                    graph.object_candidate_owner_point_priors.to(device=self.device, dtype=self.dtype)[:row_count],
+                    eps=self.config.epsilon_a,
+                )
+            if bool(owner_valid.any().item()):
+                dist = torch.linalg.norm(
+                    graph.anchor_x.to(device=self.device, dtype=self.dtype)[:row_count, :3]
+                    - graph.object_candidate_owner_x.to(device=self.device, dtype=self.dtype)[:row_count, :3],
+                    dim=-1,
+                )
+                owner_dist = dist[owner_valid]
+                debug["object_candidate_owner_geometry_rows"] = float(owner_valid.to(dtype=self.dtype).sum().item())
+                debug["object_candidate_owner_geometry_dist_mean"] = float(owner_dist.mean().item())
+                debug["object_candidate_owner_geometry_dist_max"] = float(owner_dist.max().item())
+                if graph.anchor_active is not None and graph.anchor_active.numel() >= row_count:
+                    active_valid = owner_valid & (
+                        graph.anchor_active.to(device=self.device, dtype=self.dtype).reshape(-1)[:row_count] > 0.5
+                    )
+                    if bool(active_valid.any().item()):
+                        debug["object_candidate_owner_geometry_active_dist_mean"] = float(dist[active_valid].mean().item())
+                        debug["object_candidate_owner_geometry_active_dist_max"] = float(dist[active_valid].max().item())
         if observed.posterior.slot_address is not None:
             debug["owm_slot_address_norm_mean"] = float(torch.linalg.norm(observed.posterior.slot_address, dim=-1).mean().item())
         if observed.posterior.support_signature is not None:
@@ -11481,18 +11939,19 @@ class PicfFullCore(nn.Module):
             _debug_tensor_stats("posterior_owner_transport_mass", observed.posterior.owner_transport_mass)
             _debug_tensor_stats("posterior_owner_transport_confidence", observed.posterior.owner_transport_confidence)
             _debug_tensor_stats("posterior_owner_transport_dist_to_standard", observed.posterior.owner_transport_dist_to_standard)
+            _debug_tensor_stats("posterior_owner_transport_dist_after_fusion", observed.posterior.owner_transport_dist_after_fusion)
             if (
                 observed.posterior.owner_transport_confidence is not None
                 and observed.posterior.owner_transport_confidence.numel() > 0
-                and observed.posterior.owner_transport_dist_to_standard is not None
-                and observed.posterior.owner_transport_dist_to_standard.numel() > 0
+                and observed.posterior.owner_transport_dist_after_fusion is not None
+                and observed.posterior.owner_transport_dist_after_fusion.numel() > 0
             ):
                 owner_conf = torch.clamp(
                     observed.posterior.owner_transport_confidence.detach().to(device=self.device, dtype=self.dtype).reshape(-1),
                     min=0.0,
                     max=1.0,
                 )
-                owner_dist = observed.posterior.owner_transport_dist_to_standard.detach().to(
+                owner_dist = observed.posterior.owner_transport_dist_after_fusion.detach().to(
                     device=self.device,
                     dtype=self.dtype,
                 ).reshape(-1)
@@ -11510,6 +11969,9 @@ class PicfFullCore(nn.Module):
                         debug["posterior_owner_transport_active_dist_mean"] = float(active_dist.mean().item())
                         debug["posterior_owner_transport_active_dist_min"] = float(active_dist.min().item())
                         debug["posterior_owner_transport_active_dist_max"] = float(active_dist.max().item())
+                        debug["posterior_owner_transport_active_dist_after_fusion_mean"] = float(active_dist.mean().item())
+                        debug["posterior_owner_transport_active_dist_after_fusion_min"] = float(active_dist.min().item())
+                        debug["posterior_owner_transport_active_dist_after_fusion_max"] = float(active_dist.max().item())
             if observed.posterior.owner_transport_applied_fraction is not None:
                 debug["posterior_owner_transport_applied_fraction"] = float(
                     observed.posterior.owner_transport_applied_fraction.to(device=self.device, dtype=self.dtype).reshape(()).item()

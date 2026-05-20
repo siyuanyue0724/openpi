@@ -67,10 +67,11 @@ I11, I12, I13 and the long experiment report.  The operator-facing summary is:
 
 ```text
 Keep A7 for model-side training/diagnostics.
-Pause A5 sidecar generation; sidecar dataflow is proven but benefit is not.
+Use the clean A7 full sidecar generation as the only production data gate.
+Old A5 partial/samseed/diagnostic sidecar runs remain historical evidence only.
 Do not judge the model by action loss alone.
-The main remaining risk is rebound of object-binding health metrics after an
-initial healthy phase.
+The main remaining risk is long-run rebound of object-binding health metrics
+after an initially healthy phase.
 ```
 
 ### Current P0 Watch Metrics

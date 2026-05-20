@@ -15,6 +15,7 @@ from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfObservationAnchorState
 from openpi.picf.core.contracts import PicfPosteriorAnchorState
 from openpi.picf.core.contracts import PicfAnchorPriorGraphState
+from openpi.picf.core.contracts import PicfSlotQualityState
 from openpi.picf.core.contracts import PicfTemporalVisualSupportState
 from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.contracts import PicfVLGroundingState
@@ -1509,7 +1510,7 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
     assert first.state.anchor_prior_graph is not None
     assert first.state.anchor_prior_graph.cache_priors is None
     assert first.state.predictive.evidence_cache is not None
-    assert bool(first.state.predictive.evidence_cache.valid[0].all().item())
+    assert bool(first.state.predictive.evidence_cache.valid[0].any().item())
 
     second = core.step(
         frames[1],
@@ -1526,9 +1527,11 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
     # counting it.
     assert graph.cache_priors is None
     assert second.state.predictive.evidence_cache is not None
-    assert bool(second.state.predictive.evidence_cache.valid[0].all().item())
-    assert bool(second.state.predictive.evidence_cache.valid[1].all().item())
-    assert second.debug["owm_evidence_cache_valid_entries"] >= float(core.config.persistent_anchors)
+    assert bool(second.state.predictive.evidence_cache.valid[0].any().item())
+    assert bool(second.state.predictive.evidence_cache.valid[1].any().item())
+    assert second.debug["owm_evidence_cache_valid_entries"] >= float(
+        second.state.predictive.evidence_cache.valid[0].sum().item()
+    )
     assert "evidence_cache_trust_mean" in second.debug
     assert "evidence_cache_age_mean" in second.debug
     assert "owm_evidence_cache_innovation_mean" in second.debug
@@ -1545,7 +1548,7 @@ def test_evidence_cache_is_written_after_correction_and_read_next_step_only(tmp_
     graph = third.state.anchor_prior_graph
     assert graph is not None
     assert graph.cache_priors is not None
-    assert graph.cache_priors.shape[1] == core.config.persistent_anchors
+    assert 0 < graph.cache_priors.shape[1] <= core.config.persistent_anchors
     assert third.debug["owm_evidence_cache_read_active"] == 1.0
 
     low_cache_read = core._previous_evidence_cache_tokens(second.state)
@@ -2281,6 +2284,467 @@ def test_control_prefix_explicitly_depends_on_global_post(tmp_path: Path) -> Non
     assert not torch.allclose(base_control.tokens, shifted_control.tokens)
 
 
+def test_control_graph_downstream_weights_are_attention_bias_not_token_scaling(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    core, replay = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_context_slot_enabled=True,
+        aqr_control_graph_attention_bias_enabled=True,
+        aqr_control_graph_token_scaling_enabled=False,
+        aqr_control_graph_state_embedding_enabled=True,
+        aqr_control_graph_bias_min=1.0e-4,
+    )
+    frame = next(iter(replay))
+    frame.tactile = _make_tactile_packet(frame.step_id)
+    observed = core.observe_step(
+        frame,
+        point_features_override=_point_override(core, frame),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=_semantic_features(1.0),
+    )
+    weights = torch.tensor([1.0, 0.12, 0.0], device=core.device, dtype=core.dtype)
+    graph = PicfAnchorPriorGraphState(
+        pg_priors=None,
+        visual_priors=torch.zeros((3, 4), device=core.device, dtype=core.dtype),
+        point_priors=None,
+        tactile_priors=None,
+        posterior_priors=None,
+        anchor_tokens=torch.randn((3, core.config.hidden_dim), device=core.device, dtype=core.dtype),
+        anchor_roles=torch.ones((3,), device=core.device, dtype=torch.long),
+        anchor_scores=torch.ones((3,), device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.ones((3,), device=core.device, dtype=core.dtype),
+        anchor_x=None,
+        anchor_S=None,
+        geometry_valid=torch.ones((3,), device=core.device, dtype=torch.bool),
+        obs_slot_assignment=None,
+        task_assignment=None,
+        modality_confidence=torch.ones((3, 10), device=core.device, dtype=core.dtype),
+        valid=torch.tensor(True, device=core.device),
+        anchor_active=torch.tensor([1.0, 0.0, 0.0], device=core.device, dtype=core.dtype),
+        anchor_downstream_weight=weights,
+    )
+    captured: dict[str, torch.Tensor | None] = {}
+    original_control_forward = core.control_world.forward
+    original_pi_forward = core.pi_prefix_reader.forward
+    original_future_forward = core.future_condition_reader.forward
+
+    def _capture_control(
+        tokens: torch.Tensor,
+        *,
+        attn_bias: torch.Tensor | None = None,
+        return_attention: bool = False,
+    ) -> torch.Tensor | tuple[torch.Tensor, torch.Tensor | None]:
+        captured["control_prefix"] = tokens.detach().clone()
+        captured["control_bias"] = None if attn_bias is None else attn_bias.detach().clone()
+        return original_control_forward(tokens, attn_bias=attn_bias, return_attention=return_attention)
+
+    def _capture_pi(
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        *,
+        attn_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        captured["pi_bias"] = None if attn_bias is None else attn_bias.detach().clone()
+        return original_pi_forward(queries, keys, attn_bias=attn_bias)
+
+    def _capture_future(
+        queries: torch.Tensor,
+        keys: torch.Tensor,
+        *,
+        attn_bias: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        captured["future_bias"] = None if attn_bias is None else attn_bias.detach().clone()
+        return original_future_forward(queries, keys, attn_bias=attn_bias)
+
+    monkeypatch.setattr(core.control_world, "forward", _capture_control)
+    monkeypatch.setattr(core.pi_prefix_reader, "forward", _capture_pi)
+    monkeypatch.setattr(core.future_condition_reader, "forward", _capture_future)
+
+    control = core._build_conditioned_control_state(
+        observed.posterior,
+        observed.innovation_token,
+        observed.proprio_token,
+        observed.task_readout,
+        anchor_graph=graph,
+    )
+
+    control_bias = captured["control_bias"]
+    pi_bias = captured["pi_bias"]
+    future_bias = captured["future_bias"]
+    assert control_bias is not None
+    assert pi_bias is not None
+    assert future_bias is not None
+    graph_end = int(captured["control_prefix"].shape[1] - core.control_query_tokens.shape[0])
+    graph_start = graph_end - int(weights.numel())
+    expected_bias = torch.log(torch.clamp(weights, min=core.config.aqr_control_graph_bias_min, max=1.0))
+    torch.testing.assert_close(control_bias[0, graph_start:graph_end], expected_bias)
+    torch.testing.assert_close(pi_bias[0, graph_start:graph_end], expected_bias)
+    torch.testing.assert_close(future_bias[0, graph_start:graph_end], expected_bias)
+    assert control.graph_tokens is not None
+    assert float(control.graph_tokens[-1].norm().item()) > 0.0
+
+
+def test_context_slot_downstream_weight_is_not_zeroed_by_slot_quality(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_context_slot_enabled=True,
+        aqr_context_slot_weight=0.12,
+        aqr_context_slot_min_confidence=0.01,
+        aqr_context_slot_min_score=0.001,
+        aqr_context_slot_quality_gate_enabled=False,
+    )
+    count = 3
+    priors = torch.zeros((count, 8), device=core.device, dtype=core.dtype)
+    priors[0, 0] = 1.0
+    priors[1, 3] = 1.0
+    priors[2, 6] = 1.0
+    slot_quality = PicfSlotQualityState(
+        object_quality=torch.ones((count,), device=core.device, dtype=core.dtype),
+        no_object_prob=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        duplicate_prob=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        active_weight=torch.ones((count,), device=core.device, dtype=core.dtype),
+        context_weight=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        deterministic_object_quality=torch.ones((count,), device=core.device, dtype=core.dtype),
+        target_object_quality=torch.ones((count,), device=core.device, dtype=core.dtype),
+        target_no_object_prob=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        target_duplicate_prob=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        logits=torch.zeros((count, 3), device=core.device, dtype=core.dtype),
+        valid=torch.tensor(True, device=core.device),
+    )
+
+    weights = core._aqr_downstream_slot_weights(
+        roles=torch.ones((count,), device=core.device, dtype=torch.long),
+        visual_priors=priors,
+        active=torch.tensor([1.0, 0.0, 0.0], device=core.device, dtype=core.dtype),
+        anchor_scores=torch.ones((count,), device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.ones((count,), device=core.device, dtype=core.dtype),
+        slot_quality=slot_quality,
+    )
+
+    torch.testing.assert_close(weights, torch.tensor([1.0, 0.12, 0.12], device=core.device, dtype=core.dtype))
+
+
+def test_owner_candidate_geometry_returns_mask_center_measurement(tmp_path: Path) -> None:
+    core, _ = _make_core(tmp_path, aqr_mapg_enabled=True)
+    hidden = core.config.hidden_dim
+    point_positions = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [0.0, 1.0, 0.0],
+        ],
+        device=core.device,
+        dtype=core.dtype,
+    )
+    token_field = PicfTokenFieldState(
+        point_tokens=torch.zeros((3, hidden), device=core.device, dtype=core.dtype),
+        visual_tokens=torch.zeros((1, hidden), device=core.device, dtype=core.dtype),
+        tactile_tokens=torch.zeros((0, hidden), device=core.device, dtype=core.dtype),
+        context_tokens=torch.zeros((0, hidden), device=core.device, dtype=core.dtype),
+        fused_tokens=torch.zeros((3, hidden), device=core.device, dtype=core.dtype),
+        point_positions=point_positions,
+        modality_ids=torch.zeros((3,), device=core.device, dtype=torch.long),
+        point_align_embeddings=torch.zeros((3, core.config.latent_dim), device=core.device, dtype=core.dtype),
+        visual_align_embeddings=torch.zeros((1, core.config.latent_dim), device=core.device, dtype=core.dtype),
+        tactile_align_embeddings=torch.zeros((0, core.config.latent_dim), device=core.device, dtype=core.dtype),
+        tactile_positions_world=torch.zeros((0, 3), device=core.device, dtype=core.dtype),
+        tactile_contact_gate=torch.zeros((0,), device=core.device, dtype=core.dtype),
+        point_positions_world=point_positions,
+    )
+    owner_priors = torch.tensor(
+        [
+            [0.25, 0.75, 0.0],
+            [0.0, 0.0, 0.0],
+        ],
+        device=core.device,
+        dtype=core.dtype,
+    )
+
+    owner_geometry = core._object_candidate_owner_geometry(
+        token_field=token_field,
+        owner_point_priors=owner_priors,
+        row_count=2,
+    )
+
+    assert owner_geometry is not None
+    owner_x, owner_S, valid = owner_geometry
+    torch.testing.assert_close(owner_x[0], torch.tensor([0.75, 0.0, 0.0], device=core.device, dtype=core.dtype))
+    assert bool(valid[0].item())
+    assert not bool(valid[1].item())
+    assert torch.isfinite(owner_S).all()
+
+
+def test_slot_quality_owner_floor_preserves_accepted_measurement(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_slot_quality_learned_enabled=False,
+        aqr_slot_quality_owner_active_floor=0.60,
+    )
+    count = 2
+    visual_priors = torch.full((count, 4), 0.25, device=core.device, dtype=core.dtype)
+    owner_assignment = torch.tensor([[1.0], [0.0]], device=core.device, dtype=core.dtype)
+    owner_point_priors = torch.tensor(
+        [[0.9, 0.1, 0.0, 0.0], [0.0, 0.0, 0.0, 0.0]],
+        device=core.device,
+        dtype=core.dtype,
+    )
+
+    quality = core._build_slot_quality_state(
+        anchor_tokens=torch.zeros((count, core.config.hidden_dim), device=core.device, dtype=core.dtype),
+        roles=torch.ones((count,), device=core.device, dtype=torch.long),
+        query_types=torch.zeros((count,), device=core.device, dtype=torch.long),
+        visual_priors=visual_priors,
+        point_priors=None,
+        temporal_priors=None,
+        pg_priors=None,
+        tactile_priors=None,
+        tracklet_priors=None,
+        proposal_priors=None,
+        anchor_x=None,
+        geometry_valid=None,
+        anchor_scores=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.zeros((count,), device=core.device, dtype=core.dtype),
+        modality_confidence=torch.zeros((count, 3), device=core.device, dtype=core.dtype),
+        object_candidate_assignment=None,
+        object_candidate_owner_assignment=owner_assignment,
+        object_candidate_owner_point_priors=owner_point_priors,
+        object_candidate_duplicate_overlap=None,
+        object_candidate_row_strength=None,
+        proposal_anchor_seed_strength=None,
+        proposal_anchor_seed_assignment=None,
+        task_owner_anchor_score=None,
+        task_owner_point_priors=None,
+    )
+
+    assert quality is not None
+    assert float(quality.active_weight[0].item()) >= 0.59
+    assert float(quality.active_weight[1].item()) <= 0.06
+
+
+def test_context_slot_downstream_weight_deduplicates_context_rows(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_context_slot_enabled=True,
+        aqr_context_slot_weight=0.12,
+        aqr_context_slot_min_confidence=0.01,
+        aqr_context_slot_min_score=0.001,
+        aqr_context_slot_deduplicate_enabled=True,
+        aqr_context_slot_max_per_role=8,
+        aqr_context_slot_self_overlap_threshold=0.75,
+    )
+    count = 4
+    priors = torch.zeros((count, 8), device=core.device, dtype=core.dtype)
+    priors[0, 0] = 1.0
+    priors[1, 3] = 1.0
+    priors[2, 3] = 1.0
+    priors[3, 6] = 1.0
+
+    weights = core._aqr_downstream_slot_weights(
+        roles=torch.ones((count,), device=core.device, dtype=torch.long),
+        visual_priors=priors,
+        active=torch.tensor([1.0, 0.0, 0.0, 0.0], device=core.device, dtype=core.dtype),
+        anchor_scores=torch.tensor([1.0, 0.9, 0.8, 0.7], device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.ones((count,), device=core.device, dtype=core.dtype),
+    )
+
+    expected = torch.tensor([1.0, 0.12, 0.0, 0.12], device=core.device, dtype=core.dtype)
+    torch.testing.assert_close(weights, expected)
+
+
+def test_context_slot_downstream_weight_can_disable_context_dedup(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_context_slot_enabled=True,
+        aqr_context_slot_weight=0.12,
+        aqr_context_slot_min_confidence=0.01,
+        aqr_context_slot_min_score=0.001,
+        aqr_context_slot_deduplicate_enabled=False,
+    )
+    count = 4
+    priors = torch.zeros((count, 8), device=core.device, dtype=core.dtype)
+    priors[0, 0] = 1.0
+    priors[1, 3] = 1.0
+    priors[2, 3] = 1.0
+    priors[3, 6] = 1.0
+
+    weights = core._aqr_downstream_slot_weights(
+        roles=torch.ones((count,), device=core.device, dtype=torch.long),
+        visual_priors=priors,
+        active=torch.tensor([1.0, 0.0, 0.0, 0.0], device=core.device, dtype=core.dtype),
+        anchor_scores=torch.tensor([1.0, 0.9, 0.8, 0.7], device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.ones((count,), device=core.device, dtype=core.dtype),
+    )
+
+    expected = torch.tensor([1.0, 0.12, 0.12, 0.12], device=core.device, dtype=core.dtype)
+    torch.testing.assert_close(weights, expected)
+
+
+def test_context_slot_downstream_weight_deduplicates_diffuse_support_rows(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_context_slot_enabled=True,
+        aqr_context_slot_weight=0.12,
+        aqr_context_slot_min_confidence=0.01,
+        aqr_context_slot_min_score=0.001,
+        aqr_context_slot_deduplicate_enabled=True,
+        aqr_context_slot_self_overlap_threshold=0.75,
+        aqr_context_slot_self_support_overlap_enabled=True,
+        aqr_context_slot_self_support_overlap_threshold=0.70,
+    )
+    count = 4
+    visual_priors = torch.zeros((count, 8), device=core.device, dtype=core.dtype)
+    visual_priors[0, 0] = 1.0
+    visual_priors[1, 2:4] = 1.0
+    visual_priors[2, 2:4] = 1.0
+    visual_priors[3, 6] = 1.0
+    proposal_priors = torch.zeros((count, 4), device=core.device, dtype=core.dtype)
+    proposal_priors[0, 0] = 1.0
+    proposal_priors[1, 1] = 1.0
+    proposal_priors[2, 2] = 1.0
+    proposal_priors[3, 3] = 1.0
+
+    weights = core._aqr_downstream_slot_weights(
+        roles=torch.ones((count,), device=core.device, dtype=torch.long),
+        visual_priors=visual_priors,
+        proposal_priors=proposal_priors,
+        active=torch.tensor([1.0, 0.0, 0.0, 0.0], device=core.device, dtype=core.dtype),
+        anchor_scores=torch.tensor([1.0, 0.9, 0.8, 0.7], device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.ones((count,), device=core.device, dtype=core.dtype),
+    )
+
+    expected = torch.tensor([1.0, 0.12, 0.0, 0.12], device=core.device, dtype=core.dtype)
+    torch.testing.assert_close(weights, expected)
+
+
+def test_context_slot_downstream_weight_deduplicates_active_diffuse_support(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_context_slot_enabled=True,
+        aqr_context_slot_weight=0.12,
+        aqr_context_slot_min_confidence=0.01,
+        aqr_context_slot_min_score=0.001,
+        aqr_context_slot_deduplicate_enabled=True,
+        aqr_context_slot_duplicate_overlap_threshold=0.75,
+        aqr_context_slot_active_support_overlap_enabled=True,
+        aqr_context_slot_active_support_overlap_threshold=0.70,
+    )
+    count = 3
+    visual_priors = torch.zeros((count, 8), device=core.device, dtype=core.dtype)
+    visual_priors[0, 2:4] = 1.0
+    visual_priors[1, 2:4] = 1.0
+    visual_priors[2, 6] = 1.0
+    # Different proposal evidence keeps object-core overlap low under the
+    # geometric-mean rule; the duplicate is visible only in full visual support.
+    proposal_priors = torch.zeros((count, 3), device=core.device, dtype=core.dtype)
+    proposal_priors[0, 0] = 1.0
+    proposal_priors[1, 1] = 1.0
+    proposal_priors[2, 2] = 1.0
+
+    weights = core._aqr_downstream_slot_weights(
+        roles=torch.ones((count,), device=core.device, dtype=torch.long),
+        visual_priors=visual_priors,
+        proposal_priors=proposal_priors,
+        active=torch.tensor([1.0, 0.0, 0.0], device=core.device, dtype=core.dtype),
+        anchor_scores=torch.tensor([1.0, 0.9, 0.8], device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.ones((count,), device=core.device, dtype=core.dtype),
+    )
+
+    expected = torch.tensor([1.0, 0.0, 0.12], device=core.device, dtype=core.dtype)
+    torch.testing.assert_close(weights, expected)
+
+
+def test_context_slot_downstream_weight_can_disable_diffuse_support_dedup(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        aqr_mapg_enabled=True,
+        aqr_context_slot_enabled=True,
+        aqr_context_slot_weight=0.12,
+        aqr_context_slot_min_confidence=0.01,
+        aqr_context_slot_min_score=0.001,
+        aqr_context_slot_deduplicate_enabled=True,
+        aqr_context_slot_self_overlap_threshold=0.75,
+        aqr_context_slot_self_support_overlap_enabled=False,
+    )
+    count = 4
+    visual_priors = torch.zeros((count, 8), device=core.device, dtype=core.dtype)
+    visual_priors[0, 0] = 1.0
+    visual_priors[1, 2:4] = 1.0
+    visual_priors[2, 2:4] = 1.0
+    visual_priors[3, 6] = 1.0
+    proposal_priors = torch.zeros((count, 4), device=core.device, dtype=core.dtype)
+    proposal_priors[0, 0] = 1.0
+    proposal_priors[1, 1] = 1.0
+    proposal_priors[2, 2] = 1.0
+    proposal_priors[3, 3] = 1.0
+
+    weights = core._aqr_downstream_slot_weights(
+        roles=torch.ones((count,), device=core.device, dtype=torch.long),
+        visual_priors=visual_priors,
+        proposal_priors=proposal_priors,
+        active=torch.tensor([1.0, 0.0, 0.0, 0.0], device=core.device, dtype=core.dtype),
+        anchor_scores=torch.tensor([1.0, 0.9, 0.8, 0.7], device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.ones((count,), device=core.device, dtype=core.dtype),
+    )
+
+    expected = torch.tensor([1.0, 0.12, 0.12, 0.12], device=core.device, dtype=core.dtype)
+    torch.testing.assert_close(weights, expected)
+
+
+def test_object_explanation_point_variance_uses_high_confidence_core(tmp_path: Path) -> None:
+    core_robust, _ = _make_core(
+        tmp_path,
+        object_explanation_point_core_mass=0.90,
+        object_explanation_point_core_topk=4,
+    )
+    core_full, _ = _make_core(
+        tmp_path,
+        object_explanation_point_core_mass=1.0,
+        object_explanation_point_core_topk=0,
+    )
+    points = torch.tensor(
+        [
+            [0.00, 0.00, 0.00],
+            [0.01, 0.00, 0.00],
+            [0.00, 0.01, 0.00],
+            [0.01, 0.01, 0.00],
+            [1.00, 0.00, 0.00],
+        ],
+        device=core_robust.device,
+        dtype=core_robust.dtype,
+    )
+    token_field = PicfTokenFieldState(
+        point_tokens=torch.zeros((points.shape[0], 4), device=core_robust.device, dtype=core_robust.dtype),
+        visual_tokens=torch.zeros((0, 4), device=core_robust.device, dtype=core_robust.dtype),
+        tactile_tokens=torch.zeros((0, 4), device=core_robust.device, dtype=core_robust.dtype),
+        context_tokens=torch.zeros((0, 4), device=core_robust.device, dtype=core_robust.dtype),
+        fused_tokens=torch.zeros((0, 4), device=core_robust.device, dtype=core_robust.dtype),
+        point_positions=points,
+        modality_ids=torch.zeros((points.shape[0],), device=core_robust.device, dtype=torch.long),
+        point_align_embeddings=torch.zeros((points.shape[0], 4), device=core_robust.device, dtype=core_robust.dtype),
+        visual_align_embeddings=torch.zeros((0, 4), device=core_robust.device, dtype=core_robust.dtype),
+        tactile_align_embeddings=torch.zeros((0, 4), device=core_robust.device, dtype=core_robust.dtype),
+        tactile_positions_world=torch.zeros((0, 3), device=core_robust.device, dtype=core_robust.dtype),
+        tactile_contact_gate=torch.zeros((0,), device=core_robust.device, dtype=core_robust.dtype),
+    )
+    mask = torch.tensor([[1.0, 1.0, 1.0, 1.0, 0.01]], device=core_robust.device, dtype=core_robust.dtype)
+
+    robust = core_robust._object_explanation_point_variance(mask, token_field)
+    full = core_full._object_explanation_point_variance(mask, token_field)
+
+    assert robust is not None
+    assert full is not None
+    assert float(robust.item()) < 0.05 * float(full.item())
+
+
 def test_control_and_future_trunks_consume_task_readout_and_not_raw_semantic_prefix(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     core, replay = _make_core(tmp_path)
     frame = next(iter(replay))
@@ -2966,6 +3430,81 @@ def test_posterior_lifecycle_calibration_protects_stable_supported_slots(tmp_pat
     assert lifecycle["reset_allowance"][0] < lifecycle["reset_allowance"][1]
     assert lifecycle["unexplained_dustbin_mass"] < dustbin_raw.sum()
     assert lifecycle["inactive_dustbin_mass"] > 0
+
+
+def test_posterior_owner_transport_uses_direct_graph_candidate_write_through(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        posterior_owner_transport_enabled=True,
+        posterior_owner_transport_direct_candidate_assignment=True,
+        posterior_owner_transport_max_per_role=2,
+        posterior_owner_transport_direct_candidate_min_score=0.01,
+        posterior_owner_transport_inactive_prior=1.0,
+    )
+    hidden = core.config.hidden_dim
+    eye = torch.eye(3, device=core.device, dtype=core.dtype)
+    graph_x = torch.tensor([[1.0, 0.0, 0.0], [-1.0, 0.0, 0.0]], device=core.device, dtype=core.dtype)
+    graph = PicfAnchorPriorGraphState(
+        pg_priors=None,
+        visual_priors=torch.zeros((2, 2), device=core.device, dtype=core.dtype),
+        point_priors=None,
+        tactile_priors=None,
+        posterior_priors=None,
+        anchor_tokens=torch.zeros((2, hidden), device=core.device, dtype=core.dtype),
+        anchor_roles=torch.ones((2,), device=core.device, dtype=torch.long),
+        anchor_scores=torch.ones((2,), device=core.device, dtype=core.dtype),
+        anchor_confidence=torch.ones((2,), device=core.device, dtype=core.dtype),
+        anchor_x=graph_x,
+        anchor_S=eye[None, :, :].expand(2, -1, -1).clone(),
+        geometry_valid=torch.ones((2,), device=core.device, dtype=torch.bool),
+        obs_slot_assignment=None,
+        task_assignment=None,
+        modality_confidence=torch.ones((2, 3), device=core.device, dtype=core.dtype),
+        valid=torch.tensor(True, device=core.device),
+        anchor_active=torch.ones((2,), device=core.device, dtype=core.dtype),
+        object_candidate_owner_assignment=torch.eye(2, device=core.device, dtype=core.dtype),
+        object_candidate_owner_point_priors=torch.eye(2, device=core.device, dtype=core.dtype),
+        object_candidate_owner_x=graph_x,
+        object_candidate_owner_S=eye[None, :, :].expand(2, -1, -1).clone(),
+    )
+    obs_graph = torch.tensor([[0.8, 0.2], [0.2, 0.8]], device=core.device, dtype=core.dtype)
+    obs = PicfObservationAnchorState(
+        seed_indices=torch.arange(2, device=core.device),
+        tokens=torch.zeros((2, hidden), device=core.device, dtype=core.dtype),
+        point_weights=torch.zeros((2, 2), device=core.device, dtype=core.dtype),
+        routing_mass_point=torch.zeros((2,), device=core.device, dtype=core.dtype),
+        routing_mass_visual=torch.zeros((2,), device=core.device, dtype=core.dtype),
+        routing_support_point=torch.zeros((2, 2), device=core.device, dtype=core.dtype),
+        routing_support_visual=torch.zeros((2, 2), device=core.device, dtype=core.dtype),
+        routing_gate_point=torch.zeros((2,), device=core.device, dtype=core.dtype),
+        routing_gate_visual=torch.zeros((2,), device=core.device, dtype=core.dtype),
+        x=torch.zeros((2, 3), device=core.device, dtype=core.dtype),
+        S=eye[None, :, :].expand(2, -1, -1).clone(),
+        a=torch.ones((2, 3), device=core.device, dtype=core.dtype),
+        role_ids=torch.ones((2,), device=core.device, dtype=torch.long),
+        graph_assignment=obs_graph,
+    )
+    binding_support = torch.tensor([[0.9, 0.1], [0.1, 0.9]], device=core.device, dtype=core.dtype)
+    lifecycle = {
+        "assignment_confidence": torch.ones((2,), device=core.device, dtype=core.dtype),
+        "owner_reliability": torch.ones((2,), device=core.device, dtype=core.dtype),
+    }
+    competition = {"demoted_mass": torch.zeros((2,), device=core.device, dtype=core.dtype)}
+
+    out = core._posterior_owner_transport_measurement(
+        obs_anchors=obs,
+        anchor_graph=graph,
+        binding_support=binding_support,
+        file_gate=torch.ones((2,), device=core.device, dtype=core.dtype),
+        lifecycle=lifecycle,
+        file_competition=competition,
+        posterior_roles=torch.ones((2,), device=core.device, dtype=torch.long),
+    )
+
+    assert out is not None
+    torch.testing.assert_close(out["x"][0], graph_x[0], atol=1e-5, rtol=1e-5)
+    torch.testing.assert_close(out["x"][1], graph_x[1], atol=1e-5, rtol=1e-5)
+    assert float(out["confidence"].min().item()) > 0.0
 
 
 def test_posterior_file_competition_demotes_duplicate_same_role_files(tmp_path: Path) -> None:

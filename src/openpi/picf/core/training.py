@@ -106,6 +106,7 @@ class PicfTransitionLossConfig:
     lambda_object_explanation_background: float = 0.0
     object_explanation_active_object_only: bool = True
     object_explanation_duplicate_margin: float = 0.30
+    object_explanation_point_loss_clip: float = 8.0
     detach_action_loss_from_picf: bool = False
     mapg_siglip_tau: float = 0.07
     mapg_vicreg_var_target: float = 1.0
@@ -390,19 +391,32 @@ def _binding_consistency_loss(
             matched_current = fn.normalize(assign.t() @ current, dim=-1)
             forward = 1.0 - torch.sum(current * matched_target, dim=-1)
             backward = 1.0 - torch.sum(target * matched_current, dim=-1)
-            weight = torch.ones((slot_count,), device=reference.device, dtype=reference.dtype)
+            current_weight = torch.ones((slot_count,), device=reference.device, dtype=reference.dtype)
+            future_weight = torch.ones((slot_count,), device=reference.device, dtype=reference.dtype)
             alpha = getattr(posterior, "alpha", None)
             if alpha is not None:
                 current_alpha = alpha.to(device=reference.device, dtype=reference.dtype).reshape(-1)[:slot_count].clamp(0.0, 1.0)
-                weight = weight * current_alpha
+                current_weight = current_weight * current_alpha
             if future.posterior_support_summary is not None and future.posterior_support_summary.numel() > 0:
                 future_alpha = future.posterior_support_summary.detach().to(device=reference.device, dtype=reference.dtype)
                 if future_alpha.ndim >= 2 and future_alpha.shape[1] > 0:
-                    weight = weight * future_alpha.reshape(future_alpha.shape[0], -1)[:slot_count, 0].clamp(0.0, 1.0)
-            if bool((weight.sum() > eps).item()):
+                    future_weight = future_weight * future_alpha.reshape(future_alpha.shape[0], -1)[:slot_count, 0].clamp(0.0, 1.0)
+            has_current_weight = bool((current_weight.sum() > eps).item())
+            has_future_weight = bool((future_weight.sum() > eps).item())
+            if has_current_weight or has_future_weight:
+                forward_term = (
+                    (forward * current_weight).sum() / torch.clamp(current_weight.sum(), min=eps)
+                    if has_current_weight
+                    else forward.mean()
+                )
+                backward_term = (
+                    (backward * future_weight).sum() / torch.clamp(future_weight.sum(), min=eps)
+                    if has_future_weight
+                    else backward.mean()
+                )
                 temporal = 0.5 * (
-                    (forward * weight).sum() / torch.clamp(weight.sum(), min=eps)
-                    + (backward * weight).sum() / torch.clamp(weight.sum(), min=eps)
+                    forward_term
+                    + backward_term
                 )
             else:
                 temporal = 0.5 * (forward.mean() + backward.mean())
@@ -735,6 +749,9 @@ def _object_explanation_loss(
     feature = (feature_raw[: quality.numel()] * quality).sum() / denom if feature_raw.numel() >= quality.numel() else _zero_like(reference)
 
     point_raw = oeml.point_spatial_variance.to(device=reference.device, dtype=reference.dtype).reshape(-1)
+    point_clip = float(getattr(cfg, "object_explanation_point_loss_clip", 8.0))
+    if point_clip > 0.0 and point_raw.numel() > 0:
+        point_raw = torch.clamp(point_raw, min=0.0, max=point_clip)
     point = (point_raw[: quality.numel()] * quality).sum() / denom if point_raw.numel() >= quality.numel() else _zero_like(reference)
 
     contact_score = torch.clamp(oeml.contact_explanation_score.to(device=reference.device, dtype=reference.dtype).reshape(()), min=0.0, max=1.0)

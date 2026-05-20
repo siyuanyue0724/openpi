@@ -797,6 +797,7 @@ def _anchor_source_snapshot(
     owner_transport_mass: torch.Tensor | None = None,
     owner_transport_confidence: torch.Tensor | None = None,
     owner_transport_dist_to_standard: torch.Tensor | None = None,
+    owner_transport_dist_after_fusion: torch.Tensor | None = None,
     support_signature: torch.Tensor | None = None,
     binding_signature: torch.Tensor | None = None,
 ) -> dict[str, Any] | None:
@@ -839,6 +840,7 @@ def _anchor_source_snapshot(
         "owner_transport_mass": _aligned(owner_transport_mass, dtype=torch.float32),
         "owner_transport_confidence": _aligned(owner_transport_confidence, dtype=torch.float32),
         "owner_transport_dist_to_standard": _aligned(owner_transport_dist_to_standard, dtype=torch.float32),
+        "owner_transport_dist_after_fusion": _aligned(owner_transport_dist_after_fusion, dtype=torch.float32),
         "support_signature": _aligned_matrix(support_signature),
         "binding_signature": _aligned_matrix(binding_signature),
     }
@@ -907,6 +909,7 @@ def _anchor_overlay_snapshot_from_output(
             owner_transport_mass=getattr(posterior, "owner_transport_mass", None),
             owner_transport_confidence=getattr(posterior, "owner_transport_confidence", None),
             owner_transport_dist_to_standard=getattr(posterior, "owner_transport_dist_to_standard", None),
+            owner_transport_dist_after_fusion=getattr(posterior, "owner_transport_dist_after_fusion", None),
             support_signature=getattr(posterior, "support_signature", None) if dump_signatures else None,
             binding_signature=getattr(posterior, "binding_signature", None) if dump_signatures else None,
         )
@@ -3747,11 +3750,20 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "oeml_contact_explanation_score",
     "oeml_visual_background_mean",
     "oeml_point_background_mean",
+    "object_candidate_owner_geometry_rows",
+    "object_candidate_owner_geometry_dist_mean",
+    "object_candidate_owner_geometry_dist_max",
+    "object_candidate_owner_geometry_active_dist_mean",
+    "object_candidate_owner_geometry_active_dist_max",
     "aqr_active_anchor_count",
     "aqr_inactive_anchor_fraction",
     "aqr_context_anchor_count",
     "aqr_context_downstream_weight_mean",
     "aqr_reserve_anchor_fraction",
+    "aqr_downstream_same_role_support_overlap_max",
+    "aqr_downstream_same_role_object_core_overlap_max",
+    "aqr_context_same_role_support_overlap_max",
+    "aqr_context_same_role_object_core_overlap_max",
     "aqr_active_same_role_support_overlap_max",
     "aqr_active_same_role_support_overlap_mean",
     "aqr_active_same_role_object_core_overlap_max",
@@ -3867,12 +3879,17 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "posterior_owner_transport_confidence_max",
     "posterior_owner_transport_dist_to_standard_mean",
     "posterior_owner_transport_dist_to_standard_max",
+    "posterior_owner_transport_dist_after_fusion_mean",
+    "posterior_owner_transport_dist_after_fusion_max",
     "posterior_owner_transport_active_count",
     "posterior_owner_transport_active_confidence_mean",
     "posterior_owner_transport_active_confidence_max",
     "posterior_owner_transport_active_dist_mean",
     "posterior_owner_transport_active_dist_min",
     "posterior_owner_transport_active_dist_max",
+    "posterior_owner_transport_active_dist_after_fusion_mean",
+    "posterior_owner_transport_active_dist_after_fusion_min",
+    "posterior_owner_transport_active_dist_after_fusion_max",
     "posterior_owner_transport_applied_fraction",
     "posterior_owner_active_gate_enabled",
     "posterior_owner_active_score_mean",
@@ -6080,6 +6097,78 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 _SPEC_DEFAULTS.aqr_context_slot_duplicate_overlap_threshold,
             )
         ),
+        aqr_context_slot_deduplicate_enabled=bool(
+            _arg_or_default(
+                "aqr_context_slot_deduplicate_enabled",
+                _SPEC_DEFAULTS.aqr_context_slot_deduplicate_enabled,
+            )
+        ),
+        aqr_context_slot_max_per_role=int(
+            _arg_or_default("aqr_context_slot_max_per_role", _SPEC_DEFAULTS.aqr_context_slot_max_per_role)
+        ),
+        aqr_context_slot_self_overlap_threshold=float(
+            _arg_or_default(
+                "aqr_context_slot_self_overlap_threshold",
+                _SPEC_DEFAULTS.aqr_context_slot_self_overlap_threshold,
+            )
+        ),
+        aqr_context_slot_self_support_overlap_enabled=bool(
+            _arg_or_default(
+                "aqr_context_slot_self_support_overlap_enabled",
+                _SPEC_DEFAULTS.aqr_context_slot_self_support_overlap_enabled,
+            )
+        ),
+        aqr_context_slot_self_support_overlap_threshold=float(
+            _arg_or_default(
+                "aqr_context_slot_self_support_overlap_threshold",
+                _SPEC_DEFAULTS.aqr_context_slot_self_support_overlap_threshold,
+            )
+        ),
+        aqr_context_slot_active_support_overlap_enabled=bool(
+            _arg_or_default(
+                "aqr_context_slot_active_support_overlap_enabled",
+                _SPEC_DEFAULTS.aqr_context_slot_active_support_overlap_enabled,
+            )
+        ),
+        aqr_context_slot_active_support_overlap_threshold=float(
+            _arg_or_default(
+                "aqr_context_slot_active_support_overlap_threshold",
+                _SPEC_DEFAULTS.aqr_context_slot_active_support_overlap_threshold,
+            )
+        ),
+        aqr_context_slot_quality_gate_enabled=bool(
+            _arg_or_default(
+                "aqr_context_slot_quality_gate_enabled",
+                _SPEC_DEFAULTS.aqr_context_slot_quality_gate_enabled,
+            )
+        ),
+        aqr_slot_quality_owner_active_floor=float(
+            _arg_or_default(
+                "aqr_slot_quality_owner_active_floor",
+                _SPEC_DEFAULTS.aqr_slot_quality_owner_active_floor,
+            )
+        ),
+        aqr_control_graph_attention_bias_enabled=bool(
+            _arg_or_default(
+                "aqr_control_graph_attention_bias_enabled",
+                _SPEC_DEFAULTS.aqr_control_graph_attention_bias_enabled,
+            )
+        ),
+        aqr_control_graph_token_scaling_enabled=bool(
+            _arg_or_default(
+                "aqr_control_graph_token_scaling_enabled",
+                _SPEC_DEFAULTS.aqr_control_graph_token_scaling_enabled,
+            )
+        ),
+        aqr_control_graph_state_embedding_enabled=bool(
+            _arg_or_default(
+                "aqr_control_graph_state_embedding_enabled",
+                _SPEC_DEFAULTS.aqr_control_graph_state_embedding_enabled,
+            )
+        ),
+        aqr_control_graph_bias_min=float(
+            _arg_or_default("aqr_control_graph_bias_min", _SPEC_DEFAULTS.aqr_control_graph_bias_min)
+        ),
         posterior_owner_active_gate_enabled=bool(
             _arg_or_default(
                 "posterior_owner_active_gate_enabled",
@@ -6301,6 +6390,24 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         ),
         object_candidate_owner_point_mix=float(
             _arg_or_default("object_candidate_owner_point_mix", _SPEC_DEFAULTS.object_candidate_owner_point_mix)
+        ),
+        object_candidate_owner_geometry_mix=float(
+            _arg_or_default("object_candidate_owner_geometry_mix", _SPEC_DEFAULTS.object_candidate_owner_geometry_mix)
+        ),
+        posterior_owner_transport_candidate_geometry_mix=float(
+            _arg_or_default(
+                "posterior_owner_transport_candidate_geometry_mix",
+                _SPEC_DEFAULTS.posterior_owner_transport_candidate_geometry_mix,
+            )
+        ),
+        object_explanation_point_core_mass=float(
+            _arg_or_default("object_explanation_point_core_mass", _SPEC_DEFAULTS.object_explanation_point_core_mass)
+        ),
+        object_explanation_point_core_topk=int(
+            _arg_or_default("object_explanation_point_core_topk", _SPEC_DEFAULTS.object_explanation_point_core_topk)
+        ),
+        object_explanation_point_loss_clip=float(
+            _arg_or_default("object_explanation_point_loss_clip", _SPEC_DEFAULTS.object_explanation_point_loss_clip)
         ),
         task_owner_proposal_point_bridge_weight=float(
             _arg_or_default(
@@ -6577,6 +6684,18 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             _arg_or_default(
                 "posterior_owner_transport_min_mass",
                 _SPEC_DEFAULTS.posterior_owner_transport_min_mass,
+            )
+        ),
+        posterior_owner_transport_direct_candidate_assignment=bool(
+            _arg_or_default(
+                "posterior_owner_transport_direct_candidate_assignment",
+                _SPEC_DEFAULTS.posterior_owner_transport_direct_candidate_assignment,
+            )
+        ),
+        posterior_owner_transport_direct_candidate_min_score=float(
+            _arg_or_default(
+                "posterior_owner_transport_direct_candidate_min_score",
+                _SPEC_DEFAULTS.posterior_owner_transport_direct_candidate_min_score,
             )
         ),
         posterior_owner_transport_assignment_floor=float(
@@ -6985,6 +7104,9 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         ),
         object_explanation_duplicate_margin=float(
             getattr(args, "object_explanation_duplicate_margin", defaults.object_explanation_duplicate_margin)
+        ),
+        object_explanation_point_loss_clip=float(
+            getattr(args, "object_explanation_point_loss_clip", defaults.object_explanation_point_loss_clip)
         ),
         detach_action_loss_from_picf=bool(getattr(args, "detach_action_loss_from_picf", defaults.detach_action_loss_from_picf)),
         mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", defaults.mapg_siglip_tau)),
@@ -7897,7 +8019,7 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "lambda_mapg_geometry_diversity", _LOSS_DEFAULTS.lambda_mapg_geometry_diversity)),
             )
             logging.info(
-                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_point_prior_weight=%s ownership_point_prior_sigma_m=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s same_role_support_competition_enabled=%s same_role_support_competition_weight=%s same_role_support_competition_iters=%s same_role_support_competition_physical_only=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s active_slot_relative_score_threshold=%s active_slot_geometry_duplicate_enabled=%s active_slot_geometry_duplicate_sigma_m=%s active_slot_geometry_duplicate_threshold=%s context_slot_enabled=%s context_slot_weight=%s context_slot_min_confidence=%s context_slot_min_score=%s context_slot_duplicate_overlap_threshold=%s posterior_owner_active_gate_enabled=%s posterior_owner_active_min=%s posterior_owner_active_bias=%s posterior_file_competition_enabled=%s posterior_file_competition_min_per_role=%s posterior_file_competition_max_per_role=%s posterior_file_competition_min_support=%s posterior_file_competition_overlap_threshold=%s posterior_file_competition_geometry_duplicate_enabled=%s posterior_file_competition_geometry_sigma_m=%s posterior_file_competition_geometry_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
+                "AQR-OWM direct-final graph contract: enabled=%s physical_queries=%s task_queries=%s query_rounds=%s sinkhorn_iters=%s sinkhorn_temperature=%s pg_grounding_enabled=%s pg_image_support_enabled=%s pg_image_support_weight=%s pg_entropy_threshold=%s pg_peak_threshold=%s pg_bias_weight=%s support_bias_clip=%s ownership_prior_enabled=%s ownership_prior_weight=%s ownership_point_prior_weight=%s ownership_point_prior_sigma_m=%s ownership_temporal_prior_weight=%s ownership_uniform_mix=%s same_role_support_competition_enabled=%s same_role_support_competition_weight=%s same_role_support_competition_iters=%s same_role_support_competition_physical_only=%s active_slot_filter_enabled=%s active_slot_min_per_role=%s active_slot_max_per_role=%s active_slot_min_confidence=%s active_slot_overlap_threshold=%s active_slot_relative_score_threshold=%s active_slot_geometry_duplicate_enabled=%s active_slot_geometry_duplicate_sigma_m=%s active_slot_geometry_duplicate_threshold=%s context_slot_enabled=%s context_slot_weight=%s context_slot_min_confidence=%s context_slot_min_score=%s context_slot_duplicate_overlap_threshold=%s context_slot_deduplicate_enabled=%s context_slot_max_per_role=%s context_slot_self_overlap_threshold=%s context_slot_self_support_overlap_enabled=%s context_slot_self_support_overlap_threshold=%s context_slot_active_support_overlap_enabled=%s context_slot_active_support_overlap_threshold=%s context_slot_quality_gate_enabled=%s control_graph_attention_bias_enabled=%s control_graph_token_scaling_enabled=%s control_graph_state_embedding_enabled=%s control_graph_bias_min=%s posterior_owner_active_gate_enabled=%s posterior_owner_active_min=%s posterior_owner_active_bias=%s posterior_file_competition_enabled=%s posterior_file_competition_min_per_role=%s posterior_file_competition_max_per_role=%s posterior_file_competition_min_support=%s posterior_file_competition_overlap_threshold=%s posterior_file_competition_geometry_duplicate_enabled=%s posterior_file_competition_geometry_sigma_m=%s posterior_file_competition_geometry_threshold=%s vjepa_temporal_mode=%s vjepa_temporal_tokens=%s vjepa_temporal_delta=%s evidence_cache_enabled=%s evidence_cache_len=%s evidence_cache_read_weight=%s evidence_cache_innovation_downweight=%s tracklet_memory_enabled=%s proposal_memory_enabled=%s posterior_occupancy_prior_enabled=%s posterior_occupancy_prior_weight=%s posterior_occupancy_prior_sigma_m=%s posterior_occupancy_prior_clip=%s observation_anchor_seed_point_mix=%s recycle_residual_norm_mode=%s posterior_slotwise_recycle_residual=%s legacy_local_refinement_opt_in=%s local_refinement_enabled=%s local_refinement_weight=%s local_refinement_binding_weight=%s slot_jepa_enabled=%s support_prediction_enabled=%s ordinal_relation_enabled=%s losses(slot_jepa=%s support_pred=%s bind=%s denoise=%s) obs_gate_init=%s task_gate_init=%s posterior_gate_init=%s control_gate_init=%s legacy_mapg_builder_enabled=%s vl_router_enabled=%s",
                 bool(getattr(args, "aqr_mapg_enabled", False)),
                 int(getattr(args, "aqr_query_count_physical", _SPEC_DEFAULTS.aqr_query_count_physical)),
                 int(getattr(args, "aqr_query_count_task", _SPEC_DEFAULTS.aqr_query_count_task)),
@@ -8016,6 +8138,84 @@ def train(args: argparse.Namespace) -> None:
                 bool(
                     getattr(
                         args,
+                        "aqr_context_slot_deduplicate_enabled",
+                        _SPEC_DEFAULTS.aqr_context_slot_deduplicate_enabled,
+                    )
+                ),
+                int(getattr(args, "aqr_context_slot_max_per_role", _SPEC_DEFAULTS.aqr_context_slot_max_per_role)),
+                float(
+                    getattr(
+                        args,
+                        "aqr_context_slot_self_overlap_threshold",
+                        _SPEC_DEFAULTS.aqr_context_slot_self_overlap_threshold,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_context_slot_self_support_overlap_enabled",
+                        _SPEC_DEFAULTS.aqr_context_slot_self_support_overlap_enabled,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "aqr_context_slot_self_support_overlap_threshold",
+                        _SPEC_DEFAULTS.aqr_context_slot_self_support_overlap_threshold,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_context_slot_active_support_overlap_enabled",
+                        _SPEC_DEFAULTS.aqr_context_slot_active_support_overlap_enabled,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "aqr_context_slot_active_support_overlap_threshold",
+                        _SPEC_DEFAULTS.aqr_context_slot_active_support_overlap_threshold,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_context_slot_quality_gate_enabled",
+                        _SPEC_DEFAULTS.aqr_context_slot_quality_gate_enabled,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_control_graph_attention_bias_enabled",
+                        _SPEC_DEFAULTS.aqr_control_graph_attention_bias_enabled,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_control_graph_token_scaling_enabled",
+                        _SPEC_DEFAULTS.aqr_control_graph_token_scaling_enabled,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "aqr_control_graph_state_embedding_enabled",
+                        _SPEC_DEFAULTS.aqr_control_graph_state_embedding_enabled,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "aqr_control_graph_bias_min",
+                        _SPEC_DEFAULTS.aqr_control_graph_bias_min,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
                         "posterior_owner_active_gate_enabled",
                         _SPEC_DEFAULTS.posterior_owner_active_gate_enabled,
                     )
@@ -8119,7 +8319,7 @@ def train(args: argparse.Namespace) -> None:
                 bool(getattr(args, "vl_anchor_router_enabled", False)),
             )
             logging.info(
-                "Posterior owner-transport contract: enabled=%s roles=%s max_per_role=%s max_rate=%s precision_gain=%s min_mass=%s assignment_floor=%s reliability_floor=%s covariance_scale=%s inactive_prior=%s activates_file=%s active_threshold=%s. "
+                "Posterior owner-transport contract: enabled=%s roles=%s max_per_role=%s max_rate=%s precision_gain=%s min_mass=%s direct_candidate_assignment=%s direct_candidate_min_score=%s assignment_floor=%s reliability_floor=%s covariance_scale=%s inactive_prior=%s activates_file=%s active_threshold=%s. "
                 "Accepted object/contact responsibility is closed into posterior object-file geometry instead of staying only in the transient graph.",
                 bool(getattr(args, "posterior_owner_transport_enabled", _SPEC_DEFAULTS.posterior_owner_transport_enabled)),
                 str(getattr(args, "posterior_owner_transport_roles", _SPEC_DEFAULTS.posterior_owner_transport_roles)),
@@ -8149,6 +8349,20 @@ def train(args: argparse.Namespace) -> None:
                         args,
                         "posterior_owner_transport_min_mass",
                         _SPEC_DEFAULTS.posterior_owner_transport_min_mass,
+                    )
+                ),
+                bool(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_direct_candidate_assignment",
+                        _SPEC_DEFAULTS.posterior_owner_transport_direct_candidate_assignment,
+                    )
+                ),
+                float(
+                    getattr(
+                        args,
+                        "posterior_owner_transport_direct_candidate_min_score",
+                        _SPEC_DEFAULTS.posterior_owner_transport_direct_candidate_min_score,
                     )
                 ),
                 float(
@@ -9057,6 +9271,15 @@ def main() -> None:
     )
     parser.add_argument("--object-explanation-duplicate-margin", type=float, default=_LOSS_DEFAULTS.object_explanation_duplicate_margin)
     parser.add_argument(
+        "--object-explanation-point-loss-clip",
+        type=float,
+        default=_LOSS_DEFAULTS.object_explanation_point_loss_clip,
+        help=(
+            "Upper bound for the OEML point compactness auxiliary. "
+            "This prevents noisy sidecar mask tails from becoming hard unbounded labels."
+        ),
+    )
+    parser.add_argument(
         "--picf-action-detach-from-anchor",
         dest="detach_action_loss_from_picf",
         action="store_true",
@@ -9528,6 +9751,99 @@ def main() -> None:
         default=_SPEC_DEFAULTS.aqr_context_slot_duplicate_overlap_threshold,
     )
     parser.add_argument(
+        "--aqr-context-slot-deduplicate-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_context_slot_deduplicate_enabled,
+        help=(
+            "Expose only distinct low-priority context anchors to the control graph. "
+            "Dense typed memory is unchanged; duplicate context rows remain reserve capacity."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-context-slot-max-per-role",
+        type=int,
+        default=_SPEC_DEFAULTS.aqr_context_slot_max_per_role,
+        help="Maximum duplicate-suppressed context anchors per role; <=0 means no explicit cap.",
+    )
+    parser.add_argument(
+        "--aqr-context-slot-self-overlap-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_context_slot_self_overlap_threshold,
+        help="Suppress context-context rows whose object-core/geometry overlap exceeds this threshold.",
+    )
+    parser.add_argument(
+        "--aqr-context-slot-self-support-overlap-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_context_slot_self_support_overlap_enabled,
+        help=(
+            "Also suppress context-context rows whose full support maps overlap strongly. "
+            "This catches diffuse duplicate context rows that object-core overlap intentionally tolerates."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-context-slot-self-support-overlap-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_context_slot_self_support_overlap_threshold,
+        help="Full-support overlap threshold for context-context duplicate suppression.",
+    )
+    parser.add_argument(
+        "--aqr-context-slot-active-support-overlap-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_context_slot_active_support_overlap_enabled,
+        help=(
+            "Also suppress context rows whose full support overlaps an already-active object owner. "
+            "This keeps duplicate owner rows out of the control graph without deleting dense typed memory."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-context-slot-active-support-overlap-threshold",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_context_slot_active_support_overlap_threshold,
+        help="Full-support overlap threshold for context rows compared against active owners.",
+    )
+    parser.add_argument(
+        "--aqr-context-slot-quality-gate-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_context_slot_quality_gate_enabled,
+        help=(
+            "Opt-in ablation: multiply accepted context rows by learned slot-quality context weights. "
+            "The maintained default keeps deterministic context evidence visible and only gates active rows by slot quality."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-slot-quality-owner-active-floor",
+        type=float,
+        default=_SPEC_DEFAULTS.aqr_slot_quality_owner_active_floor,
+        help=(
+            "Minimum active-quality contribution for rows with accepted owner-candidate evidence. "
+            "This prevents QASA-style quality from suppressing a valid contact/motion owner measurement during early training."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-control-graph-attention-bias-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_control_graph_attention_bias_enabled,
+        help=(
+            "Use active/context/reserve downstream weights as graph-token attention priors "
+            "inside the control world and downstream PI0.5 readers."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-control-graph-token-scaling-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_control_graph_token_scaling_enabled,
+        help=(
+            "Legacy opt-in: multiply control graph token embeddings by downstream weight. "
+            "The maintained path keeps embeddings intact and uses attention bias instead."
+        ),
+    )
+    parser.add_argument(
+        "--aqr-control-graph-state-embedding-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.aqr_control_graph_state_embedding_enabled,
+    )
+    parser.add_argument("--aqr-control-graph-bias-min", type=float, default=_SPEC_DEFAULTS.aqr_control_graph_bias_min)
+    parser.add_argument(
         "--posterior-owner-active-gate-enabled",
         action=argparse.BooleanOptionalAction,
         default=_SPEC_DEFAULTS.posterior_owner_active_gate_enabled,
@@ -9723,6 +10039,36 @@ def main() -> None:
         type=float,
         default=_SPEC_DEFAULTS.object_candidate_owner_point_mix,
         help="Mix ratio for owner transport point priors into the candidate point prior.",
+    )
+    parser.add_argument(
+        "--object-candidate-owner-geometry-mix",
+        type=float,
+        default=_SPEC_DEFAULTS.object_candidate_owner_geometry_mix,
+        help=(
+            "Mix accepted owner-candidate point-mask geometry into graph anchor geometry before active selection. "
+            "This turns inspected sidecar masks into soft measurement centers instead of mere support priors."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-candidate-geometry-mix",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_candidate_geometry_mix,
+        help="Mix accepted owner-candidate geometry into posterior owner transport measurements.",
+    )
+    parser.add_argument(
+        "--object-explanation-point-core-mass",
+        type=float,
+        default=_SPEC_DEFAULTS.object_explanation_point_core_mass,
+        help=(
+            "Fraction of each object-mask row mass used for OEML point compactness. "
+            "This keeps the auxiliary compactness target robust to weak sidecar tails without pruning dense memory."
+        ),
+    )
+    parser.add_argument(
+        "--object-explanation-point-core-topk",
+        type=int,
+        default=_SPEC_DEFAULTS.object_explanation_point_core_topk,
+        help="Maximum point tokens used for OEML point compactness per row; 0 disables the top-k cap.",
     )
     parser.add_argument(
         "--task-owner-proposal-point-bridge-weight",
@@ -10027,6 +10373,21 @@ def main() -> None:
         type=float,
         default=_SPEC_DEFAULTS.posterior_owner_transport_min_mass,
         help="Minimum transported owner mass required before posterior geometry can be rewritten.",
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-direct-candidate-assignment",
+        action=argparse.BooleanOptionalAction,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_direct_candidate_assignment,
+        help=(
+            "Assign validated graph-owner candidates directly to posterior files before owner geometry is averaged. "
+            "This is the slot-responsibility write-back path; the obs-averaged transport remains fallback."
+        ),
+    )
+    parser.add_argument(
+        "--posterior-owner-transport-direct-candidate-min-score",
+        type=float,
+        default=_SPEC_DEFAULTS.posterior_owner_transport_direct_candidate_min_score,
+        help="Minimum candidate-to-file responsibility score required for direct owner write-through.",
     )
     parser.add_argument(
         "--posterior-owner-transport-assignment-floor",

@@ -26,8 +26,8 @@ if [[ -z "${SEGMENTS:-}" ]]; then
     echo "Run scripts/picf_prepare_full_sidecar_root.py after full sidecar generation." >&2
     exit 2
   fi
-  export SEGMENTS
   SEGMENTS="$(tr -d '\n' < "${SEGMENT_FILE}")"
+  export SEGMENTS
 fi
 
 exec "${SCRIPT_DIR}/run_a7_actionaware_after_dedup_smoke300_20260520.sh"

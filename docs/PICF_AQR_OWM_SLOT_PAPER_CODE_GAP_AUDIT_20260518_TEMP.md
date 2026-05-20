@@ -2,7 +2,34 @@
 
 Date: 2026-05-18
 
-Status: structural audit, not a training acceptance report.
+Status: superseded structural audit, not a training acceptance report.
+
+Supersession note, 2026-05-20:
+
+```text
+This document is intentionally preserved as historical evidence of the
+paper-code gap that existed before the OEML / object-candidate / owner
+measurement transport repairs.
+
+Do not use its "missing object-explanation loop" judgment as the current
+state of the code without also reading:
+
+  temp/audits_20260519/latest_slot_full_deployment_closure_20260519.md
+  docs/PICF_AQR_OWM_OWNER_MEASUREMENT_TRANSPORT_20260520_TEMP.md
+  docs/PICF_AQR_OWM_OPEN_ISSUE_TRACKER_20260517_TEMP.md
+
+Current status:
+  PICF now has a guarded OEML object/background explanation path, soft
+  object-candidate assignment, contact-motion sidecar measurements, accepted
+  owner-candidate geometry transport into graph anchors, posterior owner
+  transport through precision fusion, and slot-quality active/context gating.
+
+Still not claimed:
+  a full reconstruction-first DINOSAUR/MetaSlot image autoencoder, hard visual
+  VQ posterior truth, or a mask-label supervised SlotVLA clone.  These remain
+  rejected or future-guarded because PICF is a multimodal belief router, not a
+  pure image reconstruction object discovery model.
+```
 
 This document compares the current PICF-AQR-OWM anchor/slot design against
 the closest object-centric slot code that was pulled locally under

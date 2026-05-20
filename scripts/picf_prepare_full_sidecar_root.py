@@ -70,8 +70,21 @@ def _segment_coverage(step_ids: list[int], intervals: list[tuple[int, int]]) -> 
     return coverage
 
 
+def _sample_paths(paths: list[Path], sample_limit: int) -> list[Path]:
+    """Return a deterministic root-wide sample instead of only the first files."""
+
+    if sample_limit <= 0 or not paths:
+        return []
+    if len(paths) <= sample_limit:
+        return list(paths)
+    indices = np.linspace(0, len(paths) - 1, num=int(sample_limit), dtype=np.int64)
+    # `linspace(..., dtype=int)` can repeat indices for very small ranges.  Keep
+    # ordering deterministic and unique so sampled_files is truthful.
+    return [paths[int(i)] for i in np.unique(indices)]
+
+
 def _sample_key_stats(paths: list[Path], sample_limit: int) -> dict[str, object]:
-    sample_paths = paths[: max(int(sample_limit), 0)]
+    sample_paths = _sample_paths(paths, max(int(sample_limit), 0))
     key_counts: dict[str, int] = {}
     bad_files: list[str] = []
     first_shapes: dict[str, list[int]] = {}
@@ -99,6 +112,7 @@ def _sample_key_stats(paths: list[Path], sample_limit: int) -> dict[str, object]
         return float(ok) / float(len(sample_paths))
     return {
         "sampled_files": len(sample_paths),
+        "sample_strategy": "deterministic_evenly_spaced",
         "bad_files": bad_files[:20],
         "keys": sorted(key_counts),
         "first_shapes": first_shapes,
@@ -140,6 +154,9 @@ def main() -> int:
     if not selected_segments:
         ok = False
         failures.append("no covered CALVIN language segments")
+    if stats["bad_files"]:
+        ok = False
+        failures.append("bad sidecar files in sampled audit set")
     if bool(args.require_proposal) and float(stats["proposal_required_present_fraction"]) < 0.999:
         ok = False
         failures.append("proposal required keys missing in sampled files")
@@ -163,6 +180,7 @@ def main() -> int:
         "proposal_mask_present_fraction": stats["proposal_mask_present_fraction"],
         "tracklet_required_present_fraction": stats["tracklet_required_present_fraction"],
         "sampled_files": stats["sampled_files"],
+        "sample_strategy": stats["sample_strategy"],
         "sample_keys": stats["keys"],
         "first_shapes": stats["first_shapes"],
         "ok": bool(ok),

@@ -27,10 +27,12 @@ implemented:
   explicit object/background residual
   adaptive object/no-object/duplicate slot quality
   active/context/reserve fixed-capacity file gating
+  active-context full-support duplicate demotion
   same-object pairwise binding subspace
   calibrated quadratic / low-rank binding scores
   persistent posterior binding-signature memory
   sidecar/contact object candidates as soft measurements
+  accepted owner-candidate geometry as graph/posterior measurement
   object-owner posterior transport through precision fusion
   tactile/contact evidence attached to object owner, not gripper owner
   tracklet/proposal optional typed sidecar dataflow
@@ -56,6 +58,12 @@ queued slot-comprehensive frozen-policy validation show active posterior owners
 on the inspected task/contact object, low active same-role overlap, finite
 binding-signature dispersion, and nonzero sidecar/tracklet evidence when
 configured.
+
+2026-05-20 validation update:
+`picf_a7_active_support_dedup_300_20260520` passed the short structural gate:
+the previous downstream/context clone rebound did not reproduce through step
+300.  The current next gate is longer training/eval, not another local patch on
+the same failure mode.
 ```
 
 This distinction is mandatory.  A static audit can prove that the architecture
@@ -185,6 +193,7 @@ active/context/reserve file state
 duplicate demotion
 birth competition
 sidecar/proposal-conditioned initialization
+accepted owner-candidate geometry transport
 ```
 
 Not copied:
@@ -311,6 +320,7 @@ tracklet_* sidecar schema
 object_candidate_assignment
 object_candidate_owner_assignment
 object_candidate_owner_point_priors
+object_candidate_owner_x / object_candidate_owner_S
 posterior_owner_transport
 anchor overlays and IsSameObject diagnostics
 ```
@@ -372,12 +382,13 @@ This is stronger and cleaner than linearly dragging an anchor center.
 These are not "missing modules" in the code. They are behavior/data gates:
 
 ```text
-1. Current A7 anchor-only run must show that active posterior owner files stay
-   on the inspected sidecar/contact object across sampled overlays.
+1. Short validation has now shown active posterior owner files staying on the
+   inspected sidecar/contact object across sampled overlays.  This is closed
+   for short validation, not for final 30000-step behavior.
 
-2. The queued slot-comprehensive frozen-policy validation must show the same
-   under full PICF slot/router/posterior/OEML trainability while action and
-   PaliGemma are frozen.
+2. Longer training/eval must still show the same under the intended
+   action-aware training recipe.  A 300-step run can reject structural failures;
+   it cannot prove final action performance.
 
 3. Full sidecar/tracklet coverage is still a data-production issue. The code
    can consume proposal_* and tracklet_* arrays, but behavior depends on their
@@ -428,36 +439,39 @@ online IsSameObject weak loss:
 
 ## 6. Current validation sequence
 
-Current A7 run:
+Completed A7 short validation:
 
 ```text
-picf_a7_slot_quality_selector_anchor1000_20260519
-class: anchor_capability_probe
+picf_a7_active_support_dedup_300_20260520
+class: slot-comprehensive frozen-policy short validation
 ```
 
-Valid question:
+Answered question:
 
 ```text
-Can object anchors and posterior owners move to inspected sidecar/contact
-object evidence when action, PaliGemma and predictive losses are removed?
+Can active owner localization remain correct while downstream/context duplicate
+support rows are prevented from re-entering the action-visible owner set?
 ```
 
-Queued next run:
+Observed answer:
 
 ```text
-picf_a7_slot_comprehensive_frozen_policy_1000_20260519
-class: slot_comprehensive_frozen_policy_validation
+yes for short validation:
+  active support overlap <= 0.0367
+  downstream support overlap ~= 0.50 instead of the previous 0.76+ rebound
+  loss_object_explanation_point falls to 1.7866 by step 300
+  active overlays remain on the sidecar mask
 ```
 
-Valid question:
+Next validation:
 
 ```text
-Can the full PICF slot/router/posterior/OEML path preserve object ownership
-when large pretrained perception, PaliGemma, and action pressure are frozen?
+longer frozen-pretrain/action-aware training and CALVIN/video evidence.
 ```
 
-Only after both pass should a production 30000-step frozen-pretrain co-training
-run be interpreted as meaningful.
+Do not add another patch for this same failure mode unless downstream-visible
+overlap again rises into the old failure band or overlays show active owner
+localization leaving the sidecar mask.
 
 ## 7. Acceptance keys
 
@@ -537,9 +551,8 @@ The version is therefore code-level complete for the latest-slot PICF design.
 The only honest remaining statement is:
 
 ```text
-Behavior must still be accepted by the current 1000-step anchor probe, the
-queued 1000-step comprehensive frozen-policy validation, and then a guarded
-30000-step co-training run.
+Short structural validation is now positive. Behavior must still be accepted
+by a guarded longer co-training run and CALVIN/video evidence.
 ```
 
 If those fail, the next action is not to import another external slot module

@@ -245,6 +245,40 @@ class PicfCoreConfig:
     aqr_context_slot_min_confidence: float = 0.05
     aqr_context_slot_min_score: float = 0.01
     aqr_context_slot_duplicate_overlap_threshold: float = 0.75
+    # Context rows are real low-priority scene evidence, but they must still be
+    # object-distinct.  Keep fixed AQR capacity in reserve while exposing only
+    # a quality-guided, duplicate-suppressed context subset to the control
+    # graph.  This is the context analogue of active-slot duplicate removal,
+    # not dense-token pruning.
+    aqr_context_slot_deduplicate_enabled: bool = True
+    aqr_context_slot_max_per_role: int = 8
+    aqr_context_slot_self_overlap_threshold: float = 0.75
+    # Object-core overlap intentionally lets a discriminative modality break a
+    # visual tie.  Context rows, however, can still become diffuse duplicates in
+    # the control graph when their full support maps overlap strongly.  Gate
+    # context-context selection with a second full-support threshold while
+    # leaving dense typed memory and posterior truth untouched.
+    aqr_context_slot_self_support_overlap_enabled: bool = True
+    aqr_context_slot_self_support_overlap_threshold: float = 0.70
+    # Apply the same full-support test against already-active object owners.
+    # Object-core/geometry overlap alone can miss diffuse context clones that
+    # re-enter the control graph and fight the selected owner measurement.
+    aqr_context_slot_active_support_overlap_enabled: bool = True
+    aqr_context_slot_active_support_overlap_threshold: float = 0.55
+    # Context rows are already filtered by confidence, support score, and
+    # active-duplicate overlap.  Do not let the early learned slot-quality head
+    # zero them out by default: context is weak scene evidence, not posterior
+    # object truth.  Keep this opt-in for ablations that explicitly want learned
+    # context gating.
+    aqr_context_slot_quality_gate_enabled: bool = False
+    # Carry active/context/reserve reliability into the action-control graph as
+    # an attention prior instead of shrinking token embeddings.  This preserves
+    # dense slot content and lets the transformer decide how much context to
+    # read, while duplicate/reserve rows remain strongly downweighted.
+    aqr_control_graph_attention_bias_enabled: bool = True
+    aqr_control_graph_token_scaling_enabled: bool = False
+    aqr_control_graph_state_embedding_enabled: bool = True
+    aqr_control_graph_bias_min: float = 1.0e-4
     # Adaptive slot-quality selector.  This is the PICF-native analogue of
     # adaptive slot-count / slot-quality methods: fixed query capacity remains
     # available, but every row receives differentiable object/no-object/
@@ -255,6 +289,7 @@ class PicfCoreConfig:
     aqr_slot_quality_learned_enabled: bool = True
     aqr_slot_quality_learned_scale: float = 0.25
     aqr_slot_quality_floor: float = 0.05
+    aqr_slot_quality_owner_active_floor: float = 0.55
     aqr_slot_quality_context_scale: float = 0.25
     aqr_slot_quality_duplicate_threshold: float = 0.50
     aqr_slot_quality_target_smoothing: float = 0.02
@@ -358,6 +393,12 @@ class PicfCoreConfig:
     object_candidate_owner_roles: tuple[int, ...] = (1,)
     object_candidate_owner_min_share: float = 0.65
     object_candidate_owner_point_mix: float = 1.0
+    # Accepted owner candidates are measurement centers, not merely support
+    # priors. Transport their point-mask geometry into the graph anchor before
+    # active selection and posterior correction, with covariance still carrying
+    # sidecar uncertainty.
+    object_candidate_owner_geometry_mix: float = 0.90
+    posterior_owner_transport_candidate_geometry_mix: float = 1.0
     # Object Explanation Measurement Layer (OEML). This is the PICF-native
     # slot/OCL invariant: every dense typed evidence token is explained by
     # competing object anchors or a background/no-object residual before the
@@ -369,6 +410,15 @@ class PicfCoreConfig:
     object_explanation_min_slot_quality: float = 0.05
     object_explanation_duplicate_margin: float = 0.30
     object_explanation_point_sigma_m: float = 0.06
+    # Point compactness is a diagnostic/auxiliary object-quality term, not a
+    # hard segmentation label.  Contact-motion sidecar masks may contain weak
+    # projected tails or short trajectory spread, so compute compactness on the
+    # high-confidence mask core and keep the downstream loss bounded.  This
+    # matches modern slot/OCL practice: assignment quality should be robust to
+    # noisy tails and background residuals should absorb invalid fragments.
+    object_explanation_point_core_mass: float = 0.90
+    object_explanation_point_core_topk: int = 128
+    object_explanation_point_loss_clip: float = 8.0
     object_explanation_contact_weight_floor: float = 0.05
     object_explanation_feature_eps: float = 1e-6
     task_owner_bias_enabled: bool = True
@@ -459,6 +509,12 @@ class PicfCoreConfig:
     posterior_owner_transport_max_rate: float = 0.85
     posterior_owner_transport_precision_gain: float = 8.0
     posterior_owner_transport_min_mass: float = 0.01
+    # Preserve accepted graph-owner candidate identity until posterior-file
+    # selection.  This is the belief-filter analogue of slot responsibility
+    # write-back: a validated object candidate should choose the file it writes
+    # to before its geometry is averaged with unrelated observation supports.
+    posterior_owner_transport_direct_candidate_assignment: bool = True
+    posterior_owner_transport_direct_candidate_min_score: float = 0.01
     posterior_owner_transport_assignment_floor: float = 0.50
     posterior_owner_transport_reliability_floor: float = 0.50
     posterior_owner_transport_covariance_scale: float = 0.50

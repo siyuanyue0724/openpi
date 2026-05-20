@@ -99,6 +99,8 @@ class PicfAnchorPriorGraphState:
     object_candidate_assignment: torch.Tensor | None = None
     object_candidate_owner_assignment: torch.Tensor | None = None
     object_candidate_owner_point_priors: torch.Tensor | None = None
+    object_candidate_owner_x: torch.Tensor | None = None
+    object_candidate_owner_S: torch.Tensor | None = None
     object_candidate_coverage: torch.Tensor | None = None
     object_candidate_background: torch.Tensor | None = None
     object_candidate_duplicate_overlap: torch.Tensor | None = None
@@ -461,6 +463,7 @@ class PicfPosteriorAnchorState:
     owner_transport_confidence: torch.Tensor | None = None
     owner_transport_applied_fraction: torch.Tensor | None = None
     owner_transport_dist_to_standard: torch.Tensor | None = None
+    owner_transport_dist_after_fusion: torch.Tensor | None = None
 
 
 @dataclasses.dataclass

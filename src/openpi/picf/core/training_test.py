@@ -15,12 +15,14 @@ from openpi.picf.contracts import TactileSensorFrame
 from openpi.picf.core.config import PicfCoreConfig
 from openpi.picf.core.contracts import PicfAnchorPriorGraphState
 from openpi.picf.core.contracts import PicfObservationAnchorState
+from openpi.picf.core.contracts import PicfObjectExplanationState
 from openpi.picf.core.contracts import PicfProjectiveGeometryState
 from openpi.picf.core.contracts import PicfTokenFieldState
 from openpi.picf.core.pipeline import PicfFullCore
 from openpi.picf.core.training import PicfAlignmentLossConfig
 from openpi.picf.core.training import _mapg_cycle_loss
 from openpi.picf.core.training import _mapg_support_overlap_loss
+from openpi.picf.core.training import _object_explanation_loss
 from openpi.picf.core.training import compute_alignment_loss
 from openpi.picf.core.training import compute_transition_loss
 from openpi.picf.core.training import PicfTransitionLossConfig
@@ -1331,3 +1333,47 @@ def test_alignment_loss_uses_fingertip_local_bag_and_front_halfspace() -> None:
     )
     assert torch.isfinite(alignment.pt)
     assert float(alignment.pt.item()) < 1e-3
+
+
+def test_object_explanation_point_loss_is_bounded_for_noisy_sidecar_tail() -> None:
+    dtype = torch.float32
+    oeml = PicfObjectExplanationState(
+        object_mask_visual=None,
+        background_mask_visual=None,
+        object_mask_temporal=None,
+        background_mask_temporal=None,
+        object_mask_point=None,
+        background_mask_point=None,
+        object_mask_tactile=None,
+        background_mask_tactile=None,
+        object_mask_tracklet=None,
+        background_mask_tracklet=None,
+        object_mask_proposal=None,
+        background_mask_proposal=None,
+        anchor_quality=torch.ones((2,), dtype=dtype),
+        anchor_duplicate_overlap=torch.zeros((2, 2), dtype=dtype),
+        anchor_feature_variance=torch.zeros((2,), dtype=dtype),
+        point_spatial_variance=torch.tensor([1000.0, 4.0], dtype=dtype),
+        contact_explanation_score=torch.tensor(0.0, dtype=dtype),
+        valid=torch.tensor(True),
+    )
+    state = SimpleNamespace(
+        object_explanation=oeml,
+        anchor_prior_graph=None,
+        token_field=SimpleNamespace(tactile_contact_prob=None),
+    )
+    cfg = PicfTransitionLossConfig(
+        lambda_object_explanation_point=1.0,
+        object_explanation_active_object_only=False,
+        object_explanation_point_loss_clip=8.0,
+    )
+
+    total, _feature, point, _contact, _duplicate, _background = _object_explanation_loss(
+        state,
+        cfg,
+        reference=torch.zeros((), dtype=dtype),
+        eps=1e-6,
+    )
+
+    torch.testing.assert_close(point, torch.tensor(6.0, dtype=dtype))
+    torch.testing.assert_close(total, point)

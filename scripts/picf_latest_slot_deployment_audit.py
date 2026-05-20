@@ -45,8 +45,14 @@ def run(repo_root: Path) -> list[Check]:
     issue_tracker = _read(repo_root / "docs/PICF_AQR_OWM_OPEN_ISSUE_TRACKER_20260517_TEMP.md")
     closure_doc = repo_root / "temp/audits_20260519/latest_slot_full_deployment_closure_20260519.md"
     closure_text = _read(closure_doc) if closure_doc.exists() else ""
+    final_audit_doc = repo_root / "docs/PICF_AQR_OWM_LATEST_SLOT_FINAL_AUDIT_20260520_TEMP.md"
+    final_audit_text = _read(final_audit_doc) if final_audit_doc.exists() else ""
+    direct_owner_doc = repo_root / "temp/audits_20260520/posterior_owner_transport_direct_write_through_followthrough.md"
+    direct_owner_text = _read(direct_owner_doc) if direct_owner_doc.exists() else ""
     comprehensive_script = repo_root / "scripts/experiments/picf_aqr_owm_202605_active/run_a7_slot_comprehensive_frozen_policy_1000_20260519.sh"
     comprehensive = _read(comprehensive_script) if comprehensive_script.exists() else ""
+    actionaware_script = repo_root / "scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_after_dedup_smoke300_20260520.sh"
+    actionaware = _read(actionaware_script) if actionaware_script.exists() else ""
 
     checks: list[Check] = []
 
@@ -177,9 +183,58 @@ def run(repo_root: Path) -> list[Check]:
             )
             and _all(
                 pipeline,
-                ("proposal_priors", "tracklet_priors", "object_candidate_owner_assignment", "object_candidate_owner_point_priors"),
+                (
+                    "proposal_priors",
+                    "tracklet_priors",
+                    "object_candidate_owner_assignment",
+                    "object_candidate_owner_point_priors",
+                    "object_candidate_owner_x",
+                    "object_candidate_owner_geometry_mix",
+                    "aqr_context_slot_active_support_overlap_enabled",
+                    "max_support_to_active",
+                ),
             ),
             "SlotVLA-style object evidence must enter as optional typed sidecar measurements under posterior authority.",
+        )
+    )
+    checks.append(
+        Check(
+            "posterior_owner_transport_preserves_candidate_identity_until_file_write",
+            _all(
+                config,
+                (
+                    "posterior_owner_transport_direct_candidate_assignment",
+                    "posterior_owner_transport_direct_candidate_min_score",
+                ),
+            )
+            and _all(
+                pipeline,
+                (
+                    "slot_graph_weight",
+                    "direct_candidate_assignment",
+                    "direct_role_has_assignment",
+                    "owner_transport_dist_after_fusion",
+                ),
+            )
+            and _all(
+                trainer,
+                (
+                    "--posterior-owner-transport-direct-candidate-assignment",
+                    "posterior_owner_transport_active_dist_after_fusion_mean",
+                    "owner_transport_dist_after_fusion",
+                ),
+            )
+            and direct_owner_doc.exists()
+            and _all(
+                direct_owner_text,
+                (
+                    "candidate \\rightarrow graph\\ owner \\rightarrow posterior\\ file",
+                    "direct candidate/file assignment",
+                    "posterior_owner_transport_dist_after_fusion",
+                    "old obs-averaged owner transport remains only as fallback",
+                ),
+            ),
+            "Accepted graph-owner candidate identity must survive until posterior-file write-through; pre-fusion distance is not the closure metric.",
         )
     )
     checks.append(
@@ -214,9 +269,23 @@ def run(repo_root: Path) -> list[Check]:
                 (
                     "--picf-trainable-scope all",
                     "--perception-finetune-mode frozen",
-                    "--lambda-action-pos 0.0",
+                    "TRAINING_STRATEGY=\"${TRAINING_STRATEGY:-ddp}\"",
+                    "--training-strategy \"${TRAINING_STRATEGY}\"",
+                    "ACTION_LOSS_WEIGHT=\"${ACTION_LOSS_WEIGHT:-0.0}\"",
+                    "--lambda-action-pos \"${ACTION_POS_WEIGHT}\"",
+                    "SEMANTIC_TRAINABLE=\"${SEMANTIC_TRAINABLE:-0}\"",
                     "--lambda-slot-jepa 0.0",
                     "--lambda-anchor-object-pull 0.35",
+                ),
+            )
+            and _all(
+                actionaware,
+                (
+                    "SEMANTIC_TRAINABLE=\"${SEMANTIC_TRAINABLE:-1}\"",
+                    "TRAINING_STRATEGY=\"${TRAINING_STRATEGY:-fsdp_full_shard}\"",
+                    "PYTORCH_CUDA_ALLOC_CONF=\"${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}\"",
+                    "ACTION_LOSS_WEIGHT=\"${ACTION_LOSS_WEIGHT:-0.50}\"",
+                    "run_a7_slot_comprehensive_frozen_policy_1000_20260519.sh",
                 ),
             ),
             "Anchor-only probes must not be conflated with comprehensive frozen-policy validation.",
@@ -239,6 +308,27 @@ def run(repo_root: Path) -> list[Check]:
             and closure_doc.exists()
             and "Final closure verdict" in closure_text,
             "README_v2.2 must route reviewers to the current closure verdict.",
+        )
+    )
+    checks.append(
+        Check(
+            "latest_slot_final_audit_records_no_new_mandatory_module",
+            "PICF_AQR_OWM_LATEST_SLOT_FINAL_AUDIT_20260520_TEMP.md" in readme
+            and final_audit_doc.exists()
+            and _all(
+                final_audit_text,
+                (
+                    "No new mandatory slot module was found",
+                    "slot-axis evidence competition",
+                    "object/background residual explanation",
+                    "Object-Binding-style pairwise/quadratic same-object subspace",
+                    "tactile/contact routing to object owner",
+                    "blind SAM proposals",
+                    "hard visual VQ posterior truth",
+                    "behavior acceptance still requires longer co-training plus CALVIN/video evidence",
+                ),
+            ),
+            "The current README must link the final latest-slot audit and record both accepted and rejected mechanisms.",
         )
     )
     checks.append(

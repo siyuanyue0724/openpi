@@ -1,6 +1,6 @@
 # PICF-AQR-OWM Current State And Cleanup Audit
 
-Date: 2026-05-18
+Date: 2026-05-18, updated 2026-05-20
 
 This document is the current cleanup/audit checkpoint for the live
 PICF-AQR-OWM/MVTrack codebase. It does not replace
@@ -19,12 +19,33 @@ Those modules should not all be deleted at once: several are still referenced by
 verifiers, experiment notes, or compatibility paths. The correct cleanup is
 therefore classification plus archived entry points, not blind removal.
 
+2026-05-20 operator update:
+
+```text
+current long-run blocker:
+  wait for the clean proposal+mask+tracklet sidecar root to finish and pass the
+  final sidecar audit.
+
+current accepted long-run launcher:
+  scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_ownerdirect_long30k_20260520.sh
+
+current accepted sidecar root:
+  /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+
+do not use:
+  1000-frame diagnostics, 12000-frame diagnostics, blind-SAM roots, or old
+  samseed tracklet roots for production validation.
+```
+
 ## Current Source Of Truth
 
 - Primary live entry: `src/openpi/picf/README_v2.2.md`
 - This cleanup status: `docs/PICF_AQR_OWM_CURRENT_STATE_20260518.md`
 - Issue ledger: `docs/PICF_AQR_OWM_OPEN_ISSUE_TRACKER_20260517_TEMP.md`
 - Loss audit: `docs/PICF_AQR_OWM_LOSS_AUDIT_20260517_TEMP.md`
+- 30K handoff: `docs/PICF_AQR_OWM_30K_VALIDATION_AND_DENSE_CONTEXT_PLAN_20260520_TEMP.md`
+- Full sidecar generation gate:
+  `docs/PICF_AQR_OWM_CONTACT_MOTION_MASK_GENERATION_20260519_TEMP.md`
 - SAM status: rejected/archived. Historical notes live under
   `docs/archive/picf_aqr_owm_202605/sam_rejected_20260519/`.
 - AR active-anchor proposal audit: `docs/PICF_AQR_OWM_AR_ANCHOR_PROPOSAL_AUDIT_20260518_TEMP.md`
@@ -103,7 +124,7 @@ behavior unless their data or loss weights are active.
 
 | Area | Default | Rule |
 | --- | --- | --- |
-| Tracklet typed memory | Enabled in config, no-op without sidecar tensors | Keep. It is the right long-term temporal correspondence channel. Require sidecar coverage/quality checks before production claims. |
+| Tracklet typed memory | Enabled in config, no-op without sidecar tensors | Keep. It is the right long-term temporal correspondence channel. The accepted 2026-05-20 path is the clean contact-motion proposal/mask root plus KLT tracklet merge, audited before 30K. |
 | Generic proposal sidecar memory | Disabled | Keep only for inspected contact/task/tracklet-aware sidecars. Blind automatic SAM is rejected and archived. |
 | Offline IsSameObject probe | Offline only | Keep as audit. It validates the binding subspace; it must not become an online training loss without a separate design review. |
 | `slot_jepa` | Loss weight 0 | Keep hook; do not enable until matched, masked targets are empirically stable. |
@@ -195,28 +216,21 @@ must judge the whole bundle rather than a single loss.
 These are not "unfixed bugs"; they are either data-dependent or require long-run
 behavior evidence.
 
-1. Tracklet sidecars: code path exists, but production claims require generated
-   sidecars and coverage/quality checks.
+1. Tracklet sidecars: code path exists and the 2026-05-20 clean full-root
+   generation is in progress. Production claims still require the final
+   proposal/mask/tracklet audit and long-run behavior evidence.
    The 2026-05-18 A5 generation failure was traced to corrupted compressed
    tracklet `.npz` files during resume. `scripts/picf_tracklet_sidecar_precompute.py`
    now treats `zlib.error` like `BadZipFile`: the corrupt file is removed and
    regenerated instead of killing the whole shard.
-   2026-05-18 sidecar pause decision: the generated tracklet files are readable
-   and visualization samples show valid static/gripper points, but the only
-   full-sidecar training diagnostic so far proved dataflow, not behavior
-   improvement. The closest run,
-   `picf_a7_full_sidecar_anchoronly_diag300_20260517`, had nonzero
-   `owm_tracklet_tokens` but also residual proposal tokens and was
-   anchor-only/no-action/frozen-PaliGemma, so it is not a fair proof that
-   tracklet sidecars outperform the no-sidecar trainable-PaliGemma recipe.
-   Current recommendation: pause dataset-scale sidecar generation, keep the
-   code path and partial artifacts, and only resume when running a matched
-   A/B test:
-     A. no sidecar;
-     B. tracklet-only sidecar with proposal memory off;
-     C. prompted/contact-reranked proposal sidecar if that data exists.
-   All three must share trainable scope, action settings, PaliGemma trainability,
-   unroll/burnin, learning rate, and checkpoint source.
+   2026-05-20 replacement decision: old SAM-seeded, partial, and diagnostic
+   roots are rejected for production validation. The current generation starts
+   from the inspected contact-motion proposal/mask root
+   `/mnt/picf_sidecars/contact_motion_full_20260519` and writes a clean
+   proposal+mask+tracklet root at
+   `/mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520`. The long
+   run may use it only after `scripts/picf_prepare_full_sidecar_root.py` passes
+   with `--require-proposal --require-mask --require-tracklet`.
 2. SAM/proposal sidecars: blind SAM was demoted; prompted/contact/reranked
    proposals are future sidecar work, not current default.
 3. Fourth-object/ordinal grounding: no hard rank labels exist. Current ordinal
@@ -224,6 +238,77 @@ behavior evidence.
 4. Long-run acceptance: short diagnostics can reject bad configurations, but
    only a 30k-style run plus overlays/CALVIN metrics can prove sustained action
    and binding behavior.
+
+## 2026-05-20 Immediate Operating Procedure
+
+1. Let clean full-root generation finish on A7.
+2. Run the final sidecar audit:
+
+```bash
+PYTHONPATH=src python scripts/picf_prepare_full_sidecar_root.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --sidecar-root /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520 \
+  --split training \
+  --require-proposal \
+  --require-mask \
+  --require-tracklet \
+  --sample-limit 1024
+```
+
+3. If and only if that audit passes, start the accepted 30K launcher. The
+   launcher reads `calvin_segment_indices.txt` from the clean root and fails
+   closed if it is absent.
+4. Judge the first 500 steps by active ownership, after-fusion owner distance,
+   downstream overlap, action-default-equivalent loss, and overlays. Do not
+   judge by raw all-row overlap alone.
+
+## 2026-05-20 Local Verification Pass
+
+The current local code/document整理 pass validated the maintained handoff with:
+
+```text
+python -m py_compile:
+  picf_core_train.py
+  picf_latest_slot_deployment_audit.py
+  config.py / contracts.py / pipeline.py / training.py
+  sidecar preparation/generation scripts
+
+bash -n:
+  run_a7_slot_comprehensive_frozen_policy_1000_20260519.sh
+  run_a7_actionaware_after_dedup_smoke300_20260520.sh
+  run_a7_actionaware_ownerdirect_long30k_20260520.sh
+
+uv run pytest:
+  src/openpi/picf/core/pipeline_test.py
+  src/openpi/picf/core/training_test.py
+  result: 133 passed
+
+uv run python scripts/verify_picf_owm_contract.py:
+  PASS
+
+uv run python scripts/picf_owm_dataflow_trace.py --fail-on-fail:
+  ok=true
+
+uv run python scripts/picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS
+
+uv run python scripts/picf_latest_slot_deployment_audit.py --fail-on-fail:
+  14/14 PASS
+
+git diff --check:
+  PASS
+```
+
+One audit-hardening bug was fixed during this pass:
+
+```text
+scripts/picf_prepare_full_sidecar_root.py
+```
+
+The sidecar audit now samples evenly across the entire root instead of checking
+only the first `sample_limit` files, and any sampled corrupt `.npz` fails the
+gate. This directly addresses the risk that resume/interrupt artifacts near
+the middle or end of the dataset could survive a front-loaded audit.
 
 ## Code Cleanliness Conclusion
 
