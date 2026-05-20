@@ -9,6 +9,11 @@ set -euo pipefail
 #
 # Do not use --use-foundation-backbones here: that convenience flag sets
 # semantic_trainable=True.  Spell out the real encoders manually.
+#
+# The maintained action-aware smoke wrapper reuses this exact command and only
+# overrides SEMANTIC_TRAINABLE / SEMANTIC_LR_SCALE / ACTION_* weights.  Keep the
+# slot, sidecar, owner-transport, and dedup arguments identical so the smoke
+# tests action/semantic pressure rather than a different slot architecture.
 
 REPO_ROOT="${REPO_ROOT:-/root/openpi_slot_quality_ea2c5f2}"
 cd "${REPO_ROOT}"
@@ -20,11 +25,27 @@ CALVIN_ROOT="${CALVIN_ROOT:-/mnt/calvin_data/task_ABC_D}"
 PYTHON_BIN="${PYTHON_BIN:-/root/openpi/.venv/bin/python}"
 NPROC_PER_NODE="${NPROC_PER_NODE:-2}"
 SEGMENTS="${SEGMENTS:-0,1,2,3}"
+TRAINING_STRATEGY="${TRAINING_STRATEGY:-ddp}"
+OPTIMIZER_SHARDING="${OPTIMIZER_SHARDING:-none}"
+SEMANTIC_TRAINABLE="${SEMANTIC_TRAINABLE:-0}"
+SEMANTIC_LR_SCALE="${SEMANTIC_LR_SCALE:-1e-6}"
+ACTION_LOSS_WEIGHT="${ACTION_LOSS_WEIGHT:-0.0}"
+ACTION_POS_WEIGHT="${ACTION_POS_WEIGHT:-${ACTION_LOSS_WEIGHT}}"
+ACTION_ROT_WEIGHT="${ACTION_ROT_WEIGHT:-${ACTION_LOSS_WEIGHT}}"
+ACTION_GRIPPER_WEIGHT="${ACTION_GRIPPER_WEIGHT:-${ACTION_LOSS_WEIGHT}}"
+
+SEMANTIC_TRAINABLE_ARGS=()
+case "${SEMANTIC_TRAINABLE}" in
+  1|true|TRUE|yes|YES|on|ON)
+    SEMANTIC_TRAINABLE_ARGS+=(--semantic-trainable)
+    ;;
+esac
 
 mkdir -p /mnt/picf_run_logs /mnt/checkpoints/picf_core
 
 export PYTHONUNBUFFERED=1
 export PYTHONPATH="src:${PYTHONPATH:-}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
 
 CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" "${PYTHON_BIN}" -m torch.distributed.run --standalone --nproc_per_node="${NPROC_PER_NODE}" scripts/picf_core_train.py \
   --calvin-root "${CALVIN_ROOT}" \
@@ -39,6 +60,7 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" "${PYTHON_BIN}" -m torch.dis
   --use-tactile \
   --semantic-mode paligemma \
   --semantic-source auto \
+  "${SEMANTIC_TRAINABLE_ARGS[@]}" \
   --visual-checkpoint-path /root/openpi/checkpoints/foundation/vjepa2_1/vjepa2_1_vit_base_384/vjepa2_1_vitb_dist_vitG_384.pt \
   --tactile-checkpoint-path /root/openpi/checkpoints/foundation/anytouch2/checkpoint-4frames.pth \
   --tactile-backgrounds-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_backgrounds.npz \
@@ -46,8 +68,10 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" "${PYTHON_BIN}" -m torch.dis
   --tactile-contact-stats-path /mnt/checkpoints/picf_core/debug/tactile_calib_task_ABC_D_rgb_latent_full_v8/tactile_contact_stats.json \
   --sonata-checkpoint-path /root/openpi/src/pretrain/SpatialLM_Sonata_encoder.pth \
   --semantic-checkpoint-path /root/openpi/checkpoints/foundation/pi05_base_pytorch \
-  --training-strategy fsdp_full_shard \
-  --optimizer-sharding none \
+  --action-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json \
+  --prompt-state-norm-stats-path /root/openpi_posterior_vla_clean/assets/pi05_calvin_sonata/calvin/norm_stats.json \
+  --training-strategy "${TRAINING_STRATEGY}" \
+  --optimizer-sharding "${OPTIMIZER_SHARDING}" \
   --optimizer-checkpoint-mode model-only \
   --perception-finetune-mode frozen \
   --picf-trainable-scope all \
@@ -58,13 +82,13 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" "${PYTHON_BIN}" -m torch.dis
   --min-lr 2e-5 \
   --warmup-steps 50 \
   --weight-decay 1e-4 \
-  --semantic-lr-scale 1e-6 \
+  --semantic-lr-scale "${SEMANTIC_LR_SCALE}" \
   --unroll-steps 2 \
   --burnin-steps 1 \
   --burnin-mode state_only \
-  --lambda-action-pos 0.0 \
-  --lambda-action-rot 0.0 \
-  --lambda-action-gripper 0.0 \
+  --lambda-action-pos "${ACTION_POS_WEIGHT}" \
+  --lambda-action-rot "${ACTION_ROT_WEIGHT}" \
+  --lambda-action-gripper "${ACTION_GRIPPER_WEIGHT}" \
   --picf-action-prefix-stopgrad \
   --lambda-visual-latent 0.0 \
   --lambda-visual-real 0.0 \
@@ -155,6 +179,11 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" "${PYTHON_BIN}" -m torch.dis
   --object-candidate-owner-roles 1 \
   --object-candidate-owner-min-share 0.75 \
   --object-candidate-owner-point-mix 1.0 \
+  --object-candidate-owner-geometry-mix 0.95 \
+  --posterior-owner-transport-candidate-geometry-mix 1.0 \
+  --object-explanation-point-core-mass 0.90 \
+  --object-explanation-point-core-topk 128 \
+  --object-explanation-point-loss-clip 8.0 \
   --tactile-attach-to-object-owner \
   --tactile-evidence-prob-floor 0.35 \
   --tactile-anchor-prob-on 0.55 \
@@ -214,6 +243,8 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" "${PYTHON_BIN}" -m torch.dis
   --posterior-owner-transport-max-rate 0.85 \
   --posterior-owner-transport-precision-gain 8.0 \
   --posterior-owner-transport-min-mass 0.01 \
+  --posterior-owner-transport-direct-candidate-assignment \
+  --posterior-owner-transport-direct-candidate-min-score 0.01 \
   --posterior-owner-transport-assignment-floor 0.50 \
   --posterior-owner-transport-reliability-floor 0.50 \
   --posterior-owner-transport-covariance-scale 0.50 \
@@ -234,7 +265,24 @@ CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1}" "${PYTHON_BIN}" -m torch.dis
   --aqr-active-slot-geometry-duplicate-enabled \
   --aqr-active-slot-geometry-duplicate-sigma-m 0.05 \
   --aqr-active-slot-geometry-duplicate-threshold 0.45 \
-  --no-aqr-context-slot-enabled \
+  --aqr-context-slot-enabled \
+  --aqr-context-slot-weight 0.12 \
+  --aqr-context-slot-min-confidence 0.03 \
+  --aqr-context-slot-min-score 0.005 \
+  --aqr-context-slot-duplicate-overlap-threshold 0.75 \
+  --aqr-context-slot-deduplicate-enabled \
+  --aqr-context-slot-max-per-role 8 \
+  --aqr-context-slot-self-overlap-threshold 0.75 \
+  --aqr-context-slot-self-support-overlap-enabled \
+  --aqr-context-slot-self-support-overlap-threshold 0.70 \
+  --aqr-context-slot-active-support-overlap-enabled \
+  --aqr-context-slot-active-support-overlap-threshold 0.50 \
+  --no-aqr-context-slot-quality-gate-enabled \
+  --aqr-slot-quality-owner-active-floor 0.65 \
+  --aqr-control-graph-attention-bias-enabled \
+  --no-aqr-control-graph-token-scaling-enabled \
+  --aqr-control-graph-state-embedding-enabled \
+  --aqr-control-graph-bias-min 0.0001 \
   --grad-clip-mode fixed \
   --grad-clip-norm 5.0 \
   --anchor-overlay-interval 50 \

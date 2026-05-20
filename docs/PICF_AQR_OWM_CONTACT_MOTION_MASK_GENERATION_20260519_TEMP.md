@@ -162,3 +162,155 @@ The long-run command must use:
 The nearest fallback is age-aware weak evidence.  It is not a substitute for
 sidecar coverage; it only prevents exact-frame sparsity from silently becoming
 `proposal_tokens=0` on nearby frames.
+
+## 2026-05-20 Full-Sidecar Preparation Update
+
+The 1000-frame root remains diagnostic only.  The A7 inspection found a larger
+proposal-mask root already present:
+
+```text
+/mnt/picf_sidecars/contact_motion_full_20260519
+  proposal/mask npz files: about 199k
+  fields: proposal_centers_xy, proposal_boxes_xyxy,
+          proposal_mask_xy, proposal_mask_weights, proposal_mask_offsets,
+          proposal_objectness, proposal_view_ids, proposal_source_ids
+  missing before repair: calvin_segment_indices.txt and long-run manifest
+```
+
+The preparation script is:
+
+```text
+scripts/picf_prepare_full_sidecar_root.py
+```
+
+It is metadata-only and CPU/IO-only.  It scans the sidecar split directory,
+maps covered `episode_XXXXXXX.npz` ids back to CALVIN language segments, writes:
+
+```text
+calvin_segment_indices.txt
+long_run_manifest.json
+```
+
+and verifies sampled proposal/mask/tracklet keys.  This is the required gate
+before a long run can claim that sampling is tied to sidecar coverage.
+
+Important 2026-05-20 audit fix: CALVIN `auto_lang_ann.npy` stores
+`info["indx"]` in a shuffled order.  Segment coverage must therefore use
+per-interval binary search over sorted sidecar episode ids.  A monotonic cursor
+undercounts coverage and can turn a large proposal/mask root into a false
+12-segment root.
+
+Tracklets must be generated or merged into a clean output root separately.  The
+maintained tracklet generator is:
+
+```text
+scripts/picf_tracklet_sidecar_precompute.py
+```
+
+Important 2026-05-20 repair: when this generator merges a proposal root into a
+tracklet output root, it must copy the sparse mask keys too:
+
+```text
+proposal_mask_xy
+proposal_mask_weights
+proposal_mask_offsets
+```
+
+Without this, a "full tracklet" sidecar silently loses the owner-mask evidence
+that the current slot contract depends on.
+
+The clean production root should therefore be prepared in two stages:
+
+```text
+Stage A:
+  prepare /mnt/picf_sidecars/contact_motion_full_20260519
+  require proposal + mask keys
+  no GPU required
+  expected runtime: minutes, dominated by directory scan
+
+Stage B:
+  generate clean KLT tracklets seeded by the Stage-A proposal root into:
+    /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+  no GPU required
+  expected runtime: hours, dominated by CPU image decode + OpenCV KLT + IO
+  run sharded across CPU processes
+
+Stage C:
+  prepare/audit the Stage-B root
+  require proposal + mask + tracklet keys
+  train with:
+    --mvtrack-sidecar-root /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+    --calvin-segment-indices "$(cat /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520/calvin_segment_indices.txt)"
+```
+
+Do not use `tracklets_samseed_*` as the clean production root.  Those roots are
+useful historical evidence that the dataflow can carry tracklets, but their
+seed provenance is not the current contact-motion contract.
+
+## 2026-05-20 Clean Full-Root Generation Status
+
+Current A7 production-prep run:
+
+```text
+tmux session:
+  picf_a7_full_tracklets_clean_20260520
+
+proposal/mask input root:
+  /mnt/picf_sidecars/contact_motion_full_20260519
+
+clean proposal+mask+tracklet output root:
+  /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+
+shards:
+  8 CPU/OpenCV workers
+
+GPU:
+  not used
+```
+
+The output root was intentionally empty before launch.  Old diagnostic or
+rejected roots were removed from the top-level `/mnt/picf_sidecars` namespace
+so future launch scripts cannot accidentally pick a dirty root.  The only
+top-level roots retained for this contract are:
+
+```text
+/mnt/picf_sidecars/contact_motion_full_20260519
+/mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+```
+
+Progress log caveat:
+
+```text
+scripts/picf_tracklet_sidecar_precompute.py emits per-shard
+`progress_segments`, not `segments_logged`.
+
+Total progress = sum(progress_segments across shard logs).
+```
+
+At 2026-05-20 22:25 CST, the clean run had:
+
+```text
+progress_segments:
+  2800 / 7545
+
+progress_fraction:
+  about 37.1%
+
+remaining wall time:
+  roughly 3.0-4.0 hours at the observed rate
+```
+
+The final required gate after generation is:
+
+```bash
+PYTHONPATH=src python scripts/picf_prepare_full_sidecar_root.py \
+  --calvin-root /mnt/calvin_data/task_ABC_D \
+  --sidecar-root /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520 \
+  --split training \
+  --require-proposal \
+  --require-mask \
+  --require-tracklet \
+  --sample-limit 1024
+```
+
+Only after that command passes may a long training run use this root.

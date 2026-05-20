@@ -26,6 +26,145 @@ under `scripts/archive/` and
 `proposal_*` sidecar schema only for inspected contact/task/tracklet-aware
 sources.
 
+2026-05-20 robust OEML core update: use
+[`docs/PICF_AQR_OWM_ROBUST_OEML_CORE_FOLLOWTHROUGH_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ROBUST_OEML_CORE_FOLLOWTHROUGH_20260520_TEMP.md)
+for the current object-mask/point compactness repair. The A7 context-quality
+validation fixed context starvation but exposed an unbounded
+`loss_object_explanation_point` path (`1.7 -> 34` by step 250). The accepted
+fix computes OEML point compactness on the high-confidence sidecar mask core
+and clips the auxiliary point loss. This does not prune dense V-JEPA/point
+tokens and does not promote sidecar masks to posterior truth; it only restores
+the intended soft-measurement/background-residual contract.
+
+2026-05-20 context dedup update: use
+[`docs/PICF_AQR_OWM_CONTEXT_DEDUP_FOLLOWTHROUGH_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CONTEXT_DEDUP_FOLLOWTHROUGH_20260520_TEMP.md)
+for the current reserve/context duplicate repair. The robust OEML validation
+showed active posterior rows were healthy
+(`aqr_active_same_role_support_overlap_max < 0.05`) while raw same-role overlap
+returned to `0.93-0.99` because about 22 context/reserve rows still exposed
+duplicate object evidence to the control graph. The first context-core dedup
+repair held through step 100 but failed at step 150 because diffuse full-support
+overlap reappeared while object-core overlap stayed low. The accepted fix is
+quality-ordered, per-role context-context duplicate suppression before
+downstream graph exposure, using both object-core/geometry overlap and
+full-support overlap. It keeps dense typed memory and fixed AQR capacity intact;
+it only changes which low-priority context rows remain visible to PI0.5/control
+readers.
+
+2026-05-20 A7 active validation update: `picf_a7_context_support_dedup_300_20260520`
+completed 300 steps. The old step-150 failure has not recurred: raw
+reserve-pool support overlap can still approach `1.0`, but
+`aqr_active_same_role_support_overlap_max`,
+`aqr_context_same_role_support_overlap_max`, and
+`aqr_downstream_same_role_support_overlap_max` remain bounded below the old
+`0.83-0.84` failure band (`0.049 / 0.512 / 0.628` at step 300). This validates
+the current selector boundary: overcomplete capacity and dense typed memory are
+preserved, while duplicate low-priority context rows are suppressed before
+downstream control exposure. It is still not a 30000-step launch candidate:
+`loss_object_explanation_point` rises to `6.09`, grad clipping appears after
+step 250, and overlays show active/posterior owner localization is not yet
+cleanly centered on the sidecar mask. Next work should target owner transport
+and active-quality calibration, not revive blind SAM or add generic diversity
+losses.
+
+2026-05-20 owner measurement transport update: use
+[`docs/PICF_AQR_OWM_OWNER_MEASUREMENT_TRANSPORT_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_OWNER_MEASUREMENT_TRANSPORT_20260520_TEMP.md)
+for the current repair after `picf_a7_context_support_dedup_300_20260520`.
+The fix promotes accepted contact/motion owner candidates from "support prior
+only" to explicit soft geometry measurements `(x_owner, S_owner)` for graph
+active selection and posterior owner transport. It also adds an owner active
+floor to QASA-style slot quality, so a validated owner candidate is not
+suppressed as a low-quality duplicate during early training. This remains a
+belief-state measurement path, not hard mask truth: dense V-JEPA/point/tactile
+tokens are not pruned, blind SAM remains rejected, and posterior file
+competition remains authoritative.
+
+2026-05-20 active-support dedup update: the owner-transport repair fixed active
+owner localization but left a second-order clone path where non-active
+context/downstream rows reused the same full support as an already-active
+owner. The maintained fix is
+`aqr_context_slot_active_support_overlap_enabled`, documented in the same owner
+transport ledger above. It suppresses only downstream owner weight for
+context rows whose full support duplicates an active owner; it does not delete
+dense context tokens, does not add another loss, and does not turn sidecar masks
+into truth. Interim A7 validation
+`picf_a7_active_support_dedup_300_20260520` is positive through step 300:
+`aqr_downstream_same_role_support_overlap_max` stays near `0.50` instead of
+the previous `0.76+` rebound, `loss_object_explanation_point` falls to `1.7866`,
+active overlap remains low (`0.0367`), and overlays keep the active owner on
+the sidecar mask. Treat this as fixed for short validation; the next gate is a
+longer training/eval run, not another local patch on this failure mode.
+
+2026-05-20 action-aware smoke gate: use
+[`docs/PICF_AQR_OWM_ACTION_AWARE_SMOKE_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_AWARE_SMOKE_20260520_TEMP.md)
+for the next validation after active-support dedup. The launcher is
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_after_dedup_smoke300_20260520.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_after_dedup_smoke300_20260520.sh).
+It reuses the exact slot/sidecar/OEML/owner-transport command that passed
+frozen-policy validation, but turns on production-relevant PaliGemma training
+and action loss while keeping V-JEPA/Sonata/AnyTouch frozen. This is the right
+next test because the remaining risk is no longer the local dedup invariant; it
+is whether action/semantic pressure destabilizes the repaired slot belief
+router. Because PaliGemma is trainable in this smoke, the launcher must override
+the frozen-policy DDP default with `TRAINING_STRATEGY=fsdp_full_shard`,
+`OPTIMIZER_SHARDING=none`, and
+`PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`. A DDP action-aware launch
+replicates the semantic stack and can OOM before step 1; that is a memory
+contract error, not evidence against the slot repair.
+
+2026-05-20 action-aware smoke result: the FSDP relaunch
+`picf_a7_actionaware_after_dedup_smoke300_20260520` completed 300 steps and
+saved checkpoint `300`. It passes the short action-aware gate: active duplicate
+overlap stayed `0` at every logged step, active same-role support overlap ended
+near zero (`0.00105`), downstream overlap ended below the step50 level
+(`0.27396`), action-default-equivalent loss improved from `0.10420` to
+`0.03255`, and overlays kept the active owner on the sidecar/contact mask. It
+does not close long-run behavior: object auxiliary losses are non-monotonic,
+stable identity switch still rebounds on later windows, and CALVIN/video
+acceptance is still required. The correct next gate is longer co-training with
+the same slot contract, not another raw-overlap patch.
+
+2026-05-20 30K validation gate: use
+[`docs/PICF_AQR_OWM_30K_VALIDATION_AND_DENSE_CONTEXT_PLAN_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_30K_VALIDATION_AND_DENSE_CONTEXT_PLAN_20260520_TEMP.md)
+as the handoff for the first production-length action-aware run after the
+short smoke gates. The launcher is
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_ownerdirect_long30k_20260520.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_ownerdirect_long30k_20260520.sh).
+It freezes V-JEPA/Sonata/AnyTouch pretrained modules, trains PaliGemma,
+PICF adapters, and action-side heads, keeps guarded predictive/denoising losses
+disabled, logs/overlays every 50 steps, saves every 2500 steps, and keeps the
+latest 3 checkpoints. The dense-background-context idea is recorded there as a
+follow-up: inject raw V-JEPA/static/wrist context through gated attention/bias,
+similar in spirit to JEPA-VLA/VLA-JEPA predictive embedding conditioning, but
+do not enable it in this 30K run because it would confound the owner-direct
+action-aware acceptance signal.
+
+2026-05-20 full sidecar generation gate: the long-run launcher now defaults to
+the clean production sidecar root
+`/mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520` and fails
+closed unless that root has `calvin_segment_indices.txt` or the operator
+explicitly supplies `SEGMENTS`.  The clean root is generated from
+`/mnt/picf_sidecars/contact_motion_full_20260519`, preserves proposal boxes,
+sparse proposal masks, and KLT tracklets, and must pass
+`scripts/picf_prepare_full_sidecar_root.py --require-proposal --require-mask
+--require-tracklet` before 30K training starts.  At 2026-05-20 22:25 CST the A7
+generation was at `2800/7545` progress segments with about `3.0-4.0` hours
+remaining and no GPU use.  Do not use old 1000/12000/SAM/samseed diagnostic
+roots for this run.
+
+2026-05-20 latest-slot final audit: use
+[`docs/PICF_AQR_OWM_LATEST_SLOT_FINAL_AUDIT_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_LATEST_SLOT_FINAL_AUDIT_20260520_TEMP.md)
+as the current strict reconciliation against recent slot/object-binding/VLA
+methods and local paper-code snapshots. The conclusion is intentionally narrow:
+PICF has imported the production-compatible invariants from the latest slot
+lineage: slot-axis competition, object/background residual, QASA-style slot
+quality, MetaSlot-style dynamic duplicate demotion without hard VQ posterior
+truth, IsSameObject-style pairwise/quadratic binding, persistent
+binding-signature memory, contact/motion sidecar measurements, object-owner
+posterior transport, tactile-to-object routing, and context attention bias
+instead of destructive token pruning. The audit rejects blind SAM, hard visual
+VQ truth, and full reconstruction decoders as current production defaults. This
+does not prove final behavior; it says no new mathematically mandatory slot
+module was found before the next longer co-training/CALVIN gate.
+
 2026-05-19 run taxonomy / latest-slot deployment update: use
 [`temp/audits_20260519/run_taxonomy_latest_slot_deployment_20260519.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260519/run_taxonomy_latest_slot_deployment_20260519.md)
 before interpreting any A7/A5 run. The active
@@ -49,9 +188,10 @@ MetaSlot-style duplicate/dynamic active-file gating without hard VQ posterior
 truth, Object-Binding-style pairwise/quadratic binding subspace, persistent
 binding-signature memory, SlotVLA-style optional proposal/tracklet sidecar
 measurements, tactile-to-object owner routing, and precision-fused posterior
-owner transport.  Behavior-level acceptance is still pending the active A7
-anchor probe, the queued slot-comprehensive frozen-policy validation, and then
-a guarded 30000-step co-training run.  The executable closure check is
+owner transport.  The active A7 structural gate has now passed through
+`picf_a7_active_support_dedup_300_20260520`; behavior-level acceptance is now
+pending the action-aware smoke, longer co-training, and CALVIN/video evidence.
+The executable closure check is
 [`scripts/picf_latest_slot_deployment_audit.py`](/home/siyuanyue/Documents/openpi/scripts/picf_latest_slot_deployment_audit.py).
 
 2026-05-19 multimodal prototype / reconstruction-aux roadmap: use
@@ -811,6 +951,17 @@ active object anchors enter the graph prefix with full weight, real non-target
 context anchors enter with low weight, and duplicate/no-object reserve anchors
 remain diagnostics/lifecycle capacity. This replaces the rejected binary
 `active`/`inactive` graph-prefix gate while preserving typed background memory.
+2026-05-20 refinement: context/reserve reliability is now carried as
+graph-column attention bias instead of multiplying graph token embeddings by the
+downstream weight.  This keeps dense slot content intact and aligns the control
+interface with Slot Attention/SAVi/MetaSlot-style assignment-space reliability:
+active rows are full evidence, context rows are low-priority scene evidence, and
+reserve rows are strongly downweighted without being confused with semantic
+zero vectors.  The follow-up fix also keeps accepted context rows from being
+zeroed by early learned `slot_quality.context_weight`: active rows may be
+quality-gated, but context rows are deterministic low-priority evidence by
+default.  The complete dataflow/math audit is
+[`docs/PICF_AQR_OWM_CONTEXT_ATTENTION_BIAS_FOLLOWTHROUGH_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CONTEXT_ATTENTION_BIAS_FOLLOWTHROUGH_20260520_TEMP.md).
 It adds an assignment-model step before posterior write:
 
 ```text
@@ -1311,6 +1462,17 @@ anchor/recycle health. Both runs use `save_interval=2500` and
   tri-state math, traces the code dataflow from AQR priors to PI0.5 control
   prefix, and lists the metrics needed to verify that real scene context remains
   available without letting reserve files become full object evidence.
+- [`docs/PICF_AQR_OWM_CONTEXT_ATTENTION_BIAS_FOLLOWTHROUGH_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CONTEXT_ATTENTION_BIAS_FOLLOWTHROUGH_20260520_TEMP.md)
+  2026-05-20 refinement of the tri-state router. It records the paper-code
+  follow-through, the reason graph-token norm scaling was replaced by
+  attention-bias reliability, and the exact code/CLI dataflow from AQR
+  downstream weights into `control_world`, `pi_prefix_reader`, and
+  `future_condition_reader`.
+- [`docs/PICF_AQR_OWM_ROBUST_OEML_CORE_FOLLOWTHROUGH_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ROBUST_OEML_CORE_FOLLOWTHROUGH_20260520_TEMP.md)
+  2026-05-20 robust object-explanation measurement repair. It records why
+  sidecar mask tails made `loss_object_explanation_point` unbounded, the
+  high-confidence point-core compactness formula, the bounded point-loss guard,
+  and the A7 300-step acceptance criteria.
 - [`docs/PICF_AQR_OWM_SLOT_THEORY_GAP_ANALYSIS_20260515_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SLOT_THEORY_GAP_ANALYSIS_20260515_TEMP.md)
   2026-05-15 theory/dataflow audit that splits the architecture into typed
   evidence, AQR routing, support signatures, posterior binding, recycle/dustbin,
@@ -6518,6 +6680,27 @@ fixed, while the 200-step active-scope diagnostic still leaves
 Do not treat raw duplicate telemetry as active-object failure, but also do not
 claim anchor-PV/denoising are solved until the active-object PV / global
 PV-weak split is validated.
+
+The latest-slot final audit and direct owner write-through repair are
+[`docs/PICF_AQR_OWM_LATEST_SLOT_FINAL_AUDIT_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_LATEST_SLOT_FINAL_AUDIT_20260520_TEMP.md)
+and
+[`temp/audits_20260520/posterior_owner_transport_direct_write_through_followthrough.md`](/home/siyuanyue/Documents/openpi/temp/audits_20260520/posterior_owner_transport_direct_write_through_followthrough.md).
+They record the current maintained slot contract: graph owner candidates are
+kept as object-measurement evidence, then directly assigned to bounded
+posterior files before precision fusion.  Use
+`posterior_owner_transport_active_dist_after_fusion_*`, not only the pre-fusion
+`posterior_owner_transport_dist_to_standard_*`, when judging whether owner
+transport has actually closed into the posterior file.
+The same follow-through now also records the full local core re-audit:
+`pipeline_test.py + training_test.py` pass with 133 tests, proposal debug
+logging is independent of tracklets, cache validity follows active-file rather
+than all-row semantics, and guarded binding consistency is permutation-tolerant
+under detached future-slot reordering.
+The `picf_a7_owner_direct_final_smoke300_20260520` frozen-policy validation
+completed 300 steps and is recorded there as well: active posterior duplicate
+overlap stayed zero, active support overlap stayed near zero, and active owner
+closure after fusion stayed in the millimeter range. Raw reserve/context
+overlap still rises and remains a separate monitoring item.
 
 The posterior birth/no-object transport repair is
 [`docs/PICF_AQR_OWM_POSTERIOR_BIRTH_TRANSPORT_FOLLOWTHROUGH_20260517_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_POSTERIOR_BIRTH_TRANSPORT_FOLLOWTHROUGH_20260517_TEMP.md).

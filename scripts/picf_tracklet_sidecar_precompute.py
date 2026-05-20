@@ -42,9 +42,13 @@ _TRACKLET_KEYS = (
 _PROPOSAL_KEYS = (
     "proposal_centers_xy",
     "proposal_boxes_xyxy",
+    "proposal_mask_xy",
+    "proposal_mask_weights",
+    "proposal_mask_offsets",
     "proposal_objectness",
     "proposal_view_ids",
     "proposal_source_ids",
+    "proposal_age",
 )
 
 

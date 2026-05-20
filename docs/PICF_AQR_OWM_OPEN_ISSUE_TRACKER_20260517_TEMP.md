@@ -39,6 +39,28 @@ Legacy reproduction requires archived scripts plus
 --allow-legacy-blind-sam-sidecar.
 ```
 
+2026-05-20 clean sidecar disposition:
+
+```text
+Old SAM-seeded, smoke-only, and partial diagnostic sidecar roots are rejected
+for production validation.
+
+The accepted next-run data contract is:
+  /mnt/picf_sidecars/contact_motion_full_20260519
+    proposal + sparse mask source root
+
+  /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+    clean proposal + sparse mask + KLT tracklet root
+
+The clean root is generated from an empty output directory and must pass
+scripts/picf_prepare_full_sidecar_root.py with:
+  --require-proposal --require-mask --require-tracklet
+
+Status at 2026-05-20 22:25 CST:
+  generation in progress, 2800 / 7545 progress_segments, no GPU use,
+  ETA roughly 3.0-4.0 hours.
+```
+
 This section centralizes the current A7-facing issue list.  Earlier versions of
 this tracker did record the same symptoms, but they were spread across I5,
 I11, I12, I13 and the long experiment report.  The operator-facing summary is:
@@ -198,11 +220,15 @@ not sufficient by themselves.
    Tried:
      generation and a full-sidecar anchor-only diagnostic.
    Result:
-     generated files are readable and AQR receives nonzero tracklet tokens, but
-     the diagnostic was not a matched proof of behavior benefit.  Some shards
-     had zero saved frames under proposal-required filtering.
+     the old SAM-seeded/diagnostic roots proved the dataflow but were not clean
+     production evidence.  The maintained root is now regenerated from
+     contact-motion proposal/mask evidence into a clean KLT tracklet root, with
+     sparse mask keys preserved during merge and final proposal/mask/tracklet
+     auditing required before long training.
    Verdict:
-     paused/archived as unproven-benefit data upgrade.
+     open-train: data generation is in progress; if the final audit passes,
+     tracklet/proposal/mask sidecars are accepted for the next 30K validation
+     but behavior benefit still requires long-run evidence.
 
 10. Frozen-PaliGemma action diagnostic
     Tried:
@@ -506,6 +532,81 @@ burnin_suffix_graph_consistency:
 
 These repairs should not be reopened unless a metric or script regression shows
 the exact failure mode again.
+
+### 2026-05-20 Owner Measurement Transport Update
+
+Run:
+
+```text
+picf_a7_context_support_dedup_300_20260520
+```
+
+Verdict:
+
+```text
+context/downstream duplicate rebound:
+  closed for this diagnostic.
+
+task-owner active/posterior localization:
+  still open-code before this repair.
+```
+
+Evidence:
+
+```text
+step 300:
+  aqr_active_same_role_support_overlap_max     = 0.049
+  aqr_context_same_role_support_overlap_max    = 0.512
+  aqr_downstream_same_role_support_overlap_max = 0.628
+  loss_object_explanation_point                = 6.09
+  grad clipping                                = active
+```
+
+Overlay interpretation:
+
+```text
+sidecar/mask core exists, but graph active owner is only near the core and
+posterior active file can remain farther away. This means sidecar/contact
+owner evidence was still too indirect: it entered support priors but was not
+first-class owner geometry for active selection and posterior transport.
+```
+
+Implemented locally:
+
+```text
+object_candidate_owner_x / object_candidate_owner_S:
+  accepted owner candidate point-mask geometry.
+
+object_candidate_owner_geometry_mix:
+  blends owner measurement geometry into graph anchor geometry before active
+  selection.
+
+posterior_owner_transport_candidate_geometry_mix:
+  uses accepted owner measurement geometry during posterior precision fusion.
+
+aqr_slot_quality_owner_active_floor:
+  prevents QASA-style quality from suppressing an accepted owner candidate as
+  early duplicate/no-object noise.
+```
+
+Validation doc:
+
+```text
+docs/PICF_AQR_OWM_OWNER_MEASUREMENT_TRANSPORT_20260520_TEMP.md
+```
+
+Next acceptance:
+
+```text
+Run picf_a7_owner_measurement_transport_300_20260520.
+
+Pass condition:
+  owner geometry active distance near zero;
+  posterior_owner_transport_confidence nonzero;
+  active and posterior overlays move to sidecar/mask core;
+  active/downstream overlap stays below old failure band;
+  loss_object_explanation_point remains bounded without late grad explosion.
+```
 
 ## Open Work Plan
 
@@ -3254,4 +3355,541 @@ loss_anchor_object_pull decreases by step 50/100.
 role-1/orange active owner moves into/near the sidecar mask.
 If this fails, the remaining fault is anchor geometry/query capacity or
 sidecar projection, not blue-role competition.
+```
+
+## 2026-05-20 Issue Update: Context-Core Dedup Was Necessary But Not Sufficient
+
+Status: partially closed.  Support-aware context dedup is implemented and A7
+`picf_a7_context_support_dedup_300_20260520` completed 300 steps.  It fixes
+the old downstream duplicate-context rebound but exposes a separate remaining
+owner-localization issue.
+
+What the previous A7 run proved:
+
+```text
+picf_a7_context_dedup_300_20260520
+
+step 50/100:
+  context rows dropped from about 22 to about 6.
+  downstream/context same-role support overlap stayed around 0.25-0.41.
+  active same-role support overlap stayed below 0.02.
+
+step 150:
+  active same-role support overlap still stayed low.
+  context object-core overlap stayed low (~0.26).
+  downstream object-core overlap stayed low (~0.28).
+  context/downstream full-support overlap rebounded to ~0.83-0.84.
+  grad clipping triggered.
+```
+
+Conclusion:
+
+```text
+This is not active posterior collapse.
+This is not a missing SAM/proposal module.
+This is not an action-loss conflict, because the run has zero action loss.
+
+The remaining engineering fault is narrower:
+  the context selector suppressed duplicate object-core owners but did not
+  suppress diffuse duplicate support rows before the control graph.
+```
+
+Implemented repair:
+
+```text
+config:
+  aqr_context_slot_self_support_overlap_enabled=True
+  aqr_context_slot_self_support_overlap_threshold=0.70
+
+pipeline:
+  context-context greedy selection now rejects a candidate if either:
+    object-core/geometry overlap > aqr_context_slot_self_overlap_threshold
+    full-support overlap > aqr_context_slot_self_support_overlap_threshold
+
+tests:
+  added a regression where two rows have distinct proposal/object-core evidence
+  but identical diffuse visual support.  The old selector keeps both; the new
+  support-aware selector suppresses the lower-scoring duplicate.
+```
+
+Acceptance for the active validation:
+
+```text
+By step 100:
+  aqr_context_same_role_support_overlap_max should stay materially below the
+  old 0.83+ rebound.
+  aqr_downstream_same_role_support_overlap_max should stay below raw overlap.
+  aqr_active_same_role_support_overlap_max should remain low.
+  loss_object_explanation_point should stay bounded and not return to the old
+  unbounded 10-30 range.
+
+If this fails, the next issue is upstream support-map formation, not context
+dedup visibility.
+```
+
+Observed active validation:
+
+```text
+picf_a7_context_support_dedup_300_20260520
+
+step 50:
+  active/context/downstream support overlap max = 0.0148 / 0.2982 / 0.3382
+  raw same-role support overlap max = 0.4713
+  loss_object_explanation_point = 0.7746
+  grad_clip_applied = false
+
+step 100:
+  active/context/downstream support overlap max = 0.0239 / 0.2433 / 0.2692
+  raw same-role support overlap max = 0.8454
+  loss_object_explanation_point = 2.6901
+  grad_clip_applied = false
+
+step 150:
+  active/context/downstream support overlap max = 0.0093 / 0.2120 / 0.2521
+  raw same-role support overlap max = 0.9951
+  loss_object_explanation_point = 4.4468
+  grad_clip_applied = false
+
+step 200:
+  active/context/downstream support overlap max = 0.0390 / 0.3786 / 0.4614
+  raw same-role support overlap max = 0.9995
+  loss_object_explanation_point = 4.2610
+  grad_clip_applied = false
+
+step 250:
+  active/context/downstream support overlap max = 0.0923 / 0.4327 / 0.6175
+  raw same-role support overlap max = 0.9999
+  loss_object_explanation_point = 5.4936
+  grad_clip_applied = true
+
+step 300:
+  active/context/downstream support overlap max = 0.0490 / 0.5121 / 0.6277
+  raw same-role support overlap max = 0.9999
+  loss_object_explanation_point = 6.0854
+  grad_clip_applied = true
+```
+
+Current conclusion:
+
+```text
+The old step-150 failure did not reproduce.  Raw reserve overlap remains high,
+which is expected for an overcomplete fixed-capacity query bank, but active,
+context, and downstream rows remain bounded below the old 0.83-0.84 band.
+
+However, this is not a full binding closure.  The point/object-pull losses rise
+late and grad clipping appears after step 250.  Overlay review shows active
+graph anchors can remain near but not cleanly centered on the sidecar mask, and
+posterior active files can stay farther away.  The next issue is owner
+transport / active-quality calibration, not another generic context dedup rule.
+```
+
+## 2026-05-20 Issue Update: Owner Measurement Transport Fixed Active Localization, Not Downstream Reuse
+
+Status: partially closed.  The accepted sidecar/contact owner candidate is now
+promoted to a first-class geometry measurement and transported into graph and
+posterior owner updates.
+
+Run:
+
+```text
+picf_a7_owner_measurement_transport_300_20260520
+```
+
+Implemented repair:
+
+```text
+PicfAnchorPriorGraphState.object_candidate_owner_x/S
+_object_candidate_owner_geometry()
+object_candidate_owner_geometry_mix
+posterior_owner_transport_candidate_geometry_mix
+aqr_slot_quality_owner_active_floor
+```
+
+Observed:
+
+```text
+step 50:
+  owner geometry active distance ~= 0.00020 m
+  active/context/downstream support overlap max = 0.0018 / 0.2502 / 0.3642
+  loss_anchor_object_pull = 0.3229
+  loss_object_explanation_point = 2.1870
+
+step 100:
+  owner geometry active distance ~= 0.00022 m
+  active/context/downstream support overlap max = 0.0024 / 0.3577 / 0.4063
+  loss_anchor_object_pull = 0.2827
+  loss_object_explanation_point = 2.1716
+
+step 150:
+  owner geometry active distance ~= 0.00028 m
+  active/context/downstream support overlap max = 0.0422 / 0.4623 / 0.6048
+  loss_anchor_object_pull = 0.2638
+  loss_object_explanation_point = 2.8618
+
+step 200:
+  owner geometry active distance ~= 0.00047 m
+  active/context/downstream support overlap max = 0.1131 / 0.4986 / 0.7659
+  loss_anchor_object_pull = 0.5630
+  loss_object_explanation_point = 3.1591
+```
+
+Overlay inspection:
+
+```text
+step 50 push_the_switch_downwards:
+  active graph/posterior owner sits on the sidecar mask.
+
+step 100 push_the_switch_downwards:
+  active graph/posterior owner still sits on the sidecar mask.
+
+step 150 open_the_drawer:
+  active graph/posterior owner sits on the drawer sidecar mask.
+
+step 200 slide_the_door_to_the_left:
+  active graph/posterior owner sits on the sidecar mask.
+```
+
+Conclusion:
+
+```text
+Fixed:
+  the active owner localization path.  The previous "mask exists but orange
+  owner cannot be pulled to it" diagnosis is no longer true for the inspected
+  50/100/150/200 overlays.
+
+Still open:
+  downstream/context rows continue to reuse the same object support after the
+  active owner is selected.  This causes raw/context/downstream overlap and
+  object-explanation point loss to rise even though the selected active owner
+  is correct.
+
+Next root repair:
+  duplicate demotion must be applied to downstream/context weights for rows
+  that explain an already-owned sidecar object.  It must preserve dense
+  context tokens as low-weight background/context evidence, but prevent them
+  from acting as additional object owners in the control graph.
+```
+
+## 2026-05-20 Issue Update: Active-Context Support Dedup Implemented Locally
+
+Status: implemented locally; A7 revalidation pending.
+
+Root cause:
+
+```text
+The owner-geometry repair made the selected active owner correct, but
+downstream/context rows could still reuse the same full support distribution.
+The earlier duplicate filter checked object-core/geometry overlap; it missed
+diffuse full-support duplicates that should be reserve/background context, not
+second object owners.
+```
+
+Repair:
+
+```text
+aqr_context_slot_active_support_overlap_enabled
+aqr_context_slot_active_support_overlap_threshold
+```
+
+Rule:
+
+```text
+If a non-active context candidate's full support overlaps an already-active
+owner above threshold, the row remains in the dense graph state but loses
+downstream owner weight.
+```
+
+Why this is not an ad-hoc patch:
+
+```text
+It completes the same slot-competition invariant already used for active rows
+and context-context deduplication.  It adds no new loss and deletes no dense
+tokens.  It only prevents duplicate explanations of an already-owned object
+from entering the action-visible owner set.
+```
+
+Local verifier:
+
+```text
+test_context_slot_downstream_weight_deduplicates_active_diffuse_support
+```
+
+The test deliberately creates a failure case where object-core overlap is low
+but full visual support overlap is identical.  The duplicate context row must
+be suppressed; an unrelated context row must remain available.
+
+Remote validation started:
+
+```text
+picf_a7_active_support_dedup_300_20260520
+```
+
+Decision rule:
+
+```text
+At step 100/200/300, judge active/context/downstream overlap separately.  Do
+not reject on raw reserve overlap alone.  Reject if downstream-visible overlap
+rebounds like picf_a7_owner_measurement_transport_300_20260520 while
+loss_object_explanation_point continues rising.
+```
+
+Interim validation through step 200:
+
+```text
+step 50:
+  active/context/downstream/raw support overlap max = 0.0017 / 0.2398 / 0.3327 / 0.4620
+  loss_anchor_object_pull = 0.3701
+  loss_object_explanation_point = 2.2234
+
+step 100:
+  active/context/downstream/raw support overlap max = 0.0045 / 0.3399 / 0.3779 / 0.6498
+  loss_anchor_object_pull = 0.2629
+  loss_object_explanation_point = 2.4188
+
+step 150:
+  active/context/downstream/raw support overlap max = 0.0182 / 0.4342 / 0.4569 / 0.9017
+  loss_anchor_object_pull = 0.2479
+  loss_object_explanation_point = 2.5368
+
+step 200:
+  active/context/downstream/raw support overlap max = 0.0287 / 0.4842 / 0.5005 / 0.9669
+  loss_anchor_object_pull = 0.3043
+  loss_object_explanation_point = 2.1444
+
+step 250:
+  active/context/downstream/raw support overlap max = 0.0228 / 0.4786 / 0.5019 / 0.9855
+  loss_anchor_object_pull = 0.2443
+  loss_object_explanation_point = 2.2171
+
+step 300:
+  active/context/downstream/raw support overlap max = 0.0367 / 0.4819 / 0.5080 / 0.9928
+  loss_anchor_object_pull = 0.2668
+  loss_object_explanation_point = 1.7866
+```
+
+Step-200 comparison to the previous owner-measurement run:
+
+```text
+downstream overlap:       0.7659 -> 0.5005
+loss_anchor_object_pull:  0.5630 -> 0.3043
+loss_object_expl_point:   3.1591 -> 2.1444
+```
+
+Current issue status:
+
+```text
+Fixed for short validation:
+  active owner localization and the old downstream/context clone rebound.
+
+Still monitored in long runs:
+  raw reserve overlap remains high.  This is acceptable only while downstream
+  overlap stays bounded and overlays show the active owner on the sidecar mask.
+
+Next gate:
+  move to longer training/eval.  Do not add another patch to this failure mode
+  unless downstream-visible overlap again rises into the old failure band or
+  overlays show active owner localization leaving the sidecar mask.
+```
+
+## 2026-05-20 Issue Update: Direct Owner Write-Through and After-Fusion Metric
+
+Status: implemented locally and deployed to A7; 300-step validation running.
+
+Root cause:
+
+```text
+The graph-side owner candidate could already be close to the sidecar/contact
+mask, but posterior owner transport was still judged through a pre-fusion
+distance and could be diluted by observation-averaged owner geometry before
+posterior-file write-through.
+```
+
+Repair:
+
+```text
+posterior_owner_transport_direct_candidate_assignment
+posterior_owner_transport_direct_candidate_min_score
+posterior_owner_transport_dist_after_fusion
+posterior_owner_transport_active_dist_after_fusion_*
+```
+
+Rule:
+
+```text
+If a graph owner candidate wins bounded candidate/file responsibility, write
+that candidate's owner geometry directly into the posterior owner measurement
+for the selected file.  Use the old obs-averaged transport only as fallback for
+roles without a direct candidate/file match.
+```
+
+Implementation guard:
+
+```text
+Selected (slot, graph, score) triples are collected first and written through
+out-of-place index_copy.  This keeps the score differentiable and avoids
+PyTorch autograd version-counter failures from in-place slice writes.
+```
+
+Why this is not an ad-hoc patch:
+
+```text
+It is the posterior-filter translation of Slot Attention / SAVi-style
+responsibility-preserving write-back.  It adds no new proposal source, no SAM,
+no reconstruction decoder, and no hard visual VQ truth.  It only preserves the
+candidate identity that the existing slot-axis competition already selected.
+```
+
+Local verifiers:
+
+```text
+test_posterior_owner_transport_uses_direct_graph_candidate_write_through
+picf_latest_slot_deployment_audit.py --fail-on-fail
+picf_object_candidate_slot_binding_audit.py --json
+verify_picf_owm_contract.py
+picf_owm_strict_diagnose.py --fail-on-fail
+picf_owm_dataflow_trace.py --fail-on-fail
+picf_owm_mvtrack_deep_audit.py --fail-on-fail
+```
+
+Remote validation:
+
+```text
+picf_a7_owner_direct_autogradsafe_smoke300_20260520
+```
+
+Interim validation through step 100:
+
+```text
+step 50:
+  loss_total = 0.1716
+  loss_anchor_object_pull = 0.3409
+  loss_object_explanation_point = 2.2158
+  object_candidate_owner_geometry_active_dist_mean = 0.00021 m
+  posterior_owner_transport_active_dist_after_fusion_mean = 0.00426 m
+  active/context/downstream/raw support overlap max = 0.0007 / 0.2626 / 0.3412 / 0.4752
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  posterior_recycle_rate = 0.0256
+
+step 100:
+  loss_total = 0.1662
+  loss_anchor_object_pull = 0.3305
+  loss_object_explanation_point = 2.1009
+  object_candidate_owner_geometry_active_dist_mean = 0.00020 m
+  posterior_owner_transport_active_dist_after_fusion_mean = 0.00466 m
+  active/context/downstream/raw support overlap max = 0.0029 / 0.3442 / 0.3674 / 0.5788
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  posterior_recycle_rate = 0.0366
+
+step 150:
+  loss_total = 0.1289
+  loss_anchor_object_pull = 0.2205
+  loss_object_explanation_point = 2.1893
+  object_candidate_owner_geometry_active_dist_mean = 0.00017 m
+  posterior_owner_transport_active_dist_after_fusion_mean = 0.00312 m
+  active/context/downstream/raw support overlap max = 0.0085 / 0.3515 / 0.3962 / 0.8407
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  posterior_recycle_rate = 0.1102
+
+step 200:
+  loss_total = 0.1412
+  loss_anchor_object_pull = 0.2728
+  loss_object_explanation_point = 1.8646
+  object_candidate_owner_geometry_active_dist_mean = 0.00021 m
+  posterior_owner_transport_active_dist_after_fusion_mean = 0.00236 m
+  active/context/downstream/raw support overlap max = 0.0567 / 0.1500 / 0.3002 / 0.9961
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  posterior_recycle_rate = 0.1207
+
+step 250:
+  loss_total = 0.1787
+  loss_anchor_object_pull = 0.3537
+  loss_object_explanation_point = 2.3259
+  object_candidate_owner_geometry_active_dist_mean = 0.00028 m
+  posterior_owner_transport_active_dist_after_fusion_mean = 0.00273 m
+  active/context/downstream/raw support overlap max = 0.0582 / 0.0929 / 0.2464 / 0.9990
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  posterior_recycle_rate = 0.1211
+
+step 300:
+  loss_total = 0.1930
+  loss_anchor_object_pull = 0.4210
+  loss_object_explanation_point = 1.8818
+  object_candidate_owner_geometry_active_dist_mean = 0.00028 m
+  posterior_owner_transport_active_dist_after_fusion_mean = 0.00305 m
+  active/context/downstream/raw support overlap max = 0.0427 / 0.1460 / 0.3116 / 0.9977
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  posterior_recycle_rate = 0.1114
+```
+
+Interim verdict:
+
+```text
+The old posterior-owner transport failure is fixed at the first 100-step gate:
+the active posterior owner closes to the accepted owner candidate within ~5 mm,
+while the candidate owner geometry itself is sub-millimeter relative to the
+sidecar point mask.  Through step 300 the active closure remains ~2-5 mm,
+downstream-visible overlap stays near 0.25-0.40 instead of the old 0.7-0.9
+failure band, and active duplicate overlap stays zero.  Raw reserve overlap
+still rises to ~1.0, but this run confirms it is currently contained in
+reserve/non-owner context rather than becoming an action-visible duplicate owner.
+
+Remaining caution:
+  loss_anchor_object_pull is not monotonic and returns to 0.421 at step 300.
+  This is not the previous posterior write-through failure, because the direct
+  after-fusion residual stays low.  It should be watched in the next action-aware
+  or longer co-training run together with overlays.
+```
+
+Decision rule:
+
+```text
+Judge posterior owner closure by posterior_owner_transport_active_dist_after_fusion_*,
+not only by posterior_owner_transport_dist_to_standard.  The pre-fusion metric
+is correction magnitude; the after-fusion metric is the actual posterior
+closure residual.
+```
+
+2026-05-20 local strict re-audit closure:
+
+```text
+resolved-code:
+  proposal debug logging was accidentally tracklet-gated.  It is now emitted
+  whenever proposal tokens exist, preventing proposal-only sidecar false
+  negatives.
+
+resolved-test-contract:
+  evidence cache writes active posterior files only.  The old all-row-valid
+  assertion was inconsistent with active/context/reserve semantics and is now
+  replaced by active-row and next-step-read assertions.
+
+resolved-code:
+  guarded binding-consistency temporal matching used current-slot weights for
+  both current->future and future->current terms.  It now uses current weights
+  for the forward term and future weights for the backward term, restoring
+  permutation tolerance under detached future-slot reordering.
+```
+
+Validation:
+
+```text
+pipeline_test.py + training_test.py:
+  133 passed
+
+picf_latest_slot_deployment_audit.py --fail-on-fail:
+  14/14 PASS
+
+picf_object_candidate_slot_binding_audit.py --json:
+  ok=true, 37 checks
+
+verify_picf_owm_contract.py:
+  PASS
+
+picf_owm_dataflow_trace.py --fail-on-fail:
+  ok=true
+
+picf_owm_mvtrack_deep_audit.py --fail-on-fail:
+  PASS
+
+git diff --check:
+  PASS
 ```
