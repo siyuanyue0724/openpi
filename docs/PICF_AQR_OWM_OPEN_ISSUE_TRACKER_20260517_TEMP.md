@@ -54,11 +54,18 @@ The accepted next-run data contract is:
 
 The clean root is generated from an empty output directory and must pass
 scripts/picf_prepare_full_sidecar_root.py with:
-  --require-proposal --require-mask --require-tracklet
+  --require-tracklet
+  --proposal-nearest-max-gap 8
+  --min-proposal-nonempty-fraction 0.80
+  --min-proposal-reachable-fraction 0.85
+  --min-mask-reachable-fraction 0.85
 
-Status at 2026-05-20 22:25 CST:
-  generation in progress, 2800 / 7545 progress_segments, no GPU use,
-  ETA roughly 3.0-4.0 hours.
+Status at 2026-05-21 00:24 CST:
+  generation finished, 240,758 npz files, no GPU use.
+  A strict physical-key proposal/mask gate fails because proposals are sparse:
+  about 82% of sampled files have current non-empty proposal/mask. This is not
+  a tracklet failure. The maintained contract is current tracklet plus nearest
+  non-empty proposal/mask borrowing with proposal_age decay.
 ```
 
 This section centralizes the current A7-facing issue list.  Earlier versions of

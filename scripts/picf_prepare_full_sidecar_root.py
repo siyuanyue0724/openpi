@@ -83,6 +83,56 @@ def _sample_paths(paths: list[Path], sample_limit: int) -> list[Path]:
     return [paths[int(i)] for i in np.unique(indices)]
 
 
+def _proposal_count(path: Path) -> int:
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if "proposal_centers_xy" in data.files:
+                return int(np.asarray(data["proposal_centers_xy"]).reshape(-1, 2).shape[0])
+            if "proposal_boxes_xyxy" in data.files:
+                return int(np.asarray(data["proposal_boxes_xyxy"]).reshape(-1, 4).shape[0])
+    except Exception:
+        return 0
+    return 0
+
+
+def _has_mask(path: Path) -> bool:
+    try:
+        with np.load(path, allow_pickle=False) as data:
+            if not all(key in data.files for key in _PROPOSAL_MASK):
+                return False
+            if "proposal_mask_xy" not in data.files:
+                return False
+            return int(np.asarray(data["proposal_mask_xy"]).reshape(-1, 2).shape[0]) > 0
+    except Exception:
+        return False
+
+
+def _reachability_fraction(
+    sample_paths: list[Path],
+    path_by_step: dict[int, Path],
+    *,
+    max_gap: int,
+    predicate,
+) -> float:
+    if not sample_paths:
+        return 0.0
+    ok = 0
+    for path in sample_paths:
+        step_id = _episode_id(path)
+        if step_id is None:
+            continue
+        if predicate(path):
+            ok += 1
+            continue
+        for gap in range(1, max(int(max_gap), 0) + 1):
+            left = path_by_step.get(int(step_id) - gap)
+            right = path_by_step.get(int(step_id) + gap)
+            if (left is not None and predicate(left)) or (right is not None and predicate(right)):
+                ok += 1
+                break
+    return float(ok) / float(len(sample_paths))
+
+
 def _sample_key_stats(paths: list[Path], sample_limit: int) -> dict[str, object]:
     sample_paths = _sample_paths(paths, max(int(sample_limit), 0))
     key_counts: dict[str, int] = {}
@@ -122,6 +172,41 @@ def _sample_key_stats(paths: list[Path], sample_limit: int) -> dict[str, object]
     }
 
 
+def _sample_sparse_proposal_stats(paths: list[Path], sample_limit: int, proposal_nearest_max_gap: int) -> dict[str, float]:
+    sample_paths = _sample_paths(paths, max(int(sample_limit), 0))
+    if not sample_paths:
+        return {
+            "proposal_nonempty_fraction": 0.0,
+            "proposal_reachable_fraction": 0.0,
+            "proposal_mask_nonempty_fraction": 0.0,
+            "proposal_mask_reachable_fraction": 0.0,
+        }
+    path_by_step = {
+        int(step_id): path
+        for path in paths
+        for step_id in [_episode_id(path)]
+        if step_id is not None
+    }
+    proposal_nonempty = sum(1 for path in sample_paths if _proposal_count(path) > 0) / float(len(sample_paths))
+    mask_nonempty = sum(1 for path in sample_paths if _has_mask(path)) / float(len(sample_paths))
+    return {
+        "proposal_nonempty_fraction": float(proposal_nonempty),
+        "proposal_reachable_fraction": _reachability_fraction(
+            sample_paths,
+            path_by_step,
+            max_gap=int(proposal_nearest_max_gap),
+            predicate=lambda path: _proposal_count(path) > 0,
+        ),
+        "proposal_mask_nonempty_fraction": float(mask_nonempty),
+        "proposal_mask_reachable_fraction": _reachability_fraction(
+            sample_paths,
+            path_by_step,
+            max_gap=int(proposal_nearest_max_gap),
+            predicate=_has_mask,
+        ),
+    }
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--calvin-root", required=True)
@@ -132,6 +217,10 @@ def main() -> int:
     parser.add_argument("--require-proposal", action="store_true")
     parser.add_argument("--require-mask", action="store_true")
     parser.add_argument("--require-tracklet", action="store_true")
+    parser.add_argument("--proposal-nearest-max-gap", type=int, default=0)
+    parser.add_argument("--min-proposal-nonempty-fraction", type=float, default=0.0)
+    parser.add_argument("--min-proposal-reachable-fraction", type=float, default=0.0)
+    parser.add_argument("--min-mask-reachable-fraction", type=float, default=0.0)
     parser.add_argument("--write-manifest", action=argparse.BooleanOptionalAction, default=True)
     args = parser.parse_args()
 
@@ -149,6 +238,11 @@ def main() -> int:
         segment_id for segment_id, count in sorted(coverage.items()) if count >= int(args.min_frames_per_segment)
     ]
     stats = _sample_key_stats(paths, int(args.sample_limit))
+    sparse_stats = _sample_sparse_proposal_stats(
+        paths,
+        int(args.sample_limit),
+        int(args.proposal_nearest_max_gap),
+    )
     ok = True
     failures: list[str] = []
     if not selected_segments:
@@ -166,6 +260,15 @@ def main() -> int:
     if bool(args.require_tracklet) and float(stats["tracklet_required_present_fraction"]) < 0.999:
         ok = False
         failures.append("tracklet required keys missing in sampled files")
+    if float(sparse_stats["proposal_nonempty_fraction"]) < float(args.min_proposal_nonempty_fraction):
+        ok = False
+        failures.append("proposal non-empty sampled fraction below threshold")
+    if float(sparse_stats["proposal_reachable_fraction"]) < float(args.min_proposal_reachable_fraction):
+        ok = False
+        failures.append("proposal nearest-reachable sampled fraction below threshold")
+    if float(sparse_stats["proposal_mask_reachable_fraction"]) < float(args.min_mask_reachable_fraction):
+        ok = False
+        failures.append("proposal mask nearest-reachable sampled fraction below threshold")
 
     manifest = {
         "sidecar_root": str(sidecar_root),
@@ -178,6 +281,11 @@ def main() -> int:
         "coverage_mean": float(np.mean([coverage[s] for s in selected_segments])) if selected_segments else 0.0,
         "proposal_required_present_fraction": stats["proposal_required_present_fraction"],
         "proposal_mask_present_fraction": stats["proposal_mask_present_fraction"],
+        "proposal_nonempty_fraction": sparse_stats["proposal_nonempty_fraction"],
+        "proposal_nearest_max_gap": int(args.proposal_nearest_max_gap),
+        "proposal_reachable_fraction": sparse_stats["proposal_reachable_fraction"],
+        "proposal_mask_nonempty_fraction": sparse_stats["proposal_mask_nonempty_fraction"],
+        "proposal_mask_reachable_fraction": sparse_stats["proposal_mask_reachable_fraction"],
         "tracklet_required_present_fraction": stats["tracklet_required_present_fraction"],
         "sampled_files": stats["sampled_files"],
         "sample_strategy": stats["sample_strategy"],

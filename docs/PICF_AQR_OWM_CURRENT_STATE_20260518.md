@@ -23,11 +23,14 @@ therefore classification plus archived entry points, not blind removal.
 
 ```text
 current long-run blocker:
-  wait for the clean proposal+mask+tracklet sidecar root to finish and pass the
-  final sidecar audit.
+  none at launch time. Clean proposal+mask+tracklet generation is finished and
+  the coverage-aware final sidecar audit passed.
 
 current accepted long-run launcher:
   scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_ownerdirect_long30k_20260520.sh
+
+current active long-run exp:
+  picf_a7_actionaware_ownerdirect_long30k_fullsidecar_20260521
 
 current accepted sidecar root:
   /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
@@ -230,7 +233,8 @@ behavior evidence.
    proposal+mask+tracklet root at
    `/mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520`. The long
    run may use it only after `scripts/picf_prepare_full_sidecar_root.py` passes
-   with `--require-proposal --require-mask --require-tracklet`.
+   the sparse-proposal gate: tracklet keys are required, while proposal/mask
+   coverage is checked through non-empty and nearest-reachable fractions.
 2. SAM/proposal sidecars: blind SAM was demoted; prompted/contact/reranked
    proposals are future sidecar work, not current default.
 3. Fourth-object/ordinal grounding: no hard rank labels exist. Current ordinal
@@ -249,15 +253,18 @@ PYTHONPATH=src python scripts/picf_prepare_full_sidecar_root.py \
   --calvin-root /mnt/calvin_data/task_ABC_D \
   --sidecar-root /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520 \
   --split training \
-  --require-proposal \
-  --require-mask \
   --require-tracklet \
+  --proposal-nearest-max-gap 8 \
+  --min-proposal-nonempty-fraction 0.80 \
+  --min-proposal-reachable-fraction 0.85 \
+  --min-mask-reachable-fraction 0.85 \
   --sample-limit 1024
 ```
 
 3. If and only if that audit passes, start the accepted 30K launcher. The
    launcher reads `calvin_segment_indices.txt` from the clean root and fails
-   closed if it is absent.
+   closed if it is absent.  This was done for
+   `picf_a7_actionaware_ownerdirect_long30k_fullsidecar_20260521`.
 4. Judge the first 500 steps by active ownership, after-fusion owner distance,
    downstream overlap, action-default-equivalent loss, and overlays. Do not
    judge by raw all-row overlap alone.

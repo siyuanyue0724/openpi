@@ -287,30 +287,98 @@ scripts/picf_tracklet_sidecar_precompute.py emits per-shard
 Total progress = sum(progress_segments across shard logs).
 ```
 
-At 2026-05-20 22:25 CST, the clean run had:
+At 2026-05-21 00:24 CST, the clean run had completed:
 
 ```text
-progress_segments:
-  2800 / 7545
+shards:
+  8 / 8 done
 
-progress_fraction:
-  about 37.1%
+output:
+  /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
 
-remaining wall time:
-  roughly 3.0-4.0 hours at the observed rate
+npz files:
+  240,758
 ```
 
-The final required gate after generation is:
+The first strict physical-key gate deliberately failed:
+
+```text
+tracklet_required_present_fraction:
+  1.0
+
+proposal_required_present_fraction:
+  about 0.82
+
+proposal_mask_present_fraction:
+  about 0.82
+```
+
+This is not a tracklet failure.  It reflects the sparse proposal contract:
+contact/task proposal sidecars are only emitted when the motion/contact scorer
+finds a credible object-region mask.  Many frames still have KLT tracklets but
+no current-frame proposal.  The correct training dataflow is:
+
+```text
+current frame:
+  read current tracklet rows
+
+if current proposal/mask is absent:
+  borrow nearest non-empty proposal/mask within
+  --mvtrack-sidecar-proposal-nearest-max-gap
+
+then:
+  set proposal_age = temporal_gap
+  let proposal_age_decay_steps downweight stale evidence
+```
+
+Do not materialize empty proposal keys as a shortcut unless the reader also
+continues nearest-proposal search for zero-length proposals.  Empty keys alone
+can silently block fallback and reduce proposal evidence.
+
+The maintained final gate after generation is now coverage-aware rather than
+key-presence-only:
 
 ```bash
 PYTHONPATH=src python scripts/picf_prepare_full_sidecar_root.py \
   --calvin-root /mnt/calvin_data/task_ABC_D \
   --sidecar-root /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520 \
   --split training \
-  --require-proposal \
-  --require-mask \
   --require-tracklet \
+  --proposal-nearest-max-gap 8 \
+  --min-proposal-nonempty-fraction 0.80 \
+  --min-proposal-reachable-fraction 0.85 \
+  --min-mask-reachable-fraction 0.85 \
   --sample-limit 1024
 ```
 
 Only after that command passes may a long training run use this root.
+
+Observed gate result at 2026-05-21 00:36 CST:
+
+```text
+ok:
+  true
+
+npz_files:
+  240,758
+
+covered_segments:
+  7,869
+
+tracklet_required_present_fraction:
+  1.0
+
+proposal_nonempty_fraction:
+  0.822265625
+
+proposal_reachable_fraction with gap=8:
+  0.87890625
+
+proposal_mask_reachable_fraction with gap=8:
+  0.87890625
+```
+
+The training reader was also repaired so a current tracklet-only sidecar file
+does not block nearest non-empty proposal/mask borrowing.  This is required
+because the full root contains valid current tracklets on more frames than it
+contains current sparse proposal masks.

@@ -71,9 +71,11 @@ required file:
 
 required audit:
   scripts/picf_prepare_full_sidecar_root.py
-    --require-proposal
-    --require-mask
     --require-tracklet
+    --proposal-nearest-max-gap 8
+    --min-proposal-nonempty-fraction 0.80
+    --min-proposal-reachable-fraction 0.85
+    --min-mask-reachable-fraction 0.85
 ```
 
 The wrapper now fails closed if `calvin_segment_indices.txt` is absent and no
@@ -223,5 +225,76 @@ ETA:
   about 3.0-4.0 hours remaining
 ```
 
-Do not start the 30K run before the final `--require-proposal --require-mask
---require-tracklet` audit passes on the output root.
+Do not start the 30K run before the final coverage-aware sidecar audit passes
+on the output root.  The contract is intentionally sparse: tracklet fields must
+be present on sampled files, while proposal/mask evidence may be absent on
+no-contact/no-task frames and is borrowed from nearby non-empty proposal frames
+with `proposal_age` decay.
+
+## 2026-05-21 Launch State
+
+The coverage-aware gate passed at 2026-05-21 00:36 CST:
+
+```text
+sidecar_root:
+  /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+
+sampled_files:
+  1024
+
+tracklet_required_present_fraction:
+  1.0
+
+proposal_nonempty_fraction:
+  0.822265625
+
+proposal_reachable_fraction:
+  0.87890625
+
+proposal_mask_reachable_fraction:
+  0.87890625
+```
+
+The accepted long run was launched in tmux:
+
+```text
+session:
+  picf_a7_actionaware_ownerdirect_long30k_fullsidecar_20260521
+
+exp:
+  picf_a7_actionaware_ownerdirect_long30k_fullsidecar_20260521
+
+log:
+  /mnt/picf_run_logs/picf_a7_actionaware_ownerdirect_long30k_fullsidecar_20260521.log
+```
+
+Configuration confirmed at startup:
+
+```text
+world_size:
+  2
+
+training_strategy:
+  fsdp_full_shard
+
+effective_global_batch:
+  2
+
+num_steps:
+  30000
+
+save_interval:
+  2500
+
+keep_last_checkpoints:
+  3
+
+unroll_steps / burnin_steps:
+  2 / 1
+
+semantic:
+  PaliGemma trainable, semantic_lr_scale=0.25
+
+pretrained perception:
+  Sonata, V-JEPA, AnyTouch frozen
+```

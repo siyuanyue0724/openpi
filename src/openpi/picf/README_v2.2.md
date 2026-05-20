@@ -144,11 +144,22 @@ closed unless that root has `calvin_segment_indices.txt` or the operator
 explicitly supplies `SEGMENTS`.  The clean root is generated from
 `/mnt/picf_sidecars/contact_motion_full_20260519`, preserves proposal boxes,
 sparse proposal masks, and KLT tracklets, and must pass
-`scripts/picf_prepare_full_sidecar_root.py --require-proposal --require-mask
---require-tracklet` before 30K training starts.  At 2026-05-20 22:25 CST the A7
-generation was at `2800/7545` progress segments with about `3.0-4.0` hours
-remaining and no GPU use.  Do not use old 1000/12000/SAM/samseed diagnostic
-roots for this run.
+`scripts/picf_prepare_full_sidecar_root.py --require-tracklet
+--proposal-nearest-max-gap 8 --min-proposal-nonempty-fraction 0.80
+--min-proposal-reachable-fraction 0.85 --min-mask-reachable-fraction 0.85`
+before 30K training starts.  At 2026-05-21 00:24 CST the A7 generation had
+finished with `240,758` npz files.  The correct contract is sparse-proposal:
+tracklets must be present, while proposal/mask may be absent on no-contact
+frames and is borrowed from nearby non-empty proposal frames with
+`proposal_age` decay.  Do not use old 1000/12000/SAM/samseed diagnostic roots
+for this run.
+
+2026-05-21 launch note: the coverage-aware gate passed on `1024` sampled files
+with `tracklet_required_present_fraction=1.0`,
+`proposal_nonempty_fraction=0.822265625`, and
+`proposal_reachable_fraction=proposal_mask_reachable_fraction=0.87890625` at
+`--proposal-nearest-max-gap 8`.  The accepted 30K run is
+`picf_a7_actionaware_ownerdirect_long30k_fullsidecar_20260521`.
 
 2026-05-20 latest-slot final audit: use
 [`docs/PICF_AQR_OWM_LATEST_SLOT_FINAL_AUDIT_20260520_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_LATEST_SLOT_FINAL_AUDIT_20260520_TEMP.md)

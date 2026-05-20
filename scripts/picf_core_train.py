@@ -18,6 +18,7 @@ import time
 import traceback
 from collections import deque
 from collections.abc import Iterator
+from collections.abc import Mapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -3359,6 +3360,41 @@ def _read_mvtrack_sidecar_fields(
     if sidecar_root is None:
         return {}
     root = Path(sidecar_root)
+    proposal_key_set = {str(key) for key in _MVTRACK_PROPOSAL_KEYS if str(key) != "proposal_age"}
+    requested_proposal_keys = [str(key) for key in keys if str(key).startswith("proposal_")]
+
+    def _proposal_count_from_frame(frame: Mapping[str, np.ndarray]) -> int:
+        if "proposal_centers_xy" in frame:
+            return int(np.asarray(frame["proposal_centers_xy"]).reshape(-1, 2).shape[0])
+        if "proposal_boxes_xyxy" in frame:
+            return int(np.asarray(frame["proposal_boxes_xyxy"]).reshape(-1, 4).shape[0])
+        return 0
+
+    def _proposal_count_from_path(path: Path) -> int:
+        try:
+            with np.load(path, allow_pickle=False) as data:
+                if "proposal_centers_xy" in data.files:
+                    return int(np.asarray(data["proposal_centers_xy"]).reshape(-1, 2).shape[0])
+                if "proposal_boxes_xyxy" in data.files:
+                    return int(np.asarray(data["proposal_boxes_xyxy"]).reshape(-1, 4).shape[0])
+        except Exception:
+            return 0
+        return 0
+
+    def _nearest_proposal_path(max_gap: int) -> tuple[int, Path] | None:
+        for gap in range(1, max(int(max_gap), 0) + 1):
+            for signed_gap in (-gap, gap):
+                for candidate in (
+                    root / split / f"episode_{int(step_id + signed_gap):07d}.npz",
+                    root / f"episode_{int(step_id + signed_gap):07d}.npz",
+                ):
+                    if not candidate.exists():
+                        continue
+                    if _proposal_count_from_path(candidate) <= 0:
+                        continue
+                    return abs(int(signed_gap)), candidate
+        return None
+
     candidates = (
         root / split / f"episode_{int(step_id):07d}.npz",
         root / f"episode_{int(step_id):07d}.npz",
@@ -3367,32 +3403,36 @@ def _read_mvtrack_sidecar_fields(
     temporal_gap = 0
     if path is None:
         max_gap = max(int(proposal_nearest_max_gap), 0)
-        if max_gap <= 0 or not any(str(key).startswith("proposal_") for key in keys):
+        if max_gap <= 0 or not requested_proposal_keys:
             return {}
-        proposal_key_set = {str(key) for key in _MVTRACK_PROPOSAL_KEYS if str(key) != "proposal_age"}
-        best: tuple[int, Path] | None = None
-        for gap in range(1, max_gap + 1):
-            for signed_gap in (-gap, gap):
-                for candidate in (
-                    root / split / f"episode_{int(step_id + signed_gap):07d}.npz",
-                    root / f"episode_{int(step_id + signed_gap):07d}.npz",
-                ):
-                    if not candidate.exists():
-                        continue
-                    with np.load(candidate, allow_pickle=False) as data:
-                        if not any(key in data.files for key in proposal_key_set):
-                            continue
-                    best = (abs(int(signed_gap)), candidate)
-                    break
-                if best is not None:
-                    break
-            if best is not None:
-                break
+        best = _nearest_proposal_path(max_gap)
         if best is None:
             return {}
         temporal_gap, path = best
     with np.load(path, allow_pickle=False) as data:
         frame = {key: data[key] for key in keys if key in data.files}
+    # Tracklet sidecar files may exist for frames where the sparse contact/task
+    # proposal generator intentionally emitted no current proposal.  Do not let
+    # that current tracklet file block proposal borrowing: merge nearest
+    # non-empty proposal/mask fields into the same frame and rely on
+    # `proposal_age` decay downstream.  This preserves current-frame tracklets
+    # while keeping proposal evidence sparse and age-aware.
+    if (
+        path is not None
+        and temporal_gap == 0
+        and requested_proposal_keys
+        and int(proposal_nearest_max_gap) > 0
+        and _proposal_count_from_frame(frame) <= 0
+    ):
+        best = _nearest_proposal_path(int(proposal_nearest_max_gap))
+        if best is not None:
+            temporal_gap, proposal_path = best
+            with np.load(proposal_path, allow_pickle=False) as data:
+                for key in requested_proposal_keys:
+                    if key == "proposal_age":
+                        continue
+                    if key in proposal_key_set and key in data.files:
+                        frame[key] = data[key]
     if temporal_gap > 0 and any(key in frame for key in ("proposal_centers_xy", "proposal_boxes_xyxy")):
         count = 0
         if "proposal_centers_xy" in frame:
