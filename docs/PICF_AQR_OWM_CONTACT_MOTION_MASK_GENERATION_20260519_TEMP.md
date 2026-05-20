@@ -382,3 +382,136 @@ The training reader was also repaired so a current tracklet-only sidecar file
 does not block nearest non-empty proposal/mask borrowing.  This is required
 because the full root contains valid current tracklets on more frames than it
 contains current sparse proposal masks.
+
+## 2026-05-21 Strict Quality Audit
+
+Purpose:
+
+```text
+Answer whether the full sidecar root is clean enough for the accepted 30K run,
+and whether the earlier missing proposal/mask fields are understood.
+```
+
+Remote root audited:
+
+```text
+source proposal/mask root:
+  /mnt/picf_sidecars/contact_motion_full_20260519
+
+clean merged root:
+  /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+```
+
+Machine-checkable result:
+
+```text
+source proposal files:
+  199,339
+
+clean merged files:
+  240,758
+
+sampled clean files:
+  8,192 deterministic evenly-spaced files
+
+load errors:
+  0
+
+tracklet keys present:
+  8,192 / 8,192 = 1.0
+
+proposal keys present:
+  6,741 / 8,192 = 0.8228759765625
+
+mask keys present:
+  6,741 / 8,192 = 0.8228759765625
+
+missing proposal although source file exists:
+  0
+
+proposal present although source file absent:
+  0
+
+finite failures:
+  0
+
+range failures:
+  0
+
+box order failures:
+  0
+
+mask offset failures:
+  0
+
+center outside box:
+  0
+
+tracklet shape/range failures:
+  0
+```
+
+This proves the missing proposal/mask fields are not a merge bug: the output
+root exactly preserves the source proposal root when proposal evidence exists,
+and adds KLT tracklets on additional frames.  Therefore the correct data
+contract is sparse proposal/mask plus dense-ish tracklet evidence.
+
+Distribution checks:
+
+```text
+proposal area:
+  p01=0.00519, p50=0.02017, p95=0.03646, max=0.06610
+
+proposal aspect:
+  p01=0.571, p50=1.143, p95=2.000, p99=2.562
+
+objectness:
+  p01=0.0169, p50=0.5724, p95=0.7300, p99=0.7579
+
+mask samples per proposal:
+  p01=6, p50=38, p95=50, max=50
+
+tracklets per file:
+  p01=47, p50=63, p95=64, max=64
+
+nearest proposal/mask gap histogram over sampled files:
+  gap0=6741, gap1=68, gap2=66, gap3=58, gap4=48,
+  gap5=46, gap6=43, gap7=36, gap8=42
+```
+
+Mask/box relationship:
+
+```text
+mask_inside_box_fraction:
+  p01=0.80, p05=0.844, p50=0.958, p95=1.0
+
+mask weighted mean vs proposal center, normalized by box diagonal:
+  p50=1.19e-05, p95=8.15e-05, max=7.19e-04
+```
+
+Interpretation:
+
+```text
+1. The weighted mask center and proposal center are numerically aligned.
+2. Some mask sample tails fall outside the green box because the box is a
+   compact percentile support box, not a hard instance-mask hull.
+3. The sparse mask samples are the primary supervision signal; the box is
+   visualization / seeding / coarse geometry.
+4. These sidecars are acceptable as weak owner/contact scaffold, not as
+   pixel-perfect instance segmentation labels.
+```
+
+Visual audit artifacts:
+
+```text
+/mnt/picf_sidecar_quality_audit_20260521/
+  mask_overlay_contact_sheet.png
+  episode_*.png
+  audit_visual_summary.json
+```
+
+Visual inspection of the contact sheet shows mostly compact contact/motion
+regions.  Some boxes include gripper plus object edge, which is expected for
+contact-generated weak masks.  This would be too noisy for hard semantic mask
+supervision, but it is consistent with the current weak owner-transport and
+proposal-age-decayed scaffold.
