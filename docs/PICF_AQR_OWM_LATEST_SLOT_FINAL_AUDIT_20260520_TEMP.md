@@ -147,6 +147,16 @@ temp/external_repos/SlotLifter
 temp/external_repos/slot_refs_20260520/vit-object-binding
 ```
 
+Committed provenance manifest:
+
+```text
+temp/audits_20260520/paper_code_snapshot_manifest.md
+```
+
+The full external repositories are audit inputs, not vendored runtime
+dependencies.  The manifest pins the remotes and commits so the comparison is
+reproducible without placing third-party repositories inside the OpenPI tree.
+
 Recent papers used as design evidence:
 
 ```text

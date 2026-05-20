@@ -49,6 +49,8 @@ def run(repo_root: Path) -> list[Check]:
     final_audit_text = _read(final_audit_doc) if final_audit_doc.exists() else ""
     direct_owner_doc = repo_root / "temp/audits_20260520/posterior_owner_transport_direct_write_through_followthrough.md"
     direct_owner_text = _read(direct_owner_doc) if direct_owner_doc.exists() else ""
+    snapshot_manifest = repo_root / "temp/audits_20260520/paper_code_snapshot_manifest.md"
+    snapshot_manifest_text = _read(snapshot_manifest) if snapshot_manifest.exists() else ""
     comprehensive_script = repo_root / "scripts/experiments/picf_aqr_owm_202605_active/run_a7_slot_comprehensive_frozen_policy_1000_20260519.sh"
     comprehensive = _read(comprehensive_script) if comprehensive_script.exists() else ""
     actionaware_script = repo_root / "scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_after_dedup_smoke300_20260520.sh"
@@ -59,6 +61,50 @@ def run(repo_root: Path) -> list[Check]:
     checks.append(
         Check(
             "paper_code_snapshots_present_for_nontrivial_comparison",
+            (
+                all(
+                    (repo_root / path).exists()
+                    for path in (
+                        "temp/paper_code_20260518/MetaSlot",
+                        "temp/paper_code_20260518/AdaSlot",
+                        "temp/paper_code_20260518/object-centric-learning-framework",
+                        "temp/paper_code_20260518/slot-attention-video",
+                        "temp/external_repos/SlotLifter",
+                    )
+                )
+                or _all(
+                    snapshot_manifest_text,
+                    (
+                        "MetaSlot",
+                        "AdaSlot",
+                        "object-centric-learning-framework",
+                        "slot-attention-video",
+                        "SlotLifter",
+                        "vit-object-binding",
+                    ),
+                )
+            ),
+            "Local paper-code snapshots or a committed snapshot manifest must exist so the audit is not based on memory-only summaries.",
+        )
+    )
+    checks.append(
+        Check(
+            "paper_code_snapshots_are_not_runtime_dependencies",
+            snapshot_manifest.exists()
+            and _all(
+                snapshot_manifest_text,
+                (
+                    "not vendored",
+                    "not runtime dependencies",
+                    "External code snapshots inform architecture audits only",
+                ),
+            ),
+            "Paper-code snapshots must be documented as audit provenance, not hidden runtime dependencies.",
+        )
+    )
+    checks.append(
+        Check(
+            "paper_code_snapshots_present_locally_for_nontrivial_comparison",
             all(
                 (repo_root / path).exists()
                 for path in (
@@ -69,7 +115,7 @@ def run(repo_root: Path) -> list[Check]:
                     "temp/external_repos/SlotLifter",
                 )
             ),
-            "Local paper-code snapshots must exist so the audit is not based on memory-only summaries.",
+            "Local checkout should keep paper-code snapshots for deep audits; GitHub state may rely on the committed manifest.",
         )
     )
     checks.append(
