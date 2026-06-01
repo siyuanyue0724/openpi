@@ -62,4 +62,4 @@ export TRAINING_STRATEGY="${TRAINING_STRATEGY:-fsdp_full_shard}"
 export OPTIMIZER_SHARDING="${OPTIMIZER_SHARDING:-none}"
 export OPTIMIZER_CHECKPOINT_MODE="${OPTIMIZER_CHECKPOINT_MODE:-model-only}"
 
-exec "${SCRIPT_DIR}/run_a7_stepindexed_fixedwindow_from7000_30k_20260529.sh"
+exec bash "${SCRIPT_DIR}/run_a7_stepindexed_fixedwindow_from7000_30k_20260529.sh"

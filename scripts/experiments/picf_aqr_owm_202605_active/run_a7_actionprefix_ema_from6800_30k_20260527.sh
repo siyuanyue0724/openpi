@@ -76,4 +76,4 @@ export KEEP_LAST_CHECKPOINTS="${KEEP_LAST_CHECKPOINTS:-5}"
 export LOG_INTERVAL="${LOG_INTERVAL:-50}"
 export ANCHOR_OVERLAY_INTERVAL="${ANCHOR_OVERLAY_INTERVAL:-100}"
 
-exec "${SCRIPT_DIR}/run_a7_actionaware_after_dedup_smoke300_20260520.sh"
+exec bash "${SCRIPT_DIR}/run_a7_actionaware_after_dedup_smoke300_20260520.sh"

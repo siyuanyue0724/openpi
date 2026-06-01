@@ -68,4 +68,4 @@ export OPTIMIZER_SHARDING="${OPTIMIZER_SHARDING:-none}"
 # resume from the same weights and rebuild Adam state.
 export OPTIMIZER_CHECKPOINT_MODE="${OPTIMIZER_CHECKPOINT_MODE:-model-only}"
 
-exec "${SCRIPT_DIR}/run_a7_stepindexed_from9100_suffixadapter_backbone_300_20260531.sh"
+exec bash "${SCRIPT_DIR}/run_a7_stepindexed_from9100_suffixadapter_backbone_300_20260531.sh"
