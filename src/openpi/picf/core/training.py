@@ -42,6 +42,12 @@ class PicfTransitionLossConfig:
     anchor_object_pull_allowed_roles: tuple[int, ...] = (1, 2)
     anchor_object_pull_graph_weight: float = 1.0
     anchor_object_pull_posterior_weight: float = 1.0
+    anchor_object_pull_target_quality_gate_enabled: bool = True
+    anchor_object_pull_target_quality_sigma_m: float = 0.08
+    anchor_object_pull_target_quality_min: float = 0.05
+    anchor_object_pull_target_quality_power: float = 1.0
+    anchor_object_pull_target_core_mass: float = 0.90
+    anchor_object_pull_target_core_topk: int = 128
     lambda_pv_weak: float = 0.02
     lambda_pt: float = 1.0
     anchor_pv_object_gate_enabled: bool = True
@@ -107,6 +113,10 @@ class PicfTransitionLossConfig:
     object_explanation_active_object_only: bool = True
     object_explanation_duplicate_margin: float = 0.30
     object_explanation_point_loss_clip: float = 8.0
+    object_explanation_point_quality_gate_enabled: bool = False
+    object_explanation_point_quality_min: float = 0.05
+    object_explanation_point_quality_power: float = 1.0
+    object_explanation_point_outlier_prior: float = 0.0
     detach_action_loss_from_picf: bool = False
     mapg_siglip_tau: float = 0.07
     mapg_vicreg_var_target: float = 1.0
@@ -134,6 +144,12 @@ class PicfAlignmentLossConfig:
     anchor_object_pull_allowed_roles: tuple[int, ...] = (1, 2)
     anchor_object_pull_graph_weight: float = 1.0
     anchor_object_pull_posterior_weight: float = 1.0
+    anchor_object_pull_target_quality_gate_enabled: bool = True
+    anchor_object_pull_target_quality_sigma_m: float = 0.08
+    anchor_object_pull_target_quality_min: float = 0.05
+    anchor_object_pull_target_quality_power: float = 1.0
+    anchor_object_pull_target_core_mass: float = 0.90
+    anchor_object_pull_target_core_topk: int = 128
     lambda_pv_weak: float = 0.2
     lambda_pt: float = 1.0
     anchor_pv_object_gate_enabled: bool = True
@@ -179,8 +195,15 @@ class PicfTransitionLossBreakdown:
     alignment: torch.Tensor
     alignment_raw: torch.Tensor
     total_minus_action: torch.Tensor
+    action_prefix_trust: torch.Tensor
     anchor_pv: torch.Tensor
     anchor_object_pull: torch.Tensor
+    anchor_object_pull_graph: torch.Tensor
+    anchor_object_pull_posterior: torch.Tensor
+    anchor_object_pull_graph_weight_sum: torch.Tensor
+    anchor_object_pull_posterior_weight_sum: torch.Tensor
+    anchor_object_pull_target_mass_mean: torch.Tensor
+    anchor_object_pull_target_quality_mean: torch.Tensor
     pv_weak: torch.Tensor
     pt: torch.Tensor
     availability: torch.Tensor
@@ -202,6 +225,11 @@ class PicfTransitionLossBreakdown:
     mapg_support_diversity: torch.Tensor
     mapg_geometry_diversity: torch.Tensor
     slot_jepa: torch.Tensor
+    slot_jepa_direction: torch.Tensor
+    slot_jepa_log_norm: torch.Tensor
+    slot_jepa_pred_norm: torch.Tensor
+    slot_jepa_target_norm: torch.Tensor
+    slot_jepa_matched_target_norm: torch.Tensor
     support_pred: torch.Tensor
     binding_consistency: torch.Tensor
     aqr_denoising: torch.Tensor
@@ -238,8 +266,15 @@ class PicfTransitionLossBreakdown:
             "alignment": float(self.alignment.item()),
             "alignment_raw": float(self.alignment_raw.item()),
             "total_minus_action": float(self.total_minus_action.item()),
+            "action_prefix_trust": float(self.action_prefix_trust.item()),
             "anchor_pv": float(self.anchor_pv.item()),
             "anchor_object_pull": float(self.anchor_object_pull.item()),
+            "anchor_object_pull_graph": float(self.anchor_object_pull_graph.item()),
+            "anchor_object_pull_posterior": float(self.anchor_object_pull_posterior.item()),
+            "anchor_object_pull_graph_weight_sum": float(self.anchor_object_pull_graph_weight_sum.item()),
+            "anchor_object_pull_posterior_weight_sum": float(self.anchor_object_pull_posterior_weight_sum.item()),
+            "anchor_object_pull_target_mass_mean": float(self.anchor_object_pull_target_mass_mean.item()),
+            "anchor_object_pull_target_quality_mean": float(self.anchor_object_pull_target_quality_mean.item()),
             "pv_weak": float(self.pv_weak.item()),
             "pt": float(self.pt.item()),
             "physical_aux_budget_scale": float(self.physical_aux_budget_scale.item()),
@@ -260,6 +295,11 @@ class PicfTransitionLossBreakdown:
             "mapg_support_diversity": float(self.mapg_support_diversity.item()),
             "mapg_geometry_diversity": float(self.mapg_geometry_diversity.item()),
             "slot_jepa": float(self.slot_jepa.item()),
+            "slot_jepa_direction": float(self.slot_jepa_direction.item()),
+            "slot_jepa_log_norm": float(self.slot_jepa_log_norm.item()),
+            "slot_jepa_pred_norm": float(self.slot_jepa_pred_norm.item()),
+            "slot_jepa_target_norm": float(self.slot_jepa_target_norm.item()),
+            "slot_jepa_matched_target_norm": float(self.slot_jepa_matched_target_norm.item()),
             "support_pred": float(self.support_pred.item()),
             "binding_consistency": float(self.binding_consistency.item()),
             "aqr_denoising": float(self.aqr_denoising.item()),
@@ -275,10 +315,27 @@ class PicfTransitionLossBreakdown:
 
 
 @dataclasses.dataclass(frozen=True)
+class PicfObjectAnchorPullBreakdown:
+    total: torch.Tensor
+    graph: torch.Tensor
+    posterior: torch.Tensor
+    graph_weight_sum: torch.Tensor
+    posterior_weight_sum: torch.Tensor
+    target_mass_mean: torch.Tensor
+    target_quality_mean: torch.Tensor
+
+
+@dataclasses.dataclass(frozen=True)
 class PicfAlignmentLossBreakdown:
     total: torch.Tensor
     anchor_pv: torch.Tensor
     anchor_object_pull: torch.Tensor
+    anchor_object_pull_graph: torch.Tensor
+    anchor_object_pull_posterior: torch.Tensor
+    anchor_object_pull_graph_weight_sum: torch.Tensor
+    anchor_object_pull_posterior_weight_sum: torch.Tensor
+    anchor_object_pull_target_mass_mean: torch.Tensor
+    anchor_object_pull_target_quality_mean: torch.Tensor
     pv_weak: torch.Tensor
     pt: torch.Tensor
     candidate_edges: int
@@ -289,6 +346,12 @@ class PicfAlignmentLossBreakdown:
             "total": float(self.total.item()),
             "anchor_pv": float(self.anchor_pv.item()),
             "anchor_object_pull": float(self.anchor_object_pull.item()),
+            "anchor_object_pull_graph": float(self.anchor_object_pull_graph.item()),
+            "anchor_object_pull_posterior": float(self.anchor_object_pull_posterior.item()),
+            "anchor_object_pull_graph_weight_sum": float(self.anchor_object_pull_graph_weight_sum.item()),
+            "anchor_object_pull_posterior_weight_sum": float(self.anchor_object_pull_posterior_weight_sum.item()),
+            "anchor_object_pull_target_mass_mean": float(self.anchor_object_pull_target_mass_mean.item()),
+            "anchor_object_pull_target_quality_mean": float(self.anchor_object_pull_target_quality_mean.item()),
             "pv_weak": float(self.pv_weak.item()),
             "pt": float(self.pt.item()),
             "candidate_edges": float(self.candidate_edges),
@@ -465,6 +528,71 @@ def _matched_prediction_loss(
     matched_pred = assign.T @ pred_w
     backward = fn.mse_loss(matched_pred, target_w)
     return 0.5 * (forward + backward), assign.detach()
+
+
+@dataclasses.dataclass(frozen=True)
+class _MatchedPredictionDiagnostics:
+    direction: torch.Tensor
+    log_norm: torch.Tensor
+    pred_norm: torch.Tensor
+    target_norm: torch.Tensor
+    matched_target_norm: torch.Tensor
+
+
+def _zero_matched_prediction_diagnostics(
+    pred: torch.Tensor | None,
+    reference: torch.Tensor,
+) -> _MatchedPredictionDiagnostics:
+    zero = _zero_weight_loss(pred, reference)
+    return _MatchedPredictionDiagnostics(
+        direction=zero,
+        log_norm=zero,
+        pred_norm=zero,
+        target_norm=zero,
+        matched_target_norm=zero,
+    )
+
+
+def _matched_prediction_diagnostics(
+    pred: torch.Tensor,
+    target: torch.Tensor,
+    assignment: torch.Tensor | None,
+    *,
+    reference: torch.Tensor,
+    eps: float,
+) -> _MatchedPredictionDiagnostics:
+    """Scale-separated diagnostics for guarded slot-level prediction.
+
+    Raw slot-JEPA MSE is kept as the compatibility field, but it conflates
+    direction errors with latent norm drift. These diagnostics are logged only
+    and do not affect the objective unless a future config explicitly opts in.
+    """
+
+    if pred.numel() == 0 or target.numel() == 0 or assignment is None or assignment.numel() == 0:
+        return _zero_matched_prediction_diagnostics(pred, reference)
+    slot_count = min(int(pred.shape[0]), int(target.shape[0]), int(assignment.shape[0]), int(assignment.shape[1]))
+    width = min(int(pred.shape[-1]), int(target.shape[-1]))
+    if slot_count == 0 or width == 0:
+        return _zero_matched_prediction_diagnostics(pred, reference)
+    pred_w = pred[:slot_count, :width]
+    target_w = target.detach().to(device=pred.device, dtype=pred.dtype)[:slot_count, :width]
+    assign = assignment[:slot_count, :slot_count].detach().to(device=pred.device, dtype=pred.dtype)
+    matched_target = assign @ target_w
+    pred_norm = torch.linalg.vector_norm(pred_w, dim=-1).clamp_min(float(eps))
+    target_norm = torch.linalg.vector_norm(target_w, dim=-1).clamp_min(float(eps))
+    matched_norm = torch.linalg.vector_norm(matched_target, dim=-1).clamp_min(float(eps))
+    pred_dir = pred_w / pred_norm.unsqueeze(-1)
+    matched_dir = matched_target / matched_norm.unsqueeze(-1)
+    cosine = (pred_dir * matched_dir).sum(dim=-1)
+    direction = (1.0 - cosine.clamp(-1.0, 1.0)).mean()
+    log_norm = fn.smooth_l1_loss(torch.log(pred_norm), torch.log(matched_norm))
+    return _MatchedPredictionDiagnostics(
+        direction=direction,
+        log_norm=log_norm,
+        pred_norm=pred_norm.mean(),
+        target_norm=target_norm.mean(),
+        matched_target_norm=matched_norm.mean(),
+    )
 
 
 def _aqr_support_denoising_loss(
@@ -734,6 +862,11 @@ def _object_explanation_loss(
         zero = _zero_like(reference)
         return zero, zero, zero, zero, zero, zero
     quality = torch.clamp(oeml.anchor_quality.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
+    base_quality_src = getattr(oeml, "anchor_base_quality", None)
+    if base_quality_src is not None and base_quality_src.numel() == quality.numel():
+        base_quality = torch.clamp(base_quality_src.to(device=reference.device, dtype=reference.dtype), min=0.0, max=1.0)
+    else:
+        base_quality = quality
     graph = getattr(state, "anchor_prior_graph", None)
     if bool(cfg.object_explanation_active_object_only):
         active_object = _active_object_row_weight(
@@ -743,6 +876,7 @@ def _object_explanation_loss(
         )
         if active_object.numel() == quality.numel():
             quality = quality * active_object
+            base_quality = base_quality * active_object
     denom = torch.clamp(quality.sum(), min=eps)
 
     feature_raw = oeml.anchor_feature_variance.to(device=reference.device, dtype=reference.dtype).reshape(-1)
@@ -752,7 +886,39 @@ def _object_explanation_loss(
     point_clip = float(getattr(cfg, "object_explanation_point_loss_clip", 8.0))
     if point_clip > 0.0 and point_raw.numel() > 0:
         point_raw = torch.clamp(point_raw, min=0.0, max=point_clip)
-    point = (point_raw[: quality.numel()] * quality).sum() / denom if point_raw.numel() >= quality.numel() else _zero_like(reference)
+    if point_raw.numel() >= quality.numel():
+        point_value = point_raw[: quality.numel()]
+        outlier_prior = min(max(float(getattr(cfg, "object_explanation_point_outlier_prior", 0.0)), 0.0), 0.49)
+        if outlier_prior > 0.0:
+            inlier_likelihood = torch.exp(-0.5 * torch.clamp(point_value, min=0.0))
+            mixture_likelihood = ((1.0 - outlier_prior) * inlier_likelihood) + outlier_prior
+            point_value = -2.0 * torch.log(torch.clamp(mixture_likelihood, min=eps))
+        if bool(getattr(cfg, "object_explanation_point_quality_gate_enabled", False)):
+            point_quality_src = getattr(oeml, "anchor_point_quality", None)
+            if point_quality_src is not None and point_quality_src.numel() == quality.numel():
+                point_quality = torch.clamp(
+                    point_quality_src.to(device=reference.device, dtype=reference.dtype),
+                    min=0.0,
+                    max=1.0,
+                )
+            else:
+                point_quality_raw = torch.clamp(point_raw[: quality.numel()].detach(), min=0.0)
+                if point_clip > 0.0:
+                    point_quality_raw = torch.clamp(point_quality_raw, max=point_clip)
+                point_quality = torch.exp(-0.5 * point_quality_raw)
+            quality_min = min(max(float(getattr(cfg, "object_explanation_point_quality_min", 0.0)), 0.0), 1.0)
+            quality_power = max(float(getattr(cfg, "object_explanation_point_quality_power", 1.0)), 0.0)
+            reliability = torch.clamp(point_quality.detach(), min=quality_min, max=1.0)
+            if quality_power != 1.0:
+                reliability = reliability.pow(quality_power)
+            point_weight = base_quality[: quality.numel()] * reliability
+            point_denom = torch.clamp(base_quality[: quality.numel()].sum(), min=eps)
+        else:
+            point_weight = quality[: quality.numel()]
+            point_denom = denom
+        point = (point_value * point_weight).sum() / point_denom
+    else:
+        point = _zero_like(reference)
 
     contact_score = torch.clamp(oeml.contact_explanation_score.to(device=reference.device, dtype=reference.dtype).reshape(()), min=0.0, max=1.0)
     contact_valid = (
@@ -892,8 +1058,15 @@ def make_action_only_transition_loss(
         alignment=zero,
         alignment_raw=zero,
         total_minus_action=zero,
+        action_prefix_trust=zero,
         anchor_pv=zero,
         anchor_object_pull=zero,
+        anchor_object_pull_graph=zero,
+        anchor_object_pull_posterior=zero,
+        anchor_object_pull_graph_weight_sum=zero,
+        anchor_object_pull_posterior_weight_sum=zero,
+        anchor_object_pull_target_mass_mean=zero,
+        anchor_object_pull_target_quality_mean=zero,
         pv_weak=zero,
         pt=zero,
         availability=availability,
@@ -915,6 +1088,11 @@ def make_action_only_transition_loss(
         mapg_support_diversity=zero,
         mapg_geometry_diversity=zero,
         slot_jepa=zero,
+        slot_jepa_direction=zero,
+        slot_jepa_log_norm=zero,
+        slot_jepa_pred_norm=zero,
+        slot_jepa_target_norm=zero,
+        slot_jepa_matched_target_norm=zero,
         support_pred=zero,
         binding_consistency=zero,
         aqr_denoising=zero,
@@ -2232,7 +2410,7 @@ def _object_anchor_pull_loss(
     *,
     reference: torch.Tensor,
     eps: float,
-) -> torch.Tensor:
+) -> PicfObjectAnchorPullBreakdown:
     """Directly pull object-confirmed anchor centers to sidecar object points.
 
     This is a diagnostic supervision term, not a detector replacement.  The
@@ -2242,21 +2420,33 @@ def _object_anchor_pull_loss(
     toward the object under an isolated pull objective.
     """
 
+    def _zero_breakdown(*deps: torch.Tensor | None) -> PicfObjectAnchorPullBreakdown:
+        zero = _zero_weight_sum(reference, *deps)
+        return PicfObjectAnchorPullBreakdown(
+            total=zero,
+            graph=zero,
+            posterior=zero,
+            graph_weight_sum=zero,
+            posterior_weight_sum=zero,
+            target_mass_mean=zero,
+            target_quality_mean=zero,
+        )
+
     graph = getattr(state, "anchor_prior_graph", None)
     token_field = getattr(state, "token_field", None)
     anchor_x = None if graph is None else getattr(graph, "anchor_x", None)
     if graph is None or token_field is None or not isinstance(anchor_x, torch.Tensor) or anchor_x.numel() == 0:
-        return _zero_like(reference)
+        return _zero_breakdown(anchor_x)
 
     point_positions = getattr(token_field, "point_positions_world", None)
     if not isinstance(point_positions, torch.Tensor) or point_positions.numel() == 0:
         point_positions = getattr(token_field, "point_positions", None)
     if not isinstance(point_positions, torch.Tensor) or point_positions.numel() == 0:
-        return _zero_weight_sum(reference, anchor_x)
+        return _zero_breakdown(anchor_x)
 
     row_count = min(int(anchor_x.shape[0]), int(getattr(graph, "anchor_tokens", anchor_x).shape[0]))
     if row_count <= 0:
-        return _zero_weight_sum(reference, anchor_x, point_positions)
+        return _zero_breakdown(anchor_x, point_positions)
 
     priors: list[torch.Tensor] = []
     for value in (
@@ -2274,11 +2464,68 @@ def _object_anchor_pull_loss(
         ):
             priors.append(torch.clamp(value.to(device=reference.device, dtype=reference.dtype)[:row_count], min=0.0))
     if not priors:
-        return _zero_weight_sum(reference, anchor_x, point_positions)
+        return _zero_breakdown(anchor_x, point_positions)
 
     target_prior = torch.stack(priors, dim=0).max(dim=0).values
+    point_positions_t = point_positions.to(device=reference.device, dtype=reference.dtype)
+
+    def _core_prior(prior: torch.Tensor) -> torch.Tensor:
+        """Keep the high-confidence target core for center/quality estimation.
+
+        Contact-motion and proposal priors are weak measurement fields.  Their
+        low-confidence tails should stay available as evidence, but should not
+        define a hard geometric pull target.  This mirrors the robust OEML point
+        core used for explanation quality.
+        """
+
+        prior = torch.clamp(prior.to(device=reference.device, dtype=reference.dtype), min=0.0)
+        core_mass = min(max(float(getattr(cfg, "anchor_object_pull_target_core_mass", 1.0)), 0.0), 1.0)
+        core_topk = int(getattr(cfg, "anchor_object_pull_target_core_topk", 0))
+        if prior.ndim != 2 or prior.shape[-1] <= 0 or (core_mass >= 1.0 and core_topk <= 0):
+            return prior
+        k = prior.shape[-1] if core_topk <= 0 else min(core_topk, int(prior.shape[-1]))
+        values, indices = torch.topk(prior, k=k, dim=-1, largest=True, sorted=True)
+        if core_mass < 1.0:
+            target = torch.clamp(prior.sum(dim=-1, keepdim=True) * core_mass, min=eps)
+            cumulative = torch.cumsum(values, dim=-1)
+            prev = torch.cat([torch.zeros_like(cumulative[:, :1]), cumulative[:, :-1]], dim=-1)
+            keep = (prev < target) & (values > eps)
+        else:
+            keep = values > eps
+        core = torch.zeros_like(prior)
+        core.scatter_(dim=-1, index=indices, src=values * keep.to(dtype=values.dtype))
+        return torch.where(core.sum(dim=-1, keepdim=True) > eps, core, prior)
+
+    target_core_prior = _core_prior(target_prior)
     target_mass = target_prior.sum(dim=-1)
+    target_core_mass = target_core_prior.sum(dim=-1)
+    target_quality = torch.ones((row_count,), device=reference.device, dtype=reference.dtype)
+    if bool(getattr(cfg, "anchor_object_pull_target_quality_gate_enabled", True)):
+        core_prob = target_core_prior / torch.clamp(target_core_mass[:, None], min=eps)
+        target_center = core_prob @ point_positions_t
+        dist2 = torch.sum((point_positions_t[None, :, :] - target_center[:, None, :]) ** 2, dim=-1)
+        variance = (core_prob * dist2).sum(dim=-1)
+        sigma_q = max(float(getattr(cfg, "anchor_object_pull_target_quality_sigma_m", 0.08)), eps)
+        quality_raw = torch.exp(-0.5 * torch.clamp(variance / (sigma_q * sigma_q), min=0.0, max=16.0))
+        quality_power = max(float(getattr(cfg, "anchor_object_pull_target_quality_power", 1.0)), 0.0)
+        if quality_power != 1.0:
+            quality_raw = quality_raw.pow(quality_power)
+        target_quality = torch.where(target_core_mass > eps, torch.clamp(quality_raw, min=0.0, max=1.0), torch.zeros_like(quality_raw))
+        min_quality = min(max(float(getattr(cfg, "anchor_object_pull_target_quality_min", 0.05)), 0.0), 1.0)
+        if min_quality > 0.0:
+            target_quality = torch.where(target_quality >= min_quality, target_quality, torch.zeros_like(target_quality))
     valid = target_mass > eps
+    valid = valid & (target_core_mass > eps) & (target_quality > eps)
+    target_mass_mean = (
+        target_mass[valid].mean()
+        if bool(valid.any().item())
+        else _zero_weight_sum(reference, target_prior)
+    )
+    target_quality_mean = (
+        target_quality[valid].mean()
+        if bool(valid.any().item())
+        else _zero_weight_sum(reference, target_prior, target_quality)
+    )
     if bool(cfg.anchor_pv_object_distribution_confirmed_only):
         row_weight = _confirmed_object_row_weight(
             graph,
@@ -2298,9 +2545,8 @@ def _object_anchor_pull_loss(
         for role in allowed_roles:
             allowed = allowed | (roles_t == int(role))
         row_weight = row_weight * allowed.to(dtype=reference.dtype)
-    row_weight = row_weight * valid.to(dtype=reference.dtype)
+    row_weight = row_weight * valid.to(dtype=reference.dtype) * target_quality
     sigma = max(float(cfg.anchor_object_pull_sigma_m), eps)
-    point_positions_t = point_positions.to(device=reference.device, dtype=reference.dtype)
 
     def _center_pull_numer_denom(
         pred_x: torch.Tensor,
@@ -2330,13 +2576,19 @@ def _object_anchor_pull_loss(
 
     numer = reference.new_zeros(())
     denom = reference.new_zeros(())
+    graph_loss = _zero_weight_sum(reference, anchor_x, target_prior)
+    graph_denom = reference.new_zeros(())
+    posterior_loss = _zero_weight_sum(reference, anchor_x, target_prior)
+    posterior_denom = reference.new_zeros(())
     graph_weight = max(float(getattr(cfg, "anchor_object_pull_graph_weight", 1.0)), 0.0)
     if graph_weight > 0.0:
         graph_numer, graph_denom = _center_pull_numer_denom(
             anchor_x.to(device=reference.device, dtype=reference.dtype)[:row_count, :3],
-            target_prior,
+            target_core_prior,
             row_weight,
         )
+        if bool((graph_denom > eps).item()):
+            graph_loss = graph_numer / torch.clamp(graph_denom, min=eps)
         numer = numer + (graph_weight * graph_numer)
         denom = denom + (graph_weight * graph_denom)
 
@@ -2367,7 +2619,7 @@ def _object_anchor_pull_loss(
             obs_target_prior = torch.clamp(
                 graph_assignment.to(device=reference.device, dtype=reference.dtype)[:, :row_count],
                 min=0.0,
-            ) @ torch.clamp(target_prior.to(device=reference.device, dtype=reference.dtype), min=0.0)
+            ) @ torch.clamp(target_core_prior.to(device=reference.device, dtype=reference.dtype), min=0.0)
             post_prior = torch.clamp(
                 binding.to(device=reference.device, dtype=reference.dtype)[:post_count],
                 min=0.0,
@@ -2379,7 +2631,7 @@ def _object_anchor_pull_loss(
             # a belief-file target while row competition decides which file is
             # active.  This closes graph->belief supervision without creating a
             # new detector or bypassing posterior file competition.
-            global_prior = torch.clamp(target_prior.to(device=reference.device, dtype=reference.dtype), min=0.0).max(dim=0).values
+            global_prior = torch.clamp(target_core_prior.to(device=reference.device, dtype=reference.dtype), min=0.0).max(dim=0).values
             post_prior = global_prior[None, :].expand(post_count, -1)
         post_weight = torch.ones((post_count,), device=reference.device, dtype=reference.dtype)
         active = getattr(posterior, "file_competition_active", None)
@@ -2403,12 +2655,25 @@ def _object_anchor_pull_loss(
             post_prior,
             post_weight,
         )
+        posterior_denom = post_denom
+        if bool((post_denom > eps).item()):
+            posterior_loss = post_numer / torch.clamp(post_denom, min=eps)
         numer = numer + (posterior_weight * post_numer)
         denom = denom + (posterior_weight * post_denom)
 
     if not bool((denom > eps).item()):
-        return _zero_weight_sum(reference, anchor_x, point_positions, target_prior)
-    return numer / torch.clamp(denom, min=eps)
+        total = _zero_weight_sum(reference, anchor_x, point_positions, target_prior)
+    else:
+        total = numer / torch.clamp(denom, min=eps)
+    return PicfObjectAnchorPullBreakdown(
+        total=total,
+        graph=graph_loss,
+        posterior=posterior_loss,
+        graph_weight_sum=graph_denom,
+        posterior_weight_sum=posterior_denom,
+        target_mass_mean=target_mass_mean,
+        target_quality_mean=target_quality_mean,
+    )
 
 
 def compute_alignment_loss(
@@ -2428,11 +2693,17 @@ def compute_alignment_loss(
             token_field.visual_align_embeddings,
         )
         anchor_object_pull = _object_anchor_pull_loss(state, cfg, reference=zero, eps=1e-6)
-        total = zero_align + (cfg.lambda_anchor_object_pull * anchor_object_pull) + (cfg.lambda_pt * pt)
+        total = zero_align + (cfg.lambda_anchor_object_pull * anchor_object_pull.total) + (cfg.lambda_pt * pt)
         return PicfAlignmentLossBreakdown(
             total=total,
             anchor_pv=zero_align,
-            anchor_object_pull=anchor_object_pull,
+            anchor_object_pull=anchor_object_pull.total,
+            anchor_object_pull_graph=anchor_object_pull.graph,
+            anchor_object_pull_posterior=anchor_object_pull.posterior,
+            anchor_object_pull_graph_weight_sum=anchor_object_pull.graph_weight_sum,
+            anchor_object_pull_posterior_weight_sum=anchor_object_pull.posterior_weight_sum,
+            anchor_object_pull_target_mass_mean=anchor_object_pull.target_mass_mean,
+            anchor_object_pull_target_quality_mean=anchor_object_pull.target_quality_mean,
             pv_weak=zero_align,
             pt=pt,
             candidate_edges=0,
@@ -2450,11 +2721,17 @@ def compute_alignment_loss(
             token_field.visual_align_embeddings,
         )
         anchor_object_pull = _object_anchor_pull_loss(state, cfg, reference=zero, eps=1e-6)
-        total = zero_align + (cfg.lambda_anchor_object_pull * anchor_object_pull) + (cfg.lambda_pt * pt)
+        total = zero_align + (cfg.lambda_anchor_object_pull * anchor_object_pull.total) + (cfg.lambda_pt * pt)
         return PicfAlignmentLossBreakdown(
             total=total,
             anchor_pv=zero_align,
-            anchor_object_pull=anchor_object_pull,
+            anchor_object_pull=anchor_object_pull.total,
+            anchor_object_pull_graph=anchor_object_pull.graph,
+            anchor_object_pull_posterior=anchor_object_pull.posterior,
+            anchor_object_pull_graph_weight_sum=anchor_object_pull.graph_weight_sum,
+            anchor_object_pull_posterior_weight_sum=anchor_object_pull.posterior_weight_sum,
+            anchor_object_pull_target_mass_mean=anchor_object_pull.target_mass_mean,
+            anchor_object_pull_target_quality_mean=anchor_object_pull.target_quality_mean,
             pv_weak=zero_align,
             pt=pt,
             candidate_edges=0,
@@ -2562,14 +2839,20 @@ def compute_alignment_loss(
     anchor_object_pull = _object_anchor_pull_loss(state, cfg, reference=projective, eps=1e-6)
     total = (
         (cfg.lambda_anchor_pv * anchor_pv)
-        + (cfg.lambda_anchor_object_pull * anchor_object_pull)
+        + (cfg.lambda_anchor_object_pull * anchor_object_pull.total)
         + (cfg.lambda_pv_weak * pv_weak)
         + (cfg.lambda_pt * pt)
     )
     return PicfAlignmentLossBreakdown(
         total=total,
         anchor_pv=anchor_pv,
-        anchor_object_pull=anchor_object_pull,
+        anchor_object_pull=anchor_object_pull.total,
+        anchor_object_pull_graph=anchor_object_pull.graph,
+        anchor_object_pull_posterior=anchor_object_pull.posterior,
+        anchor_object_pull_graph_weight_sum=anchor_object_pull.graph_weight_sum,
+        anchor_object_pull_posterior_weight_sum=anchor_object_pull.posterior_weight_sum,
+        anchor_object_pull_target_mass_mean=anchor_object_pull.target_mass_mean,
+        anchor_object_pull_target_quality_mean=anchor_object_pull.target_quality_mean,
         pv_weak=pv_weak,
         pt=pt,
         candidate_edges=candidate_edges,
@@ -2589,6 +2872,7 @@ def compute_transition_loss(
     action_pos_override: torch.Tensor | None = None,
     action_rot_override: torch.Tensor | None = None,
     action_gripper_override: torch.Tensor | None = None,
+    action_prefix_trust_override: torch.Tensor | None = None,
     future_targets_override: PicfFutureTargets | None = None,
 ) -> PicfTransitionLossBreakdown:
     cfg = config or PicfTransitionLossConfig()
@@ -2611,6 +2895,12 @@ def compute_transition_loss(
             anchor_object_pull_allowed_roles=cfg.anchor_object_pull_allowed_roles,
             anchor_object_pull_graph_weight=cfg.anchor_object_pull_graph_weight,
             anchor_object_pull_posterior_weight=cfg.anchor_object_pull_posterior_weight,
+            anchor_object_pull_target_quality_gate_enabled=cfg.anchor_object_pull_target_quality_gate_enabled,
+            anchor_object_pull_target_quality_sigma_m=cfg.anchor_object_pull_target_quality_sigma_m,
+            anchor_object_pull_target_quality_min=cfg.anchor_object_pull_target_quality_min,
+            anchor_object_pull_target_quality_power=cfg.anchor_object_pull_target_quality_power,
+            anchor_object_pull_target_core_mass=cfg.anchor_object_pull_target_core_mass,
+            anchor_object_pull_target_core_topk=cfg.anchor_object_pull_target_core_topk,
             lambda_pv_weak=cfg.lambda_pv_weak,
             lambda_pt=cfg.lambda_pt,
             anchor_pv_object_gate_enabled=cfg.anchor_pv_object_gate_enabled,
@@ -2667,6 +2957,14 @@ def compute_transition_loss(
         action_default_equiv = _default_weighted_action_components(action_pos, action_rot, action_gripper)
     action_weight_scale = action_loss.detach() / torch.clamp(action_default_equiv.detach(), min=1e-6)
     action_active7 = _action_active7_loss(action_pos, action_rot, action_gripper)
+    if action_prefix_trust_override is None:
+        action_prefix_trust = _zero_weight_loss(predictive.action, predictive.action)
+    else:
+        action_prefix_trust = torch.as_tensor(
+            action_prefix_trust_override,
+            device=action_loss.device,
+            dtype=action_loss.dtype,
+        )
 
     if _branch_is_usable(
         pred=pred_cache.visual_latent,
@@ -2815,6 +3113,10 @@ def compute_transition_loss(
         + (cfg.lambda_point_real * point_real)
     )
     slot_assignment = None
+    slot_jepa_diag = _zero_matched_prediction_diagnostics(
+        predictive.slot_prediction_tokens,
+        predictive.action,
+    )
     if predictive.slot_prediction_tokens is not None:
         slot_tokens = predictive.slot_prediction_tokens
         if future.posterior_tokens is not None and future.posterior_tokens.numel() > 0:
@@ -2822,6 +3124,13 @@ def compute_transition_loss(
             slot_jepa, slot_assignment = _matched_prediction_loss(
                 slot_tokens,
                 target_slots,
+                reference=predictive.action,
+                eps=float(core.config.epsilon_a),
+            )
+            slot_jepa_diag = _matched_prediction_diagnostics(
+                slot_tokens,
+                target_slots,
+                slot_assignment,
                 reference=predictive.action,
                 eps=float(core.config.epsilon_a),
             )
@@ -2921,7 +3230,7 @@ def compute_transition_loss(
         + object_explanation
     )
     semantic_group = cfg.lambda_semantic_future_aux * semantic_future_aux
-    alignment_group = alignment.total + vl_router_raw + mapg_graph_raw + guarded_owm_aux
+    alignment_group = alignment.total + vl_router_raw + mapg_graph_raw + guarded_owm_aux + action_prefix_trust
     physical_aux_capped, physical_scale = _budgeted_group(
         physical_aux,
         action_loss=action_loss,
@@ -2973,8 +3282,15 @@ def compute_transition_loss(
         alignment=alignment_group_capped,
         alignment_raw=alignment.total,
         total_minus_action=total - action_loss,
+        action_prefix_trust=action_prefix_trust,
         anchor_pv=alignment.anchor_pv,
         anchor_object_pull=alignment.anchor_object_pull,
+        anchor_object_pull_graph=alignment.anchor_object_pull_graph,
+        anchor_object_pull_posterior=alignment.anchor_object_pull_posterior,
+        anchor_object_pull_graph_weight_sum=alignment.anchor_object_pull_graph_weight_sum,
+        anchor_object_pull_posterior_weight_sum=alignment.anchor_object_pull_posterior_weight_sum,
+        anchor_object_pull_target_mass_mean=alignment.anchor_object_pull_target_mass_mean,
+        anchor_object_pull_target_quality_mean=alignment.anchor_object_pull_target_quality_mean,
         pv_weak=alignment.pv_weak,
         pt=alignment.pt,
         availability=future.availability,
@@ -2996,6 +3312,11 @@ def compute_transition_loss(
         mapg_support_diversity=mapg_support_diversity,
         mapg_geometry_diversity=mapg_geometry_diversity,
         slot_jepa=slot_jepa,
+        slot_jepa_direction=slot_jepa_diag.direction,
+        slot_jepa_log_norm=slot_jepa_diag.log_norm,
+        slot_jepa_pred_norm=slot_jepa_diag.pred_norm,
+        slot_jepa_target_norm=slot_jepa_diag.target_norm,
+        slot_jepa_matched_target_norm=slot_jepa_diag.matched_target_norm,
         support_pred=support_pred,
         binding_consistency=binding_consistency,
         aqr_denoising=aqr_denoising,

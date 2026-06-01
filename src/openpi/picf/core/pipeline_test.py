@@ -2284,6 +2284,51 @@ def test_control_prefix_explicitly_depends_on_global_post(tmp_path: Path) -> Non
     assert not torch.allclose(base_control.tokens, shifted_control.tokens)
 
 
+def test_action_prefix_rmsnorm_bounds_action_visible_interface(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        action_prefix_norm_mode="rmsnorm",
+        action_prefix_rms_target=2.0,
+        action_prefix_norm_eps=1.0e-6,
+    )
+    tokens = torch.tensor(
+        [[[3.0, 4.0, 0.0], [0.0, 0.0, 0.0]]],
+        device=core.device,
+        dtype=core.dtype,
+    )
+    stabilized, pre_rms, post_rms, scale, gate = core._stabilize_action_prefix_tokens(tokens)
+
+    assert pre_rms is not None
+    assert post_rms is not None
+    assert scale is not None
+    assert gate is not None
+    assert stabilized.shape == tokens.shape
+    torch.testing.assert_close(post_rms[0, 0], torch.tensor(2.0, device=core.device, dtype=post_rms.dtype), atol=1.0e-4, rtol=1.0e-4)
+    torch.testing.assert_close(stabilized[0, 1], torch.zeros_like(stabilized[0, 1]))
+
+
+def test_action_prefix_output_gate_scales_action_visible_interface(tmp_path: Path) -> None:
+    core, _ = _make_core(
+        tmp_path,
+        action_prefix_norm_mode="rmsnorm",
+        action_prefix_rms_target=1.0,
+        action_prefix_output_gate=0.25,
+    )
+    tokens = torch.ones((1, 2, 4), device=core.device, dtype=core.dtype)
+
+    stabilized, _pre_rms, post_rms, _scale, gate = core._stabilize_action_prefix_tokens(tokens)
+
+    assert post_rms is not None
+    assert gate is not None
+    torch.testing.assert_close(gate, torch.full_like(gate, 0.25))
+    torch.testing.assert_close(
+        torch.sqrt(torch.mean(stabilized.to(dtype=torch.float32).square(), dim=-1)),
+        torch.full_like(post_rms.to(dtype=torch.float32), 0.25),
+        atol=1.0e-4,
+        rtol=1.0e-4,
+    )
+
+
 def test_control_graph_downstream_weights_are_attention_bias_not_token_scaling(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -14,6 +14,7 @@ import tempfile
 import pytest
 import numpy as np
 import torch
+from PIL import Image
 
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.contracts import PicfTactilePacket
@@ -160,6 +161,7 @@ def _base_args() -> argparse.Namespace:
         grad_clip_mode="percentile",
         grad_clip_percentile=75.0,
         grad_clip_window=100,
+        step_indexed_window_rng=True,
         action_normalization="quantile",
         action_norm_stats_path=None,
         action_output_clip=None,
@@ -239,6 +241,8 @@ def _base_args() -> argparse.Namespace:
         semantic_dtype="bfloat16",
         semantic_trainable=False,
         semantic_lr_scale=0.25,
+        picf_core_lr_scale=1.0,
+        policy_head_lr_scale=1.0,
         semantic_gradient_checkpointing=True,
         window_activation_checkpointing=False,
         semantic_use_gripper=True,
@@ -311,6 +315,26 @@ def test_normalize_train_args_sets_default_warmup_fraction() -> None:
     args = _base_args()
     _MODULE._normalize_train_args(args)
     assert args.warmup_steps == 600
+
+
+def test_step_indexed_window_rng_is_resume_stable_and_step_specific() -> None:
+    same_a = _MODULE._step_indexed_window_rng(seed=17, rank=1, step=7000, micro_step=0, retry_count=0)
+    same_b = _MODULE._step_indexed_window_rng(seed=17, rank=1, step=7000, micro_step=0, retry_count=0)
+    next_step = _MODULE._step_indexed_window_rng(seed=17, rank=1, step=7001, micro_step=0, retry_count=0)
+    retry = _MODULE._step_indexed_window_rng(seed=17, rank=1, step=7000, micro_step=0, retry_count=1)
+
+    sample_a = same_a.integers(0, 1_000_000, size=8).tolist()
+    assert sample_a == same_b.integers(0, 1_000_000, size=8).tolist()
+    assert sample_a != next_step.integers(0, 1_000_000, size=8).tolist()
+    assert sample_a != retry.integers(0, 1_000_000, size=8).tolist()
+
+
+def test_normalize_train_args_enables_step_indexed_window_rng_by_default() -> None:
+    args = _base_args()
+    delattr(args, "step_indexed_window_rng")
+    _MODULE._normalize_train_args(args)
+
+    assert args.step_indexed_window_rng is True
 
 
 def test_normalize_train_args_caps_visual_real_diagnostic_upscale_for_64_grid() -> None:
@@ -845,6 +869,29 @@ def test_normalize_train_args_accepts_anchor_only_trainable_scope() -> None:
     assert args.visual_finetune_mode == "frozen"
 
 
+def test_normalize_train_args_accepts_policy_only_trainable_scope() -> None:
+    args = _base_args()
+    args.picf_trainable_scope = "policy-only"
+    args.semantic_trainable = True
+    args.semantic_gradient_checkpointing = True
+    args.window_activation_checkpointing = True
+    args.point_backbone_trainable = True
+    args.visual_trainable = True
+    args.tactile_trainable = True
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.picf_trainable_scope == "policy_only"
+    assert args.perception_finetune_mode == "frozen"
+    assert args.point_backbone_trainable is False
+    assert args.visual_trainable is False
+    assert args.visual_finetune_mode == "frozen"
+    assert args.tactile_trainable is False
+    assert args.semantic_trainable is True
+    assert args.semantic_gradient_checkpointing is True
+    assert args.window_activation_checkpointing is True
+
+
 def test_anchor_only_trainable_scope_freezes_policy_and_keeps_anchor_path() -> None:
     class TinyModel(torch.nn.Module):
         def __init__(self) -> None:
@@ -874,6 +921,49 @@ def test_anchor_only_trainable_scope_freezes_policy_and_keeps_anchor_path() -> N
     assert "semantic_encoder.weight" not in trainable
     assert info["scope"] == "anchor_only"
     assert info["trainable_numel"] < info["total_numel"]
+
+
+def test_policy_only_trainable_scope_freezes_picf_core_and_keeps_policy_path() -> None:
+    class TinyModel(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = torch.nn.Module()
+            self.core.aqr_visual_reader = torch.nn.Linear(2, 2)
+            self.core.posterior_slot_token = torch.nn.Parameter(torch.ones(2, 2))
+            self.semantic_encoder = torch.nn.Linear(2, 2)
+            self.action_head = torch.nn.Linear(2, 2)
+
+    args = _base_args()
+    args.picf_trainable_scope = "policy_only"
+    model = TinyModel()
+
+    info = _MODULE._apply_picf_trainable_scope(model, args=args)
+    trainable = {name for name, param in model.named_parameters() if param.requires_grad}
+
+    assert "core.aqr_visual_reader.weight" not in trainable
+    assert "core.posterior_slot_token" not in trainable
+    assert "semantic_encoder.weight" in trainable
+    assert "action_head.weight" in trainable
+    assert info["scope"] == "policy_only"
+    assert info["trainable_numel"] < info["total_numel"]
+
+
+def test_normalize_train_args_canonicalizes_semantic_trainable_scope() -> None:
+    args = _base_args()
+    args.semantic_trainable_scope = "action-head-only"
+
+    _MODULE._normalize_train_args(args)
+
+    assert args.semantic_trainable_scope == "action_head_only"
+
+
+def test_validate_train_args_rejects_invalid_semantic_trainable_scope() -> None:
+    args = _base_args()
+    args.semantic_trainable_scope = "everything"
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="semantic_trainable_scope"):
+        _MODULE._validate_train_args(args)
 
 
 def test_normalize_train_args_resolves_visual_finetune_mode() -> None:
@@ -1223,16 +1313,21 @@ def test_validate_train_args_rejects_cpu_sonata() -> None:
 
 
 def test_build_optimizer_preserves_foundation_lr_scales() -> None:
-    core = types.SimpleNamespace(
-        point_feature_extractor=torch.nn.Linear(3, 4, bias=False),
-        visual_encoder=torch.nn.Linear(5, 6, bias=False),
-        tactile_encoder=torch.nn.Linear(7, 8, bias=False),
-    )
+    class TinyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.point_feature_extractor = torch.nn.Linear(3, 4, bias=False)
+            self.visual_encoder = torch.nn.Linear(5, 6, bias=False)
+            self.tactile_encoder = torch.nn.Linear(7, 8, bias=False)
+            self.adapter = torch.nn.Linear(13, 14, bias=False)
+
     trainer = torch.nn.Module()
-    trainer.core = core
+    trainer.core = TinyCore()
     trainer.semantic_encoder = torch.nn.Linear(9, 10, bias=False)
     trainer.head = torch.nn.Linear(11, 12, bias=False)
     args = _base_args()
+    args.picf_core_lr_scale = 0.05
+    args.policy_head_lr_scale = 0.75
     optimizer, group_info = _MODULE._build_optimizer(trainer, args=args)
     del optimizer
     name_to_scale = {item["name"]: item["lr_scale"] for item in group_info}
@@ -1240,8 +1335,78 @@ def test_build_optimizer_preserves_foundation_lr_scales() -> None:
     assert name_to_scale["visual_backbone"] == pytest.approx(0.25)
     assert name_to_scale["tactile_backbone"] == pytest.approx(0.25)
     assert name_to_scale["semantic_backbone"] == pytest.approx(0.25)
-    assert name_to_scale["picf_core"] == pytest.approx(1.0)
+    assert name_to_scale["picf_core"] == pytest.approx(0.05)
+    assert name_to_scale["policy_head"] == pytest.approx(0.75)
     assert {item["optimizer_sharding"] for item in group_info} == {"none"}
+
+
+def test_build_optimizer_preserves_picf_core_group_under_training_wrappers() -> None:
+    class TinyCore(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.point_feature_extractor = None
+            self.visual_encoder = None
+            self.tactile_encoder = None
+            self.adapter = torch.nn.Linear(3, 4, bias=False)
+
+    class TinyTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.core = TinyCore()
+            self.semantic_encoder = torch.nn.Linear(5, 6, bias=False)
+            self.head = torch.nn.Linear(7, 8, bias=False)
+
+    class FakeFsdpRoot(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self._fsdp_wrapped_module = TinyTrainer()
+
+        @property
+        def core(self) -> torch.nn.Module:
+            return self._fsdp_wrapped_module.core
+
+        @property
+        def semantic_encoder(self) -> torch.nn.Module:
+            return self._fsdp_wrapped_module.semantic_encoder
+
+    trainer = FakeFsdpRoot()
+    args = _base_args()
+    args.picf_core_lr_scale = 0.005
+    args.policy_head_lr_scale = 1.0
+
+    optimizer, group_info = _MODULE._build_optimizer(trainer, args=args)
+
+    name_to_info = {item["name"]: item for item in group_info}
+    assert name_to_info["picf_core"]["lr_scale"] == pytest.approx(0.005)
+    assert name_to_info["picf_core"]["num_params"] == 12
+    assert name_to_info["policy_head"]["lr_scale"] == pytest.approx(1.0)
+    assert name_to_info["policy_head"]["num_params"] == 56
+    assert _MODULE._optimizer_group_grad_metrics(optimizer)["lr_group_picf_core"] == pytest.approx(
+        args.lr * args.picf_core_lr_scale
+    )
+
+
+def test_optimizer_group_grad_metrics_reports_named_groups() -> None:
+    left = torch.nn.Parameter(torch.tensor([1.0, -2.0]))
+    right = torch.nn.Parameter(torch.tensor([3.0]))
+    left.grad = torch.tensor([3.0, 4.0])
+    right.grad = torch.tensor([-2.0])
+    optimizer = torch.optim.AdamW(
+        [
+            {"name": "semantic/backbone", "params": [left], "lr": 1.0e-4},
+            {"name": "picf_core", "params": [right], "lr": 2.0e-5},
+        ]
+    )
+
+    metrics = _MODULE._optimizer_group_grad_metrics(optimizer)
+
+    assert metrics["grad_norm_group_semantic_backbone"] == pytest.approx(5.0)
+    assert metrics["grad_absmax_group_semantic_backbone"] == pytest.approx(4.0)
+    assert metrics["grad_param_tensors_group_semantic_backbone"] == pytest.approx(1.0)
+    assert metrics["grad_elements_group_semantic_backbone"] == pytest.approx(2.0)
+    assert metrics["lr_group_semantic_backbone"] == pytest.approx(1.0e-4)
+    assert metrics["grad_norm_group_picf_core"] == pytest.approx(2.0)
+    assert metrics["lr_group_picf_core"] == pytest.approx(2.0e-5)
 
 
 def test_build_optimizer_rejects_zero1_without_initialized_distributed(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1314,19 +1479,19 @@ def test_split_optimizer_groups_by_dense_type_skips_uninitialized_params() -> No
     assert partitions[0][1][0]["params"] == [fp32]
 
 
-def test_infer_tactile_dense_dim_prefers_anytouch_native_hidden_size() -> None:
+def test_infer_tactile_dense_dim_prefers_picf_hidden_size_after_projection() -> None:
     vision_cfg = types.SimpleNamespace(hidden_size=768)
     tactile_model = types.SimpleNamespace(config=types.SimpleNamespace(vision_config=vision_cfg))
     tactile_encoder = types.SimpleNamespace(model=tactile_model)
-    core = types.SimpleNamespace(tactile_encoder=tactile_encoder)
+    core = types.SimpleNamespace(config=types.SimpleNamespace(hidden_dim=512), tactile_encoder=tactile_encoder)
 
-    assert _MODULE._infer_tactile_dense_dim(core) == 768
+    assert _MODULE._infer_tactile_dense_dim(core) == 512
 
 
 def test_infer_tactile_dense_dim_falls_back_to_default() -> None:
     core = types.SimpleNamespace(tactile_encoder=None)
 
-    assert _MODULE._infer_tactile_dense_dim(core) == 768
+    assert _MODULE._infer_tactile_dense_dim(core) == 512
 
 
 def test_materialize_model_parameters_initializes_task_tactile_reread() -> None:
@@ -1384,12 +1549,12 @@ def test_materialize_model_parameters_initializes_task_tactile_reread() -> None:
         trainer.core.tactile_native_reread.key_proj.weight,
         torch.nn.parameter.UninitializedParameter,
     )
-    assert tuple(trainer.core.tactile_native_reread.key_proj.weight.shape) == (8, 768)
+    assert tuple(trainer.core.tactile_native_reread.key_proj.weight.shape) == (8, 8)
     assert not isinstance(
         trainer.core.task_tactile_reread.key_proj.weight,
         torch.nn.parameter.UninitializedParameter,
     )
-    assert tuple(trainer.core.task_tactile_reread.key_proj.weight.shape) == (8, 768)
+    assert tuple(trainer.core.task_tactile_reread.key_proj.weight.shape) == (8, 8)
 
 
 @contextlib.contextmanager
@@ -2295,6 +2460,13 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
         "loss_alignment_raw": torch.tensor(0.055),
         "loss_total_minus_action": torch.tensor(0.8),
         "loss_anchor_pv": torch.tensor(0.06),
+        "loss_anchor_object_pull": torch.tensor(0.061),
+        "loss_anchor_object_pull_graph": torch.tensor(0.031),
+        "loss_anchor_object_pull_posterior": torch.tensor(0.091),
+        "loss_anchor_object_pull_graph_weight_sum": torch.tensor(2.0),
+        "loss_anchor_object_pull_posterior_weight_sum": torch.tensor(1.0),
+        "loss_anchor_object_pull_target_mass_mean": torch.tensor(0.42),
+        "loss_anchor_object_pull_target_quality_mean": torch.tensor(0.73),
         "loss_pv_weak": torch.tensor(0.07),
         "loss_pt": torch.tensor(0.09),
         "loss_mapg_graph": torch.tensor(0.021),
@@ -2324,6 +2496,11 @@ def test_metric_accumulator_update_from_outputs_tracks_semantic_future_aux() -> 
     assert averages["loss_semantic_group_capped"] == pytest.approx(0.02)
     assert averages["loss_physical_aux_capped"] == pytest.approx(0.03)
     assert averages["loss_total_minus_action"] == pytest.approx(0.8)
+    assert averages["loss_anchor_object_pull"] == pytest.approx(0.061)
+    assert averages["loss_anchor_object_pull_graph"] == pytest.approx(0.031)
+    assert averages["loss_anchor_object_pull_posterior"] == pytest.approx(0.091)
+    assert averages["loss_anchor_object_pull_target_mass_mean"] == pytest.approx(0.42)
+    assert averages["loss_anchor_object_pull_target_quality_mean"] == pytest.approx(0.73)
     assert averages["loss_mapg_graph"] == pytest.approx(0.021)
     assert averages["loss_mapg_support_diversity"] == pytest.approx(0.027)
     assert averages["loss_mapg_geometry_diversity"] == pytest.approx(0.028)
@@ -2382,6 +2559,7 @@ def test_picf_window_trainer_passes_semantic_override_to_core() -> None:
         alignment_raw=torch.tensor(0.11),
         total_minus_action=torch.tensor(0.9),
         anchor_pv=torch.tensor(0.1),
+        anchor_object_pull=torch.tensor(0.0),
         pv_weak=torch.tensor(0.1),
         pt=torch.tensor(0.1),
         vl_router=torch.tensor(0.0),
@@ -2507,6 +2685,7 @@ def test_picf_window_trainer_reuses_middle_frame_targets_with_detached_override(
         alignment_raw=torch.tensor(0.11),
         total_minus_action=torch.tensor(0.9),
         anchor_pv=torch.tensor(0.1),
+        anchor_object_pull=torch.tensor(0.0),
         pv_weak=torch.tensor(0.1),
         pt=torch.tensor(0.1),
         vl_router=torch.tensor(0.0),
@@ -2647,6 +2826,7 @@ def test_picf_window_trainer_state_only_burnin_skips_policy_flow_until_suffix() 
         alignment_raw=torch.tensor(0.11),
         total_minus_action=torch.tensor(0.9),
         anchor_pv=torch.tensor(0.1),
+        anchor_object_pull=torch.tensor(0.0),
         pv_weak=torch.tensor(0.1),
         pt=torch.tensor(0.1),
         vl_router=torch.tensor(0.0),
@@ -2824,6 +3004,40 @@ def test_save_visual_diagnostics_writes_png_gif_and_metadata(tmp_path: Path) -> 
     metadata = (diag_dir / "metadata.json").read_text(encoding="utf-8")
     assert "coarse 4x4 RGB reconstructions" in metadata
     assert "stack blocks" in metadata
+
+
+def test_save_visual_diagnostics_handles_missing_prediction_size_mismatch(tmp_path: Path) -> None:
+    frame0 = PicfObservation(
+        rgb_static=np.full((20, 18, 3), 16, dtype=np.uint8),
+        depth_static=np.zeros((20, 18), dtype=np.float32),
+        robot_obs=np.zeros((15,), dtype=np.float32),
+        prompt="push red block",
+        step_id=20,
+        segment_id=4,
+        timestamp_s=0.0,
+        reset_scaffold=True,
+        action=np.zeros((7,), dtype=np.float32),
+    )
+    frame1 = dataclasses.replace(
+        frame0,
+        step_id=21,
+        reset_scaffold=False,
+        rgb_static=np.full((20, 18, 3), 144, dtype=np.uint8),
+    )
+    window = _MODULE._TransitionWindow(segment_id=4, start_step_id=20, prompt="push red block", frames=(frame0, frame1))
+
+    _MODULE._save_visual_diagnostics(
+        output_dir=tmp_path,
+        step=501,
+        window=window,
+        physical_visual_real_seq=[torch.linspace(0.0, 1.0, 48)],
+        semantic_visual_real_seq=[None],
+        visual_real_grid=4,
+        visual_real_upscale=8,
+    )
+
+    compare = np.asarray(Image.open(tmp_path / "diagnostics" / "000501" / "compare_grid.png"))
+    assert compare.shape == (32, 128, 3)
 
 
 def test_first_step_window_precheck_rejects_empty_local_support() -> None:

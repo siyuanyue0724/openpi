@@ -60,6 +60,22 @@ Launcher:
 scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_ownerdirect_long30k_20260520.sh
 ```
 
+Current 2026-05-22 relaunch:
+
+```text
+exp:
+  picf_a7_actionaware_defaultsync_action2_from0_long30k_20260522
+
+reason:
+  The staged action-2.0 continuation from step 500 was archived after about
+  step 1900.  It stayed structurally safe, but action-default-equivalent loss
+  plateaued near 0.05 and late preclip gradients spiked.  The clean test is
+  therefore action weight 2.0 from step 0, not another continuation.
+
+archive:
+  /mnt/picf_run_logs/archive_20260522_action2_from500_plateau/
+```
+
 Sidecar requirement:
 
 ```text
@@ -91,8 +107,8 @@ burnin_mode=state_only
 training_strategy=fsdp_full_shard
 optimizer_sharding=none
 log_interval=50
-anchor_overlay_interval=50
-save_interval=2500
+anchor_overlay_interval=100
+save_interval=500
 keep_last_checkpoints=3
 progress=true
 ```
@@ -297,4 +313,54 @@ semantic:
 
 pretrained perception:
   Sonata, V-JEPA, AnyTouch frozen
+```
+
+## 2026-05-21 Step-500 Interruption
+
+The launch reached step 500 and then stopped in visual diagnostics before any
+checkpoint was written.
+
+```text
+not a model numeric failure:
+  rank0 failed while writing compare_grid.png.
+
+root cause:
+  semantic visual-real prediction was absent for one transition, so the old
+  fallback used raw target_next size while physical prediction used
+  visual_real_grid * visual_real_upscale.  Concatenating the row mixed 256-high
+  and 200-high images.
+
+code fix:
+  all compare-grid columns now pass through _resize_rgb_for_concat, and missing
+  prediction columns are allocated directly at compare_size.
+
+test:
+  scripts/picf_core_train_test.py::test_save_visual_diagnostics_handles_missing_prediction_size_mismatch
+```
+
+Loss triage from the valid 50-500 step window:
+
+```text
+action:
+  loss_action_default_equiv improves from 0.1003 to the 0.060-0.067 band.
+  This is comparable to the historical early 4-22/A7 action range, not a final
+  mature 25k+ convergence claim.
+
+healthy:
+  posterior_file_competition_active_duplicate_overlap_max stays 0.
+  posterior_recycle_rate stays roughly 0.05-0.10.
+  active_same_role_support_overlap_max stays <= 0.212.
+  tracklet/proposal sidecar evidence is present.
+
+risk:
+  loss_anchor_object_pull rises to 1.164.
+  loss_object_explanation_point rises to 6.293.
+  raw same-role support overlap saturates near 1.0.
+  context_anchor_count falls from 7.69 to 1.97.
+
+read:
+  the active owner route is no longer catastrophically duplicated, but the
+  reserve/context side of the object-file system still degenerates under
+  action-aware co-training.  A restart after the diagnostic fix is valid only if
+  these metrics are watched at 50/100/200/300/500 again.
 ```

@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import random
 import sys
+import time
 from typing import Any
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -40,10 +41,33 @@ def _build_policy_example(obs: dict[str, Any], goal: str, *, needs_reset: bool) 
     return example
 
 
-def _discretize_calvin_gripper(action: np.ndarray) -> np.ndarray:
+def _sanitize_calvin_action(action: np.ndarray, *, clip: float | None) -> tuple[np.ndarray, dict[str, float | int | bool | None]]:
     out = np.array(action, dtype=np.float32, copy=True).reshape(-1)
+    raw = np.array(out, dtype=np.float32, copy=True)
+    finite = np.isfinite(out)
+    finite_all = bool(np.all(finite))
+    if not finite_all:
+        out = np.nan_to_num(out, nan=0.0, posinf=0.0, neginf=0.0)
+    clip_value = None if clip is None or clip <= 0 else float(clip)
+    before_clip = np.array(out, dtype=np.float32, copy=True)
+    if clip_value is not None and out.size > 1:
+        out[:-1] = np.clip(out[:-1], -clip_value, clip_value)
+    clip_changed = bool(out.size > 1 and not np.allclose(before_clip[:-1], out[:-1], equal_nan=True))
+    before_gripper = float(out[-1]) if out.size else 0.0
     out[-1] = 1.0 if out[-1] >= 0.0 else -1.0
-    return out
+    gripper_discretized = bool(out.size and not np.isclose(before_gripper, float(out[-1])))
+    finite_abs = np.abs(raw[np.isfinite(raw)])
+    stats: dict[str, float | int | bool | None] = {
+        "changed": bool((not finite_all) or clip_changed or gripper_discretized),
+        "finite_all": finite_all,
+        "nonfinite_changed": bool(not finite_all),
+        "clip_changed": clip_changed,
+        "gripper_discretized": gripper_discretized,
+        "dim": int(out.size),
+        "raw_max_abs": float(finite_abs.max()) if finite_abs.size else None,
+        "out_max_abs": float(np.max(np.abs(out))) if out.size else 0.0,
+    }
+    return out, stats
 
 
 def _seed_everything(seed: int) -> None:
@@ -91,6 +115,8 @@ class _PicfCalvinModel:
         anchor_debug_dir: str | Path | None = None,
         save_prediction_debug: bool = False,
         prediction_debug_dir: str | Path | None = None,
+        action_clip: float | None = 1.0,
+        action_safety_log: str | Path | None = None,
     ):
         self.policy = WebsocketClientPolicy(host=host, port=port)
         self._needs_reset = True
@@ -107,6 +133,12 @@ class _PicfCalvinModel:
         self._pending_prediction_debug = None
         self._pending_prediction_goal = ""
         self._pending_prediction_step = -1
+        self._action_clip = None if action_clip is None or float(action_clip) <= 0 else float(action_clip)
+        self._action_safety_log = Path(action_safety_log).expanduser() if action_safety_log is not None else None
+        self._action_safety_jsonl = None
+        if self._action_safety_log is not None:
+            self._action_safety_log.parent.mkdir(parents=True, exist_ok=True)
+            self._action_safety_jsonl = open(self._action_safety_log, "a", encoding="utf-8")
         if self._save_anchor_debug:
             if self._anchor_debug_dir is None:
                 self._anchor_debug_dir = Path("/mnt/calvin_eval_logs/anchor_debug")
@@ -132,6 +164,9 @@ class _PicfCalvinModel:
         if self._prediction_jsonl is not None:
             self._prediction_jsonl.close()
             self._prediction_jsonl = None
+        if self._action_safety_jsonl is not None:
+            self._action_safety_jsonl.close()
+            self._action_safety_jsonl = None
 
     def _start_anchor_episode(self, frame: np.ndarray) -> None:
         self.close()
@@ -345,6 +380,9 @@ class _PicfCalvinModel:
             goal = goal.decode("utf-8", "ignore")
         elif not isinstance(goal, str):
             goal = str(goal)
+        if self._needs_reset and not (self._save_anchor_debug or self._save_prediction_debug):
+            self._episode_index += 1
+            self._step_index = 0
         if self._needs_reset and (self._save_anchor_debug or self._save_prediction_debug):
             rgb_obs = obs.get("rgb_obs", {})
             frame = np.asarray(rgb_obs.get("rgb_static"), dtype=np.uint8)
@@ -373,11 +411,60 @@ class _PicfCalvinModel:
             self._pending_prediction_debug = out.get("prediction_debug")
             self._pending_prediction_goal = goal
             self._pending_prediction_step = current_step_index
-        if self._save_anchor_debug or self._save_prediction_debug:
-            self._step_index += 1
         actions = np.asarray(out["actions"], dtype=np.float32)
         action = actions[0] if actions.ndim == 2 else actions.reshape(-1)
-        return _discretize_calvin_gripper(action)
+        action, safety = _sanitize_calvin_action(action, clip=self._action_clip)
+        server_timing = out.get("server_timing")
+        if self._action_safety_jsonl is not None:
+            record = {
+                "episode": int(self._episode_index),
+                "step": int(current_step_index),
+                "goal": goal,
+                **safety,
+            }
+            if isinstance(server_timing, dict):
+                record["server_timing"] = server_timing
+                record["infer_ms"] = server_timing.get("infer_ms")
+                record["prev_total_ms"] = server_timing.get("prev_total_ms")
+            self._action_safety_jsonl.write(json.dumps(record, separators=(",", ":")) + "\n")
+            self._action_safety_jsonl.flush()
+        if safety.get("nonfinite_changed") or safety.get("clip_changed"):
+            raw_max_abs = safety.get("raw_max_abs")
+            raw_max_abs_str = "nan" if raw_max_abs is None else f"{float(raw_max_abs):.4g}"
+            print(
+                "WARNING sanitized CALVIN action "
+                f"goal={goal!r} step={current_step_index} "
+                f"finite_all={safety['finite_all']} clip_changed={safety['clip_changed']} "
+                f"raw_max_abs={raw_max_abs_str} out_max_abs={float(safety['out_max_abs']):.4g}",
+                flush=True,
+            )
+        self._step_index += 1
+        return action
+
+
+def _patch_calvin_rollout_logging(upstream_eval) -> None:
+    original = getattr(upstream_eval, "rollout", None)
+    if not callable(original) or getattr(original, "_picf_logged", False):
+        return
+
+    def _logged_rollout(env, model, task_oracle, subtask, val_annotations, plans, debug):
+        start = time.monotonic()
+        print(f"PICF_CALVIN_ROLLOUT_START subtask={subtask!r}", flush=True)
+        try:
+            success = original(env, model, task_oracle, subtask, val_annotations, plans, debug)
+        except Exception as exc:
+            elapsed = time.monotonic() - start
+            print(
+                f"PICF_CALVIN_ROLLOUT_ERROR subtask={subtask!r} elapsed_s={elapsed:.3f} error={type(exc).__name__}: {exc}",
+                flush=True,
+            )
+            raise
+        elapsed = time.monotonic() - start
+        print(f"PICF_CALVIN_ROLLOUT_END subtask={subtask!r} success={int(bool(success))} elapsed_s={elapsed:.3f}", flush=True)
+        return success
+
+    _logged_rollout._picf_logged = True
+    upstream_eval.rollout = _logged_rollout
 
 
 def main() -> None:
@@ -397,6 +484,17 @@ def main() -> None:
         "--prediction_debug_dir",
         default=os.environ.get("PICF_PREDICTION_DEBUG_DIR", "/mnt/calvin_eval_logs/prediction_debug"),
     )
+    parser.add_argument(
+        "--action_clip",
+        type=float,
+        default=float(os.environ.get("PICF_CALVIN_ACTION_CLIP", "1.0")),
+        help="Clip non-gripper CALVIN actions to [-value, value]; <=0 disables clipping.",
+    )
+    parser.add_argument(
+        "--action_safety_log",
+        default=os.environ.get("PICF_CALVIN_ACTION_SAFETY_LOG"),
+        help="Optional JSONL path for per-step CALVIN action finite/clip diagnostics.",
+    )
     parser.add_argument("--debug", action="store_true")
     parser.add_argument("--calvin_agent_root", default="/mnt/calvin/calvin_models/calvin_agent")
     args = parser.parse_args()
@@ -412,6 +510,7 @@ def main() -> None:
 
     _seed_everything(0)
     _patch_calvin_git_hash_lookup()
+    _patch_calvin_rollout_logging(upstream_eval)
     upstream_eval.NUM_SEQUENCES = int(args.num_sequences)
     if args.save_video:
         os.environ["CALVIN_SAVE_VIDEO"] = "1"
@@ -428,6 +527,8 @@ def main() -> None:
         anchor_debug_dir=args.anchor_debug_dir,
         save_prediction_debug=bool(args.save_prediction_debug),
         prediction_debug_dir=args.prediction_debug_dir,
+        action_clip=args.action_clip,
+        action_safety_log=args.action_safety_log,
     )
     try:
         upstream_eval.evaluate_policy(

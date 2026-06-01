@@ -313,15 +313,17 @@ def run(repo_root: Path) -> list[Check]:
             and _all(
                 comprehensive,
                 (
-                    "--picf-trainable-scope all",
+                    'PICF_TRAINABLE_SCOPE="${PICF_TRAINABLE_SCOPE:-all}"',
+                    '--picf-trainable-scope "${PICF_TRAINABLE_SCOPE}"',
                     "--perception-finetune-mode frozen",
-                    "TRAINING_STRATEGY=\"${TRAINING_STRATEGY:-ddp}\"",
+                    'TRAINING_STRATEGY="${TRAINING_STRATEGY:-ddp}"',
                     "--training-strategy \"${TRAINING_STRATEGY}\"",
-                    "ACTION_LOSS_WEIGHT=\"${ACTION_LOSS_WEIGHT:-0.0}\"",
+                    'ACTION_LOSS_WEIGHT="${ACTION_LOSS_WEIGHT:-0.0}"',
                     "--lambda-action-pos \"${ACTION_POS_WEIGHT}\"",
-                    "SEMANTIC_TRAINABLE=\"${SEMANTIC_TRAINABLE:-0}\"",
+                    'SEMANTIC_TRAINABLE="${SEMANTIC_TRAINABLE:-0}"',
                     "--lambda-slot-jepa 0.0",
-                    "--lambda-anchor-object-pull 0.35",
+                    'LAMBDA_ANCHOR_OBJECT_PULL="${LAMBDA_ANCHOR_OBJECT_PULL:-0.35}"',
+                    '--lambda-anchor-object-pull "${LAMBDA_ANCHOR_OBJECT_PULL}"',
                 ),
             )
             and _all(

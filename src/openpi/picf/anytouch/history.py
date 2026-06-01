@@ -15,6 +15,12 @@ class _SensorHistory:
     background_rgb: np.ndarray | None = None
 
 
+@dataclasses.dataclass(frozen=True)
+class MultiSensorTactileClipBufferState:
+    segment_id: int | None
+    histories: dict[str, tuple[tuple[np.ndarray, ...], np.ndarray | None, np.ndarray | None]]
+
+
 class MultiSensorTactileClipBuffer:
     def __init__(self, *, num_frames: int = 4, frame_stride: int = 2):
         if num_frames <= 0 or frame_stride <= 0:
@@ -27,6 +33,26 @@ class MultiSensorTactileClipBuffer:
     def reset(self, *, segment_id: int | None = None) -> None:
         self._segment_id = segment_id
         self._histories.clear()
+
+    def snapshot(self) -> MultiSensorTactileClipBufferState:
+        histories: dict[str, tuple[tuple[np.ndarray, ...], np.ndarray | None, np.ndarray | None]] = {}
+        for name, history in self._histories.items():
+            histories[name] = (
+                tuple(np.asarray(frame).copy() for frame in history.frames),
+                None if history.T_sens_to_wrist is None else np.asarray(history.T_sens_to_wrist).copy(),
+                None if history.background_rgb is None else np.asarray(history.background_rgb).copy(),
+            )
+        return MultiSensorTactileClipBufferState(segment_id=self._segment_id, histories=histories)
+
+    def restore(self, state: MultiSensorTactileClipBufferState) -> None:
+        self._segment_id = state.segment_id
+        self._histories.clear()
+        for name, (frames, pose, background) in state.histories.items():
+            self._histories[name] = _SensorHistory(
+                frames=deque((np.asarray(frame).copy() for frame in frames), maxlen=self.num_frames * self.frame_stride),
+                T_sens_to_wrist=None if pose is None else np.asarray(pose).copy(),
+                background_rgb=None if background is None else np.asarray(background).copy(),
+            )
 
     def push(self, packet: PicfTactilePacket, *, segment_id: int, reset: bool) -> None:
         if reset or (self._segment_id is not None and self._segment_id != segment_id):

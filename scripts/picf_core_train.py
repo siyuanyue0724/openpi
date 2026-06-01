@@ -11,6 +11,7 @@ import logging
 import math
 import os
 import random
+import re
 import signal
 import shutil
 import sys
@@ -105,6 +106,14 @@ _MVTRACK_PROPOSAL_KEYS = (
 )
 _SPEC_DEFAULTS = PicfCoreConfig()
 _LOSS_DEFAULTS = PicfTransitionLossConfig()
+_OBJECT_SCAFFOLD_DECAY_FIELDS = (
+    "lambda_anchor_object_pull",
+    "lambda_object_explanation_point",
+    "lambda_object_explanation_contact",
+    "lambda_object_explanation_duplicate",
+    "lambda_object_explanation_background",
+    "lambda_mapg_support_diversity",
+)
 _RETRYABLE_FIRST_STEP_ERRORS = (
     "PICF core requires a valid xyzrgb point cloud on the first control step.",
     "PICF core requires non-empty local xyzrgb support on the first control step.",
@@ -145,6 +154,8 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.predictive_query_tokens",
     "core.pi_prefix_query_tokens",
     "core.pi_prefix_reader.*",
+    "core.action_prefix_teacher_tokens",
+    "core.action_prefix_teacher_initialized",
     "core.future_condition_reader.*",
     "core.predictive_semantic_world.*",
     "core.predictive_state_proj.*",
@@ -153,6 +164,30 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "core.binding_quadratic_diag",
     "core.binding_low_rank_left.*",
     "core.binding_low_rank_right.*",
+    "semantic_encoder.encoder.action_context_in_proj.*",
+    "semantic_encoder.encoder.action_context_q_proj.*",
+    "semantic_encoder.encoder.action_context_k_proj.*",
+    "semantic_encoder.encoder.action_context_v_proj.*",
+    "semantic_encoder.encoder.action_context_out_proj.*",
+    "semantic_encoder.encoder.action_context_gate_logit",
+    "policy.semantic_encoder.encoder.action_context_in_proj.*",
+    "policy.semantic_encoder.encoder.action_context_q_proj.*",
+    "policy.semantic_encoder.encoder.action_context_k_proj.*",
+    "policy.semantic_encoder.encoder.action_context_v_proj.*",
+    "policy.semantic_encoder.encoder.action_context_out_proj.*",
+    "policy.semantic_encoder.encoder.action_context_gate_logit",
+    "encoder.action_context_in_proj.*",
+    "encoder.action_context_q_proj.*",
+    "encoder.action_context_k_proj.*",
+    "encoder.action_context_v_proj.*",
+    "encoder.action_context_out_proj.*",
+    "encoder.action_context_gate_logit",
+    "action_context_in_proj.*",
+    "action_context_q_proj.*",
+    "action_context_k_proj.*",
+    "action_context_v_proj.*",
+    "action_context_out_proj.*",
+    "action_context_gate_logit",
     "semantic_prefix_proj.*",
     "posterior_to_control_proj.*",
     "global_post_to_control_proj.*",
@@ -181,6 +216,8 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "predictive_query_tokens",
     "pi_prefix_query_tokens",
     "pi_prefix_reader.*",
+    "action_prefix_teacher_tokens",
+    "action_prefix_teacher_initialized",
     "future_condition_reader.*",
     "predictive_semantic_world.*",
     "predictive_state_proj.*",
@@ -649,6 +686,14 @@ def _write_gif(path: Path, frames: list[np.ndarray], *, duration_ms: int = 400) 
     )
 
 
+def _resize_rgb_for_concat(image: np.ndarray, size: tuple[int, int]) -> np.ndarray:
+    """Return a uint8 RGB image with the exact width/height needed for concat grids."""
+    rgb = _rgb_uint8(image)
+    if rgb.shape[1] == int(size[0]) and rgb.shape[0] == int(size[1]):
+        return rgb
+    return np.asarray(Image.fromarray(rgb).resize(size, resample=Image.Resampling.BILINEAR))
+
+
 def _save_visual_diagnostics(
     *,
     output_dir: Path,
@@ -715,17 +760,21 @@ def _save_visual_diagnostics(
             grid=visual_real_grid,
             upscale=visual_real_upscale,
         )
+        if physical is not None:
+            compare_size = physical.shape[1], physical.shape[0]
+        elif semantic is not None:
+            compare_size = semantic.shape[1], semantic.shape[0]
+        else:
+            side = max(1, int(visual_real_grid) * max(1, int(visual_real_upscale)))
+            compare_size = side, side
         if physical is None:
-            physical = np.zeros_like(target_next)
+            physical = np.zeros((compare_size[1], compare_size[0], 3), dtype=np.uint8)
         if semantic is None:
-            semantic = np.zeros_like(target_next)
-        compare_size = physical.shape[1], physical.shape[0]
-        current_ref = np.asarray(
-            Image.fromarray(current).resize(compare_size, resample=Image.Resampling.BILINEAR)
-        )
-        target_ref = np.asarray(
-            Image.fromarray(target_next).resize(compare_size, resample=Image.Resampling.BILINEAR)
-        )
+            semantic = np.zeros((compare_size[1], compare_size[0], 3), dtype=np.uint8)
+        current_ref = _resize_rgb_for_concat(current, compare_size)
+        physical = _resize_rgb_for_concat(physical, compare_size)
+        semantic = _resize_rgb_for_concat(semantic, compare_size)
+        target_ref = _resize_rgb_for_concat(target_next, compare_size)
         row = np.concatenate([current_ref, physical, semantic, target_ref], axis=1)
         compare_rows.append(row)
     if compare_rows:
@@ -1663,17 +1712,43 @@ def _looks_like_legacy_blind_sam_sidecar(path: str | Path | None) -> bool:
     return any(needle in text for needle in legacy_needles)
 
 
+_LEGACY_SPEC_DEFAULT_OVERRIDES = {
+    # These fields were added after the 4-22 ablation artifacts.  Some remote
+    # probe worktrees can have a newer trainer script paired with an older
+    # PicfCoreConfig, so old-args replay must not assume the config object has
+    # every newer attribute.
+    "posterior_binding_signature_memory_enabled": True,
+    "posterior_binding_signature_update_rate": 0.20,
+    "posterior_binding_signature_update_max_rate": 0.50,
+    "posterior_binding_signature_min_support": 0.02,
+    "posterior_binding_signature_owner_weight": 0.50,
+    "posterior_binding_signature_dispersion_gate_enabled": True,
+    "posterior_binding_signature_measurement_min_std": 0.05,
+    "posterior_binding_signature_measurement_margin_min": 0.25,
+    "posterior_binding_signature_measurement_margin_temperature": 0.10,
+}
+
+
+def _spec_default(name: str, fallback: Any | None = None) -> Any:
+    if hasattr(_SPEC_DEFAULTS, name):
+        return getattr(_SPEC_DEFAULTS, name)
+    if name in _LEGACY_SPEC_DEFAULT_OVERRIDES:
+        return _LEGACY_SPEC_DEFAULT_OVERRIDES[name]
+    return fallback
+
+
 def _normalize_train_args(args: argparse.Namespace) -> None:
     args.training_strategy = str(getattr(args, "training_strategy", "ddp")).lower().replace("-", "_")
     args.picf_mode = str(getattr(args, "picf_mode", "enabled")).lower().replace("-", "_")
     args.picf_trainable_scope = str(getattr(args, "picf_trainable_scope", "all")).lower().replace("-", "_")
-    if args.picf_trainable_scope not in {"all", "anchor_only"}:
+    if args.picf_trainable_scope not in {"all", "anchor_only", "policy_only"}:
         raise ValueError(
-            "picf_trainable_scope must be one of {'all', 'anchor_only'}, "
+            "picf_trainable_scope must be one of {'all', 'anchor_only', 'policy_only'}, "
             f"got {getattr(args, 'picf_trainable_scope', None)!r}."
         )
     args.burnin_mode = str(getattr(args, "burnin_mode", "full")).lower().replace("-", "_")
     args.burnin_steps = int(getattr(args, "burnin_steps", 0) or 0)
+    args.step_indexed_window_rng = bool(getattr(args, "step_indexed_window_rng", True))
     args.effector_persistent_anchors = int(
         getattr(args, "effector_persistent_anchors", _SPEC_DEFAULTS.effector_persistent_anchors)
     )
@@ -1685,6 +1760,18 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
     args.scene_anchor_border_patches = float(
         getattr(args, "scene_anchor_border_patches", _SPEC_DEFAULTS.scene_anchor_border_patches)
     )
+    if getattr(args, "visual_feature_mode", None) is None:
+        args.visual_feature_mode = "auto"
+    if getattr(args, "vjepa_feature_cache_root", None) is None:
+        args.vjepa_feature_cache_root = None
+    if getattr(args, "vjepa_feature_cache_mode", None) is None:
+        args.vjepa_feature_cache_mode = "off"
+    if getattr(args, "vjepa_feature_cache_temporal_slices", None) is None:
+        args.vjepa_feature_cache_temporal_slices = 4
+    else:
+        args.vjepa_feature_cache_temporal_slices = int(args.vjepa_feature_cache_temporal_slices)
+    if getattr(args, "vjepa_feature_cache_storage_dtype", None) is None:
+        args.vjepa_feature_cache_storage_dtype = "bfloat16"
     args.visual_real_grid = int(getattr(args, "visual_real_grid", _SPEC_DEFAULTS.visual_real_grid))
     if int(getattr(args, "diagnostic_visual_upscale", 64)) == 64 and int(args.visual_real_grid) >= 32:
         # The historical 4x4 visual-real target used 64x upscaling to make
@@ -1745,6 +1832,12 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.semantic_trainable = False
         args.semantic_gradient_checkpointing = False
         args.window_activation_checkpointing = False
+    if args.picf_trainable_scope == "policy_only":
+        args.perception_finetune_mode = "frozen"
+        args.point_backbone_trainable = False
+        args.tactile_trainable = False
+        args.visual_trainable = False
+        args.visual_finetune_mode = "frozen"
     if not _picf_mode_enabled(args):
         args.point_backbone = "rgb"
         args.point_backbone_trainable = False
@@ -1905,7 +1998,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "action_prefix_stopgrad",
     ):
         if getattr(args, _name, None) is None:
-            setattr(args, _name, bool(getattr(_SPEC_DEFAULTS, _name)))
+            setattr(args, _name, bool(_spec_default(_name)))
     for _name in (
         "aqr_sinkhorn_temperature",
         "aqr_pg_image_support_weight",
@@ -1973,7 +2066,7 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         "aqr_control_gate_init",
     ):
         if getattr(args, _name, None) is None:
-            setattr(args, _name, float(getattr(_SPEC_DEFAULTS, _name)))
+            setattr(args, _name, float(_spec_default(_name)))
     if getattr(args, "require_pi0_action_generator", None) is None:
         args.require_pi0_action_generator = bool(_SPEC_DEFAULTS.require_pi0_action_generator)
     if getattr(args, "semantic_prefix_dropout_prob", None) is None:
@@ -2053,6 +2146,44 @@ def _normalize_train_args(args: argparse.Namespace) -> None:
         args.warmup_steps = max(1, int(round(0.02 * float(args.num_train_steps))))
     else:
         args.warmup_steps = int(args.warmup_steps)
+    if getattr(args, "point_backbone_lr_scale", None) is None:
+        args.point_backbone_lr_scale = 0.25
+    if getattr(args, "visual_lr_scale", None) is None:
+        args.visual_lr_scale = 0.25
+    if getattr(args, "tactile_lr_scale", None) is None:
+        args.tactile_lr_scale = 0.25
+    if getattr(args, "semantic_lr_scale", None) is None:
+        args.semantic_lr_scale = 0.25
+    args.semantic_trainable_scope = str(
+        getattr(args, "semantic_trainable_scope", "backbone_only")
+    ).strip().lower().replace("-", "_")
+    if getattr(args, "picf_core_lr_scale", None) is None:
+        args.picf_core_lr_scale = 1.0
+    if getattr(args, "policy_head_lr_scale", None) is None:
+        args.policy_head_lr_scale = 1.0
+    args.picf_core_lr_runtime_mode = str(
+        getattr(args, "picf_core_lr_runtime_mode", "constant")
+    ).lower().replace("-", "_")
+    if getattr(args, "action_prefix_norm_mode", None) is None:
+        args.action_prefix_norm_mode = str(_SPEC_DEFAULTS.action_prefix_norm_mode)
+    if getattr(args, "action_prefix_rms_target", None) is None:
+        args.action_prefix_rms_target = float(_SPEC_DEFAULTS.action_prefix_rms_target)
+    if getattr(args, "action_prefix_norm_eps", None) is None:
+        args.action_prefix_norm_eps = float(_SPEC_DEFAULTS.action_prefix_norm_eps)
+    if getattr(args, "action_prefix_value_clip", None) is None:
+        args.action_prefix_value_clip = float(_SPEC_DEFAULTS.action_prefix_value_clip)
+    if getattr(args, "picf_action_condition_enabled", None) is None:
+        args.picf_action_condition_enabled = bool(_SPEC_DEFAULTS.picf_action_condition_enabled)
+    if getattr(args, "action_prefix_output_gate", None) is None:
+        args.action_prefix_output_gate = float(_SPEC_DEFAULTS.action_prefix_output_gate)
+    if getattr(args, "action_prefix_teacher_mode", None) is None:
+        args.action_prefix_teacher_mode = str(_SPEC_DEFAULTS.action_prefix_teacher_mode)
+    if getattr(args, "action_prefix_teacher_ema_decay", None) is None:
+        args.action_prefix_teacher_ema_decay = float(_SPEC_DEFAULTS.action_prefix_teacher_ema_decay)
+    if getattr(args, "action_prefix_teacher_blend", None) is None:
+        args.action_prefix_teacher_blend = float(_SPEC_DEFAULTS.action_prefix_teacher_blend)
+    if getattr(args, "lambda_action_prefix_trust", None) is None:
+        args.lambda_action_prefix_trust = float(_SPEC_DEFAULTS.lambda_action_prefix_trust)
     if getattr(args, "pt_bag_radius_m", None) is None:
         args.pt_bag_radius_m = 0.045
         args.pt_bag_radius_m_source = "default"
@@ -2337,7 +2468,29 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         )
     if bool(getattr(args, "anchor_overlay_dump_signatures", False)) and int(getattr(args, "anchor_overlay_interval", 0)) <= 0:
         raise ValueError("--anchor-overlay-dump-signatures requires --anchor-overlay-interval > 0.")
-    for name in ("point_backbone_lr_scale", "visual_lr_scale", "tactile_lr_scale", "semantic_lr_scale"):
+    semantic_scope_choices = {
+        "all",
+        "backbone_only",
+        "model_only",
+        "action_head_only",
+        "action_adapter_only",
+        "action_head_and_adapter",
+    }
+    if str(getattr(args, "semantic_trainable_scope", "backbone_only")) not in semantic_scope_choices:
+        raise ValueError(
+            "semantic_trainable_scope must be one of "
+            "{'all', 'backbone_only', 'model_only', 'action_head_only', "
+            "'action_adapter_only', 'action_head_and_adapter'}, "
+            f"got {getattr(args, 'semantic_trainable_scope', None)!r}."
+        )
+    for name in (
+        "point_backbone_lr_scale",
+        "visual_lr_scale",
+        "tactile_lr_scale",
+        "semantic_lr_scale",
+        "picf_core_lr_scale",
+        "policy_head_lr_scale",
+    ):
         value = float(getattr(args, name))
         if value <= 0.0:
             raise ValueError(f"{name} must be > 0, got {value}.")
@@ -2613,6 +2766,51 @@ def _unwrap_training_model(model: torch.nn.Module) -> torch.nn.Module:
     if _is_fsdp_model(model):
         return model.module
     return model
+
+
+def _object_scaffold_decay_scale(args: argparse.Namespace, step: int) -> float:
+    mode = str(getattr(args, "object_scaffold_decay_mode", "none")).lower()
+    if mode == "none":
+        return 1.0
+    start = int(getattr(args, "object_scaffold_decay_start_step", 0))
+    end = int(getattr(args, "object_scaffold_decay_end_step", 0))
+    floor = min(max(float(getattr(args, "object_scaffold_decay_floor", 1.0)), 0.0), 1.0)
+    if end <= start:
+        return floor
+    if step < start:
+        return 1.0
+    if step >= end:
+        return floor
+    progress = min(max(float(step - start) / float(end - start), 0.0), 1.0)
+    if mode == "linear":
+        return 1.0 + (floor - 1.0) * progress
+    if mode == "cosine":
+        return floor + (1.0 - floor) * 0.5 * (1.0 + math.cos(math.pi * progress))
+    raise ValueError(f"Unsupported object_scaffold_decay_mode: {mode!r}")
+
+
+def _scheduled_loss_config(
+    base: PicfTransitionLossConfig,
+    *,
+    args: argparse.Namespace,
+    step: int,
+) -> tuple[PicfTransitionLossConfig, float]:
+    """Return the per-step loss contract for weak object scaffold teachers.
+
+    Contact-motion/tracklet sidecars are weak measurement evidence, not hard
+    labels.  A schedule lets them bootstrap slot ownership early and then decay
+    to a small shaping term so action learning and dense context remain the
+    dominant long-run objective.
+    """
+
+    scale = _object_scaffold_decay_scale(args, step)
+    if scale == 1.0:
+        return base, scale
+    updates = {
+        field: float(getattr(base, field)) * scale
+        for field in _OBJECT_SCAFFOLD_DECAY_FIELDS
+    }
+    return dataclasses.replace(base, **updates), scale
 
 
 def _training_model_no_sync(
@@ -2997,6 +3195,62 @@ def _seed_everything(seed: int, rank: int) -> None:
         torch.cuda.manual_seed_all(mixed)
 
 
+def _step_indexed_window_rng(
+    *,
+    seed: int,
+    rank: int,
+    step: int,
+    micro_step: int,
+    retry_count: int = 0,
+) -> np.random.Generator:
+    """Return a deterministic sampler RNG keyed by the global optimizer step.
+
+    Resume safety matters for PICF action-loss analysis: if a run resumes from
+    step 7000 but reuses a stateful RNG initialized only from `seed + rank`, it
+    replays the same early sampled-window stream and can make train-window loss
+    look like a model rebound.  Keying the RNG by global step keeps sampling
+    deterministic while making continuation semantics independent of whether
+    the process reached the step in one run or via checkpoint resume.
+    """
+
+    words = (
+        int(seed) & 0xFFFFFFFF,
+        int(rank) & 0xFFFFFFFF,
+        int(step) & 0xFFFFFFFF,
+        int(micro_step) & 0xFFFFFFFF,
+        int(retry_count) & 0xFFFFFFFF,
+        0xA7B5_2026,
+    )
+    return np.random.default_rng(np.random.SeedSequence(words))
+
+
+def _calvin_prompt_bucket(prompt: str) -> str:
+    """Coarse CALVIN task family used only for sampler balancing/trace.
+
+    The bucket is intentionally derived from language metadata rather than
+    model outputs.  It does not enter the model and cannot leak action labels;
+    it only prevents a long run from issuing many consecutive optimizer
+    updates dominated by one task family.
+    """
+
+    text = str(prompt).strip().lower().replace("_", " ")
+    if not text:
+        return "other"
+    if "drawer" in text:
+        return "drawer"
+    if "button" in text or "switch" in text or "light" in text or "led" in text:
+        return "switch_button_light"
+    if "slider" in text or "slide" in text:
+        return "slider"
+    if "push" in text and "block" in text:
+        return "block_push"
+    if ("lift" in text or "grasp" in text or "pick" in text) and "block" in text:
+        return "block_lift"
+    if "block" in text:
+        return "block_other"
+    return "other"
+
+
 def _reduce_mean(value: float, *, device: torch.device, world_size: int) -> float:
     if world_size <= 1:
         return float(value)
@@ -3167,6 +3421,33 @@ def _optimizer_param_group_lookup(optimizer: torch.optim.Optimizer | None) -> di
     return lookup
 
 
+def _optimizer_group_grad_metrics(optimizer: torch.optim.Optimizer | None) -> dict[str, float]:
+    if optimizer is None:
+        return {}
+    metrics: dict[str, float] = {}
+    for index, group in enumerate(optimizer.param_groups):
+        name = str(group.get("name", f"group_{index}"))
+        safe_name = re.sub(r"[^0-9A-Za-z_]+", "_", name).strip("_") or f"group_{index}"
+        sq_sum = 0.0
+        max_abs = 0.0
+        elem_count = 0
+        param_count = 0
+        for param in group.get("params", ()):
+            if isinstance(param, UninitializedParameter) or param.grad is None:
+                continue
+            grad = torch.nan_to_num(param.grad.detach().to(dtype=torch.float32), nan=0.0, posinf=0.0, neginf=0.0)
+            sq_sum += float(torch.sum(grad.square()).item())
+            max_abs = max(max_abs, float(grad.abs().max().item()) if grad.numel() > 0 else 0.0)
+            elem_count += int(grad.numel())
+            param_count += 1
+        metrics[f"grad_norm_group_{safe_name}"] = float(math.sqrt(max(sq_sum, 0.0)))
+        metrics[f"grad_absmax_group_{safe_name}"] = float(max_abs)
+        metrics[f"grad_param_tensors_group_{safe_name}"] = float(param_count)
+        metrics[f"grad_elements_group_{safe_name}"] = float(elem_count)
+        metrics[f"lr_group_{safe_name}"] = float(group.get("lr", 0.0))
+    return metrics
+
+
 def _tensor_finite_abs_max(tensor: torch.Tensor) -> float:
     if tensor.numel() == 0:
         return 0.0
@@ -3280,6 +3561,61 @@ class _PendingTransitionLoss:
     tactile_active_rate: torch.Tensor
     owm_debug_metrics: dict[str, torch.Tensor]
     policy_forward_sec: float
+
+
+def _window_trace_record(
+    window: _TransitionWindow,
+    *,
+    global_step: int,
+    micro_step: int,
+    rank: int,
+    flat_index: int,
+    retry_count: int,
+    point_counts: tuple[int, ...],
+) -> dict[str, Any]:
+    """Compact sample/data-window trace for action-rebound attribution.
+
+    The recurrent late rebound can only be separated from optimizer drift if
+    the exact window distribution is visible.  This record is deliberately
+    metadata-only: it does not affect model inputs, gradients, or sampling.
+    """
+
+    first = window.frames[0]
+    action = None if first.action is None else np.asarray(first.action, dtype=np.float32)
+    action_chunk = None if first.action_chunk is None else np.asarray(first.action_chunk, dtype=np.float32)
+
+    def _norm(value: np.ndarray | None) -> float | None:
+        if value is None or value.size == 0:
+            return None
+        return float(np.linalg.norm(value.reshape(-1)))
+
+    def _count(value: Any | None) -> int:
+        if value is None:
+            return 0
+        try:
+            return int(np.asarray(value).shape[0])
+        except Exception:
+            return 0
+
+    return {
+        "global_step": int(global_step),
+        "micro_step": int(micro_step),
+        "rank": int(rank),
+        "flat_index": int(flat_index),
+        "segment": int(window.segment_id),
+        "start_step": int(window.start_step_id),
+        "prompt": str(window.prompt),
+        "prompt_bucket": _calvin_prompt_bucket(str(window.prompt)),
+        "retry_count": int(retry_count),
+        "point_counts": [int(count) for count in point_counts],
+        "action_norm": _norm(action),
+        "action_chunk_norm": _norm(action_chunk),
+        "action_chunk_first_norm": _norm(None if action_chunk is None else action_chunk[:1]),
+        "action_chunk_last_norm": _norm(None if action_chunk is None else action_chunk[-1:]),
+        "proposal_count": _count(first.proposal_centers_xy),
+        "proposal_mask_point_count": _count(first.proposal_mask_xy),
+        "tracklet_count": _count(first.tracklet_xy),
+    }
 
 
 def _load_action_chunk(
@@ -3555,9 +3891,54 @@ class _CalvinTransitionSource:
                 "No valid CALVIN transition windows found for "
                 f"split={split}, backend={backend}, unroll_steps={unroll_steps}, action_horizon={action_horizon}."
             )
+        self.bucket_to_slot_indices: dict[str, list[int]] = {}
+        for slot_index, slot in enumerate(self.segment_sampling_slots):
+            bucket = _calvin_prompt_bucket(self.segments[int(slot.segment_id)].lang)
+            self.bucket_to_slot_indices.setdefault(bucket, []).append(int(slot_index))
+        self.bucket_names: tuple[str, ...] = tuple(
+            sorted(bucket for bucket, indices in self.bucket_to_slot_indices.items() if indices)
+        )
 
     def __len__(self) -> int:
         return len(self.segment_sampling_slots)
+
+    def balanced_bucket_slot_index(
+        self,
+        *,
+        seed: int,
+        rank: int,
+        world_size: int,
+        step: int,
+        micro_step: int,
+        accum_steps: int,
+        retry_count: int = 0,
+    ) -> tuple[int, str, np.random.Generator]:
+        """Return a deterministic task-bucket-balanced segment slot.
+
+        This is a sampling-only repair for action-loss rebound diagnostics: the
+        optimizer sees a controlled sequence of task families across
+        rank/micro-step slots, while each selected segment still samples a
+        random valid start step through the same step-indexed RNG.
+        """
+
+        sample_rng = _step_indexed_window_rng(
+            seed=int(seed),
+            rank=int(rank),
+            step=int(step),
+            micro_step=int(micro_step),
+            retry_count=int(retry_count),
+        )
+        if not self.bucket_names:
+            return int(sample_rng.integers(0, len(self))), "unbucketed", sample_rng
+        global_micro = (
+            int(step) * max(int(world_size), 1) * max(int(accum_steps), 1)
+            + int(rank) * max(int(accum_steps), 1)
+            + int(micro_step)
+        )
+        bucket = self.bucket_names[int(global_micro) % len(self.bucket_names)]
+        candidates = self.bucket_to_slot_indices[bucket]
+        slot_index = int(candidates[int(sample_rng.integers(0, len(candidates)))])
+        return slot_index, bucket, sample_rng
 
     def close(self) -> None:
         self.reader.close()
@@ -3683,6 +4064,26 @@ class _CalvinTransitionSource:
 
     def window(self, flat_index: int, *, rng: np.random.Generator | None = None) -> _TransitionWindow:
         segment_id, start_step_id = self.sample_window_metadata(int(flat_index), rng=rng)
+        return self.window_from_metadata(segment_id=segment_id, start_step_id=start_step_id, rng=rng)
+
+    def window_from_metadata(
+        self,
+        *,
+        segment_id: int,
+        start_step_id: int,
+        rng: np.random.Generator | None = None,
+    ) -> _TransitionWindow:
+        segment_id = int(segment_id)
+        start_step_id = int(start_step_id)
+        if segment_id < 0 or segment_id >= len(self.segments):
+            raise ValueError(f"segment_id out of range: {segment_id}; valid [0,{len(self.segments)-1}].")
+        segment = self.segments[segment_id]
+        max_start_exclusive = int(segment.end) - (self.unroll_steps + self.action_horizon - 1)
+        if start_step_id < int(segment.start) or start_step_id >= max_start_exclusive:
+            raise ValueError(
+                "start_step_id out of valid range for segment "
+                f"{segment_id}: got {start_step_id}, valid [{int(segment.start)},{max_start_exclusive})."
+            )
         frames = tuple(
             self._load_frame(
                 segment_id,
@@ -3714,6 +4115,20 @@ def _loss_component_or_zero(losses: Any, name: str, reference: torch.Tensor | No
 
 OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_temporal_support_entropy_mean",
+    "pi_prefix_norm_mode_enabled",
+    "pi_prefix_norm_mean",
+    "pi_prefix_norm_max",
+    "pi_prefix_rms_mean",
+    "pi_prefix_rms_max",
+    "pi_prefix_max_abs",
+    "pi_prefix_nonfinite_count",
+    "pi_prefix_pre_rms_mean",
+    "pi_prefix_pre_rms_max",
+    "pi_prefix_post_rms_mean",
+    "pi_prefix_post_rms_max",
+    "pi_prefix_scale_mean",
+    "pi_prefix_scale_min",
+    "pi_prefix_scale_max",
     "aqr_temporal_support_time_mass_t0",
     "aqr_temporal_support_time_mass_t1",
     "aqr_temporal_view_mass_0",
@@ -3750,6 +4165,9 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_object_candidate_coverage_max",
     "aqr_object_candidate_background_mean",
     "aqr_object_candidate_duplicate_overlap_max",
+    "aqr_object_explanation_quality_mean",
+    "aqr_object_explanation_quality_max",
+    "aqr_object_explanation_quality_active_mean",
     "aqr_task_owner_visual_prior_entropy",
     "aqr_task_owner_visual_prior_max",
     "aqr_task_owner_proposal_score_max",
@@ -3787,6 +4205,8 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "oeml_duplicate_overlap_mean",
     "oeml_feature_variance_mean",
     "oeml_point_spatial_variance_mean",
+    "oeml_point_quality_mean",
+    "oeml_point_quality_max",
     "oeml_contact_explanation_score",
     "oeml_visual_background_mean",
     "oeml_point_background_mean",
@@ -3804,6 +4224,10 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "aqr_downstream_same_role_object_core_overlap_max",
     "aqr_context_same_role_support_overlap_max",
     "aqr_context_same_role_object_core_overlap_max",
+    "aqr_reserve_same_role_support_overlap_max",
+    "aqr_reserve_same_role_support_overlap_mean",
+    "aqr_reserve_same_role_object_core_overlap_max",
+    "aqr_reserve_same_role_object_core_overlap_mean",
     "aqr_active_same_role_support_overlap_max",
     "aqr_active_same_role_support_overlap_mean",
     "aqr_active_same_role_object_core_overlap_max",
@@ -3954,6 +4378,33 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "owm_ordinal_active",
     "owm_ordinal_target_rank",
     "owm_ordinal_confidence",
+    "pi_prefix_gate_mean",
+    "pi_prefix_gate_min",
+    "pi_prefix_gate_max",
+    "pi_prefix_teacher_mode_enabled",
+    "pi_prefix_teacher_trust_loss",
+    "pi_prefix_teacher_trust_raw",
+    "pi_prefix_teacher_delta_rms",
+    "pi_prefix_teacher_cos_to_teacher",
+    "pi_prefix_teacher_blend",
+    "pi_prefix_teacher_ema_decay",
+    "pi_context_token_count",
+    "pi_context_gate",
+    "pi_context_post_rms_mean",
+    "pi_context_fused_prefix_token_count",
+    "pi_context_attention_entropy_mean",
+    "pi_context_fused_post_rms_mean",
+    "pi_context_adapter_token_count",
+    "pi_context_adapter_gate",
+    "pi_context_adapter_attention_entropy_mean",
+    "pi_context_adapter_residual_rms_mean",
+    "pi_context_probe_mode_id",
+    "pi_context_probe_delta_rms_mean",
+    "pi_context_probe_post_rms_mean",
+    "pi_prefix_probe_mode_id",
+    "pi_prefix_probe_delta_rms_mean",
+    "pi_prefix_probe_post_rms_mean",
+    "pi_action_condition_token_count",
 )
 
 
@@ -3997,8 +4448,15 @@ class _MetricAccumulator:
     loss_alignment: float = 0.0
     loss_alignment_raw: float = 0.0
     loss_total_minus_action: float = 0.0
+    loss_action_prefix_trust: float = 0.0
     loss_anchor_pv: float = 0.0
     loss_anchor_object_pull: float = 0.0
+    loss_anchor_object_pull_graph: float = 0.0
+    loss_anchor_object_pull_posterior: float = 0.0
+    loss_anchor_object_pull_graph_weight_sum: float = 0.0
+    loss_anchor_object_pull_posterior_weight_sum: float = 0.0
+    loss_anchor_object_pull_target_mass_mean: float = 0.0
+    loss_anchor_object_pull_target_quality_mean: float = 0.0
     loss_pv_weak: float = 0.0
     loss_pt: float = 0.0
     loss_vl_router: float = 0.0
@@ -4016,6 +4474,11 @@ class _MetricAccumulator:
     loss_mapg_support_diversity: float = 0.0
     loss_mapg_geometry_diversity: float = 0.0
     loss_slot_jepa: float = 0.0
+    loss_slot_jepa_direction: float = 0.0
+    loss_slot_jepa_log_norm: float = 0.0
+    loss_slot_jepa_pred_norm: float = 0.0
+    loss_slot_jepa_target_norm: float = 0.0
+    loss_slot_jepa_matched_target_norm: float = 0.0
     loss_support_pred: float = 0.0
     loss_binding_consistency: float = 0.0
     loss_aqr_denoising: float = 0.0
@@ -4066,8 +4529,23 @@ class _MetricAccumulator:
         self.loss_alignment += float(losses.alignment.item())
         self.loss_alignment_raw += float(losses.alignment_raw.item())
         self.loss_total_minus_action += float(losses.total_minus_action.item())
+        self.loss_action_prefix_trust += float(_loss_component_or_zero(losses, "action_prefix_trust").item())
         self.loss_anchor_pv += float(losses.anchor_pv.item())
         self.loss_anchor_object_pull += float(losses.anchor_object_pull.item())
+        self.loss_anchor_object_pull_graph += float(_loss_component_or_zero(losses, "anchor_object_pull_graph").item())
+        self.loss_anchor_object_pull_posterior += float(_loss_component_or_zero(losses, "anchor_object_pull_posterior").item())
+        self.loss_anchor_object_pull_graph_weight_sum += float(
+            _loss_component_or_zero(losses, "anchor_object_pull_graph_weight_sum").item()
+        )
+        self.loss_anchor_object_pull_posterior_weight_sum += float(
+            _loss_component_or_zero(losses, "anchor_object_pull_posterior_weight_sum").item()
+        )
+        self.loss_anchor_object_pull_target_mass_mean += float(
+            _loss_component_or_zero(losses, "anchor_object_pull_target_mass_mean").item()
+        )
+        self.loss_anchor_object_pull_target_quality_mean += float(
+            _loss_component_or_zero(losses, "anchor_object_pull_target_quality_mean").item()
+        )
         self.loss_pv_weak += float(losses.pv_weak.item())
         self.loss_pt += float(losses.pt.item())
         self.loss_vl_router += float(losses.vl_router.item())
@@ -4085,6 +4563,13 @@ class _MetricAccumulator:
         self.loss_mapg_support_diversity += float(losses.mapg_support_diversity.item())
         self.loss_mapg_geometry_diversity += float(losses.mapg_geometry_diversity.item())
         self.loss_slot_jepa += float(_loss_component_or_zero(losses, "slot_jepa").item())
+        self.loss_slot_jepa_direction += float(_loss_component_or_zero(losses, "slot_jepa_direction").item())
+        self.loss_slot_jepa_log_norm += float(_loss_component_or_zero(losses, "slot_jepa_log_norm").item())
+        self.loss_slot_jepa_pred_norm += float(_loss_component_or_zero(losses, "slot_jepa_pred_norm").item())
+        self.loss_slot_jepa_target_norm += float(_loss_component_or_zero(losses, "slot_jepa_target_norm").item())
+        self.loss_slot_jepa_matched_target_norm += float(
+            _loss_component_or_zero(losses, "slot_jepa_matched_target_norm").item()
+        )
         self.loss_support_pred += float(_loss_component_or_zero(losses, "support_pred").item())
         self.loss_binding_consistency += float(_loss_component_or_zero(losses, "binding_consistency").item())
         self.loss_aqr_denoising += float(_loss_component_or_zero(losses, "aqr_denoising").item())
@@ -4127,8 +4612,23 @@ class _MetricAccumulator:
         self.loss_alignment += float(outputs["loss_alignment"].detach().item())
         self.loss_alignment_raw += float(outputs["loss_alignment_raw"].detach().item())
         self.loss_total_minus_action += float(outputs["loss_total_minus_action"].detach().item())
+        self.loss_action_prefix_trust += float(outputs.get("loss_action_prefix_trust", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_anchor_pv += float(outputs["loss_anchor_pv"].detach().item())
         self.loss_anchor_object_pull += float(outputs["loss_anchor_object_pull"].detach().item())
+        self.loss_anchor_object_pull_graph += float(outputs.get("loss_anchor_object_pull_graph", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_anchor_object_pull_posterior += float(outputs.get("loss_anchor_object_pull_posterior", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_anchor_object_pull_graph_weight_sum += float(
+            outputs.get("loss_anchor_object_pull_graph_weight_sum", outputs["loss_pt"] * 0.0).detach().item()
+        )
+        self.loss_anchor_object_pull_posterior_weight_sum += float(
+            outputs.get("loss_anchor_object_pull_posterior_weight_sum", outputs["loss_pt"] * 0.0).detach().item()
+        )
+        self.loss_anchor_object_pull_target_mass_mean += float(
+            outputs.get("loss_anchor_object_pull_target_mass_mean", outputs["loss_pt"] * 0.0).detach().item()
+        )
+        self.loss_anchor_object_pull_target_quality_mean += float(
+            outputs.get("loss_anchor_object_pull_target_quality_mean", outputs["loss_pt"] * 0.0).detach().item()
+        )
         self.loss_pv_weak += float(outputs["loss_pv_weak"].detach().item())
         self.loss_pt += float(outputs["loss_pt"].detach().item())
         self.loss_vl_router += float(outputs.get("loss_vl_router", outputs["loss_pt"] * 0.0).detach().item())
@@ -4146,6 +4646,13 @@ class _MetricAccumulator:
         self.loss_mapg_support_diversity += float(outputs.get("loss_mapg_support_diversity", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_mapg_geometry_diversity += float(outputs.get("loss_mapg_geometry_diversity", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_slot_jepa += float(outputs.get("loss_slot_jepa", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_slot_jepa_direction += float(outputs.get("loss_slot_jepa_direction", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_slot_jepa_log_norm += float(outputs.get("loss_slot_jepa_log_norm", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_slot_jepa_pred_norm += float(outputs.get("loss_slot_jepa_pred_norm", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_slot_jepa_target_norm += float(outputs.get("loss_slot_jepa_target_norm", outputs["loss_pt"] * 0.0).detach().item())
+        self.loss_slot_jepa_matched_target_norm += float(
+            outputs.get("loss_slot_jepa_matched_target_norm", outputs["loss_pt"] * 0.0).detach().item()
+        )
         self.loss_support_pred += float(outputs.get("loss_support_pred", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_binding_consistency += float(outputs.get("loss_binding_consistency", outputs["loss_pt"] * 0.0).detach().item())
         self.loss_aqr_denoising += float(outputs.get("loss_aqr_denoising", outputs["loss_pt"] * 0.0).detach().item())
@@ -4194,8 +4701,15 @@ class _MetricAccumulator:
             "loss_alignment": self.loss_alignment / denom,
             "loss_alignment_raw": self.loss_alignment_raw / denom,
             "loss_total_minus_action": self.loss_total_minus_action / denom,
+            "loss_action_prefix_trust": self.loss_action_prefix_trust / denom,
             "loss_anchor_pv": self.loss_anchor_pv / denom,
             "loss_anchor_object_pull": self.loss_anchor_object_pull / denom,
+            "loss_anchor_object_pull_graph": self.loss_anchor_object_pull_graph / denom,
+            "loss_anchor_object_pull_posterior": self.loss_anchor_object_pull_posterior / denom,
+            "loss_anchor_object_pull_graph_weight_sum": self.loss_anchor_object_pull_graph_weight_sum / denom,
+            "loss_anchor_object_pull_posterior_weight_sum": self.loss_anchor_object_pull_posterior_weight_sum / denom,
+            "loss_anchor_object_pull_target_mass_mean": self.loss_anchor_object_pull_target_mass_mean / denom,
+            "loss_anchor_object_pull_target_quality_mean": self.loss_anchor_object_pull_target_quality_mean / denom,
             "loss_pv_weak": self.loss_pv_weak / denom,
             "loss_pt": self.loss_pt / denom,
             "loss_vl_router": self.loss_vl_router / denom,
@@ -4213,6 +4727,11 @@ class _MetricAccumulator:
             "loss_mapg_support_diversity": self.loss_mapg_support_diversity / denom,
             "loss_mapg_geometry_diversity": self.loss_mapg_geometry_diversity / denom,
             "loss_slot_jepa": self.loss_slot_jepa / denom,
+            "loss_slot_jepa_direction": self.loss_slot_jepa_direction / denom,
+            "loss_slot_jepa_log_norm": self.loss_slot_jepa_log_norm / denom,
+            "loss_slot_jepa_pred_norm": self.loss_slot_jepa_pred_norm / denom,
+            "loss_slot_jepa_target_norm": self.loss_slot_jepa_target_norm / denom,
+            "loss_slot_jepa_matched_target_norm": self.loss_slot_jepa_matched_target_norm / denom,
             "loss_support_pred": self.loss_support_pred / denom,
             "loss_binding_consistency": self.loss_binding_consistency / denom,
             "loss_aqr_denoising": self.loss_aqr_denoising / denom,
@@ -4302,8 +4821,19 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_alignment": losses.alignment,
             "loss_alignment_raw": losses.alignment_raw,
             "loss_total_minus_action": losses.total_minus_action,
+            "loss_action_prefix_trust": _loss_component_or_zero(losses, "action_prefix_trust"),
             "loss_anchor_pv": losses.anchor_pv,
             "loss_anchor_object_pull": losses.anchor_object_pull,
+            "loss_anchor_object_pull_graph": _loss_component_or_zero(losses, "anchor_object_pull_graph"),
+            "loss_anchor_object_pull_posterior": _loss_component_or_zero(losses, "anchor_object_pull_posterior"),
+            "loss_anchor_object_pull_graph_weight_sum": _loss_component_or_zero(losses, "anchor_object_pull_graph_weight_sum"),
+            "loss_anchor_object_pull_posterior_weight_sum": _loss_component_or_zero(
+                losses, "anchor_object_pull_posterior_weight_sum"
+            ),
+            "loss_anchor_object_pull_target_mass_mean": _loss_component_or_zero(losses, "anchor_object_pull_target_mass_mean"),
+            "loss_anchor_object_pull_target_quality_mean": _loss_component_or_zero(
+                losses, "anchor_object_pull_target_quality_mean"
+            ),
             "loss_pv_weak": losses.pv_weak,
             "loss_pt": losses.pt,
             "loss_vl_router": losses.vl_router,
@@ -4321,6 +4851,11 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_mapg_support_diversity": losses.mapg_support_diversity,
             "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
             "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
+            "loss_slot_jepa_direction": _loss_component_or_zero(losses, "slot_jepa_direction"),
+            "loss_slot_jepa_log_norm": _loss_component_or_zero(losses, "slot_jepa_log_norm"),
+            "loss_slot_jepa_pred_norm": _loss_component_or_zero(losses, "slot_jepa_pred_norm"),
+            "loss_slot_jepa_target_norm": _loss_component_or_zero(losses, "slot_jepa_target_norm"),
+            "loss_slot_jepa_matched_target_norm": _loss_component_or_zero(losses, "slot_jepa_matched_target_norm"),
             "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
             "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
             "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
@@ -4430,8 +4965,15 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_alignment": metrics["loss_alignment"] / denom,
             "loss_alignment_raw": metrics["loss_alignment_raw"] / denom,
             "loss_total_minus_action": metrics["loss_total_minus_action"] / denom,
+            "loss_action_prefix_trust": metrics["loss_action_prefix_trust"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
             "loss_anchor_object_pull": metrics["loss_anchor_object_pull"] / denom,
+            "loss_anchor_object_pull_graph": metrics["loss_anchor_object_pull_graph"] / denom,
+            "loss_anchor_object_pull_posterior": metrics["loss_anchor_object_pull_posterior"] / denom,
+            "loss_anchor_object_pull_graph_weight_sum": metrics["loss_anchor_object_pull_graph_weight_sum"] / denom,
+            "loss_anchor_object_pull_posterior_weight_sum": metrics["loss_anchor_object_pull_posterior_weight_sum"] / denom,
+            "loss_anchor_object_pull_target_mass_mean": metrics["loss_anchor_object_pull_target_mass_mean"] / denom,
+            "loss_anchor_object_pull_target_quality_mean": metrics["loss_anchor_object_pull_target_quality_mean"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
             "loss_vl_router": metrics["loss_vl_router"] / denom,
@@ -4617,6 +5159,11 @@ class _PicfWindowTrainer(torch.nn.Module):
                     action_pos_override=None if pending.flow_override is None else pending.flow_override["action_pos"],
                     action_rot_override=None if pending.flow_override is None else pending.flow_override["action_rot"],
                     action_gripper_override=None if pending.flow_override is None else pending.flow_override["action_gripper"],
+                    action_prefix_trust_override=(
+                        None
+                        if pending.flow_override is None
+                        else pending.flow_override.get("picf_action_prefix_trust_loss")
+                    ),
                     future_targets_override=self._future_targets_override_from_observed(policy_forward.observed),
                 )
                 loss_sec = time.perf_counter() - loss_start
@@ -4678,8 +5225,21 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_alignment": losses.alignment,
                     "loss_alignment_raw": losses.alignment_raw,
                     "loss_total_minus_action": losses.total_minus_action,
+                    "loss_action_prefix_trust": _loss_component_or_zero(losses, "action_prefix_trust"),
                     "loss_anchor_pv": losses.anchor_pv,
                     "loss_anchor_object_pull": losses.anchor_object_pull,
+                    "loss_anchor_object_pull_graph": _loss_component_or_zero(losses, "anchor_object_pull_graph"),
+                    "loss_anchor_object_pull_posterior": _loss_component_or_zero(losses, "anchor_object_pull_posterior"),
+                    "loss_anchor_object_pull_graph_weight_sum": _loss_component_or_zero(losses, "anchor_object_pull_graph_weight_sum"),
+                    "loss_anchor_object_pull_posterior_weight_sum": _loss_component_or_zero(
+                        losses, "anchor_object_pull_posterior_weight_sum"
+                    ),
+                    "loss_anchor_object_pull_target_mass_mean": _loss_component_or_zero(
+                        losses, "anchor_object_pull_target_mass_mean"
+                    ),
+                    "loss_anchor_object_pull_target_quality_mean": _loss_component_or_zero(
+                        losses, "anchor_object_pull_target_quality_mean"
+                    ),
                     "loss_pv_weak": losses.pv_weak,
                     "loss_pt": losses.pt,
                     "loss_vl_router": losses.vl_router,
@@ -4697,6 +5257,11 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_mapg_support_diversity": losses.mapg_support_diversity,
                     "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
                     "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
+                    "loss_slot_jepa_direction": _loss_component_or_zero(losses, "slot_jepa_direction"),
+                    "loss_slot_jepa_log_norm": _loss_component_or_zero(losses, "slot_jepa_log_norm"),
+                    "loss_slot_jepa_pred_norm": _loss_component_or_zero(losses, "slot_jepa_pred_norm"),
+                    "loss_slot_jepa_target_norm": _loss_component_or_zero(losses, "slot_jepa_target_norm"),
+                    "loss_slot_jepa_matched_target_norm": _loss_component_or_zero(losses, "slot_jepa_matched_target_norm"),
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
                     "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
@@ -4741,8 +5306,33 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_alignment"] = metrics["loss_alignment"] + losses.alignment
                 metrics["loss_alignment_raw"] = metrics["loss_alignment_raw"] + losses.alignment_raw
                 metrics["loss_total_minus_action"] = metrics["loss_total_minus_action"] + losses.total_minus_action
+                metrics["loss_action_prefix_trust"] = metrics["loss_action_prefix_trust"] + _loss_component_or_zero(
+                    losses, "action_prefix_trust"
+                )
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
                 metrics["loss_anchor_object_pull"] = metrics["loss_anchor_object_pull"] + losses.anchor_object_pull
+                metrics["loss_anchor_object_pull_graph"] = metrics["loss_anchor_object_pull_graph"] + _loss_component_or_zero(
+                    losses, "anchor_object_pull_graph"
+                )
+                metrics["loss_anchor_object_pull_posterior"] = (
+                    metrics["loss_anchor_object_pull_posterior"] + _loss_component_or_zero(losses, "anchor_object_pull_posterior")
+                )
+                metrics["loss_anchor_object_pull_graph_weight_sum"] = (
+                    metrics["loss_anchor_object_pull_graph_weight_sum"]
+                    + _loss_component_or_zero(losses, "anchor_object_pull_graph_weight_sum")
+                )
+                metrics["loss_anchor_object_pull_posterior_weight_sum"] = (
+                    metrics["loss_anchor_object_pull_posterior_weight_sum"]
+                    + _loss_component_or_zero(losses, "anchor_object_pull_posterior_weight_sum")
+                )
+                metrics["loss_anchor_object_pull_target_mass_mean"] = (
+                    metrics["loss_anchor_object_pull_target_mass_mean"]
+                    + _loss_component_or_zero(losses, "anchor_object_pull_target_mass_mean")
+                )
+                metrics["loss_anchor_object_pull_target_quality_mean"] = (
+                    metrics["loss_anchor_object_pull_target_quality_mean"]
+                    + _loss_component_or_zero(losses, "anchor_object_pull_target_quality_mean")
+                )
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
                 metrics["loss_vl_router"] = metrics["loss_vl_router"] + losses.vl_router
@@ -4760,6 +5350,14 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_mapg_support_diversity"] = metrics["loss_mapg_support_diversity"] + losses.mapg_support_diversity
                 metrics["loss_mapg_geometry_diversity"] = metrics["loss_mapg_geometry_diversity"] + losses.mapg_geometry_diversity
                 metrics["loss_slot_jepa"] = metrics["loss_slot_jepa"] + _loss_component_or_zero(losses, "slot_jepa")
+                metrics["loss_slot_jepa_direction"] = metrics["loss_slot_jepa_direction"] + _loss_component_or_zero(losses, "slot_jepa_direction")
+                metrics["loss_slot_jepa_log_norm"] = metrics["loss_slot_jepa_log_norm"] + _loss_component_or_zero(losses, "slot_jepa_log_norm")
+                metrics["loss_slot_jepa_pred_norm"] = metrics["loss_slot_jepa_pred_norm"] + _loss_component_or_zero(losses, "slot_jepa_pred_norm")
+                metrics["loss_slot_jepa_target_norm"] = metrics["loss_slot_jepa_target_norm"] + _loss_component_or_zero(losses, "slot_jepa_target_norm")
+                metrics["loss_slot_jepa_matched_target_norm"] = (
+                    metrics["loss_slot_jepa_matched_target_norm"]
+                    + _loss_component_or_zero(losses, "slot_jepa_matched_target_norm")
+                )
                 metrics["loss_support_pred"] = metrics["loss_support_pred"] + _loss_component_or_zero(losses, "support_pred")
                 metrics["loss_binding_consistency"] = metrics["loss_binding_consistency"] + _loss_component_or_zero(
                     losses, "binding_consistency"
@@ -4811,6 +5409,11 @@ class _PicfWindowTrainer(torch.nn.Module):
                 action_pos_override=None if pending.flow_override is None else pending.flow_override["action_pos"],
                 action_rot_override=None if pending.flow_override is None else pending.flow_override["action_rot"],
                 action_gripper_override=None if pending.flow_override is None else pending.flow_override["action_gripper"],
+                action_prefix_trust_override=(
+                    None
+                    if pending.flow_override is None
+                    else pending.flow_override.get("picf_action_prefix_trust_loss")
+                ),
             )
             loss_sec = time.perf_counter() - loss_start
             if debug_phase_label is not None:
@@ -4845,8 +5448,21 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_alignment": losses.alignment,
                     "loss_alignment_raw": losses.alignment_raw,
                     "loss_total_minus_action": losses.total_minus_action,
+                    "loss_action_prefix_trust": _loss_component_or_zero(losses, "action_prefix_trust"),
                     "loss_anchor_pv": losses.anchor_pv,
                     "loss_anchor_object_pull": losses.anchor_object_pull,
+                    "loss_anchor_object_pull_graph": _loss_component_or_zero(losses, "anchor_object_pull_graph"),
+                    "loss_anchor_object_pull_posterior": _loss_component_or_zero(losses, "anchor_object_pull_posterior"),
+                    "loss_anchor_object_pull_graph_weight_sum": _loss_component_or_zero(losses, "anchor_object_pull_graph_weight_sum"),
+                    "loss_anchor_object_pull_posterior_weight_sum": _loss_component_or_zero(
+                        losses, "anchor_object_pull_posterior_weight_sum"
+                    ),
+                    "loss_anchor_object_pull_target_mass_mean": _loss_component_or_zero(
+                        losses, "anchor_object_pull_target_mass_mean"
+                    ),
+                    "loss_anchor_object_pull_target_quality_mean": _loss_component_or_zero(
+                        losses, "anchor_object_pull_target_quality_mean"
+                    ),
                     "loss_pv_weak": losses.pv_weak,
                     "loss_pt": losses.pt,
                     "loss_vl_router": losses.vl_router,
@@ -4864,6 +5480,11 @@ class _PicfWindowTrainer(torch.nn.Module):
                     "loss_mapg_support_diversity": losses.mapg_support_diversity,
                     "loss_mapg_geometry_diversity": losses.mapg_geometry_diversity,
                     "loss_slot_jepa": _loss_component_or_zero(losses, "slot_jepa"),
+                    "loss_slot_jepa_direction": _loss_component_or_zero(losses, "slot_jepa_direction"),
+                    "loss_slot_jepa_log_norm": _loss_component_or_zero(losses, "slot_jepa_log_norm"),
+                    "loss_slot_jepa_pred_norm": _loss_component_or_zero(losses, "slot_jepa_pred_norm"),
+                    "loss_slot_jepa_target_norm": _loss_component_or_zero(losses, "slot_jepa_target_norm"),
+                    "loss_slot_jepa_matched_target_norm": _loss_component_or_zero(losses, "slot_jepa_matched_target_norm"),
                     "loss_support_pred": _loss_component_or_zero(losses, "support_pred"),
                     "loss_binding_consistency": _loss_component_or_zero(losses, "binding_consistency"),
                     "loss_aqr_denoising": _loss_component_or_zero(losses, "aqr_denoising"),
@@ -4905,8 +5526,33 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_alignment"] = metrics["loss_alignment"] + losses.alignment
                 metrics["loss_alignment_raw"] = metrics["loss_alignment_raw"] + losses.alignment_raw
                 metrics["loss_total_minus_action"] = metrics["loss_total_minus_action"] + losses.total_minus_action
+                metrics["loss_action_prefix_trust"] = metrics["loss_action_prefix_trust"] + _loss_component_or_zero(
+                    losses, "action_prefix_trust"
+                )
                 metrics["loss_anchor_pv"] = metrics["loss_anchor_pv"] + losses.anchor_pv
                 metrics["loss_anchor_object_pull"] = metrics["loss_anchor_object_pull"] + losses.anchor_object_pull
+                metrics["loss_anchor_object_pull_graph"] = metrics["loss_anchor_object_pull_graph"] + _loss_component_or_zero(
+                    losses, "anchor_object_pull_graph"
+                )
+                metrics["loss_anchor_object_pull_posterior"] = (
+                    metrics["loss_anchor_object_pull_posterior"] + _loss_component_or_zero(losses, "anchor_object_pull_posterior")
+                )
+                metrics["loss_anchor_object_pull_graph_weight_sum"] = (
+                    metrics["loss_anchor_object_pull_graph_weight_sum"]
+                    + _loss_component_or_zero(losses, "anchor_object_pull_graph_weight_sum")
+                )
+                metrics["loss_anchor_object_pull_posterior_weight_sum"] = (
+                    metrics["loss_anchor_object_pull_posterior_weight_sum"]
+                    + _loss_component_or_zero(losses, "anchor_object_pull_posterior_weight_sum")
+                )
+                metrics["loss_anchor_object_pull_target_mass_mean"] = (
+                    metrics["loss_anchor_object_pull_target_mass_mean"]
+                    + _loss_component_or_zero(losses, "anchor_object_pull_target_mass_mean")
+                )
+                metrics["loss_anchor_object_pull_target_quality_mean"] = (
+                    metrics["loss_anchor_object_pull_target_quality_mean"]
+                    + _loss_component_or_zero(losses, "anchor_object_pull_target_quality_mean")
+                )
                 metrics["loss_pv_weak"] = metrics["loss_pv_weak"] + losses.pv_weak
                 metrics["loss_pt"] = metrics["loss_pt"] + losses.pt
                 metrics["loss_vl_router"] = metrics["loss_vl_router"] + losses.vl_router
@@ -4924,6 +5570,14 @@ class _PicfWindowTrainer(torch.nn.Module):
                 metrics["loss_mapg_support_diversity"] = metrics["loss_mapg_support_diversity"] + losses.mapg_support_diversity
                 metrics["loss_mapg_geometry_diversity"] = metrics["loss_mapg_geometry_diversity"] + losses.mapg_geometry_diversity
                 metrics["loss_slot_jepa"] = metrics["loss_slot_jepa"] + _loss_component_or_zero(losses, "slot_jepa")
+                metrics["loss_slot_jepa_direction"] = metrics["loss_slot_jepa_direction"] + _loss_component_or_zero(losses, "slot_jepa_direction")
+                metrics["loss_slot_jepa_log_norm"] = metrics["loss_slot_jepa_log_norm"] + _loss_component_or_zero(losses, "slot_jepa_log_norm")
+                metrics["loss_slot_jepa_pred_norm"] = metrics["loss_slot_jepa_pred_norm"] + _loss_component_or_zero(losses, "slot_jepa_pred_norm")
+                metrics["loss_slot_jepa_target_norm"] = metrics["loss_slot_jepa_target_norm"] + _loss_component_or_zero(losses, "slot_jepa_target_norm")
+                metrics["loss_slot_jepa_matched_target_norm"] = (
+                    metrics["loss_slot_jepa_matched_target_norm"]
+                    + _loss_component_or_zero(losses, "slot_jepa_matched_target_norm")
+                )
                 metrics["loss_support_pred"] = metrics["loss_support_pred"] + _loss_component_or_zero(losses, "support_pred")
                 metrics["loss_binding_consistency"] = metrics["loss_binding_consistency"] + _loss_component_or_zero(
                     losses, "binding_consistency"
@@ -4987,8 +5641,15 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_alignment": metrics["loss_alignment"] / denom,
             "loss_alignment_raw": metrics["loss_alignment_raw"] / denom,
             "loss_total_minus_action": metrics["loss_total_minus_action"] / denom,
+            "loss_action_prefix_trust": metrics["loss_action_prefix_trust"] / denom,
             "loss_anchor_pv": metrics["loss_anchor_pv"] / denom,
             "loss_anchor_object_pull": metrics["loss_anchor_object_pull"] / denom,
+            "loss_anchor_object_pull_graph": metrics["loss_anchor_object_pull_graph"] / denom,
+            "loss_anchor_object_pull_posterior": metrics["loss_anchor_object_pull_posterior"] / denom,
+            "loss_anchor_object_pull_graph_weight_sum": metrics["loss_anchor_object_pull_graph_weight_sum"] / denom,
+            "loss_anchor_object_pull_posterior_weight_sum": metrics["loss_anchor_object_pull_posterior_weight_sum"] / denom,
+            "loss_anchor_object_pull_target_mass_mean": metrics["loss_anchor_object_pull_target_mass_mean"] / denom,
+            "loss_anchor_object_pull_target_quality_mean": metrics["loss_anchor_object_pull_target_quality_mean"] / denom,
             "loss_pv_weak": metrics["loss_pv_weak"] / denom,
             "loss_pt": metrics["loss_pt"] / denom,
             "loss_vl_router": metrics["loss_vl_router"] / denom,
@@ -5006,6 +5667,11 @@ class _PicfWindowTrainer(torch.nn.Module):
             "loss_mapg_support_diversity": metrics["loss_mapg_support_diversity"] / denom,
             "loss_mapg_geometry_diversity": metrics["loss_mapg_geometry_diversity"] / denom,
             "loss_slot_jepa": metrics["loss_slot_jepa"] / denom,
+            "loss_slot_jepa_direction": metrics["loss_slot_jepa_direction"] / denom,
+            "loss_slot_jepa_log_norm": metrics["loss_slot_jepa_log_norm"] / denom,
+            "loss_slot_jepa_pred_norm": metrics["loss_slot_jepa_pred_norm"] / denom,
+            "loss_slot_jepa_target_norm": metrics["loss_slot_jepa_target_norm"] / denom,
+            "loss_slot_jepa_matched_target_norm": metrics["loss_slot_jepa_matched_target_norm"] / denom,
             "loss_support_pred": metrics["loss_support_pred"] / denom,
             "loss_binding_consistency": metrics["loss_binding_consistency"] / denom,
             "loss_aqr_denoising": metrics["loss_aqr_denoising"] / denom,
@@ -5057,8 +5723,15 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_alignment",
     "loss_alignment_raw",
     "loss_total_minus_action",
+    "loss_action_prefix_trust",
     "loss_anchor_pv",
     "loss_anchor_object_pull",
+    "loss_anchor_object_pull_graph",
+    "loss_anchor_object_pull_posterior",
+    "loss_anchor_object_pull_graph_weight_sum",
+    "loss_anchor_object_pull_posterior_weight_sum",
+    "loss_anchor_object_pull_target_mass_mean",
+    "loss_anchor_object_pull_target_quality_mean",
     "loss_pv_weak",
     "loss_pt",
     "loss_vl_router",
@@ -5076,6 +5749,11 @@ _WINDOW_OUTPUT_TENSOR_KEYS: tuple[str, ...] = (
     "loss_mapg_support_diversity",
     "loss_mapg_geometry_diversity",
     "loss_slot_jepa",
+    "loss_slot_jepa_direction",
+    "loss_slot_jepa_log_norm",
+    "loss_slot_jepa_pred_norm",
+    "loss_slot_jepa_target_norm",
+    "loss_slot_jepa_matched_target_norm",
     "loss_support_pred",
     "loss_binding_consistency",
     "loss_aqr_denoising",
@@ -5202,10 +5880,34 @@ def _lr_for_step(step: int, *, base_lr: float, warmup_steps: int, min_lr: float,
     return min_lr + (base_lr - min_lr) * cosine
 
 
-def _set_optimizer_lr(optimizer: torch.optim.Optimizer, lr: float) -> None:
+def _set_optimizer_lr(
+    optimizer: torch.optim.Optimizer,
+    lr: float,
+    *,
+    group_runtime_multipliers: dict[str, float] | None = None,
+) -> None:
     for group in optimizer.param_groups:
         scale = float(group.get("lr_scale", 1.0))
-        group["lr"] = lr * scale
+        name = str(group.get("name", ""))
+        runtime = 1.0 if group_runtime_multipliers is None else float(group_runtime_multipliers.get(name, 1.0))
+        group["lr"] = lr * scale * runtime
+
+
+def _picf_core_runtime_lr_multiplier(args: argparse.Namespace, *, step: int) -> float:
+    mode = str(getattr(args, "picf_core_lr_runtime_mode", "constant")).lower().replace("-", "_")
+    if mode in {"", "constant", "none", "off"}:
+        return 1.0
+    if mode != "block_alternating":
+        raise ValueError(f"Unsupported picf_core_lr_runtime_mode={mode!r}.")
+    start = int(getattr(args, "picf_core_lr_block_start_step", 0))
+    if int(step) < start:
+        return 0.0
+    cycle = max(int(getattr(args, "picf_core_lr_block_cycle_steps", 0)), 1)
+    active = max(int(getattr(args, "picf_core_lr_block_active_steps", 0)), 0)
+    if active <= 0:
+        return 0.0
+    phase = (int(step) - start) % cycle
+    return 1.0 if phase < min(active, cycle) else 0.0
 
 
 class _OptimizerCollection:
@@ -5643,7 +6345,7 @@ def _load_checkpoint(
                 with _fsdp_full_state_dict_context(model, rank0_only=False):
                     try:
                         model.load_state_dict(model_state, strict=True)
-                    except RuntimeError as exc:
+                    except RuntimeError:
                         try:
                             missing, unexpected, shape_mismatches = _load_state_dict_picf_compat(model, model_state)
                             logging.warning(
@@ -5715,7 +6417,13 @@ def _load_checkpoint(
     payload = torch.load(path, map_location=device, weights_only=False)
     checkpoint_dir = payload.get("checkpoint_dir")
     if checkpoint_dir is not None and "model" not in payload:
-        return _load_checkpoint(path=Path(checkpoint_dir), model=model, optimizer=optimizer, device=device)
+        return _load_checkpoint(
+            path=Path(checkpoint_dir),
+            model=model,
+            optimizer=optimizer,
+            device=device,
+            grad_clip_controller=grad_clip_controller,
+        )
     optimizer_loaded = True
     if _is_fsdp_model(model):
         if _is_ablated_semantic_only_model_state(payload["model"]):
@@ -6537,55 +7245,55 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         posterior_binding_signature_memory_enabled=bool(
             _arg_or_default(
                 "posterior_binding_signature_memory_enabled",
-                _SPEC_DEFAULTS.posterior_binding_signature_memory_enabled,
+                _spec_default("posterior_binding_signature_memory_enabled"),
             )
         ),
         posterior_binding_signature_dispersion_gate_enabled=bool(
             _arg_or_default(
                 "posterior_binding_signature_dispersion_gate_enabled",
-                _SPEC_DEFAULTS.posterior_binding_signature_dispersion_gate_enabled,
+                _spec_default("posterior_binding_signature_dispersion_gate_enabled"),
             )
         ),
         posterior_binding_signature_update_rate=float(
             _arg_or_default(
                 "posterior_binding_signature_update_rate",
-                _SPEC_DEFAULTS.posterior_binding_signature_update_rate,
+                _spec_default("posterior_binding_signature_update_rate"),
             )
         ),
         posterior_binding_signature_update_max_rate=float(
             _arg_or_default(
                 "posterior_binding_signature_update_max_rate",
-                _SPEC_DEFAULTS.posterior_binding_signature_update_max_rate,
+                _spec_default("posterior_binding_signature_update_max_rate"),
             )
         ),
         posterior_binding_signature_min_support=float(
             _arg_or_default(
                 "posterior_binding_signature_min_support",
-                _SPEC_DEFAULTS.posterior_binding_signature_min_support,
+                _spec_default("posterior_binding_signature_min_support"),
             )
         ),
         posterior_binding_signature_owner_weight=float(
             _arg_or_default(
                 "posterior_binding_signature_owner_weight",
-                _SPEC_DEFAULTS.posterior_binding_signature_owner_weight,
+                _spec_default("posterior_binding_signature_owner_weight"),
             )
         ),
         posterior_binding_signature_measurement_min_std=float(
             _arg_or_default(
                 "posterior_binding_signature_measurement_min_std",
-                _SPEC_DEFAULTS.posterior_binding_signature_measurement_min_std,
+                _spec_default("posterior_binding_signature_measurement_min_std"),
             )
         ),
         posterior_binding_signature_measurement_margin_min=float(
             _arg_or_default(
                 "posterior_binding_signature_measurement_margin_min",
-                _SPEC_DEFAULTS.posterior_binding_signature_measurement_margin_min,
+                _spec_default("posterior_binding_signature_measurement_margin_min"),
             )
         ),
         posterior_binding_signature_measurement_margin_temperature=float(
             _arg_or_default(
                 "posterior_binding_signature_measurement_margin_temperature",
-                _SPEC_DEFAULTS.posterior_binding_signature_measurement_margin_temperature,
+                _spec_default("posterior_binding_signature_measurement_margin_temperature"),
             )
         ),
         bind_address_weight=float(_arg_or_default("bind_address_weight", _SPEC_DEFAULTS.bind_address_weight)),
@@ -6902,6 +7610,58 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
         tokenwise_ff_chunk_size=int(_arg_or_default("tokenwise_ff_chunk_size", _SPEC_DEFAULTS.tokenwise_ff_chunk_size)),
         require_pi0_action_generator=bool(_arg_or_default("require_pi0_action_generator", _SPEC_DEFAULTS.require_pi0_action_generator)),
         action_prefix_stopgrad=bool(_arg_or_default("action_prefix_stopgrad", _SPEC_DEFAULTS.action_prefix_stopgrad)),
+        action_prefix_norm_mode=str(
+            _arg_or_default("action_prefix_norm_mode", _SPEC_DEFAULTS.action_prefix_norm_mode)
+        ),
+        action_prefix_rms_target=float(
+            _arg_or_default("action_prefix_rms_target", _SPEC_DEFAULTS.action_prefix_rms_target)
+        ),
+        action_prefix_norm_eps=float(
+            _arg_or_default("action_prefix_norm_eps", _SPEC_DEFAULTS.action_prefix_norm_eps)
+        ),
+        action_prefix_value_clip=float(
+            _arg_or_default("action_prefix_value_clip", _SPEC_DEFAULTS.action_prefix_value_clip)
+        ),
+        picf_action_condition_enabled=bool(
+            _arg_or_default("picf_action_condition_enabled", _SPEC_DEFAULTS.picf_action_condition_enabled)
+        ),
+        action_prefix_output_gate=float(
+            _arg_or_default("action_prefix_output_gate", _SPEC_DEFAULTS.action_prefix_output_gate)
+        ),
+        action_prefix_teacher_mode=str(
+            _arg_or_default("action_prefix_teacher_mode", _SPEC_DEFAULTS.action_prefix_teacher_mode)
+        ),
+        action_prefix_teacher_ema_decay=float(
+            _arg_or_default("action_prefix_teacher_ema_decay", _SPEC_DEFAULTS.action_prefix_teacher_ema_decay)
+        ),
+        action_prefix_teacher_blend=float(
+            _arg_or_default("action_prefix_teacher_blend", _SPEC_DEFAULTS.action_prefix_teacher_blend)
+        ),
+        lambda_action_prefix_trust=float(
+            _arg_or_default("lambda_action_prefix_trust", _SPEC_DEFAULTS.lambda_action_prefix_trust)
+        ),
+        action_context_tokens=int(_arg_or_default("action_context_tokens", _SPEC_DEFAULTS.action_context_tokens)),
+        action_context_integration=str(
+            _arg_or_default("action_context_integration", _SPEC_DEFAULTS.action_context_integration)
+        ),
+        action_context_stopgrad=bool(
+            _arg_or_default("action_context_stopgrad", _SPEC_DEFAULTS.action_context_stopgrad)
+        ),
+        action_context_norm_mode=str(
+            _arg_or_default("action_context_norm_mode", _SPEC_DEFAULTS.action_context_norm_mode)
+        ),
+        action_context_rms_target=float(
+            _arg_or_default("action_context_rms_target", _SPEC_DEFAULTS.action_context_rms_target)
+        ),
+        action_context_output_gate=float(
+            _arg_or_default("action_context_output_gate", _SPEC_DEFAULTS.action_context_output_gate)
+        ),
+        action_context_include_query_tokens=bool(
+            _arg_or_default(
+                "action_context_include_query_tokens",
+                _SPEC_DEFAULTS.action_context_include_query_tokens,
+            )
+        ),
     )
     point_feature_extractor = None
     if picf_enabled and args.point_backbone == "sonata":
@@ -6928,6 +7688,10 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
             trainable=bool(args.visual_trainable),
             feature_mode=args.visual_feature_mode,
             use_activation_checkpointing=bool(args.visual_activation_checkpointing),
+            feature_cache_root=args.vjepa_feature_cache_root,
+            feature_cache_mode=args.vjepa_feature_cache_mode,
+            feature_cache_temporal_slices=args.vjepa_feature_cache_temporal_slices,
+            feature_cache_storage_dtype=args.vjepa_feature_cache_storage_dtype,
             img_size=args.visual_img_size,
             num_frames=args.visual_num_frames,
             patch_size=args.visual_patch_size,
@@ -6981,6 +7745,7 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 device=str(device),
                 dtype=args.semantic_dtype,
                 trainable=bool(args.semantic_trainable),
+                trainable_scope=str(getattr(args, "semantic_trainable_scope", "backbone_only")),
                 gradient_checkpointing=bool(args.semantic_gradient_checkpointing),
                 include_gripper_image=bool(args.semantic_use_gripper),
                 max_length=args.semantic_max_length,
@@ -6990,6 +7755,12 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 tokenwise_chunk_size=int(getattr(args, "semantic_tokenwise_chunk_size", 0)),
                 projection_chunk_size=int(getattr(args, "semantic_projection_chunk_size", 0)),
                 mlp_chunk_size=int(getattr(args, "semantic_mlp_chunk_size", 0)),
+                action_context_adapter_gate_init=float(
+                    getattr(args, "semantic_action_context_adapter_gate_init", -2.0)
+                ),
+                action_context_adapter_rms_cap=bool(
+                    getattr(args, "semantic_action_context_adapter_rms_cap", True)
+                ),
             )
         )
     else:
@@ -7034,6 +7805,32 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         ),
         anchor_object_pull_posterior_weight=float(
             getattr(args, "anchor_object_pull_posterior_weight", defaults.anchor_object_pull_posterior_weight)
+        ),
+        anchor_object_pull_target_quality_gate_enabled=bool(
+            getattr(
+                args,
+                "anchor_object_pull_target_quality_gate_enabled",
+                defaults.anchor_object_pull_target_quality_gate_enabled,
+            )
+        ),
+        anchor_object_pull_target_quality_sigma_m=float(
+            getattr(
+                args,
+                "anchor_object_pull_target_quality_sigma_m",
+                defaults.anchor_object_pull_target_quality_sigma_m,
+            )
+        ),
+        anchor_object_pull_target_quality_min=float(
+            getattr(args, "anchor_object_pull_target_quality_min", defaults.anchor_object_pull_target_quality_min)
+        ),
+        anchor_object_pull_target_quality_power=float(
+            getattr(args, "anchor_object_pull_target_quality_power", defaults.anchor_object_pull_target_quality_power)
+        ),
+        anchor_object_pull_target_core_mass=float(
+            getattr(args, "anchor_object_pull_target_core_mass", defaults.anchor_object_pull_target_core_mass)
+        ),
+        anchor_object_pull_target_core_topk=int(
+            getattr(args, "anchor_object_pull_target_core_topk", defaults.anchor_object_pull_target_core_topk)
         ),
         lambda_pv_weak=float(getattr(args, "lambda_pv_weak", defaults.lambda_pv_weak)),
         lambda_pt=float(getattr(args, "lambda_pt", defaults.lambda_pt)),
@@ -7147,6 +7944,22 @@ def _build_loss_config(args: argparse.Namespace) -> PicfTransitionLossConfig:
         ),
         object_explanation_point_loss_clip=float(
             getattr(args, "object_explanation_point_loss_clip", defaults.object_explanation_point_loss_clip)
+        ),
+        object_explanation_point_quality_gate_enabled=bool(
+            getattr(
+                args,
+                "object_explanation_point_quality_gate_enabled",
+                defaults.object_explanation_point_quality_gate_enabled,
+            )
+        ),
+        object_explanation_point_quality_min=float(
+            getattr(args, "object_explanation_point_quality_min", defaults.object_explanation_point_quality_min)
+        ),
+        object_explanation_point_quality_power=float(
+            getattr(args, "object_explanation_point_quality_power", defaults.object_explanation_point_quality_power)
+        ),
+        object_explanation_point_outlier_prior=float(
+            getattr(args, "object_explanation_point_outlier_prior", defaults.object_explanation_point_outlier_prior)
         ),
         detach_action_loss_from_picf=bool(getattr(args, "detach_action_loss_from_picf", defaults.detach_action_loss_from_picf)),
         mapg_siglip_tau=float(getattr(args, "mapg_siglip_tau", defaults.mapg_siglip_tau)),
@@ -7373,7 +8186,7 @@ def _infer_tactile_dense_dim(core: torch.nn.Module) -> int:
     disagree with the real forward path and crashes on the first dense contact.
     """
 
-    return int(getattr(core.config, "hidden_dim", 512))
+    return int(getattr(getattr(core, "config", None), "hidden_dim", 512))
 
 
 def _prepare_output_dir(
@@ -7517,6 +8330,38 @@ def _apply_picf_trainable_scope(
             "total_numel": int(total_numel),
             "matched_names_sample": trainable_names[:24],
         }
+    if scope == "policy_only":
+        for name, param in model.named_parameters():
+            if name.startswith("core."):
+                _set_parameter_trainable(param, False)
+        trainable_names = [name for name, param in model.named_parameters() if getattr(param, "requires_grad", False)]
+        trainable_numel = sum(
+            _safe_parameter_numel(param) for _name, param in model.named_parameters() if getattr(param, "requires_grad", False)
+        )
+        total_numel = sum(_safe_parameter_numel(param) for _name, param in model.named_parameters())
+        if not trainable_names:
+            raise RuntimeError("picf_trainable_scope=policy_only matched no trainable non-core parameters.")
+        if any(name.startswith("core.") for name in trainable_names):
+            raise RuntimeError("picf_trainable_scope=policy_only left PICF core parameters trainable.")
+        info = {
+            "scope": scope,
+            "trainable_param_tensors": len(trainable_names),
+            "trainable_numel": int(trainable_numel),
+            "total_numel": int(total_numel),
+            "matched_names_sample": trainable_names[:24],
+        }
+        if logger is not None:
+            frozen_numel = int(total_numel) - int(trainable_numel)
+            logger.info(
+                "Trainable scope: scope=%s trainable_tensors=%s trainable_numel=%s frozen_numel=%s total_numel=%s frozen_prefix=core.",
+                scope,
+                len(trainable_names),
+                int(trainable_numel),
+                frozen_numel,
+                int(total_numel),
+            )
+            logger.info("Trainable scope sample: %s", ", ".join(trainable_names[:24]))
+        return info
     if scope != "anchor_only":
         raise ValueError(f"Unsupported picf_trainable_scope={scope!r}.")
 
@@ -7609,6 +8454,21 @@ def _split_optimizer_groups_by_dense_type(groups: list[dict[str, Any]]) -> list[
     return [(tensor_type, partitions[tensor_type]) for tensor_type in order]
 
 
+def _canonical_param_owner_name(name: str) -> str:
+    """Normalize wrapper prefixes before assigning optimizer groups.
+
+    FSDP exposes root parameters under ``_fsdp_wrapped_module.*`` and DDP uses
+    ``module.*``.  Optimizer grouping is semantic, not wrapper-specific: a
+    wrapped ``core.foo`` parameter must still be assigned to the slow
+    ``picf_core`` group rather than falling through to ``policy_head``.
+    """
+
+    parts = str(name).split(".")
+    while parts and parts[0] in {"module", "_fsdp_wrapped_module"}:
+        parts = parts[1:]
+    return ".".join(parts)
+
+
 def _build_optimizer(
     model: _PicfWindowTrainer,
     *,
@@ -7648,12 +8508,17 @@ def _build_optimizer(
     _append_group("tactile_backbone", tactile_params, args.tactile_lr_scale)
     _append_group("semantic_backbone", semantic_params, args.semantic_lr_scale)
 
-    core_params = [
-        param
-        for param in model.parameters()
+    remaining_named_params = [
+        (name, param)
+        for name, param in model.named_parameters()
         if getattr(param, "requires_grad", False) and id(param) not in used_ids
     ]
-    _append_group("picf_core", core_params, 1.0)
+    core_params = [param for name, param in remaining_named_params if _canonical_param_owner_name(name).startswith("core.")]
+    policy_head_params = [
+        param for name, param in remaining_named_params if not _canonical_param_owner_name(name).startswith("core.")
+    ]
+    _append_group("picf_core", core_params, args.picf_core_lr_scale)
+    _append_group("policy_head", policy_head_params, args.policy_head_lr_scale)
     if not groups:
         raise RuntimeError("No trainable parameters found for optimizer; check backbone and semantic trainability settings.")
     optimizer_sharding = str(getattr(args, "optimizer_sharding", "none")).lower()
@@ -7760,6 +8625,7 @@ def train(args: argparse.Namespace) -> None:
         output_dir = Path(args.checkpoint_base_dir) / "picf_core" / args.exp_name
         latest_path = output_dir / "latest.pt"
         metrics_path = output_dir / "metrics.jsonl"
+        window_trace_path = output_dir / f"window_trace_rank{rank}.jsonl"
         _prepare_output_dir(output_dir=output_dir, args=args, is_main=is_main, use_ddp=use_ddp, device=device)
         fault_dump_path = output_dir / f"stackdump_rank{rank}.log"
         try:
@@ -7802,12 +8668,13 @@ def train(args: argparse.Namespace) -> None:
             world_size=world_size,
         )
         core = core.to(device)
+        base_loss_config = _build_loss_config(args)
         model = _PicfWindowTrainer(
             core,
             semantic_encoder=semantic_encoder,
             visual_grid=args.visual_grid,
             use_visual_override=use_visual_override,
-            loss_config=_build_loss_config(args),
+            loss_config=base_loss_config,
             picf_mode=args.picf_mode,
             burnin_steps=args.burnin_steps,
             burnin_mode=args.burnin_mode,
@@ -7885,6 +8752,7 @@ def train(args: argparse.Namespace) -> None:
         grad_clip_threshold = grad_clip_controller.threshold()
         grad_clip_applied = False
         recent_windows: deque[dict[str, Any]] = deque(maxlen=4)
+        window_trace_interval: list[dict[str, Any]] = []
         debug_cuda_sync = os.environ.get("OPENPI_DEBUG_CUDA_SYNC", "").strip() not in {"", "0", "false", "False"}
         debug_autograd_anomaly = os.environ.get("OPENPI_DEBUG_AUTOGRAD_ANOMALY", "").strip() not in {"", "0", "false", "False"}
         debug_tensor_index_guards = os.environ.get("OPENPI_DEBUG_TENSOR_INDEX_GUARDS", "").strip() not in {"", "0", "false", "False"}
@@ -7909,7 +8777,7 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s anchor_overlay_dump_signatures=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s step_indexed_window_rng=%s calvin_balanced_bucket_sampler=%s calvin_buckets=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s anchor_overlay_dump_signatures=%s wandb=%s",
                 world_size,
                 args.training_strategy,
                 args.picf_mode,
@@ -7930,6 +8798,9 @@ def train(args: argparse.Namespace) -> None:
                 args.optimizer_sharding,
                 args.optimizer_checkpoint_mode,
                 bool(getattr(args, "window_activation_checkpointing", False)),
+                bool(getattr(args, "step_indexed_window_rng", True)),
+                bool(getattr(args, "calvin_balanced_bucket_sampler", False)),
+                ",".join(getattr(source, "bucket_names", ())),
                 int(getattr(args, "anchor_overlay_interval", 0)),
                 int(getattr(args, "anchor_overlay_max_anchors", 64)),
                 bool(getattr(args, "anchor_overlay_dump_signatures", False)),
@@ -7950,6 +8821,21 @@ def train(args: argparse.Namespace) -> None:
                 getattr(args, "action_normalization", "none"),
                 getattr(args, "action_norm_stats_path", None),
                 getattr(args, "action_output_clip", None),
+            )
+            logging.info(
+                "PICF action interface: prefix_stopgrad=%s prefix_gate=%s prefix_teacher=%s prefix_trust=%s "
+                "context_tokens=%s context_integration=%s context_stopgrad=%s context_norm=%s "
+                "context_gate=%s context_include_queries=%s",
+                bool(getattr(args, "action_prefix_stopgrad", _SPEC_DEFAULTS.action_prefix_stopgrad)),
+                float(getattr(args, "action_prefix_output_gate", _SPEC_DEFAULTS.action_prefix_output_gate)),
+                str(getattr(args, "action_prefix_teacher_mode", _SPEC_DEFAULTS.action_prefix_teacher_mode)),
+                float(getattr(args, "lambda_action_prefix_trust", _SPEC_DEFAULTS.lambda_action_prefix_trust)),
+                int(getattr(args, "action_context_tokens", _SPEC_DEFAULTS.action_context_tokens)),
+                str(getattr(args, "action_context_integration", _SPEC_DEFAULTS.action_context_integration)),
+                bool(getattr(args, "action_context_stopgrad", _SPEC_DEFAULTS.action_context_stopgrad)),
+                str(getattr(args, "action_context_norm_mode", _SPEC_DEFAULTS.action_context_norm_mode)),
+                float(getattr(args, "action_context_output_gate", _SPEC_DEFAULTS.action_context_output_gate)),
+                bool(getattr(args, "action_context_include_query_tokens", _SPEC_DEFAULTS.action_context_include_query_tokens)),
             )
             logging.info(
                 "Prompt-state contract: normalization=%s norm_stats=%s inject_state_into_prompt=%s",
@@ -8488,7 +9374,7 @@ def train(args: argparse.Namespace) -> None:
                 ),
             )
             logging.info(
-                "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s)",
+                "Backbone contract: point=%s(trainable=%s flash_requested=%s) visual=%s(finetune_mode=%s trainable=%s) tactile=%s(trainable=%s) semantic=%s(trainable=%s scope=%s)",
                 args.point_backbone,
                 bool(args.point_backbone_trainable),
                 bool(not args.sonata_disable_flash),
@@ -8499,6 +9385,16 @@ def train(args: argparse.Namespace) -> None:
                 bool(args.tactile_trainable),
                 args.semantic_mode,
                 bool(args.semantic_trainable),
+                str(getattr(args, "semantic_trainable_scope", "backbone_only")),
+            )
+            logging.info(
+                "Frozen feature cache contract: vjepa_mode=%s vjepa_root=%s vjepa_temporal_slices=%s "
+                "vjepa_storage_dtype=%s valid_only_when_visual_trainable_false=%s",
+                str(getattr(args, "vjepa_feature_cache_mode", "off")),
+                str(getattr(args, "vjepa_feature_cache_root", None)),
+                int(getattr(args, "vjepa_feature_cache_temporal_slices", 4)),
+                str(getattr(args, "vjepa_feature_cache_storage_dtype", "bfloat16")),
+                bool(not args.visual_trainable),
             )
             logging.info(
                 "MVTrack sidecar contract: mvtrack_sidecar_root=%s proposal_nearest_max_gap=%s proposal_age_decay_steps=%s; optional tracklet/proposal arrays are offline typed evidence and do not mutate CALVIN frames.",
@@ -8576,6 +9472,12 @@ def train(args: argparse.Namespace) -> None:
                     "Window contract: first-step empty xyzrgb windows will be resampled up to %s times per micro-step.",
                     args.max_empty_window_retries,
                 )
+                logging.info(
+                    "Window RNG contract: step_indexed=%s. Step-indexed mode keys sampling by "
+                    "(seed, rank, global_step, micro_step, retry) so checkpoint resume does not replay "
+                    "the early train-window stream.",
+                    bool(args.step_indexed_window_rng),
+                )
                 logging.info("CUDA debug sync: enabled=%s", bool(debug_cuda_sync))
                 logging.info("Autograd anomaly detection: enabled=%s", bool(debug_autograd_anomaly))
                 logging.info("Tensor index guards: enabled=%s", bool(debug_tensor_index_guards))
@@ -8583,14 +9485,14 @@ def train(args: argparse.Namespace) -> None:
                 logging.info("Fault dump handler (SIGUSR1): enabled=%s", bool(fault_dump_registered))
                 if fault_dump_path is not None:
                     logging.info("Fault dump path: %s", fault_dump_path)
-                for group in optimizer_group_info:
-                    logging.info(
-                        "Optimizer group: name=%s lr=%s num_params=%s sharding=%s",
-                        group["name"],
-                        group["lr"],
-                        group["num_params"],
-                        group.get("optimizer_sharding", "none"),
-                    )
+            for group in optimizer_group_info:
+                logging.info(
+                    "Optimizer group: name=%s lr=%s num_params=%s sharding=%s",
+                    group["name"],
+                    group["lr"],
+                    group["num_params"],
+                    group.get("optimizer_sharding", "none"),
+                )
 
         for step in range(start_step, args.num_train_steps):
             debug_phase_enabled = debug_phase_limit > 0 and step < debug_phase_limit
@@ -8603,13 +9505,24 @@ def train(args: argparse.Namespace) -> None:
                 min_lr=args.min_lr,
                 total_steps=args.num_train_steps,
             )
-            _set_optimizer_lr(optimizer, lr)
+            picf_core_runtime_lr_multiplier = _picf_core_runtime_lr_multiplier(args, step=step)
+            _set_optimizer_lr(
+                optimizer,
+                lr,
+                group_runtime_multipliers={"picf_core": picf_core_runtime_lr_multiplier},
+            )
             if debug_phase_enabled:
                 logging.info("phase step=%s rank=%s lr_set lr=%.8f", int(step + 1), rank, float(lr))
             optimizer.zero_grad(set_to_none=True)
             if debug_phase_enabled:
                 logging.info("phase step=%s rank=%s zero_grad_done", int(step + 1), rank)
             trainer_module = _unwrap_training_model(model)
+            scheduled_loss_config, object_scaffold_decay_scale = _scheduled_loss_config(
+                base_loss_config,
+                args=args,
+                step=step,
+            )
+            trainer_module.loss_config = scheduled_loss_config
             capture_visual_diagnostics = bool(
                 args.diagnostic_interval > 0 and ((step + 1) % args.diagnostic_interval == 0)
             )
@@ -8640,19 +9553,45 @@ def train(args: argparse.Namespace) -> None:
                         rank,
                     )
                 while True:
+                    sampled_bucket = "unbucketed"
+                    if bool(getattr(args, "calvin_balanced_bucket_sampler", False)):
+                        flat_index, sampled_bucket, sample_rng = source.balanced_bucket_slot_index(
+                            seed=int(args.seed),
+                            rank=int(rank),
+                            world_size=int(world_size),
+                            step=int(step),
+                            micro_step=int(micro_step),
+                            accum_steps=int(args.accum_steps),
+                            retry_count=int(retry_count),
+                        )
+                    else:
+                        sample_rng = (
+                            _step_indexed_window_rng(
+                                seed=int(args.seed),
+                                rank=int(rank),
+                                step=int(step),
+                                micro_step=int(micro_step),
+                                retry_count=int(retry_count),
+                            )
+                            if bool(args.step_indexed_window_rng)
+                            else rng
+                        )
+                        rng_start = time.perf_counter()
+                        flat_index = int(sample_rng.integers(0, len(source)))
+                        sampled_bucket = "random"
                     rng_start = time.perf_counter()
-                    flat_index = int(rng.integers(0, len(source)))
                     if debug_phase_enabled:
                         logging.info(
-                            "phase step=%s micro=%s rank=%s rng_pick_sec=%.3f flat_index=%s",
+                            "phase step=%s micro=%s rank=%s rng_pick_sec=%.3f flat_index=%s bucket=%s",
                             int(step + 1),
                             int(micro_step + 1),
                             rank,
                             time.perf_counter() - rng_start,
                             flat_index,
+                            sampled_bucket,
                         )
                     window_load_start = time.perf_counter()
-                    window = source.window(flat_index, rng=rng)
+                    window = source.window(flat_index, rng=sample_rng)
                     if debug_phase_enabled:
                         logging.info(
                             "phase step=%s micro=%s rank=%s window_load_sec=%.3f flat_index=%s segment=%s start_step=%s prompt=%r",
@@ -8745,9 +9684,22 @@ def train(args: argparse.Namespace) -> None:
                             "segment": int(window.segment_id),
                             "start_step": int(window.start_step_id),
                             "prompt": str(window.prompt),
+                            "prompt_bucket": _calvin_prompt_bucket(str(window.prompt)),
+                            "sampled_bucket": str(sampled_bucket),
                             "retry_count": int(retry_count),
                             "point_counts": tuple(int(count) for count in window_point_counts),
                         }
+                    )
+                    window_trace_interval.append(
+                        _window_trace_record(
+                            window,
+                            global_step=int(step + 1),
+                            micro_step=int(micro_step + 1),
+                            rank=rank,
+                            flat_index=int(flat_index),
+                            retry_count=int(retry_count),
+                            point_counts=tuple(int(count) for count in window_point_counts),
+                        )
                     )
                     try:
                         forward_label = None
@@ -8889,6 +9841,11 @@ def train(args: argparse.Namespace) -> None:
                         "steps_per_sec": float(steps_in_interval / elapsed),
                         "windows_per_sec": float(metric_accum.num_windows / elapsed),
                         "resampled_empty_first_step_windows": int(retried_windows),
+                        "object_scaffold_decay_scale": float(object_scaffold_decay_scale),
+                        "picf_core_lr_runtime_multiplier": float(picf_core_runtime_lr_multiplier),
+                        "picf_core_lr_effective_scale": float(args.picf_core_lr_scale)
+                        * float(picf_core_runtime_lr_multiplier),
+                        **_optimizer_group_grad_metrics(optimizer),
                         **averages,
                     }
                     line = json.dumps(record, sort_keys=True)
@@ -8900,7 +9857,17 @@ def train(args: argparse.Namespace) -> None:
                         fh.write(line + "\n")
                     if wandb_active:
                         wandb.log(record, step=int(step + 1))
+                if window_trace_interval:
+                    trace_record = {
+                        "step": int(step + 1),
+                        "rank": int(rank),
+                        "world_size": int(world_size),
+                        "windows": list(window_trace_interval),
+                    }
+                    with window_trace_path.open("a", encoding="utf-8") as fh:
+                        fh.write(json.dumps(trace_record, sort_keys=True) + "\n")
                 metric_accum = _MetricAccumulator()
+                window_trace_interval = []
                 interval_start = time.time()
                 steps_in_interval = 0
                 retried_windows_interval = 0
@@ -9047,6 +10014,16 @@ def main() -> None:
         ),
     )
     parser.add_argument("--accum-steps", type=int, default=1)
+    parser.add_argument(
+        "--calvin-balanced-bucket-sampler",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Sample CALVIN segment slots in deterministic coarse task buckets across rank/micro-steps. "
+            "This approximates the balanced exact-window objective used by the action-readout causal probes "
+            "without changing model inputs or adding losses."
+        ),
+    )
     parser.add_argument("--max-empty-window-retries", type=int, default=32)
     parser.add_argument("--unroll-steps", type=int, default=2)
     parser.add_argument(
@@ -9095,13 +10072,15 @@ def main() -> None:
     )
     parser.add_argument(
         "--picf-trainable-scope",
-        choices=["all", "anchor_only"],
-        default="all",
+        choices=["all", "anchor_only", "policy_only"],
+        default="backbone_only",
         help=(
             "High-level parameter trainability scope. 'all' preserves normal training. "
             "'anchor_only' is a diagnostic large-batch probe that freezes perception, semantic, "
             "PI0.5 action/control, and predictive heads while training only the PICF anchor router, "
-            "observation-anchor adapters, posterior binding/address, and support/cache/local evidence path."
+            "observation-anchor adapters, posterior binding/address, and support/cache/local evidence path. "
+            "'policy_only' freezes the whole PICF core while leaving the semantic/action policy path trainable; "
+            "use it with structural aux losses disabled to test whether action rebound is caused by moving PICF prefixes."
         ),
     )
     parser.add_argument(
@@ -9116,6 +10095,26 @@ def main() -> None:
     parser.add_argument("--min-lr", type=float, default=2e-5)
     parser.add_argument("--warmup-steps", type=int, default=None)
     parser.add_argument("--weight-decay", type=float, default=1e-4)
+    parser.add_argument(
+        "--picf-core-lr-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "LR multiplier for trainable parameters under the PICF core namespace. "
+            "Use values below 1.0 for two-timescale cotrain: action/semantic policy "
+            "can adapt normally while the belief-router prefix moves slowly."
+        ),
+    )
+    parser.add_argument(
+        "--policy-head-lr-scale",
+        type=float,
+        default=1.0,
+        help=(
+            "LR multiplier for non-semantic, non-PICF trainable policy-head parameters. "
+            "Most PI0.5 action-expert parameters live under the semantic encoder and "
+            "therefore use --semantic-lr-scale; this group covers any remaining policy adapters."
+        ),
+    )
     parser.add_argument(
         "--training-strategy",
         choices=["ddp", "fsdp_full_shard"],
@@ -9196,6 +10195,40 @@ def main() -> None:
             "Weight of the posterior belief-file center term inside anchor_object_pull. "
             "This closes graph->posterior ownership supervision in object-owner probes."
         ),
+    )
+    parser.add_argument(
+        "--anchor-object-pull-target-quality-gate-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.anchor_object_pull_target_quality_gate_enabled,
+        help=(
+            "Weight object-pull supervision by compactness of the high-confidence sidecar/proposal target core. "
+            "This keeps weak contact-motion masks as measurements rather than hard noisy labels."
+        ),
+    )
+    parser.add_argument(
+        "--anchor-object-pull-target-quality-sigma-m",
+        type=float,
+        default=_LOSS_DEFAULTS.anchor_object_pull_target_quality_sigma_m,
+    )
+    parser.add_argument(
+        "--anchor-object-pull-target-quality-min",
+        type=float,
+        default=_LOSS_DEFAULTS.anchor_object_pull_target_quality_min,
+    )
+    parser.add_argument(
+        "--anchor-object-pull-target-quality-power",
+        type=float,
+        default=_LOSS_DEFAULTS.anchor_object_pull_target_quality_power,
+    )
+    parser.add_argument(
+        "--anchor-object-pull-target-core-mass",
+        type=float,
+        default=_LOSS_DEFAULTS.anchor_object_pull_target_core_mass,
+    )
+    parser.add_argument(
+        "--anchor-object-pull-target-core-topk",
+        type=int,
+        default=_LOSS_DEFAULTS.anchor_object_pull_target_core_topk,
     )
     parser.add_argument("--lambda-pv-weak", type=float, default=_LOSS_DEFAULTS.lambda_pv_weak)
     parser.add_argument("--lambda-pt", type=float, default=_LOSS_DEFAULTS.lambda_pt)
@@ -9320,6 +10353,62 @@ def main() -> None:
         ),
     )
     parser.add_argument(
+        "--object-explanation-point-quality-gate-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=_LOSS_DEFAULTS.object_explanation_point_quality_gate_enabled,
+        help=(
+            "Weight the OEML point compactness auxiliary by detached point-quality instead "
+            "of treating noisy/sparse sidecar point masks as equally reliable hard labels."
+        ),
+    )
+    parser.add_argument(
+        "--object-explanation-point-quality-min",
+        type=float,
+        default=_LOSS_DEFAULTS.object_explanation_point_quality_min,
+    )
+    parser.add_argument(
+        "--object-explanation-point-quality-power",
+        type=float,
+        default=_LOSS_DEFAULTS.object_explanation_point_quality_power,
+    )
+    parser.add_argument(
+        "--object-explanation-point-outlier-prior",
+        type=float,
+        default=_LOSS_DEFAULTS.object_explanation_point_outlier_prior,
+        help="Robust outlier prior for the OEML point compactness mixture loss.",
+    )
+    parser.add_argument(
+        "--object-scaffold-decay-mode",
+        choices=["none", "linear", "cosine"],
+        default="none",
+        help=(
+            "Optional curriculum for weak object-scaffold losses. "
+            "Use cosine for production: sidecar/contact/tracklet teachers bootstrap ownership early, "
+            "then decay so action and dense context dominate the long run."
+        ),
+    )
+    parser.add_argument(
+        "--object-scaffold-decay-start-step",
+        type=int,
+        default=0,
+        help="Global step where object-scaffold decay starts. Resume uses the loaded global step.",
+    )
+    parser.add_argument(
+        "--object-scaffold-decay-end-step",
+        type=int,
+        default=0,
+        help="Global step where object-scaffold decay reaches its floor.",
+    )
+    parser.add_argument(
+        "--object-scaffold-decay-floor",
+        type=float,
+        default=1.0,
+        help=(
+            "Long-run multiplier for object-scaffold losses. "
+            "A floor around 0.10 keeps weak sidecar shaping near action-loss scale."
+        ),
+    )
+    parser.add_argument(
         "--picf-action-detach-from-anchor",
         dest="detach_action_loss_from_picf",
         action="store_true",
@@ -9342,6 +10431,174 @@ def main() -> None:
     )
     parser.add_argument("--no-picf-action-prefix-stopgrad", dest="action_prefix_stopgrad", action="store_false")
     parser.set_defaults(action_prefix_stopgrad=_SPEC_DEFAULTS.action_prefix_stopgrad)
+    parser.add_argument(
+        "--action-prefix-norm-mode",
+        choices=["none", "rmsnorm", "rms_norm", "rmscap", "rms_cap", "layernorm", "layer_norm"],
+        default=_SPEC_DEFAULTS.action_prefix_norm_mode,
+        help=(
+            "Normalize only the PICF-to-action prefix interface. This stabilizes the action-visible "
+            "belief prefix without changing PICF internal belief dynamics."
+        ),
+    )
+    parser.add_argument(
+        "--action-prefix-rms-target",
+        type=float,
+        default=_SPEC_DEFAULTS.action_prefix_rms_target,
+        help="Target RMS for action prefix interface normalization/capping.",
+    )
+    parser.add_argument(
+        "--action-prefix-norm-eps",
+        type=float,
+        default=_SPEC_DEFAULTS.action_prefix_norm_eps,
+        help="Numerical epsilon for action prefix interface normalization.",
+    )
+    parser.add_argument(
+        "--action-prefix-value-clip",
+        type=float,
+        default=_SPEC_DEFAULTS.action_prefix_value_clip,
+        help="Optional absolute value clip after action prefix normalization; <=0 disables clipping.",
+    )
+    parser.add_argument(
+        "--picf-action-condition-enabled",
+        dest="picf_action_condition_enabled",
+        action="store_true",
+        help=(
+            "Allow PICF conditioned-control prefixes/context to enter the PI0.5 action path. "
+            "Use --no-picf-action-condition-enabled for a clean causal control where PICF still "
+            "computes and trains auxiliary belief losses, but action receives no PICF condition."
+        ),
+    )
+    parser.add_argument(
+        "--no-picf-action-condition-enabled",
+        dest="picf_action_condition_enabled",
+        action="store_false",
+    )
+    parser.set_defaults(picf_action_condition_enabled=_SPEC_DEFAULTS.picf_action_condition_enabled)
+    parser.add_argument(
+        "--action-prefix-output-gate",
+        type=float,
+        default=_SPEC_DEFAULTS.action_prefix_output_gate,
+        help=(
+            "Fixed 0..1 scalar gate applied to PICF extra-prefix tokens after interface normalization. "
+            "This is the training-time counterpart of gated VLA conditioning: it bounds how much "
+            "a moving PICF prefix can perturb the pretrained action stream."
+        ),
+    )
+    parser.add_argument(
+        "--action-prefix-teacher-mode",
+        choices=["off", "ema"],
+        default=_SPEC_DEFAULTS.action_prefix_teacher_mode,
+        help=(
+            "Train-time target-network bridge for PICF action prefixes. ema feeds PI0.5 a slow "
+            "teacher prefix while the online prefix continues to train through PICF losses."
+        ),
+    )
+    parser.add_argument(
+        "--action-prefix-teacher-ema-decay",
+        type=float,
+        default=_SPEC_DEFAULTS.action_prefix_teacher_ema_decay,
+        help="EMA decay for the action-prefix teacher buffer.",
+    )
+    parser.add_argument(
+        "--action-prefix-teacher-blend",
+        type=float,
+        default=_SPEC_DEFAULTS.action_prefix_teacher_blend,
+        help="0..1 blend from online prefix to EMA teacher prefix; 1 uses only the teacher.",
+    )
+    parser.add_argument(
+        "--lambda-action-prefix-trust",
+        type=float,
+        default=_SPEC_DEFAULTS.lambda_action_prefix_trust,
+        help=(
+            "Auxiliary trust-region weight between online PICF prefix and EMA teacher prefix. "
+            "It enters alignment/total_minus_action, not loss_action_default_equiv."
+        ),
+    )
+    parser.add_argument(
+        "--action-context-tokens",
+        type=int,
+        default=_SPEC_DEFAULTS.action_context_tokens,
+        help=(
+            "Expose up to this many conditioned-control context tokens to the PI action path. "
+            "The integration mode decides whether they are appended or fused into the fixed PI prefix."
+        ),
+    )
+    parser.add_argument(
+        "--action-context-integration",
+        choices=["append", "prefix_fusion", "suffix_cross_attention"],
+        default=_SPEC_DEFAULTS.action_context_integration,
+        help=(
+            "How action-context tokens enter PI0.5. append increases prefix length and shifts suffix "
+            "positions; prefix_fusion keeps the PI prefix length fixed by reading context through a "
+            "bounded residual attention adapter; suffix_cross_attention keeps the native PI prefix and "
+            "lets action suffix tokens read PICF context through the semantic action adapter."
+        ),
+    )
+    parser.add_argument(
+        "--picf-action-context-stopgrad",
+        dest="action_context_stopgrad",
+        action="store_true",
+        help="Detach appended action-context tokens from action gradients while still exposing them to PI0.5.",
+    )
+    parser.add_argument("--no-picf-action-context-stopgrad", dest="action_context_stopgrad", action="store_false")
+    parser.set_defaults(action_context_stopgrad=_SPEC_DEFAULTS.action_context_stopgrad)
+    parser.add_argument(
+        "--action-context-norm-mode",
+        choices=["none", "rmsnorm", "rms_norm", "rmscap", "rms_cap", "layernorm", "layer_norm"],
+        default=_SPEC_DEFAULTS.action_context_norm_mode,
+        help="Normalize appended action-context tokens independently from the compressed PI prefix.",
+    )
+    parser.add_argument(
+        "--action-context-rms-target",
+        type=float,
+        default=_SPEC_DEFAULTS.action_context_rms_target,
+        help="Target RMS for appended action-context tokens.",
+    )
+    parser.add_argument(
+        "--action-context-output-gate",
+        type=float,
+        default=_SPEC_DEFAULTS.action_context_output_gate,
+        help="Fixed 0..1 gate applied to appended action-context tokens after normalization.",
+    )
+    parser.add_argument(
+        "--action-context-include-query-tokens",
+        dest="action_context_include_query_tokens",
+        action="store_true",
+        help="Include conditioned-control query tokens in the appended action context.",
+    )
+    parser.add_argument(
+        "--no-action-context-include-query-tokens",
+        dest="action_context_include_query_tokens",
+        action="store_false",
+    )
+    parser.set_defaults(action_context_include_query_tokens=_SPEC_DEFAULTS.action_context_include_query_tokens)
+    parser.add_argument(
+        "--picf-core-lr-runtime-mode",
+        choices=["constant", "block_alternating"],
+        default="constant",
+        help=(
+            "Runtime schedule for the picf_core optimizer group. block_alternating updates PICF core "
+            "only during short active windows, then gives the action path stationary-prefix recovery steps."
+        ),
+    )
+    parser.add_argument(
+        "--picf-core-lr-block-start-step",
+        type=int,
+        default=0,
+        help="Global optimizer step at which block_alternating PICF core updates begin.",
+    )
+    parser.add_argument(
+        "--picf-core-lr-block-cycle-steps",
+        type=int,
+        default=0,
+        help="Cycle length for block_alternating PICF core LR scheduling.",
+    )
+    parser.add_argument(
+        "--picf-core-lr-block-active-steps",
+        type=int,
+        default=0,
+        help="Number of PICF-core update steps at the beginning of each block_alternating cycle.",
+    )
     parser.add_argument("--mapg-siglip-tau", type=float, default=_LOSS_DEFAULTS.mapg_siglip_tau)
     parser.add_argument("--mapg-vicreg-var-target", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_var_target)
     parser.add_argument("--mapg-vicreg-cov-weight", type=float, default=_LOSS_DEFAULTS.mapg_vicreg_cov_weight)
@@ -9380,6 +10637,17 @@ def main() -> None:
     parser.add_argument("--tactile-aux-pose-scale", type=float, default=None)
     parser.add_argument("--tactile-aux-huber-delta", type=float, default=_LOSS_DEFAULTS.tactile_aux_huber_delta)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--step-indexed-window-rng",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Key sampled-window RNG by (seed, rank, global_step, micro_step, retry). "
+            "This is resume-safe and prevents a checkpoint continuation from replaying "
+            "the early train-window stream. Use --no-step-indexed-window-rng only to "
+            "reproduce legacy May-2026 rebound diagnostics."
+        ),
+    )
     parser.add_argument("--project-name", default="openpi")
     parser.add_argument("--wandb-run-name", default=None)
     parser.add_argument("--wandb-mode", choices=["online", "offline", "disabled"], default="offline")
@@ -9457,6 +10725,39 @@ def main() -> None:
     parser.add_argument("--visual-patch-size", type=int, default=16)
     parser.add_argument("--visual-tubelet-size", type=int, default=2)
     parser.add_argument("--visual-use-last-two-mean", action="store_true")
+    parser.add_argument(
+        "--vjepa-feature-cache-root",
+        default=None,
+        help=(
+            "Optional deterministic frozen V-JEPA feature cache root. "
+            "Only valid when the V-JEPA backbone is frozen."
+        ),
+    )
+    parser.add_argument(
+        "--vjepa-feature-cache-mode",
+        choices=["off", "read", "read_or_encode"],
+        default="off",
+        help=(
+            "V-JEPA frozen feature cache mode. 'read' fails closed on missing/stale entries; "
+            "'read_or_encode' reads valid entries and writes misses."
+        ),
+    )
+    parser.add_argument(
+        "--vjepa-feature-cache-temporal-slices",
+        type=int,
+        default=4,
+        help=(
+            "Number of most-recent V-JEPA temporal maps to persist per frozen-feature cache entry. "
+            "PICF consumes current_map/recent_maps, so a bounded suffix preserves the runtime objective "
+            "while avoiding full 32-slice dense-volume cache files."
+        ),
+    )
+    parser.add_argument(
+        "--vjepa-feature-cache-storage-dtype",
+        choices=["float32", "bfloat16", "float16"],
+        default="bfloat16",
+        help="On-disk dtype for deterministic frozen V-JEPA feature cache entries.",
+    )
     parser.add_argument("--tactile-mode", choices=["stub", "encoder"], default="stub")
     parser.add_argument("--tactile-trainable", action="store_true")
     parser.add_argument("--tactile-checkpoint-path", default=None)
@@ -9501,8 +10802,44 @@ def main() -> None:
     parser.add_argument("--semantic-action-expert-variant", default="gemma_300m")
     parser.add_argument("--semantic-dtype", default="bfloat16", choices=["float32", "float16", "bfloat16"])
     parser.add_argument("--semantic-trainable", action="store_true")
+    parser.add_argument(
+        "--semantic-trainable-scope",
+        choices=[
+            "all",
+            "backbone_only",
+            "model_only",
+            "action_head_only",
+            "action_adapter_only",
+            "action_head_and_adapter",
+        ],
+        default="all",
+        help=(
+            "Scope for trainable PaliGemma/PI0 semantic parameters when --semantic-trainable is set. "
+            "'backbone_only'/'model_only' are the production default and reproduce the historical "
+            "fast full-cotrain boundary by "
+            "training paligemma_with_expert while freezing wrapper-local action_in/out projections "
+            "and time MLPs. 'all' additionally trains those wrapper-local flow/time heads and is "
+            "reserved for explicit diagnostics because it is materially slower under FSDP. "
+            "'action_head_only' freezes the PaliGemma/Gemma backbone/expert and "
+            "trains only action_in/out projections plus time MLPs for causal probes. "
+            "'action_adapter_only' trains only the PICF-to-action suffix cross-attention adapter; "
+            "'action_head_and_adapter' trains both the wrapper-local action head and that adapter."
+        ),
+    )
+    parser.add_argument(
+        "--semantic-action-context-adapter-gate-init",
+        type=float,
+        default=-2.0,
+        help="Initial logit for the action-side PICF context adapter gate; sigmoid(-2) ~= 0.12.",
+    )
+    parser.add_argument(
+        "--semantic-action-context-adapter-rms-cap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cap action-context adapter residual RMS to the current action suffix RMS.",
+    )
     parser.add_argument("--semantic-lr-scale", type=float, default=0.25)
-    parser.add_argument("--semantic-gradient-checkpointing", action="store_true")
+    parser.add_argument("--semantic-gradient-checkpointing", action=argparse.BooleanOptionalAction, default=None)
     parser.add_argument("--window-activation-checkpointing", action="store_true")
     parser.add_argument("--semantic-use-gripper", action="store_true")
     parser.add_argument("--semantic-max-length", type=int, default=256)
@@ -10217,22 +11554,22 @@ def main() -> None:
     parser.add_argument(
         "--posterior-binding-signature-update-rate",
         type=float,
-        default=_SPEC_DEFAULTS.posterior_binding_signature_update_rate,
+        default=_spec_default("posterior_binding_signature_update_rate"),
     )
     parser.add_argument(
         "--posterior-binding-signature-update-max-rate",
         type=float,
-        default=_SPEC_DEFAULTS.posterior_binding_signature_update_max_rate,
+        default=_spec_default("posterior_binding_signature_update_max_rate"),
     )
     parser.add_argument(
         "--posterior-binding-signature-min-support",
         type=float,
-        default=_SPEC_DEFAULTS.posterior_binding_signature_min_support,
+        default=_spec_default("posterior_binding_signature_min_support"),
     )
     parser.add_argument(
         "--posterior-binding-signature-owner-weight",
         type=float,
-        default=_SPEC_DEFAULTS.posterior_binding_signature_owner_weight,
+        default=_spec_default("posterior_binding_signature_owner_weight"),
     )
     parser.add_argument(
         "--posterior-binding-signature-dispersion-gate-enabled",
@@ -10246,17 +11583,17 @@ def main() -> None:
     parser.add_argument(
         "--posterior-binding-signature-measurement-min-std",
         type=float,
-        default=_SPEC_DEFAULTS.posterior_binding_signature_measurement_min_std,
+        default=_spec_default("posterior_binding_signature_measurement_min_std"),
     )
     parser.add_argument(
         "--posterior-binding-signature-measurement-margin-min",
         type=float,
-        default=_SPEC_DEFAULTS.posterior_binding_signature_measurement_margin_min,
+        default=_spec_default("posterior_binding_signature_measurement_margin_min"),
     )
     parser.add_argument(
         "--posterior-binding-signature-measurement-margin-temperature",
         type=float,
-        default=_SPEC_DEFAULTS.posterior_binding_signature_measurement_margin_temperature,
+        default=_spec_default("posterior_binding_signature_measurement_margin_temperature"),
     )
     parser.add_argument("--bind-address-weight", type=float, default=_SPEC_DEFAULTS.bind_address_weight)
     parser.add_argument(

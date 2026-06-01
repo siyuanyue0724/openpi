@@ -281,3 +281,134 @@ def test_frozen_vjepa_eval_keeps_last_layer_contract(monkeypatch) -> None:
     assert output.tokens_thwc.shape == (2, 4, 4, 8)
     assert encoder_calls == [(False, False)]
     assert encoder.encoder.return_hierarchical is False
+
+
+def _dummy_cached_encoder(config: VjepaVisualConfig, cache_root, cache_mode: str = "read_or_encode") -> Vjepa2VisualEncoder:
+    class _DummyEncoder(nn.Module):
+        embed_dim = 8
+
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        def forward(self, video: torch.Tensor, training: bool = False) -> torch.Tensor:
+            del training
+            self.calls += 1
+            token_count = config.temporal_tokens * (config.spatial_tokens ** 2)
+            return torch.arange(token_count * self.embed_dim, dtype=torch.float32, device=video.device).reshape(
+                1,
+                token_count,
+                self.embed_dim,
+            )
+
+    encoder = Vjepa2VisualEncoder.__new__(Vjepa2VisualEncoder)
+    nn.Module.__init__(encoder)
+    encoder.config = config
+    encoder.device = torch.device("cpu")
+    encoder.dtype = torch.float32
+    encoder.trainable = False
+    encoder.encoder = _DummyEncoder()
+    encoder.checkpoint_loaded = False
+    encoder.eval()
+    encoder._cache_mode = cache_mode
+    encoder._cache_root = cache_root
+    encoder._cache_temporal_slices = max(int(config.feature_cache_temporal_slices), 1)
+    encoder._cache_storage_dtype_name = config.feature_cache_storage_dtype
+    encoder._cache_contract = {
+        "version": 1,
+        "model_name": config.model_name,
+        "arch_name": config.arch_name_override,
+        "checkpoint_path": None,
+        "checkpoint_key": None,
+        "checkpoint_hash": None,
+        "checkpoint_loaded": False,
+        "img_size": config.img_size,
+        "num_frames": config.num_frames,
+        "patch_size": config.patch_size,
+        "tubelet_size": config.tubelet_size,
+        "temporal_tokens": config.temporal_tokens,
+        "spatial_tokens": config.spatial_tokens,
+        "feature_mode": config.feature_mode,
+        "cache_temporal_slices": encoder._cache_temporal_slices,
+        "cache_storage_dtype": encoder._cache_storage_dtype_name,
+        "normalize_mean": [float(v) for v in config.normalize_mean],
+        "normalize_std": [float(v) for v in config.normalize_std],
+    }
+    encoder._cache_contract_hash = vjepa_wrapper._sha256_json(encoder._cache_contract)
+    return encoder
+
+
+def test_vjepa_feature_cache_read_or_encode_reuses_cached_features(monkeypatch, tmp_path) -> None:
+    config = VjepaVisualConfig(
+        arch_name_override="vit_tiny",
+        img_size=64,
+        num_frames=4,
+        patch_size=16,
+        tubelet_size=2,
+        device="cpu",
+        dtype="float32",
+        trainable=False,
+        feature_cache_root=str(tmp_path),
+        feature_cache_mode="read_or_encode",
+    )
+    clip = np.random.default_rng(0).integers(0, 255, size=(4, 32, 32, 3), dtype=np.uint8)
+    monkeypatch.setattr(vjepa_wrapper, "preprocess_video_clip", lambda clip, config: torch.zeros((1, 4, 3, 64, 64)))
+
+    writer = _dummy_cached_encoder(config, tmp_path, cache_mode="read_or_encode")
+    first = writer.encode_clip(clip)
+    assert writer.encoder.calls == 1
+
+    reader = _dummy_cached_encoder(config, tmp_path, cache_mode="read")
+    second = reader.encode_clip(clip)
+
+    assert reader.encoder.calls == 0
+    expected = torch.as_tensor(first.tokens_thwc)[-config.feature_cache_temporal_slices :]
+    torch.testing.assert_close(torch.as_tensor(second.tokens_thwc), expected)
+
+
+def test_vjepa_feature_cache_persists_bounded_suffix_in_low_precision(monkeypatch, tmp_path) -> None:
+    config = VjepaVisualConfig(
+        arch_name_override="vit_tiny",
+        img_size=64,
+        num_frames=8,
+        patch_size=16,
+        tubelet_size=2,
+        device="cpu",
+        dtype="float32",
+        trainable=False,
+        feature_cache_root=str(tmp_path),
+        feature_cache_mode="read_or_encode",
+        feature_cache_temporal_slices=2,
+        feature_cache_storage_dtype="bfloat16",
+    )
+    clip = np.random.default_rng(2).integers(0, 255, size=(8, 32, 32, 3), dtype=np.uint8)
+    monkeypatch.setattr(vjepa_wrapper, "preprocess_video_clip", lambda clip, config: torch.zeros((1, 8, 3, 64, 64)))
+
+    writer = _dummy_cached_encoder(config, tmp_path, cache_mode="read_or_encode")
+    first = writer.encode_clip(clip)
+    cache_files = list(tmp_path.rglob("*.pt"))
+    assert len(cache_files) == 1
+    payload = torch.load(cache_files[0], map_location="cpu", weights_only=False)
+    cached = payload["tokens_thwc"]
+    assert tuple(cached.shape[:3]) == (2, config.spatial_tokens, config.spatial_tokens)
+    assert cached.dtype == torch.bfloat16
+    expected = torch.as_tensor(first.tokens_thwc)[-2:].to(dtype=torch.bfloat16)
+    torch.testing.assert_close(cached, expected)
+
+
+def test_vjepa_feature_cache_read_mode_fails_closed_on_missing_entry(tmp_path) -> None:
+    config = VjepaVisualConfig(
+        arch_name_override="vit_tiny",
+        img_size=64,
+        num_frames=4,
+        patch_size=16,
+        tubelet_size=2,
+        device="cpu",
+        dtype="float32",
+        trainable=False,
+    )
+    clip = np.random.default_rng(1).integers(0, 255, size=(4, 32, 32, 3), dtype=np.uint8)
+    encoder = _dummy_cached_encoder(config, tmp_path, cache_mode="read")
+
+    with pytest.raises(RuntimeError, match="Missing V-JEPA feature cache entry"):
+        encoder.encode_clip(clip)

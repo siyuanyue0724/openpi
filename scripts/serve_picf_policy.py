@@ -2,10 +2,10 @@ from __future__ import annotations
 
 import argparse
 import ast
-import json
 import logging
 import os
 import socket
+import time
 from pathlib import Path
 import sys
 from typing import Any
@@ -25,6 +25,29 @@ from openpi.picf.action_normalization import PicfActionNormalizer
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.policy import PicfPi05Policy
 from openpi.serving.websocket_policy_server import WebsocketPolicyServer
+
+
+def _timing_breakdown_enabled() -> bool:
+    return os.environ.get("OPENPI_PICF_TIMING_BREAKDOWN", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sync_cuda_for_timing() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _timing_start(enabled: bool) -> float:
+    if enabled:
+        _sync_cuda_for_timing()
+        return time.perf_counter()
+    return 0.0
+
+
+def _timing_record(timing: dict[str, float], name: str, start: float, enabled: bool) -> None:
+    if not enabled:
+        return
+    _sync_cuda_for_timing()
+    timing[f"{name}_ms"] = (time.perf_counter() - start) * 1000.0
 
 
 def _as_sensor_names_arg(value: Any) -> str:
@@ -746,6 +769,7 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         export_anchor_debug: bool = False,
         export_anchor_debug_dense: bool = False,
         export_prediction_debug: bool = False,
+        picf_observe_interval: int = 1,
     ) -> None:
         self._trainer = trainer.eval()
         self._core = trainer.core
@@ -757,8 +781,11 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
                 core=trainer.core,
                 semantic_encoder=trainer.semantic_encoder,
                 picf_enabled=str(getattr(trainer, "picf_mode", "enabled")).lower().replace("-", "_") == "enabled",
+                inference_observe_interval=int(picf_observe_interval),
             ),
         )
+        if hasattr(self._policy, "inference_observe_interval"):
+            self._policy.inference_observe_interval = max(1, int(picf_observe_interval))
         self._action_normalizer = action_normalizer
         self._export_anchor_debug = bool(export_anchor_debug)
         self._export_anchor_debug_dense = bool(export_anchor_debug_dense)
@@ -773,6 +800,7 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
             "checkpoint_dir": str(checkpoint_dir),
             "checkpoint_step": int(checkpoint_step),
             "action_dim": 7,
+            "picf_observe_interval": max(1, int(picf_observe_interval)),
         }
 
     @property
@@ -828,28 +856,47 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
         )
 
     def infer(self, obs: dict[str, Any]) -> dict[str, Any]:
+        timing_enabled = _timing_breakdown_enabled()
+        timing: dict[str, float] = {}
+        total_start = _timing_start(timing_enabled)
         reset = bool(obs.get("openpi/reset", False))
         if reset:
+            stage_start = _timing_start(timing_enabled)
             self._reset_episode()
+            _timing_record(timing, "reset_episode", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         observation = self._build_observation(obs, reset=reset)
+        _timing_record(timing, "build_observation", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         visual_override = _visual_override_if_needed(self._trainer, observation)
+        _timing_record(timing, "visual_override", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         with torch.inference_mode():
             act_result = self._policy.act(
                 observation,
                 previous=self._previous,
                 visual_map_override=visual_override,
             )
+        _timing_record(timing, "policy_act", stage_start, timing_enabled)
+        policy_timing = act_result.debug.get("timing") if isinstance(act_result.debug, dict) else None
+        if timing_enabled and isinstance(policy_timing, dict):
+            timing.update({f"policy_{key}": float(value) for key, value in policy_timing.items()})
+        stage_start = _timing_start(timing_enabled)
         output = act_result.output
         self._previous = None if output is None else output.state
+        _timing_record(timing, "store_recurrent_state", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         action = act_result.action.detach().to(device="cpu", dtype=torch.float32).numpy()
         if self._action_normalizer is not None:
             action = self._action_normalizer.unnormalize_np(action)
+        _timing_record(timing, "action_to_cpu_unnorm", stage_start, timing_enabled)
         self._step_id += 1
         response = {
             "actions": action[None, :],
             "debug": act_result.debug,
         }
         if self._export_anchor_debug:
+            stage_start = _timing_start(timing_enabled)
             anchor_debug = _anchor_debug_payload(
                 output,
                 observation,
@@ -857,10 +904,16 @@ class _PicfCheckpointPolicy(_base_policy.BasePolicy):
             )
             if anchor_debug is not None:
                 response["anchor_debug"] = anchor_debug
+            _timing_record(timing, "anchor_debug_payload", stage_start, timing_enabled)
         if self._export_prediction_debug:
+            stage_start = _timing_start(timing_enabled)
             prediction_debug = _prediction_debug_payload(output)
             if prediction_debug is not None:
                 response["prediction_debug"] = prediction_debug
+            _timing_record(timing, "prediction_debug_payload", stage_start, timing_enabled)
+        _timing_record(timing, "checkpoint_policy_total", total_start, timing_enabled)
+        if timing_enabled:
+            response["policy_timing"] = timing
         return response
 
 
@@ -872,6 +925,7 @@ def _build_policy(
     export_anchor_debug: bool = False,
     export_anchor_debug_dense: bool = False,
     export_prediction_debug: bool = False,
+    picf_observe_interval: int = 1,
 ) -> _PicfCheckpointPolicy:
     output_dir, checkpoint_dir = _resolve_checkpoint_dir(checkpoint_path)
     args = _load_runtime_args(checkpoint_dir)
@@ -919,6 +973,7 @@ def _build_policy(
         export_anchor_debug=export_anchor_debug,
         export_anchor_debug_dense=export_anchor_debug_dense,
         export_prediction_debug=export_prediction_debug,
+        picf_observe_interval=max(1, int(picf_observe_interval)),
     )
 
 
@@ -959,6 +1014,16 @@ def main() -> None:
         default=os.environ.get("OPENPI_PICF_EXPORT_PREDICTIONS", "0").lower() in {"1", "true", "yes", "on"},
         help="Return compact 4x4 visual-real predictive-cache payloads with each websocket action.",
     )
+    parser.add_argument(
+        "--picf-observe-interval",
+        type=int,
+        default=int(os.environ.get("OPENPI_PICF_OBSERVE_INTERVAL", "1")),
+        help=(
+            "Inference-only low-frequency PICF observation interval. 1 recomputes the PICF belief "
+            "router every control step; values >1 reuse the last PICF control prefix on intermediate "
+            "steps while still sampling a fresh PI0.5 action."
+        ),
+    )
     args = parser.parse_args()
 
     device = torch.device(args.device)
@@ -972,6 +1037,7 @@ def main() -> None:
         export_anchor_debug=bool(args.export_anchor_debug),
         export_anchor_debug_dense=bool(args.export_anchor_debug_dense),
         export_prediction_debug=bool(args.export_prediction_debug),
+        picf_observe_interval=max(1, int(args.picf_observe_interval)),
     )
     hostname = socket.gethostname()
     local_ip = socket.gethostbyname(hostname)

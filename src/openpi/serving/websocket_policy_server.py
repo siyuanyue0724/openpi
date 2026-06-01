@@ -55,18 +55,29 @@ class WebsocketPolicyServer:
         while True:
             try:
                 start_time = time.monotonic()
-                obs = msgpack_numpy.unpackb(await websocket.recv())
+                recv_start = time.monotonic()
+                message = await websocket.recv()
+                recv_time = time.monotonic() - recv_start
+                unpack_start = time.monotonic()
+                obs = msgpack_numpy.unpackb(message)
+                unpack_time = time.monotonic() - unpack_start
 
                 infer_time = time.monotonic()
                 action = self._policy.infer(obs)
                 infer_time = time.monotonic() - infer_time
 
-                action["server_timing"] = {
+                policy_timing = action.pop("policy_timing", None)
+                server_timing = {
+                    "recv_wait_ms": recv_time * 1000,
+                    "unpack_ms": unpack_time * 1000,
                     "infer_ms": infer_time * 1000,
                 }
+                if isinstance(policy_timing, dict):
+                    server_timing["policy"] = policy_timing
                 if prev_total_time is not None:
                     # We can only record the last total time since we also want to include the send time.
-                    action["server_timing"]["prev_total_ms"] = prev_total_time * 1000
+                    server_timing["prev_total_ms"] = prev_total_time * 1000
+                action["server_timing"] = server_timing
 
                 await websocket.send(packer.pack(action))
                 prev_total_time = time.monotonic() - start_time

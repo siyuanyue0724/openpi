@@ -265,12 +265,11 @@ class PicfCoreConfig:
     # re-enter the control graph and fight the selected owner measurement.
     aqr_context_slot_active_support_overlap_enabled: bool = True
     aqr_context_slot_active_support_overlap_threshold: float = 0.55
-    # Context rows are already filtered by confidence, support score, and
-    # active-duplicate overlap.  Do not let the early learned slot-quality head
-    # zero them out by default: context is weak scene evidence, not posterior
-    # object truth.  Keep this opt-in for ablations that explicitly want learned
-    # context gating.
-    aqr_context_slot_quality_gate_enabled: bool = False
+    # Context rows are low-priority scene evidence, but the downstream control
+    # graph should not receive low-quality duplicate/no-object rows.  Apply the
+    # QASA-style quality gate to context visibility while dense typed memory and
+    # background context remain intact.
+    aqr_context_slot_quality_gate_enabled: bool = True
     # Carry active/context/reserve reliability into the action-control graph as
     # an attention prior instead of shrinking token embeddings.  This preserves
     # dense slot content and lets the transformer decide how much context to
@@ -557,6 +556,41 @@ class PicfCoreConfig:
     tokenwise_ff_chunk_size: int = 0
     require_pi0_action_generator: bool = True
     action_prefix_stopgrad: bool = False
+    # Stabilize the PICF-to-PI0.5 action prefix interface.  This is an
+    # interface normalization, not a new weak teacher: it preserves prefix
+    # direction/content while preventing recurrent PICF scale drift from
+    # changing the distribution consumed by the PaliGemma action sampler.
+    action_prefix_norm_mode: str = "none"
+    action_prefix_rms_target: float = 1.0
+    action_prefix_norm_eps: float = 1.0e-6
+    action_prefix_value_clip: float = 0.0
+    # Guarded conditioning for the PICF -> PI0.5 action interface.  PICF
+    # remains an auxiliary belief prefix; this scalar bounds how much a moving
+    # belief prefix can perturb the pretrained action stream.
+    picf_action_condition_enabled: bool = True
+    action_prefix_output_gate: float = 1.0
+    # Train-time target-network bridge for the PICF -> PI0.5 prefix.  Fixed
+    # gates and RMS normalization bound scale but not temporal drift; the EMA
+    # teacher gives the action generator a slowly moving conditioning interface
+    # while PICF continues to train against the online belief state.
+    action_prefix_teacher_mode: str = "off"
+    action_prefix_teacher_ema_decay: float = 0.99
+    action_prefix_teacher_blend: float = 1.0
+    lambda_action_prefix_trust: float = 0.0
+    # Optional action-visible context bridge.  The compressed PI prefix can be
+    # too narrow to expose improvements in the belief state to PI0.5.  When
+    # enabled, a bounded number of conditioned-control context tokens are
+    # either appended to the action prefix or fused into the fixed-length PI
+    # prefix.  The fixed-length path preserves the pretrained PI0.5 prefix/suffix
+    # position layout while still exposing dense PICF context through a bounded
+    # residual adapter.
+    action_context_tokens: int = 0
+    action_context_integration: str = "append"
+    action_context_stopgrad: bool = True
+    action_context_norm_mode: str = "rmsnorm"
+    action_context_rms_target: float = 1.0
+    action_context_output_gate: float = 0.25
+    action_context_include_query_tokens: bool = False
 
     @property
     def point_occ_dim(self) -> int:

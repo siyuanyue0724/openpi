@@ -1368,3 +1368,451 @@ avoids the frozen pattern:
   active overlap rises above ~0.25,
   recycle collapses toward zero.
 ```
+
+## 2026-05-22 A7 Action-Aware Quality-Gate Decay Long Run
+
+This section records the current maintained A7 production-style long run after
+the object-file / sidecar / active-owner repairs.  The run keeps Sonata,
+AnyTouch, and V-JEPA frozen, leaves PaliGemma and PICF connectors trainable,
+uses `unroll_steps=2` with `burnin_steps=1`, writes anchor overlays every 100
+steps, saves every 500 steps, and keeps the latest 3 checkpoints.
+
+The first branch was:
+
+```text
+run:
+  picf_a7_actionaware_qgdecay_from500_long30k_20260522
+
+resume:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_actionaware_defaultsync_action2_from0_long30k_20260522/500
+
+decay:
+  OBJECT_SCAFFOLD_DECAY_MODE=cosine
+  OBJECT_SCAFFOLD_DECAY_START_STEP=500
+  OBJECT_SCAFFOLD_DECAY_END_STEP=2000
+  OBJECT_SCAFFOLD_DECAY_FLOOR=0.10
+  ACTION_LOSS_WEIGHT=2.0
+```
+
+Step1000 gate:
+
+```text
+loss_total                                      0.1925
+loss_action_default_equiv                      0.0515
+loss_total_minus_action                        0.1410
+action fraction                                26.8%
+object_scaffold_decay_scale                    0.5514
+loss_anchor_object_pull                        0.3914
+loss_anchor_pv                                 0.6829
+loss_object_explanation_point                  4.4165
+aqr_active_same_role_support_overlap_max       0.1092
+aqr_active_same_role_object_core_overlap_max   0.0047
+aqr_downstream_same_role_support_overlap_max   0.1339
+posterior_file_competition_active_duplicate    0.0000
+posterior_identity_switch_rate                 0.2222
+posterior_recycle_rate                         0.0473
+grad_norm                                      0.7847
+grad_clip_applied                              false
+```
+
+Gate decision:
+
+```text
+Do not hard-jump action weight at step1000.
+
+Reason:
+  active/core/downstream ownership metrics are healthy, but the action
+  fraction is still low because the object scaffold remains too large.  A hard
+  action-weight jump would confound two effects: stronger action pressure and
+  abrupt removal of the weak object teacher.  The mathematically cleaner move
+  is to keep ACTION_LOSS_WEIGHT=2.0 and accelerate the cosine scaffold decay so
+  action receives a larger share of the same total budget.
+```
+
+The active replacement branch is:
+
+```text
+run:
+  picf_a7_actionaware_qgdecay_fast1300_from1000_long30k_20260522
+
+resume:
+  /mnt/checkpoints/picf_core/picf_core/picf_a7_actionaware_qgdecay_from500_long30k_20260522/1000
+
+decay:
+  OBJECT_SCAFFOLD_DECAY_MODE=cosine
+  OBJECT_SCAFFOLD_DECAY_START_STEP=500
+  OBJECT_SCAFFOLD_DECAY_END_STEP=1300
+  OBJECT_SCAFFOLD_DECAY_FLOOR=0.10
+  ACTION_LOSS_WEIGHT=2.0
+```
+
+Step1050/1100 validation:
+
+```text
+step                                      1050       1100
+loss_total                               0.1184     0.1120
+loss_action_default_equiv                0.0431     0.0450
+loss_action_active7                      0.1924     0.2015
+loss_total_minus_action                  0.0753     0.0670
+action fraction                          36.4%      40.2%
+object_scaffold_decay_scale              0.3015     0.2331
+loss_anchor_object_pull                  0.3355     0.3571
+loss_anchor_pv                           0.6704     0.6281
+loss_object_explanation_point            4.2462     5.1647
+active same-role support overlap max     0.0999     0.0974
+active same-role object-core overlap max  0.0039     0.0045
+downstream same-role support overlap max  0.1320     0.1335
+raw same-role support overlap max         1.0000     1.0000
+active duplicate overlap max             0.0000     0.0000
+posterior identity switch rate           0.1989     0.2439
+posterior recycle rate                   0.1032     0.0979
+grad_norm                                0.4897     0.7703
+grad_clip_applied                        false      false
+```
+
+Interpretation:
+
+```text
+The fast-decay branch is stable through step1100.
+
+The intended effect occurred:
+  action share rose from 26.8% at step1000 to 40.2% at step1100 without a hard
+  action-weight discontinuity.
+
+The structural acceptance metrics remain healthy:
+  active support overlap stays around 0.10, active core overlap remains near
+  zero, downstream overlap stays near 0.13, active duplicate overlap remains
+  exactly zero, and gradients do not spike.
+
+The raw same-role overlap remains near 1.0, but this is currently reserve /
+inactive telemetry rather than the active acceptance metric.  Do not optimize
+against raw overlap directly unless active/core/downstream metrics also fail.
+
+The only watch items are:
+  loss_object_explanation_point is noisy and rose at step1100;
+  identity_switch_rate increased from 0.20 to 0.24;
+  action loss did not monotonically improve between 1050 and 1100, although it
+  remains better than the step1000 gate and comparable to the old 4-22
+  5k-step level.
+```
+
+Next gate:
+
+```text
+Continue the fast1300 branch unless one of these occurs:
+  active same-role support overlap > 0.25 for two consecutive log points;
+  downstream same-role support overlap > 0.25 for two consecutive log points;
+  active duplicate overlap > 0;
+  repeated grad clipping;
+  recycle collapses toward zero while identity_switch_rate rises;
+  action loss remains flat after the scaffold reaches its 0.10 floor.
+
+If the next gate fails, resume from step1000 and use a slower end step
+(`OBJECT_SCAFFOLD_DECAY_END_STEP=1400` or `1500`) rather than increasing a new
+auxiliary loss.
+```
+
+### 2026-05-22 literature matrix and step-1500 action gate
+
+Maintained documents:
+
+```text
+docs/PICF_AQR_OWM_SLOT_VLA_PAPER_MATRIX_20260522.md
+docs/PICF_AQR_OWM_ACTION_DOMINANT_WEIGHT_AUDIT_20260522.md
+```
+
+The slot/VLA paper matrix now tracks 38 papers/systems across:
+
+```text
+object binding / IsSameObject probes
+MetaSlot / QASA / slot merging / temporal slot consistency
+object-centric robotics and manipulation
+JEPA / V-JEPA / predictive VLA
+action-dominant VLA recipes
+tactile / contact-rich VLA
+```
+
+Step1500 gate from `picf_a7_actionaware_qgdecay_fast1300_from1000_long30k_20260522`:
+
+```text
+loss_total                               0.0658
+loss_action_default_equiv                0.0416
+loss_total_minus_action                  0.0242
+action fraction                          63.3%
+object_scaffold_decay_scale              0.10
+active same-role support overlap max     0.0500
+downstream same-role support overlap max  0.0781
+active duplicate overlap max             0.0000
+posterior identity switch rate           0.2172
+posterior recycle rate                   0.1024
+loss_slot_jepa                           3002.5 diagnostic only; lambda 0
+```
+
+Decision:
+
+```text
+The action lambdas are already at the traditional PICF/PI0 scale:
+  lambda_action_pos = lambda_action_rot = lambda_action_gripper = 2.0
+
+Do not raise action above the legacy/default scale as the first move.
+The paper-consistent action-dominant continuation is to lower the weak
+object-scaffold floor from 0.10 to 0.03 after active ownership is healthy.
+This should move action from roughly 63% of the total to about 74-78% without
+changing action-gradient units.
+```
+
+Planned continuation:
+
+```text
+EXP=picf_a7_actionaware_qgfloor003_from1500_long30k_20260522
+RESUME_CHECKPOINT=/mnt/checkpoints/picf_core/picf_core/picf_a7_actionaware_qgdecay_fast1300_from1000_long30k_20260522/1500
+ACTION_LOSS_WEIGHT=2.0
+OBJECT_SCAFFOLD_DECAY_MODE=cosine
+OBJECT_SCAFFOLD_DECAY_START_STEP=500
+OBJECT_SCAFFOLD_DECAY_END_STEP=1500
+OBJECT_SCAFFOLD_DECAY_FLOOR=0.03
+SAVE_INTERVAL=500
+KEEP_LAST_CHECKPOINTS=3
+LOG_INTERVAL=50
+ANCHOR_OVERLAY_INTERVAL=100
+```
+
+### 2026-05-26 two-timescale cotrain gate
+
+Maintained document:
+
+```text
+docs/PICF_AQR_OWM_COTRAIN_TWO_TIMESCALE_FINAL_20260526.md
+```
+
+Evidence entering this gate:
+
+```text
+A7 same-timescale cotrain:
+  stopped at step 7318.
+  latest logged step 7300:
+    loss_action_default_equiv ~= 0.04763
+    loss_total_minus_action   ~= 0.01079
+    active overlap            ~= 0.105
+    downstream overlap        ~= 0.138
+  interpretation:
+    active structure was not collapsing, but action remained on a moving-prefix
+    plateau/rebound band.
+
+PC1 policy-only causal probe:
+  `picf_trainable_scope=policy_only`, structural losses 0.
+  step 6050 -> 6300:
+    loss_action_default_equiv 0.03512 -> 0.03316
+    best observed             0.02890 at step6200
+  interpretation:
+    freezing `core.*` while keeping PICF forward enabled supports the
+    moving-prefix root-cause hypothesis.
+```
+
+Decision:
+
+```text
+Do not promote policy_only to production.
+Keep cotrain, but split optimizer timescales:
+  semantic/action path learns normally;
+  PICF core remains trainable but uses a slow LR scale.
+```
+
+New launcher:
+
+```text
+scripts/experiments/picf_aqr_owm_202605_active/
+  run_a7_twotimescale_cotrain_from_pc1_6000_30k_20260526.sh
+```
+
+Run contract:
+
+```text
+EXP=picf_a7_twotime_cotrain_from_pc1_6000_core005_action2_30k_20260526
+RESUME_CHECKPOINT=/mnt/checkpoints/picf_core/picf_core/picf_pc1_from_a7_5500_freshopt_midlr_actionstable_ckpt1000_20260526/6000
+PICF_TRAINABLE_SCOPE=all
+ACTION_LOSS_WEIGHT=2.0
+SEMANTIC_LR_SCALE=0.35
+PICF_CORE_LR_SCALE=0.05
+POLICY_HEAD_LR_SCALE=1.0
+LR=7e-5
+MIN_LR=2e-5
+OBJECT_SCAFFOLD_DECAY_FLOOR=0.03
+SAVE_INTERVAL=500
+KEEP_LAST_CHECKPOINTS=3
+LOG_INTERVAL=50
+ANCHOR_OVERLAY_INTERVAL=100
+```
+
+First acceptance:
+
+```text
+step100:
+  verify optimizer group scales in log.
+
+step300:
+  compare action trend against A7 same-timescale run and PC1 policy-only.
+
+step500:
+  continue only if action does not rebound while active/downstream overlap and
+  posterior lifecycle metrics remain healthy.
+```
+
+Launch verification on A7:
+
+```text
+remote:
+  ssh -p 28060 root@36.139.225.68
+
+repo:
+  /root/openpi_twotime_cotrain_20260526
+
+tmux:
+  picf_a7_twotime_cotrain_20260526
+
+log:
+  /mnt/picf_run_logs/picf_a7_twotime_cotrain_from_pc1_6000_core005_action2_30k_20260526.log
+
+metrics:
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_a7_twotime_cotrain_from_pc1_6000_core005_action2_30k_20260526/metrics.jsonl
+```
+
+Verified runtime args from `args.json` after launch:
+
+```text
+resume_checkpoint:
+  /mnt/checkpoints/picf_core/picf_core/
+    picf_pc1_from_a7_5500_freshopt_midlr_actionstable_ckpt1000_20260526/6000
+
+num_train_steps                         30000
+save_interval                           500
+keep_last_checkpoints                   3
+picf_trainable_scope                    all
+semantic_trainable                      true
+semantic_lr_scale                       0.35
+picf_core_lr_scale                      0.05
+policy_head_lr_scale                    1.0
+lambda_action_pos/rot/gripper           2.0 / 2.0 / 2.0
+optimizer_checkpoint_mode               model_only
+training_strategy                       fsdp_full_shard
+optimizer_sharding                      none
+action_prefix_norm_mode                 rmsnorm
+mvtrack_sidecar_root:
+  /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+
+lambda_slot_jepa                        0.0
+lambda_support_pred                     0.0
+lambda_binding_consistency              0.0
+lambda_aqr_denoising                    0.0
+aqr_role_layout                         object_only
+effector_persistent_anchors             0
+task_effector_queries                   0
+tactile_attach_to_object_owner          true
+```
+
+Local and remote code verification before launch:
+
+```text
+local:
+  python -m py_compile scripts/picf_core_train.py scripts/picf_core_train_test.py
+  pytest -q scripts/picf_core_train_test.py -k 'optimizer or trainable_scope or normalize_train_args'
+  python scripts/verify_picf_owm_contract.py
+  python scripts/picf_owm_dataflow_trace.py --fail-on-fail
+  python scripts/picf_owm_strict_diagnose.py --fail-on-fail
+
+remote:
+  script/document SHA matched local for:
+    scripts/picf_core_train.py
+    scripts/picf_core_train_test.py
+    run_a7_twotimescale_cotrain_from_pc1_6000_30k_20260526.sh
+    docs/PICF_AQR_OWM_COTRAIN_TWO_TIMESCALE_FINAL_20260526.md
+
+  checkpoint path exists.
+  sidecar segment file exists.
+  old A7 tmux was stopped before the new launch.
+```
+
+Startup observation:
+
+```text
+13:24:32:
+  resumed from checkpoint step 6000.
+
+first progress:
+  step 6001:
+    loss ~= 0.0098
+    lr   ~= 6.53e-05
+    wall ~= 26.5 sec/step
+
+  step 6002:
+    loss ~= 0.0384
+    lr   ~= 6.52e-05
+
+GPU:
+  two A100-40GB active, ~40GB each, 100% utilization during first steps.
+
+Interpretation:
+  run is live and using the intended heavy full cotrain graph, not a
+  lightweight anchor-only or policy-only diagnostic.  Do not judge loss trend
+  until the first log interval writes step6050 metrics.
+```
+
+First metric gate at step 6050:
+
+```text
+current two-timescale cotrain:
+  loss_total                         0.046562
+  loss_action_default_equiv          0.035607
+  loss_action_active7                0.161482
+  loss_total_minus_action            0.010955
+  loss_anchor_object_pull            0.249496
+  loss_object_explanation_point      7.25229
+  loss_object_explanation_contact    0.315857
+  loss_mapg_cycle                    0.385852
+  loss_mapg_support_diversity        0.114093
+  active same-role support overlap   0.089886
+  downstream same-role support       0.087471
+  raw same-role support overlap      1.000000
+  posterior_recycle_rate             0.127679
+  posterior_identity_switch_rate     0.168333
+  pi_prefix_post_rms_mean/max        1.000000 / 1.000000
+  grad_norm                          0.429182
+  loss_slot_jepa                     0.643886  (telemetry; lambda 0)
+```
+
+Comparison against the previous same-timescale A7 action-polish run in the
+same 6000-6500 window:
+
+```text
+old same-timescale mean action_default_equiv   0.045545
+current step6050 action_default_equiv          0.035607
+relative change                                -21.8%
+
+old same-timescale mean loss_total             0.056617
+current step6050 loss_total                    0.046562
+relative change                                -17.8%
+
+old active overlap mean                        0.105998
+current active overlap                         0.089886
+
+old downstream overlap mean                    0.113896
+current downstream overlap                     0.087471
+
+old identity switch mean                       0.186717
+current identity switch                        0.168333
+```
+
+Comparison against the PC1 policy-only causal probe:
+
+```text
+PC1 policy-only step6050 action_default_equiv  0.035121
+current step6050 action_default_equiv          0.035607
+
+Interpretation:
+  current two-timescale cotrain is very close to policy-only action quality at
+  the first gate, while still keeping PICF core trainable and preserving
+  structural losses.  This is the intended behavior.  It is not yet proof of
+  long-run stability; the next gates are step6100, step6300, step6500, and
+  step7000.
+```

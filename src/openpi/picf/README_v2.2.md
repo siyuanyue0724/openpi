@@ -7,6 +7,201 @@ action/control contract rewrite, the frozen-perception bring-up, the
 VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
 AQR-MAPG direct-final graph replacement.
 
+2026-06-02 action-readout preservation update: the current maintained action
+diagnostic ledger is
+[`docs/PICF_AQR_OWM_ACTION_READOUT_CAUSAL_AUDIT_20260601_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_READOUT_CAUSAL_AUDIT_20260601_TEMP.md).
+It records E20/E21/E22/E23, the exact-window vs production-bucket-balanced
+math, the 2xA100-40GB memory limit, and the stopped A7 E23 cloud run.  The
+current conclusion is: balanced cross-task gradients are the right causal
+direction, but the 2-GPU `accum=1` production approximation is weaker than the
+12-window E21 diagnostic.  Next production attempt should use more GPUs with
+`accum=1` before adding another model/loss patch.
+
+2026-05-23 archive index: use
+[`docs/picf_aqr_owm_202605/README.md`](/home/siyuanyue/Documents/openpi/docs/picf_aqr_owm_202605/README.md)
+as the stable entry point for the May 2026 experiment chain. It records the
+current A7 production-length run, paper/theory documents, accepted/rejected
+module status, evidence ledgers, and next gates. Historical `*_TEMP.md` files
+remain evidence ledgers; do not start from them unless this archive index or
+the current-state report points there.
+2026-05-31 update: the maintained action-platform diagnostic protocol is
+[`docs/PICF_AQR_OWM_ACTION_PLATFORM_ROOT_CAUSE_PROTOCOL_20260531.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_PLATFORM_ROOT_CAUSE_PROTOCOL_20260531.md).
+It supersedes rolling-loss-only decisions: new training/architecture
+experiments must first check the May experiment ledger, name the unexcluded
+hypothesis being tested, and use exact-window or stratified-window probes
+before claiming checkpoint degradation.
+
+2026-05-26 cotrain root-cause update: use
+[`docs/PICF_AQR_OWM_COTRAIN_TWO_TIMESCALE_FINAL_20260526.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_COTRAIN_TWO_TIMESCALE_FINAL_20260526.md)
+as the maintained answer to the action-rebound problem.  Cotrain remains the
+target recipe, but the optimizer now supports a separate `picf_core` LR scale:
+PaliGemma/action learns at normal speed while the PICF belief router moves on a
+slower timescale.  This replaces `policy_only` as the production direction;
+`policy_only` is only a causal diagnostic for moving-prefix rebound.
+The follow-up phase-boundary repair is
+[`docs/PICF_AQR_OWM_ACTION_REBOUND_PHASE_STABILIZATION_20260526.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_REBOUND_PHASE_STABILIZATION_20260526.md):
+the core=0.02 branch still rebounded at 7000/7050/7100, so the next live gate
+uses a 300-step stationary-prefix `policy_only` phase from the clean 6500
+checkpoint before resuming full cotrain with a slower PICF core LR.
+2026-05-27 update: core=0.005 also rebounded at step 7350 while structure
+metrics stayed healthy. The maintained next repair is now the BASL-style
+gated-prefix/block-core script
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_basil_prefixgate_from6500_30k_20260527.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_basil_prefixgate_from6500_30k_20260527.sh),
+documented in the same rebound note.
+2026-05-27 late update: BASL/block-core also reproduced the 7350 rebound
+(`loss_action_default_equiv` rose to about `0.0358`) while active/downstream
+overlap and slot-JEPA stayed healthy.  The maintained root-cause repair is now
+the action-interface EMA teacher in
+[`docs/PICF_AQR_OWM_ACTION_INTERFACE_EMA_FINAL_20260527.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_INTERFACE_EMA_FINAL_20260527.md).
+It stabilizes only the PICF -> PI0.5 action prefix interface, keeps
+`loss_action_default_equiv` pure/comparable, and logs
+`loss_action_prefix_trust` plus teacher-prefix drift metrics.
+Launch with
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionprefix_ema_from6800_30k_20260527.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionprefix_ema_from6800_30k_20260527.sh).
+
+2026-05-28 update: the EMA action-interface run preserved checkpoints `7000`
+and `8000` and was stopped after the 8300 gate. It proves the EMA prefix itself
+works (`pi_prefix_teacher_delta_rms≈0.002`,
+`pi_prefix_teacher_cos_to_teacher≈0.99999`), but action still rebounded:
+`loss_action_default_equiv` moved from `0.0213` at step7000 to `0.0470` at
+step8300 while `loss_total_minus_action` and active/downstream overlap stayed
+healthy. Do not treat EMA as the final cure. The next causal split is from the
+preserved step7000 checkpoint, but note the important prior exclusion:
+freeze-PICF / `policy_only` is not an untested production recipe.  The
+6500->6800 phase-1 record already showed that a stationary PICF prefix can keep
+action healthy.  The step7000 repeat is only a confirmation with explicit
+per-optimizer-group gradients and semantic trainable scope.  The real remaining
+split is action-head-only vs full semantic/PICF cotrain, to separate
+semantic-backbone overshoot, action-head capacity, and true belief/context
+damage.
+The maintained causal plan is
+[`docs/PICF_AQR_OWM_ACTION_REBOUND_CAUSAL_PLAN_20260528.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_REBOUND_CAUSAL_PLAN_20260528.md).
+The detailed evidence-exclusion and code dataflow follow-through is
+[`docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_FOLLOWTHROUGH_20260528.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_FOLLOWTHROUGH_20260528.md).
+2026-05-28 optimizer-group correction: FSDP prefixes root parameters as
+`_fsdp_wrapped_module.core.*`; the old optimizer split only checked
+`name.startswith("core.")`.  This made prior FSDP runs that claimed a slower
+`picf_core` LR suspect, because wrapped core parameters could fall through to
+`policy_head`.  The fix strips FSDP/DDP owner prefixes before grouping and
+forces optimizer-group summaries to print even under compact DDP logs.  New
+rebound runs must show both `lr_group_picf_core` and
+`grad_norm_group_picf_core`; otherwise they are invalid.  See
+[`docs/PICF_AQR_OWM_ACTION_REBOUND_DEEP_AUDIT_20260528_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_REBOUND_DEEP_AUDIT_20260528_TEMP.md).
+2026-05-29 convergence-helper retention audit: if the fixed-group rebound gate
+passes, do not delete the runtime belief-state invariants that are part of the
+current successful contract.  Keep active/context/reserve routing,
+same-role responsibility competition, slot-quality gating, object-candidate
+owner transport, posterior file/birth competition, tactile-to-object attachment,
+action-prefix RMS/EMA stabilization, and the two-timescale optimizer split.
+Keep object-scaffold losses weak/decayed, and keep slot-JEPA/support-pred/
+binding-consistency/denoising, VCAP, legacy local refinement, and blind SAM off
+unless a dedicated ablation reopens them.  Detailed rationale:
+[`docs/PICF_AQR_OWM_CONVERGENCE_HELPER_RETENTION_AUDIT_20260529_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CONVERGENCE_HELPER_RETENTION_AUDIT_20260529_TEMP.md).
+2026-05-29 late rebound follow-through: the corrected FSDP optimizer grouping
+run still reproduced the strict action rebound at steps 7550/7600/7650 while
+`loss_total_minus_action` and active/downstream overlap stayed bounded.
+Combined with `policyonly_actionsemantic` reaching the same band with frozen
+PICF and non-action loss zero, the direct root is now narrowed to
+semantic/action-side low-basin stability and/or a repeated hard data-window
+cluster.  Do not add another raw-overlap or slot-object patch before extending
+`action_head_only` past 7550 and adding data-window trace.  See
+[`docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_20260529_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_20260529_TEMP.md).
+The trainer now writes `window_trace_rank*.jsonl` beside `metrics.jsonl` so
+future rebound runs can compare exact sampled segment/start/prompt/action-norm
+windows against loss spikes instead of relying on visual guesses.  The active
+A7 diagnostic for this split is
+`picf_a7_ema7000_policyonly_actionhead_trace_from7000_30k_20260529`: it resumes
+the same step7000 checkpoint with a 30000-step scheduler horizon, freezes PICF
+and the semantic backbone, trains only the PI0.5 action projection/time heads,
+and logs the sampled window trace needed to decide whether the rebound survives
+without semantic-backbone drift.  As of the step7100 gate, the run is valid
+(`loss_total_minus_action=0`, `window_trace_rank0/1` present) and still matches
+the earlier action-head-only diagnostic (`loss_action_default_equiv=0.02577`).
+The decisive stop/continue band remains step7550/7600; preserve all 7000/8000
+root-cause checkpoints until that split is closed.
+2026-05-29 final gate: action-head-only also entered the strict reject band
+(`7550=0.03566`, `7600=0.03561`) with `loss_total_minus_action=0`.  The key
+new conclusion is that action-head-only, fixed-group, and policy-semantic
+match almost point-by-point in the 7050-7600 region.  This points to a
+deterministic sampled-window train-loss block, because resumed runs replay the
+same RNG stream, not to another raw-overlap or slot-loss defect.  The next
+required diagnostic is a no-update / near-zero-LR same-window replay and then a
+fixed held-out action probe for production runs.  Do not launch another
+architecture repair solely from raw train-window loss until that probe exists.
+Near-zero-LR replay closed this split: with actual LR near `1e-16` to `1e-20`,
+the same 7550/7600 spike appeared (`0.03684/0.03718`).  The trainer now defaults
+to step-indexed window RNG, keyed by `(seed, rank, global_step, micro_step,
+retry_count)`, so checkpoint continuation no longer replays the early sampled
+window stream.  Use `--no-step-indexed-window-rng` only to reproduce the legacy
+May-2026 diagnostics.  Consequence: old resumed-run `7050/7550` scalar loss
+thresholds are superseded for production decisions.  Corrected runs must be
+judged on their own step-indexed stream plus structural gates and, once added,
+a fixed held-out action probe.
+2026-05-29 production-criterion correction: the first corrected step-indexed
+run passed structural gates through step7550 but stayed around
+`loss_action_default_equiv=0.04`, which is not sufficient relative to the old
+`0.02` action reference.  The run was stopped as a production candidate.  Do
+not interpret this as a new slot/raw-overlap failure until fixed-window action
+probe evidence exists.  The maintained stationary probe is now
+`scripts/picf_fixed_window_action_probe.py`: it evaluates preserved checkpoints
+on identical accepted flat indices with no backward and no optimizer update.
+Use this probe before launching another architecture or loss rewrite based on
+raw live train-window loss.
+2026-05-29 data-window audit: the current corrected continuation writes exact
+`window_trace_rank*.jsonl` records.  The cloud audit through step7950 shows
+stable sidecar coverage (`proposal_count≈1.17..1.33`,
+`proposal_mask_point_count≈38.7..44.7`, `tracklet_count≈57.8..61.8`) and
+healthy active/downstream overlap.  Train-row oscillation is partly explained
+by sampled-window mixture, but the 0.04-0.05 action plateau is not explained
+by missing sidecars or raw inactive overlap.  See
+[`docs/PICF_AQR_OWM_DATA_WINDOW_DISTRIBUTION_AUDIT_20260529_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_DATA_WINDOW_DISTRIBUTION_AUDIT_20260529_TEMP.md).
+2026-05-29 current plateau decision: the corrected step-indexed continuation
+through step8250 has healthy active/downstream overlap, but `loss_action_default_equiv`
+remains in the `0.04..0.05` band and the latest eight-row mean worsened
+(`0.04445 -> 0.04826`).  This makes the live run low-value as an optimizer
+continuation.  The next required discriminator is not another raw-overlap
+repair; it is a fixed-window no-update probe comparing the preserved step7000
+and current step8000 checkpoints on identical accepted windows.  See
+[`docs/PICF_AQR_OWM_CURRENT_PLATEAU_ROOT_CAUSE_PLAN_20260529_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CURRENT_PLATEAU_ROOT_CAUSE_PLAN_20260529_TEMP.md).
+2026-05-29 fixed-window closure: the 64-window no-update probe shows current
+step8000 improves stationary action over current step7000
+(`0.061891 -> 0.057919`), while non-action/object-pull terms drift upward.  On
+the same windows, the archived 2026-04-22 PI0.5-only ablation is
+`0.058717/0.053813/0.051038` at steps `7500/10000/20000`; the old train-log
+`0.02` row is therefore not a fixed-window quality target.  Current step8000 is
+roughly old step7500 fixed-window action quality and trails old step20000 by
+about `0.0069`.  Use fixed-window probes plus CALVIN/video behavior for further
+decisions; do not launch another raw-overlap repair from live train rows alone.
+2026-05-30 anchor-LR/sampling causal gate: do not raise PICF/anchor LR based on
+live train rows alone.  Historical policy-only and near-zero-LR replays already
+showed that an apparent rebound can occur without PICF updates.  The maintained
+discriminator is now
+[`docs/PICF_AQR_OWM_ANCHOR_LR_SAMPLING_CAUSAL_PLAN_20260530_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ANCHOR_LR_SAMPLING_CAUSAL_PLAN_20260530_TEMP.md):
+first run a same-window no-update replay from the saved step8000 checkpoint,
+then only test a higher PICF/anchor LR branch if the replay proves model updates
+are the cause rather than sampled-window difficulty.  The 8050/8100/8150
+near-zero replay matched the live rows within `0.0004`, so the immediate split
+is closed: the next accepted path is a normal step8000 continuation gated by
+fixed-window action probes at step9000/10000, not another raw-overlap or
+anchor-LR repair from live train rows.
+The archived 2026-04-22 PI0.5-only ablation action baselines are now normalized
+in
+[`docs/PICF_AQR_OWM_4_22_ABLATION_BASELINE_ARCHIVE_20260530.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_4_22_ABLATION_BASELINE_ARCHIVE_20260530.md):
+old train-stream lows reached the `0.02` band, but fixed-window means are
+`0.058717/0.053813/0.051038` at steps `7500/10000/20000`; no verified `25000`
+checkpoint was present on inspected A7 storage.
+2026-05-28 speed update: the EMA7000 full-cotrain continuation also exposed a
+runtime regression: comparable previous full-cotrain runs were about
+`25-28 sec/step`, while the latest branch measured about `40-46 sec/step`.
+The maintained speed audit is
+[`docs/PICF_AQR_OWM_SPEED_REGRESSION_AUDIT_20260528.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SPEED_REGRESSION_AUDIT_20260528.md).
+It rules out sidecar-only overhead, optimizer-step overhead, overlay overhead,
+wrong unroll/burnin, and accidental unfreezing of Sonata/V-JEPA/AnyTouch.  The
+current bottleneck is forward/backward in the full-trainable transition path.
+Do not launch another production 30K branch from this slow path until the
+short same-checkpoint speed ablations in that audit identify the exact
+regressed component.
+
 2026-05-18 cleanup/audit update: use
 [`docs/PICF_AQR_OWM_CURRENT_STATE_20260518.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CURRENT_STATE_20260518.md)
 as the compact current-state and module-disposition report. This file remains
@@ -16,6 +211,136 @@ promotes them. Root-level A7/A5 diagnostic launch scripts have been archived
 under `scripts/experiments/picf_aqr_owm_202605_archive/`; canonical launch
 recipes should be copied into this README or `docs/CALVIN_VALIDATION_README.md`
 instead of left in the repository root.
+
+2026-05-22 frozen feature cache TODO: use
+[`docs/PICF_AQR_OWM_FROZEN_FEATURE_CACHE_TODO_20260522.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_FROZEN_FEATURE_CACHE_TODO_20260522.md)
+for the deterministic frozen-backbone cache plan. Checkpoint reuse already
+exists and is not a TODO. Saved posterior/slot/belief outputs are not part of
+the near-term plan because they can lock in teacher mistakes. The maintained
+optimization target is V-JEPA-first feature caching with strict manifest hashes
+so cached frozen features can be reused across different training runs without
+changing the training objective.
+
+2026-05-22 paper matrix / action-weight audit: use
+[`docs/PICF_AQR_OWM_SLOT_VLA_PAPER_MATRIX_20260522.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SLOT_VLA_PAPER_MATRIX_20260522.md)
+as the maintained slot/object-binding/VLA/tactile literature map. It reviews
+38 papers/systems and records which mechanisms are implemented, guarded, or
+rejected for PICF. Use
+[`docs/PICF_AQR_OWM_ACTION_DOMINANT_WEIGHT_AUDIT_20260522.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_DOMINANT_WEIGHT_AUDIT_20260522.md)
+for the step-1500 action-dominant gate: action lambdas are already at the
+traditional `2.0` scale, so the next clean intervention is reducing the weak
+object-scaffold floor rather than increasing action above the legacy scale.
+2026-05-24 update in the same audit: A7 continuous training was stopped after
+the saved step2000 checkpoint because action stayed on the `0.05` plateau,
+while the A5 model-only/fresh-optimizer probe reached the cleaner `0.041~0.047`
+band from the same model family.  The promoted continuation is
+`run_a7_from_a5_1500_freshopt_actionpolish_30k_20260524.sh`, which resumes
+from the A5 step1500 model-only checkpoint with fresh optimizer state and a
+lower `5e-5` action-polish LR.
+
+2026-05-23 PI0.5-close token budget probe: use
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_pi05_token_budget_frozen_policy_100_20260523.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_pi05_token_budget_frozen_policy_100_20260523.sh)
+to isolate the safe `semantic_max_length=200` change from structural router
+changes. This follows
+[`src/openpi/picf/README_PI05_PARITY_AUDIT.md`](/home/siyuanyue/Documents/openpi/src/openpi/picf/README_PI05_PARITY_AUDIT.md):
+CALVIN PI0.5 reference configs use `max_token_len=200`, while the generic
+PICF PaliGemma wrapper default is `256`. This probe intentionally does **not**
+reduce visual grid size, object query count, V-JEPA temporal tokens, or point
+capacity, because those change belief-router capacity rather than only prompt
+token budget. The expected effect is a small semantic-prefix/runtime parity
+gain, not a fix for the known V-JEPA `visual_maps` bottleneck.
+
+2026-05-23 V-JEPA frozen feature cache gate: use
+[`docs/PICF_AQR_OWM_VJEPA_CACHE_AND_ACTION200_REPORT_20260523.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_VJEPA_CACHE_AND_ACTION200_REPORT_20260523.md).
+The cache is now a real wrapper-level deterministic cache for frozen V-JEPA
+recent temporal suffix outputs consumed by PICF, with
+`off|read|read_or_encode` modes and strict manifest validation. It is not a
+full dense-volume archive, posterior/belief/action caching, or trainable
+PaliGemma caching, and is rejected when V-JEPA is trainable. The maintained
+200-step A7 gate compares
+`ACTION_LOSS_WEIGHT=0.50` against action-from-start `2.00` with the same slot,
+sidecar, owner, context, and token-budget contract.
+
+Cloud result:
+
+```text
+run: picf_a7_pi05tok200_frozen_policy_100_20260523
+host: A7, 2xA100, DDP
+steps: 100
+semantic_max_length: 200
+semantic_trainable/action_loss: off; frozen-policy slot/router validation
+sidecar: /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+checkpoint: /mnt/checkpoints/picf_core/picf_core/picf_a7_pi05tok200_frozen_policy_100_20260523/100
+```
+
+Metric summary:
+
+```text
+step  steps/s   total   obj_pull  active_ov  downstream_ov  raw_ov  owner_dist_m
+25    0.0802    0.160   0.335     0.0077     0.0281         0.470   0.0025
+50    0.0810    0.131   0.280     0.0038     0.0278         0.432   0.0020
+75    0.0774    0.123   0.226     0.0098     0.0542         0.455   0.0027
+100   0.0819    0.213   0.454     0.0053     0.1038         0.572   0.0093
+```
+
+Conclusion:
+
+- `semantic_max_length=200` is safe and should be used when making a strict
+  PI0.5 token-budget/parity claim.
+- `semantic_max_length=256` remains the maintained production/default setting
+  for large-data training and later full fine-tuning.  The extra prompt budget
+  is a safety margin, and the 100-step probe showed that reducing it to `200`
+  does not materially change the current runtime bottleneck.
+- It does not materially speed up this profile. Runtime remains about
+  `12.2-12.9 s/step`, matching the prior timing conclusion that V-JEPA
+  `visual_maps` and dense typed memory dominate, not PaliGemma prompt length.
+- Active-owner overlap remains healthy; raw reserve overlap is still telemetry
+  from overcomplete context/reserve rows and should not be optimized as the
+  primary scalar.
+- The 100-step `loss_anchor_object_pull` rebound shows this token-budget probe
+  is not an anchor-binding repair. Do not claim it fixes object localization.
+  Treat it as a parity/runtime profile only.
+
+2026-05-23 scalability/CALVIN repair plan: use
+[`docs/PICF_AQR_OWM_SCALABILITY_AND_CALVIN_REPAIR_PLAN_20260523.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SCALABILITY_AND_CALVIN_REPAIR_PLAN_20260523.md)
+as the current handoff for post-token-budget work.  It records the maintained
+`256` token decision, full-fine-tuning staging rules, frozen-feature-cache
+boundary, dense-context follow-up, and the next CALVIN repair gates.
+
+2026-05-23 inference-speed gate: the same scalability/CALVIN repair plan now
+contains the maintained A7 inference latency gate.  Use
+[`run_a7_calvin_inference_latency_gate_20260523.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_calvin_inference_latency_gate_20260523.sh)
+to compare PI0.5-only ablated serving against PICF-enabled serving with timing
+breakdown enabled and debug payloads disabled.  The acceptance target is PICF
+median policy latency within `2x` strong / `3x` weak of PI0.5-only latency.
+Training step time and debug-overlay CALVIN runs are not valid substitutes for
+this gate.  For deployment-speed profiling only, the gate supports
+`PICF_OBSERVE_INTERVAL=N`, which runs the PICF belief update every `N` control
+steps and reuses the last PICF control prefix between updates.  Keep `N=1` for
+correctness/behavior acceptance; test `N=4` when measuring whether inference
+can reach one-half to one-third PI0.5-only speed.
+
+2026-05-23 CALVIN recurrent-NaN repair: use
+[`docs/PICF_AQR_OWM_SCALABILITY_AND_CALVIN_REPAIR_PLAN_20260523.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SCALABILITY_AND_CALVIN_REPAIR_PLAN_20260523.md)
+Sections 8-10 for the 2000/3000 checkpoint action-video failure, the
+inference-only recurrent safety guard in
+[`src/openpi/picf/policy.py`](/home/siyuanyue/Documents/openpi/src/openpi/picf/policy.py),
+and the maintained `unroll/burnin` guidance. The guard clips/sanitizes PICF
+inference prefixes, falls back from nonfinite sampled action chunks, and
+prevents nonfinite recurrent state from being stored for the next CALVIN step.
+It does not change training losses. Do not respond to this failure by making
+normal training `unroll_steps` extremely large; use short TBPTT plus no-grad
+128-360 step closed-loop audits.
+
+2026-05-23 action-rebound root-cause audit: use
+[`docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_20260523.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_20260523.md)
+for the current loss diagnosis. The maintained conclusion is that the severe
+late action-loss rebound is not primarily explained by learning rate, raw
+same-role overlap, or weak sidecar scaffold dominance. The strongest current
+evidence points to action-visible PICF prefix nonstationarity coupled to
+posterior recycle/lifecycle drift and disabled raw slot-JEPA norm explosion.
+The next repair gate should log and stabilize the action-prefix/recurrent-state
+interface before another long-run result is interpreted as behavior quality.
 
 2026-05-19 SAM disposition: Blind automatic SAM is rejected for current
 PICF-AQR-OWM training. It was tested as class-agnostic proposal evidence and
@@ -136,6 +461,238 @@ follow-up: inject raw V-JEPA/static/wrist context through gated attention/bias,
 similar in spirit to JEPA-VLA/VLA-JEPA predictive embedding conditioning, but
 do not enable it in this 30K run because it would confound the owner-direct
 action-aware acceptance signal.
+
+2026-05-21 reserve/raw-overlap closure: use
+[`docs/PICF_AQR_OWM_OPEN_ISSUE_TRACKER_20260517_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_OPEN_ISSUE_TRACKER_20260517_TEMP.md)
+and
+[`docs/PICF_AQR_OWM_SLOT_PAPER_DATAFLOW_COMPARE_20260521_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SLOT_PAPER_DATAFLOW_COMPARE_20260521_TEMP.md)
+for the final raw-overlap root-cause audit.  The A7
+`picf_a7_slot_reserveaudit_frozen_policy_300_20260521` run completed 300 steps.
+The old active-owner collapse is not reproduced:
+`aqr_active_same_role_support_overlap_max` stays low and
+`posterior_active_duplicate_overlap_max` stays `0`.  Raw same-role overlap can
+still approach `1.0`, but the new reserve-scope metrics show it tracks
+reserve/no-object fixed-capacity rows rather than active object owners.  Do not
+add another global raw-overlap loss.  Judge the next 30K gate by active overlap,
+downstream overlap, posterior active duplicate overlap, split graph/posterior
+object-pull, action trend, and overlays.
+
+2026-05-21 OEML point-quality ablation closure: the point-quality/outlier
+robust variant was implemented and tested in
+`picf_a7_slot_qualitytarget_pointrobust_frozen_policy_300_20260521`. It
+mechanically reduced `loss_object_explanation_point` from the previous high
+2-3 range to about `0.5`, but worsened the more important owner metrics:
+`loss_anchor_object_pull` rose to `0.5416` versus `0.3417` in the previous
+quality-target run, and downstream overlap also worsened. Therefore this
+variant is kept only as an explicit ablation knob:
+`object_explanation_point_quality_gate_enabled=false` and
+`object_explanation_point_outlier_prior=0` are the production defaults. Treat
+`loss_object_explanation_point` as raw weak-target compactness telemetry, not
+as a scalar to suppress at the cost of object-owner pull. This matches the
+current slot-paper reading: QASA-style quality gates should demote weak slots,
+but should not remove the only useful geometry compactness teacher available
+from noisy CALVIN sidecars.
+
+2026-05-21 30K action-aware default-sync launch: the next production-length
+run is
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_defaultsync_long30k_ckpt500_20260521.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_defaultsync_long30k_ckpt500_20260521.sh).
+It is not a new architecture ablation. It preserves the 2026-05-21 default
+slot/OEML/owner/context contract, freezes V-JEPA/Sonata/AnyTouch pretrained
+modules, trains PaliGemma/PICF adapters/action-side heads, keeps guarded
+predictive/denoising losses disabled, and uses the clean full sidecar root at
+`/mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520`.
+
+Launch contract:
+
+```text
+steps: 30000
+action weight: 0.50
+semantic lr scale: 0.25
+unroll/burnin: unroll=2, burnin=1, state_only burnin
+checkpoint cadence: every 500 steps
+checkpoint retention: latest 3 numeric checkpoints
+loss print cadence: every 50 steps
+anchor overlays: every 100 steps
+```
+
+Why no higher initial action weight: `0.50` is already the validated short-run
+stress level; using a larger weight from step zero would confound behavior
+optimization with a new structural-pressure ablation.  If
+`loss_action_default_equiv` plateaus early while active-owner metrics remain
+healthy, resume from a recent 500-step checkpoint with a staged action-weight
+increase as a separate intervention.
+
+Action-dominant continuation:
+
+```text
+script:
+  scripts/experiments/picf_aqr_owm_202605_active/
+  run_a7_actionaware_defaultsync_action2_from500_long30k_20260521.sh
+
+default resume:
+  /mnt/checkpoints/picf_core/picf_core/
+  picf_a7_actionaware_defaultsync_long30k_ckpt500_20260521/500
+
+action weight:
+  2.0
+```
+
+This stage intentionally matches the legacy/default-equivalent action scale
+after the structural stage has produced a clean step-500 checkpoint.  Treat it
+as a staged continuation, not as evidence that starting from action weight 2.0
+is structurally safe.
+
+2026-05-22 handoff note: the source run reached step 500 and saved
+`/mnt/checkpoints/picf_core/picf_core/picf_a7_actionaware_defaultsync_long30k_ckpt500_20260521/500`.
+The hard active-owner gate passed (`active_duplicate=0`,
+`active_support_overlap=0.139`, `recycle_rate~=0`), but object-pull was elevated
+(`loss_anchor_object_pull~=1.49`). Therefore the action-2.0 run is an explicit
+pressure continuation. Keep the action-0.50 checkpoint as the rollback point.
+
+The action-2.0 continuation reached step 700 without reproducing old active
+collapse: `loss_action_default_equiv` improved from `0.0609` at step550 to
+`0.0460` at step700, `loss_anchor_object_pull` improved from `0.966` to
+`0.427`, `posterior_file_competition_active_duplicate_overlap_max` stayed `0`,
+`posterior_recycle_rate` stayed about `0.08-0.12`, and downstream overlap
+improved to `0.234` by step700. This supports continuing the action-dominant
+stage while keeping the step500 checkpoint as rollback evidence.
+
+2026-05-22 step1000 watch result: the action-2.0 continuation remained alive,
+saved checkpoint `1000`, and did not trigger the historical active-collapse
+failure. From step550 to step1000, `loss_action_default_equiv` improved from
+`0.0609` to `0.0522` but did not keep the step700 local minimum (`0.0460`);
+this is action progress with early plateau/oscillation, not a reason to raise
+above legacy/default action scale yet. `active_duplicate` stayed `0`,
+`active_same_role_support_overlap_max` stayed in the `0.06-0.18` band,
+`downstream_same_role_support_overlap_max` stayed below `0.36`, and
+`posterior_recycle_rate` stayed near `0.08-0.13`. `loss_anchor_object_pull`
+improved strongly to `0.090` at step900, then bounced to `0.401` at step1000;
+therefore owner-target alignment remains a watch item, but it is not the old
+collapse signature. Raw `loss_slot_jepa` is large in this run, but
+`lambda_slot_jepa=0`; treat it as disabled predictive telemetry, not as a
+training failure.
+
+2026-05-23 local follow-up: raw `loss_slot_jepa` is now split into normalized
+diagnostic fields so future runs can distinguish direction error from latent
+norm drift:
+
+```text
+loss_slot_jepa_direction
+loss_slot_jepa_log_norm
+loss_slot_jepa_pred_norm
+loss_slot_jepa_target_norm
+loss_slot_jepa_matched_target_norm
+```
+
+The training policy is unchanged: keep `lambda_slot_jepa=0` until the normalized
+diagnostics are stable.  The detailed TODO and interpretation gates are in:
+
+```text
+docs/PICF_AQR_OWM_SLOT_JEPA_NORMALIZED_TODO_20260523.md
+```
+
+2026-05-22 action-from-zero relaunch: the action-2.0 continuation was archived
+after reaching about step 1900 because it had entered an action plateau and
+showed late gradient spikes. The archived loss bundle is
+`/mnt/picf_run_logs/archive_20260522_action2_from500_plateau/`, including the
+full log, `selected_metrics.csv`, and `loss_summary.json`. The key archive
+reading is:
+
+```text
+step 550 -> 1900:
+  loss_action_default_equiv: 0.06095 -> 0.05156
+  min loss_action_default_equiv: 0.04598
+  loss_anchor_pv: 0.67187 -> 0.58852
+  loss_aqr_denoising: 0.88851 -> 1.19545
+  preclip_grad_norm max: 869.59
+```
+
+This is useful evidence that the staged `0.50 -> 2.0` action schedule is safe
+against old active-owner collapse, but it is not efficient enough to justify
+continuing unchanged. The new run
+`picf_a7_actionaware_defaultsync_action2_from0_long30k_20260522` starts from
+step 0 with `ACTION_LOSS_WEIGHT=2.0`, keeps the same sidecar/OEML/owner/context
+contract, saves every 500 steps, keeps the latest 3 checkpoints, logs every 50
+steps, and writes anchor overlays every 100 steps. This is the clean test of
+whether normal legacy/default-equivalent action pressure should be active from
+the beginning instead of introduced after a 500-step low-action warm stage.
+
+2026-05-22 weak-scaffold quality/decay update: the step-0 action-2.0 run showed
+that early action pressure is not the immediate failure mode.  By step 450,
+`loss_action_default_equiv` was about `0.064`, while the active sidecar scaffold
+contributed roughly
+
+```text
+anchor_object_pull:       1.170 * 0.35 ~= 0.410
+object_explanation_point: 5.622 * 0.02 ~= 0.112
+other scaffold terms:                 ~= 0.006
+```
+
+so the weak sidecar teacher became about eight times larger than the action
+objective.  That violates the PICF contract: contact-motion/tracklet sidecars
+are measurement evidence, not hard labels.  The accepted continuation is now
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_qgdecay_from500_long30k_20260522.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionaware_qgdecay_from500_long30k_20260522.sh).
+It resumes from the step-500 checkpoint of
+`picf_a7_actionaware_defaultsync_action2_from0_long30k_20260522`, keeps action
+weight `2.0`, and applies a cosine weak-scaffold schedule:
+
+```math
+s(t)=s_{min} + (1-s_{min})\frac{1+\cos(\pi u)}{2},
+\quad
+u=\mathrm{clip}\left(\frac{t-500}{1500-500},0,1\right),
+\quad
+s_{min}=0.10.
+```
+
+The scale applies only to weak object-scaffold terms:
+
+```text
+lambda_anchor_object_pull
+lambda_object_explanation_point
+lambda_object_explanation_contact
+lambda_object_explanation_duplicate
+lambda_object_explanation_background
+lambda_mapg_support_diversity
+```
+
+It does not scale action, dense context, slot-quality selection, owner transport,
+posterior competition, or disabled predictive losses.  This follows the
+QASA-style principle that slot quality/selection should be decoupled from the
+main reconstruction/control pressure, while keeping the JEPA/VLA principle that
+dense predictive context remains available and is not forced into object slots.
+The target-quality gate for `anchor_object_pull` is also sharpened with
+`anchor_object_pull_target_quality_power=2.0`, so diffuse masks are weak evidence
+and compact contact-motion targets remain useful.  Do not enable
+`object_explanation_point_quality_gate` by default: the 2026-05-21 ablation
+made the scalar point loss smaller but worsened owner pull and downstream
+overlap.
+
+Operational rule:
+
+```text
+If the source run reaches step 500 without active duplicate collapse:
+  stop/archive it and resume with qgdecay from step 500.
+
+If active duplicate collapse appears before step 500:
+  do not resume; restart from zero with the same qgdecay schedule and inspect
+  sidecar quality/owner transport.
+
+If qgdecay reaches step 1500 and action remains plateaued while owner metrics
+  are healthy:
+  adjust action LR/weight as a separate action-capacity ablation, not by
+  increasing sidecar scaffold again.
+```
+
+2026-05-21 default-sync frozen-policy gate: after reverting point-quality robust
+gating to an explicit ablation, A7 completed
+`picf_a7_slot_qualitytarget_defaultsync_frozen_policy_300_20260521`. This is the
+current short structural acceptance row. `loss_anchor_object_pull` finished at
+`0.2157` (`graph=0.1528`, `posterior=0.2173`), active support overlap finished
+at `0.0314`, downstream overlap at `0.1498`, and posterior active duplicate
+overlap stayed `0`. Raw overlap still saturated (`0.9962`), but reserve overlap
+also saturated (`0.9959`), matching the reserve/no-object telemetry diagnosis.
+The gate passes frozen-policy structure; it does not replace action-aware 30K
+and CALVIN/video acceptance.
 
 2026-05-20 full sidecar generation gate: the long-run launcher now defaults to
 the clean production sidecar root
@@ -6672,6 +7229,35 @@ The current open issue ledger is
 It tracks closed engineering bugs separately from items that still require
 long-run behavior evidence, proposal/tracklet sidecars, or unavailable labels.
 
+The latest slot-paper dataflow comparison and the 2026-05-21 300-step gate are
+[`docs/PICF_AQR_OWM_SLOT_PAPER_DATAFLOW_COMPARE_20260521_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SLOT_PAPER_DATAFLOW_COMPARE_20260521_TEMP.md).
+It explicitly maps Object Binding in ViTs, MetaSlot, STORM, and SlotVLA onto the
+PICF belief-router contract.  The accepted conclusion is: keep pairwise binding
+subspaces, variable effective object count, duplicate active-owner suppression,
+weak sidecar/contact/tracklet measurement evidence, and dense context retention;
+reject blind SAM, hard visual VQ prototype truth, hard sidecar labels, and a
+full RGB reconstruction decoder in the action path.  It also records the new
+`loss_anchor_object_pull_{graph,posterior}` split required before interpreting
+the next frozen PaliGemma/action-head 300-step validation.
+The matching frozen-policy launcher is
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_slot_splitpull_frozen_policy_300_20260521.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_slot_splitpull_frozen_policy_300_20260521.sh).
+
+The 2026-05-22 local full audit is
+[`docs/PICF_AQR_OWM_LOCAL_FULL_AUDIT_20260522_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_LOCAL_FULL_AUDIT_20260522_TEMP.md).
+It reruns the local syntax, contract, professor-grade, MVTrack/OEML,
+Object-Binding/SlotContrast provenance, binding math, owner/reserve/context,
+posterior-file, tactile, and regression-test checks.  It also records the
+stale audit correction from old graph-token scaling to the current maintained
+attention-bias path.  Use this as the current local code-level gate before
+claiming that the active 30k run is ready for behavior-level judgment.
+
+The 2026-05-22 mathematical consistency and document index is
+[`docs/PICF_AQR_OWM_MATH_CONSISTENCY_AND_DOC_INDEX_20260522_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MATH_CONSISTENCY_AND_DOC_INDEX_20260522_TEMP.md).
+It is the current navigation layer for resuming this line of work: start there
+when checking whether a proposed slot/object-binding mechanism is accepted,
+rejected, or deferred, and do not restart from archived blind-SAM or raw-overlap
+threads without first reading its canonical ordering.
+
 The current experiment note for the task-owner/sidecar/tracklet cleanup is
 [`docs/PICF_AQR_OWM_EXPERIMENT_NOTE_20260517_TASK_OWNER_SIDECAREDS_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_EXPERIMENT_NOTE_20260517_TASK_OWNER_SIDECAREDS_TEMP.md).
 It archives completed engineering repairs, records the step-50/100/150/200/250/300
@@ -6732,3 +7318,78 @@ Every new training overlay writes two PNG variants:
     hides gray reserve files. Use this to judge whether active object files are
     actually bound to the target/contact region.
 ```
+
+The current action-loss rebound root-cause and prefix-stability gate are
+[`docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_20260523.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_20260523.md).
+This is the maintained entry for the 2026-05-24 next step: bound the
+action-visible PICF prefix with interface RMS normalization, log `pi_prefix_*`
+stability metrics, run the 300-step gate
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionprefix_rmsnorm_gate300_20260524.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionprefix_rmsnorm_gate300_20260524.sh),
+and only then promote the same profile to the 30K launcher
+[`scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionprefix_rmsnorm_long30k_20260524.sh`](/home/siyuanyue/Documents/openpi/scripts/experiments/picf_aqr_owm_202605_active/run_a7_actionprefix_rmsnorm_long30k_20260524.sh).
+
+The current action-polish continuity archive is
+[`docs/PICF_AQR_OWM_ACTION_DOMINANT_WEIGHT_AUDIT_20260522.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_DOMINANT_WEIGHT_AUDIT_20260522.md).
+As of 2026-05-25, the maintained active run is:
+
+```text
+picf_a7_from_a5_1500_freshopt_actionpolish_30k_20260524
+```
+
+It resumes the A5 step-1500 model weights with a fresh optimizer and normal
+action-dominant pressure.  The step-2500 checkpoint is healthy enough to keep
+training continuously:
+
+```text
+loss_action_default_equiv          0.0363
+active same-role support overlap   0.1300
+downstream same-role support       0.1289
+posterior_recycle_rate             0.1284
+```
+
+This already beats the archived 2026-04-22 ablation's step-5000 action-loss
+level, but it does not yet replace behavior-level CALVIN/video evidence.  Do
+not interrupt this run for a mid-stream eval unless a real collapse appears;
+the point of this experiment is to preserve the post-handoff optimizer
+trajectory.
+
+If the post-2400 action rebound must be isolated, use the step-2500 fresh
+optimizer causal probe documented in
+[`docs/PICF_AQR_OWM_ACTION_DOMINANT_WEIGHT_AUDIT_20260522.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_DOMINANT_WEIGHT_AUDIT_20260522.md).
+That probe must keep `num_train_steps=30000` even when it is stopped early;
+shortening the total horizon changes the LR schedule and breaks the comparison.
+The paired low-LR control is
+`picf_pc1_from_a7_2500_freshopt_lr2e5_30k_20260525`: it keeps the same A7
+step2500 checkpoint, sidecar data, action weight, slot/OEML recipe, and 30000
+step scheduler, and changes only the phase-boundary LR from `5e-5` to `2e-5`.
+Operational correction: A7's checkpoint retention later removed step2500, so
+the actually runnable low-LR current-phase control is
+`picf_pc1_from_a7_4500_freshopt_lr2e5_30k_20260525`.  Treat it as a test of the
+current A7 plateau state, not as a strict step2500 pair.
+
+The 2026-05-28 speed-regression audit is
+[`docs/PICF_AQR_OWM_SPEED_REGRESSION_AUDIT_20260528.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_SPEED_REGRESSION_AUDIT_20260528.md).
+Use it before launching any new 30K run with trainable PaliGemma. The
+production semantic cotrain boundary is now:
+
+```text
+semantic_trainable_scope = backbone_only
+semantic_gradient_checkpointing = enabled
+```
+
+This still trains the PaliGemma/Gemma semantic backbone, but freezes the
+wrapper-local restored PI0 flow/time heads. That is the historical fast
+full-cotrain boundary and restored the same-checkpoint A7 smoke from the
+39-46 sec/step regression band to about 25 sec/step. `semantic_trainable_scope
+= all` is retained only as an explicit diagnostic mode because it is materially
+slower under FSDP and is not the default production recipe.
+
+The strict post-speedfix action-rebound gate is documented in
+[`docs/PICF_AQR_OWM_ACTION_REBOUND_CAUSAL_PLAN_20260528.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_REBOUND_CAUSAL_PLAN_20260528.md).
+Do not use shortened total horizons to judge the late rebound. The live A7 gate
+`picf_a7_reboundgate_30khorizon_from7000_scopefix_20260528` resumes the
+preserved EMA step7000 checkpoint with `NUM_TRAIN_STEPS=30000`,
+`semantic_trainable_scope=backbone_only`, semantic gradient checkpointing on,
+and the restored historical 25 sec/step boundary.  The pass/fail metric is
+`loss_action_default_equiv` plus bounded `loss_total_minus_action` and healthy
+active/downstream overlap; raw reserve overlap alone is not the rebound cause.

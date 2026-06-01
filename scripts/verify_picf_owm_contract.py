@@ -978,9 +978,10 @@ def run_checks() -> list[Check]:
             _contains(
                 policy,
                 "def _action_prefix_tokens",
+                "def _training_action_prefix_tokens",
                 "action_prefix_stopgrad",
                 "tokens.detach()",
-                "extra_prefix_tokens=self._action_prefix_tokens",
+                "extra_prefix_tokens=prefix_tokens",
             )
             and _contains(trainer, "--picf-action-prefix-stopgrad", "action_prefix_stopgrad"),
             "Cotrain must support stopping action-flow gradients at PICF pi-prefix tokens without detaching the action loss itself.",
@@ -1159,6 +1160,19 @@ def run_checks() -> list[Check]:
                 "path.name.startswith(\"tmp_\")",
             ),
             "Trainer must support bounded checkpoint retention without deleting non-step diagnostics.",
+        ),
+        Check(
+            "trainer_window_rng_is_resume_safe",
+            _contains(
+                trainer,
+                "def _step_indexed_window_rng",
+                "--step-indexed-window-rng",
+                "checkpoint resume does not replay",
+                "step_indexed_window_rng",
+                "sample_rng =",
+                "source.window(flat_index, rng=sample_rng)",
+            ),
+            "Trainer sampled-window RNG must be keyed by global step so resumed runs do not replay early windows.",
         ),
         Check(
             "trainer_logs_required_owm_metrics",

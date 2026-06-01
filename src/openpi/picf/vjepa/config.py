@@ -21,6 +21,14 @@ class VjepaVisualConfig:
     trainable: bool = False
     feature_mode: str = "auto"
     use_activation_checkpointing: bool = False
+    feature_cache_root: str | None = None
+    feature_cache_mode: str = "off"
+    # Frozen-feature cache is a PICF runtime cache, not an archival dump of the
+    # full V-JEPA temporal volume.  PICF consumes current_map() and recent_maps(),
+    # so retaining a bounded suffix preserves the training objective while
+    # avoiding hundreds of MB of I/O per clip.
+    feature_cache_temporal_slices: int = 4
+    feature_cache_storage_dtype: str = "bfloat16"
     normalize_mean: tuple[float, float, float] = (0.485, 0.456, 0.406)
     normalize_std: tuple[float, float, float] = (0.229, 0.224, 0.225)
     delta_v_max_s: float = 0.15

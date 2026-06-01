@@ -1,0 +1,52 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+# Production-length action-prefix stabilized run.
+#
+# Start only after the corresponding 300-step gate shows stable prefix/action
+# metrics.  This preserves the same validated slot/OEML/owner/context profile,
+# freezes only the large pretrained perception backbones, and leaves PaliGemma,
+# connectors, PICF, and action-side trainable.
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+
+export EXP="${EXP:-picf_a7_actionprefix_rmsnorm_long30k_20260524}"
+export NUM_TRAIN_STEPS="${NUM_TRAIN_STEPS:-30000}"
+export TRAINING_STRATEGY="${TRAINING_STRATEGY:-fsdp_full_shard}"
+export OPTIMIZER_SHARDING="${OPTIMIZER_SHARDING:-none}"
+export PYTORCH_CUDA_ALLOC_CONF="${PYTORCH_CUDA_ALLOC_CONF:-expandable_segments:True}"
+
+export SEMANTIC_TRAINABLE="${SEMANTIC_TRAINABLE:-1}"
+export SEMANTIC_LR_SCALE="${SEMANTIC_LR_SCALE:-0.25}"
+export ACTION_LOSS_WEIGHT="${ACTION_LOSS_WEIGHT:-2.0}"
+
+export ACTION_PREFIX_NORM_MODE="${ACTION_PREFIX_NORM_MODE:-rmsnorm}"
+export ACTION_PREFIX_RMS_TARGET="${ACTION_PREFIX_RMS_TARGET:-1.0}"
+export ACTION_PREFIX_NORM_EPS="${ACTION_PREFIX_NORM_EPS:-1e-6}"
+export ACTION_PREFIX_VALUE_CLIP="${ACTION_PREFIX_VALUE_CLIP:-0.0}"
+
+export SAVE_INTERVAL="${SAVE_INTERVAL:-500}"
+export KEEP_LAST_CHECKPOINTS="${KEEP_LAST_CHECKPOINTS:-3}"
+export LOG_INTERVAL="${LOG_INTERVAL:-50}"
+export ANCHOR_OVERLAY_INTERVAL="${ANCHOR_OVERLAY_INTERVAL:-100}"
+export SIDECAR_ROOT="${SIDECAR_ROOT:-/mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520}"
+
+export OBJECT_SCAFFOLD_DECAY_MODE="${OBJECT_SCAFFOLD_DECAY_MODE:-cosine}"
+export OBJECT_SCAFFOLD_DECAY_START_STEP="${OBJECT_SCAFFOLD_DECAY_START_STEP:-0}"
+export OBJECT_SCAFFOLD_DECAY_END_STEP="${OBJECT_SCAFFOLD_DECAY_END_STEP:-1500}"
+export OBJECT_SCAFFOLD_DECAY_FLOOR="${OBJECT_SCAFFOLD_DECAY_FLOOR:-0.03}"
+export ANCHOR_OBJECT_PULL_TARGET_QUALITY_POWER="${ANCHOR_OBJECT_PULL_TARGET_QUALITY_POWER:-2.0}"
+export ANCHOR_OBJECT_PULL_TARGET_QUALITY_MIN="${ANCHOR_OBJECT_PULL_TARGET_QUALITY_MIN:-0.05}"
+export ANCHOR_OBJECT_PULL_TARGET_QUALITY_SIGMA_M="${ANCHOR_OBJECT_PULL_TARGET_QUALITY_SIGMA_M:-0.08}"
+
+if [[ -z "${SEGMENTS:-}" ]]; then
+  SEGMENT_FILE="${SIDECAR_ROOT}/calvin_segment_indices.txt"
+  if [[ ! -f "${SEGMENT_FILE}" ]]; then
+    echo "Missing sidecar segment file: ${SEGMENT_FILE}" >&2
+    exit 2
+  fi
+  SEGMENTS="$(tr -d '\n' < "${SEGMENT_FILE}")"
+  export SEGMENTS
+fi
+
+exec "${SCRIPT_DIR}/run_a7_actionaware_after_dedup_smoke300_20260520.sh"

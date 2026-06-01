@@ -258,6 +258,8 @@ class PicfObjectExplanationState:
     candidate_coverage: torch.Tensor | None = None
     candidate_background: torch.Tensor | None = None
     candidate_duplicate_overlap: torch.Tensor | None = None
+    anchor_base_quality: torch.Tensor | None = None
+    anchor_point_quality: torch.Tensor | None = None
 
 
 @dataclasses.dataclass
@@ -385,6 +387,10 @@ class PicfConditionedControlState:
     pi_prefix_tokens: torch.Tensor
     future_condition_tokens: torch.Tensor
     graph_tokens: torch.Tensor | None = None
+    pi_prefix_pre_rms: torch.Tensor | None = None
+    pi_prefix_post_rms: torch.Tensor | None = None
+    pi_prefix_scale: torch.Tensor | None = None
+    pi_prefix_gate: torch.Tensor | None = None
 
 
 @dataclasses.dataclass

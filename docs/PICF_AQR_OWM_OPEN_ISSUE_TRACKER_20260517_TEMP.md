@@ -66,6 +66,14 @@ Status at 2026-05-21 00:24 CST:
   about 82% of sampled files have current non-empty proposal/mask. This is not
   a tracklet failure. The maintained contract is current tracklet plus nearest
   non-empty proposal/mask borrowing with proposal_age decay.
+
+2026-05-21 reserve/raw-overlap audit disposition:
+  the 300-step reserve-scope A7 gate completed.  The old active-owner collapse
+  is not reproduced.  Raw same-role overlap still saturates, but it tracks
+  reserve/no-object rows rather than active object owners.  Treat raw overlap
+  as mixed telemetry; judge production health with active overlap, downstream
+  overlap, posterior active duplicate overlap, and split graph/posterior
+  object-pull.
 ```
 
 This section centralizes the current A7-facing issue list.  Earlier versions of
@@ -79,6 +87,124 @@ Old A5 partial/samseed/diagnostic sidecar runs remain historical evidence only.
 Do not judge the model by action loss alone.
 The main remaining risk is long-run rebound of object-binding health metrics
 after an initially healthy phase.
+```
+
+2026-05-26 cotrain rebound update:
+
+```text
+PC1 policy-only causal probe:
+  freezing `core.*` while keeping PICF forward enabled removed direct PICF
+  prefix motion and action improved in the 6050-6300 window.
+
+A7 same-timescale cotrain:
+  action improved early but rebounded while structural/PICF state continued to
+  move.
+
+Root issue:
+  not "cotrain is bad"; the issue is same-timescale cotrain where structural
+  losses move the action-visible PICF prefix as fast as the action head learns.
+
+Maintained repair:
+  two-timescale cotrain with `--picf-core-lr-scale` below 1.0, action at the
+  normal 2.0 scale, weak scaffold floor, and raw predictive losses disabled.
+
+Reference:
+  docs/PICF_AQR_OWM_COTRAIN_TWO_TIMESCALE_FINAL_20260526.md
+```
+
+2026-05-28 optimizer-group bug update:
+
+```text
+Issue:
+  FSDP wraps root parameter names as `_fsdp_wrapped_module.core.*`.
+  The optimizer split previously checked only `name.startswith("core.")`.
+
+Consequence:
+  In FSDP full-shard runs, wrapped PICF core parameters could be assigned to
+  `policy_head`, so `PICF_CORE_LR_SCALE` did not necessarily slow the core.
+  This invalidates prior causal claims that core0.02/core0.005 had truly
+  tested slow-PICF two-timescale cotrain.
+
+Fix:
+  scripts/picf_core_train.py now canonicalizes leading `module.` and
+  `_fsdp_wrapped_module.` before assigning `picf_core` vs `policy_head`.
+
+Local validation:
+  python -m pytest scripts/picf_core_train_test.py -k "optimizer or picf_core_group" -q
+    16 passed
+  python -m pytest scripts/picf_core_train_test.py -q
+    134 passed
+  verify_picf_owm_contract / strict_diagnose / dataflow_trace / latest slot
+  audit all pass.
+
+Runtime acceptance:
+  the next FSDP run must log both `lr_group_picf_core` and
+  `grad_norm_group_picf_core`.  If either is absent, the run is invalid for
+  action-rebound root-cause analysis.
+
+Runtime first gate:
+  `picf_a7_reboundgate_ema_recipe_scopefix_lrgroupfix_from7000_30k_20260528`
+  step7050 logs both required fields and shows the intended 0.005x PICF-core
+  LR (`3.175974e-7` vs policy-head `6.351949e-5`).  Action at 7050 is
+  `0.022599`, better than the prior EMA 7050 `~0.02610`.
+
+Runtime 7300 update:
+  step7200 action_default_equiv = 0.018195
+  step7250 action_default_equiv = 0.026179
+  step7300 action_default_equiv = 0.026738
+  step7300 loss_total_minus_action = 0.009539
+  step7300 active/downstream overlap = 0.015000 / 0.020547
+
+Runtime 7450 update:
+  step7350 action_default_equiv = 0.027469
+  step7400 action_default_equiv = 0.026737
+  step7450 action_default_equiv = 0.027944
+  tail6 action_default_equiv mean = 0.025544
+  tail6 action_default_equiv max = 0.027944
+  step7450 loss_total_minus_action = 0.011623
+  step7450 active/downstream overlap = 0.079741 / 0.079446
+
+Runtime 7550 update:
+  step7500 action_default_equiv = 0.030833
+  step7550 action_default_equiv = 0.035953
+  step7550 loss_total_minus_action = 0.011119
+  step7550 active/downstream overlap = 0.105000 / 0.109954
+  recent >=0.035 count = 1 row, not yet two-row rejection
+
+Decision:
+  yellow warning at 7550.  Do not switch until step7600 unless the run crashes.
+  If step7600 is also >=0.035, mark the rebound reproduced under the fixed
+  FSDP LR groups.  If step7600 falls below 0.035, keep watching 7650/8000.
+
+Status:
+  closed-code / open-late-window / yellow warning.  The code bug is fixed and
+  the 7350 runtime hard gate passed, but 7550 shows the first action-specific
+  warning row.
+
+Runtime 7600 update:
+  step7600 action_default_equiv = 0.035442
+  step7600 loss_total_minus_action = 0.011023
+  step7600 active/downstream overlap = 0.060000 / 0.066035
+  step7600 lr_group_picf_core = 3.126069e-7
+  step7600 lr_group_policy_head = 6.252138e-5
+
+Decision:
+  fixed-group rebound reproduced under the strict two-row rule.  The FSDP
+  grouping fix is closed-code and retained, but it is not the full action
+  rebound cure.  Because policyonly_actionsemantic also reaches
+  `loss_action_default_equiv=0.036278` at step7550 with PICF frozen and
+  `loss_total_minus_action=0`, the direct root is now narrowed to
+  semantic/action-side low-basin stability and/or a repeated hard data-window
+  cluster, not raw overlap or non-action structural losses.
+
+Next required counterfactuals:
+  1. extend action_head_only from the same step7000 checkpoint beyond 7550/8000;
+  2. add action-window trace fields for dataset segment, episode/transition,
+     prompt hash, target norms, and per-component action loss;
+  3. replay or isolate the 7500-7600 window with semantic frozen vs trainable.
+
+Reference:
+  docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_20260529_TEMP.md
 ```
 
 ### Current P0 Watch Metrics
@@ -229,14 +355,14 @@ not sufficient by themselves.
      generation and a full-sidecar anchor-only diagnostic.
    Result:
      the old SAM-seeded/diagnostic roots proved the dataflow but were not clean
-     production evidence.  The maintained root is now regenerated from
+     production evidence.  The maintained root was regenerated from
      contact-motion proposal/mask evidence into a clean KLT tracklet root, with
-     sparse mask keys preserved during merge and final proposal/mask/tracklet
-     auditing required before long training.
+     sparse mask keys preserved during merge.  The 2026-05-21 reserve audit
+     shows proposal and tracklet dataflow alive through the training path.
    Verdict:
-     open-train: data generation is in progress; if the final audit passes,
-     tracklet/proposal/mask sidecars are accepted for the next 30K validation
-     but behavior benefit still requires long-run evidence.
+     closed-dataflow / open-train: sidecar generation and runtime threading are
+     accepted for the next 30K validation, but behavior benefit still requires
+     long-run evidence.
 
 10. Frozen-PaliGemma action diagnostic
     Tried:
@@ -264,8 +390,11 @@ bugs were fixed.  The remaining scientific/optimization issue is:
 ```text
 The model can learn action quickly, and active duplicate capacity is much
 better controlled than before, but AQR support assignment and posterior
-lifecycle can still drift toward repeated same-role evidence unless the active
-owner selected by task/semantic/contact evidence remains stable.
+lifecycle still require long-run validation.  The latest reserve audit shows
+that high raw same-role overlap is mostly reserve/no-object telemetry, not
+active object-owner collapse.  The open question is whether the active owner
+path, downstream context capacity, and weak sidecar/object-pull stay stable
+under full action-aware co-training.
 ```
 
 Therefore the next A7 decisions must use this acceptance bundle, not a single
@@ -3900,4 +4029,3041 @@ picf_owm_mvtrack_deep_audit.py --fail-on-fail:
 
 git diff --check:
   PASS
+```
+
+## 2026-05-21 30K Full-Sidecar Run Interruption And Loss Triage
+
+Run:
+
+```text
+remote:
+  A7 / qgE72e
+
+experiment:
+  picf_a7_actionaware_ownerdirect_long30k_fullsidecar_20260521
+
+log:
+  /mnt/picf_run_logs/picf_a7_actionaware_ownerdirect_long30k_fullsidecar_20260521.log
+
+intended contract:
+  30000 steps
+  save every 2500 steps
+  keep last 3 checkpoints
+  anchor overlay every 100 steps
+  visual diagnostics every 500 steps
+  PaliGemma trainable
+  Sonata / V-JEPA / AnyTouch frozen
+  guarded slot_jepa / support_pred / binding_consistency / denoising losses off
+```
+
+Hard interruption:
+
+```text
+status:
+  stopped at step 500 before the first 2500-step checkpoint
+
+root cause:
+  scripts/picf_core_train.py::_save_visual_diagnostics built compare_grid rows
+  with current/physical/semantic/target image heights 256/256/200/256.
+
+classification:
+  engineering diagnostics bug, not a numeric training divergence.
+
+fix:
+  resize current, physical, semantic, and target images to the same compare_size
+  before concatenate; missing physical/semantic predictions now use zeros with
+  the selected compare_size instead of raw target_next size.
+
+regression test:
+  test_save_visual_diagnostics_handles_missing_prediction_size_mismatch
+```
+
+Validated metric window before interruption:
+
+```text
+step:
+  50 -> 100 -> 150 -> 200 -> 250 -> 300 -> 350 -> 400 -> 450 -> 500
+
+loss_action_default_equiv:
+  0.1003 -> 0.0712 -> 0.0679 -> 0.0601 -> 0.0620 ->
+  0.0645 -> 0.0655 -> 0.0623 -> 0.0672 -> 0.0662
+
+loss_anchor_pv:
+  0.6784 -> 0.6481 -> 0.6408 -> 0.6098 -> 0.5773 ->
+  0.6050 -> 0.6205 -> 0.6176 -> 0.6290 -> 0.6246
+
+loss_anchor_object_pull:
+  0.3563 -> 0.4056 -> 0.7177 -> 0.4286 -> 0.8464 ->
+  0.7654 -> 0.6064 -> 0.8417 -> 1.0885 -> 1.1643
+
+loss_object_explanation_point:
+  1.4734 -> 2.4118 -> 2.2104 -> 2.5046 -> 3.3775 ->
+  3.2065 -> 3.6612 -> 4.1334 -> 5.5552 -> 6.2926
+
+active_same_role_support_overlap_max:
+  0.0091 -> 0.0252 -> 0.0188 -> 0.0472 -> 0.1212 ->
+  0.0491 -> 0.0813 -> 0.1841 -> 0.1690 -> 0.2122
+
+downstream_same_role_support_overlap_max:
+  0.2939 -> 0.3543 -> 0.3678 -> 0.4805 -> 0.4521 ->
+  0.4260 -> 0.4799 -> 0.4626 -> 0.4548 -> 0.4335
+
+raw_same_role_support_overlap_max:
+  0.4713 -> 0.6874 -> 0.7205 -> 0.9436 -> 0.9974 ->
+  0.9988 -> 0.9991 -> 0.9999 -> 1.0000 -> 1.0000
+
+context_anchor_count:
+  7.69 -> 7.63 -> 7.51 -> 6.85 -> 3.92 ->
+  4.32 -> 4.22 -> 2.40 -> 2.68 -> 1.97
+
+posterior_file_competition_active_duplicate_overlap_max:
+  0.0 at every logged gate
+
+posterior_recycle_rate:
+  0.087 -> 0.063 -> 0.051 -> 0.099 -> 0.100 ->
+  0.092 -> 0.097 -> 0.071 -> 0.063 -> 0.092
+
+sidecar evidence:
+  owm_proposal_valid_fraction remains about 0.81-0.93
+  owm_tracklet_valid_fraction remains about 0.95-1.00
+```
+
+Interpretation:
+
+```text
+resolved relative to older catastrophic failures:
+  active duplicate owner collapse is not present.
+  active same-role overlap stays below 0.22 through step 500, not the old 0.95+
+  action-visible collapse band.
+  recycle does not saturate.
+  tracklet/proposal sidecar dataflow is alive.
+  action_default_equiv is in the historical early-good band.
+
+not resolved:
+  raw reserve/context same-role overlap still saturates to ~1.0.
+  context anchor count collapses from ~7.7 to ~2.0.
+  object pull and point explanation losses trend upward despite stable action loss.
+
+theoretical diagnosis:
+  The sidecar object evidence is a weak sparse scaffold, not a dense hard mask.
+  The current active owner path can remain bounded while reserve/context files
+  receive weaker independent objectives.  Those reserve/context rows then drift
+  toward the same high-evidence sidecar object or background proxy, which raises
+  raw overlap and reduces context count.  Because active duplicate overlap is
+  zero, this is not yet the old action-visible duplicate-owner failure.  Because
+  object_pull and point_explanation rise, it is still a structural risk: the
+  current object explanation pressure is not consistently aligned with the
+  posterior owner closure objective over long co-training.
+```
+
+Current action:
+
+```text
+must-fix-before-restart:
+  visual diagnostics size normalization bug.
+
+must-watch-after-restart:
+  loss_anchor_object_pull
+  loss_object_explanation_point
+  raw/context support overlap
+  context_anchor_count
+  active/downstream overlap
+  overlay: object owner should remain inside sidecar object mask, not just near
+  the gripper/contact bridge.
+```
+
+### 2026-05-21 Loss Root-Cause Analysis
+
+This section separates actual failures from noisy diagnostics.  The goal is to
+avoid patching one scalar at a time while missing the shared mathematical cause.
+
+#### Loss / metric definitions that matter
+
+```text
+loss_action_default_equiv:
+  action loss rescaled back to the historical default-equivalent scale.  This is
+  the only action number directly comparable with 4-22-style ablations.
+
+loss_anchor_pv:
+  object-row point/visual projective distribution consistency.  For confirmed
+  object rows it compares point support p_j and visual support v_j through the
+  projective compatibility C:
+
+    v_hat_j = normalize(p_j C)
+    p_hat_j = normalize(v_j C^T)
+    L_pv_j = 0.5 JS(v_j, v_hat_j) + 0.5 JS(p_j, p_hat_j)
+
+  Background/reserve rows are intentionally excluded.  A flat or mildly
+  improving loss_anchor_pv means the projective point/visual bridge is not the
+  primary failure.
+
+loss_anchor_object_pull:
+  diagnostic pull from confirmed graph/posterior object rows to sidecar point
+  centers:
+
+    target_x_j = normalize(m_j)^T X_point
+    L_pull_j = SmoothL1(x_j / sigma, stopgrad(target_x_j) / sigma)
+
+  It currently mixes graph-anchor and posterior-file terms.  Therefore it is a
+  structural warning when it rises, but it must be interpreted together with
+  posterior_owner_transport_active_dist_after_fusion.
+
+loss_object_explanation_point:
+  compactness/variance of point support under the object-explanation layer.  It
+  measures whether the selected object file explains a compact point-mask core,
+  not whether action is improving.
+
+loss_mapg_support_diversity:
+  same-role support overlap penalty.  It is meaningful only after splitting raw,
+  context/downstream, and active scopes.
+
+aqr_same_role_support_overlap_max:
+  raw same-role overlap over all fixed-capacity rows, including reserve/context.
+
+aqr_active_same_role_support_overlap_max:
+  overlap only among active object owners.  This is the collapse signal that
+  directly threatens action-visible duplicate owners.
+
+aqr_context_anchor_count:
+  number of low-weight context rows still retained as background/peripheral
+  carriers.
+```
+
+#### Observed pattern from the interrupted 50-500 window
+
+```text
+healthy action:
+  loss_action_default_equiv enters 0.060-0.067 by step 200-500.
+
+healthy active owner competition:
+  posterior_file_competition_active_duplicate_overlap_max stays 0.0.
+  active_same_role_support_overlap_max stays <= 0.212.
+  posterior_recycle_rate stays roughly 0.05-0.10.
+
+still problematic reserve/context structure:
+  raw_same_role_support_overlap_max goes to ~1.0.
+  context_anchor_count falls from ~7.7 to ~2.0.
+
+still problematic object explanation:
+  loss_anchor_object_pull rises 0.356 -> 1.164.
+  loss_object_explanation_point rises 1.47 -> 6.29.
+```
+
+#### Theoretical root cause
+
+```text
+The current design has fixed-capacity object files but most CALVIN steps expose
+only one or a few task-relevant object candidates.  Active owner competition now
+correctly selects one object file and demotes duplicate active files, which fixes
+the old catastrophic same-object active collapse.
+
+However, reserve/context rows do not receive an equally strong independent
+objectness objective.  They are retained to preserve background/peripheral dense
+context, but their support distributions are still produced by the same readers
+and see the same high-evidence sidecar/proposal/contact region.  Under action
+co-training, those low-weight rows can converge to the same easy evidence while
+remaining mostly non-action-visible.  This explains:
+
+  raw overlap saturates,
+  active duplicate overlap stays zero,
+  context count shrinks,
+  action loss remains good.
+
+Object-pull and object-explanation-point rise for a related but distinct reason:
+sidecar masks are sparse, trajectory-derived weak evidence rather than exact
+instance labels.  They are good enough as scaffold, but if interpreted as a
+long-term compactness target on every active object step, they can disagree with
+the current posterior/action objective.  In particular, contact-motion masks may
+track the changing contact bridge or motion core rather than the whole semantic
+object.  The graph/posterior object owner may then remain action-useful while the
+sidecar compactness scalar worsens.
+```
+
+#### Paper alignment
+
+```text
+Object Binding in ViTs, NeurIPS 2025:
+  https://arxiv.org/abs/2510.24709
+  Supports our use of pairwise/projected same-object subspace rather than raw
+  hidden cosine only.  It does not imply that fixed rows with weak labels will
+  automatically become clean object files; it motivates probing and calibrating
+  same-object signals.
+
+SlotVLA, ICRA 2026:
+  https://arxiv.org/abs/2511.06754
+  Uses object-centric annotations, mask/box labels, temporal tracking, slot
+  tokenizer, and relation decoder.  Compared with our setting, it has stronger
+  object supervision.  Therefore our sidecar masks should stay weak evidence,
+  not hard truth.
+
+SlotMIM / data-centric PVM revisit, 2025:
+  https://huggingface.co/papers/2503.06960
+  Supports semantic bottleneck and cross-view consistency as object-centric
+  pretraining pressure.  It supports bottlenecking object rows, but not deleting
+  dense context tokens.
+
+Embodied-SlotSSM / LIBERO-Mem, 2025:
+  https://www.sciencestack.ai/paper/2511.11478
+  Supports persistent slot identity plus temporal dynamics/memory.  This matches
+  our posterior-file route, but it also highlights that identity should be judged
+  through temporal consistency, not a single-frame raw overlap scalar.
+
+OBEYED-VLA, 2026:
+  https://arxiv.org/abs/2512.22519
+  Supports explicit task-conditioned object-centric and geometry-aware grounding
+  to avoid monolithic action training eroding grounding.  It argues for our
+  sidecar/proposal/geometry scaffold, but also suggests those signals must be
+  calibrated and not treated as perfect labels.
+```
+
+#### Immediate plan
+
+```text
+P0 fixed:
+  visual diagnostics crash at step 500.
+
+P1 do not patch yet:
+  action loss is not the failing term.  Do not lower action pressure solely
+  because total/alignment rises.
+
+P2 next instrumentation:
+  done locally on 2026-05-21:
+    loss_anchor_object_pull_graph
+    loss_anchor_object_pull_posterior
+    loss_anchor_object_pull_graph_weight_sum
+    loss_anchor_object_pull_posterior_weight_sum
+    loss_anchor_object_pull_target_mass_mean
+  This split does not change the objective; it makes the next 100/200/300-step
+  gate identifiable.
+
+P3 next training gate:
+  restart only after P0 fix and inspect 50/100/200/300/500:
+    loss_anchor_object_pull
+    loss_object_explanation_point
+    object_candidate_owner_geometry_active_dist_mean
+    posterior_owner_transport_active_dist_after_fusion_mean
+    active/downstream/raw overlap
+    context_anchor_count
+    overlays against sidecar mask
+
+P4 likely mathematical repair if P2 confirms the same trend:
+  keep active object files under owner transport,
+  keep dense background/context tokens outside object-file truth,
+  weaken or confidence-gate object_explanation_point on sparse/noisy masks,
+  and add a context-retention objective only for non-object context rows rather
+  than forcing reserve rows to behave as extra objects.
+
+P5 avoid:
+  do not re-enable blind SAM.
+  do not make sidecar masks hard labels.
+  do not add a full reconstruction decoder to the action path as a cure for
+  object-pull; this would change the belief router into a pixel reconstruction
+  model and conflict with the current PI0.5 path.
+```
+
+### 2026-05-21 Loss Issue Matrix And Root Cause Plan
+
+This matrix is the current loss-level triage after the interrupted 30K
+full-sidecar run.  It separates symptoms that are already fixed from symptoms
+that still require a structural response.
+
+```text
+1. loss_action_default_equiv
+
+   observation:
+     0.1003 -> 0.060-0.067 by step 200-500.
+
+   status:
+     healthy in the early-run sense.
+
+   physical meaning:
+     action loss in the historical default-equivalent scale; this is the only
+     action number directly comparable with the 4-22 baseline family.
+
+   root-cause read:
+     not the current failing term.  Action can improve while object-file
+     structure still has reserve/context problems.
+
+   action:
+     do not reduce action pressure just because total/alignment rises.
+     Keep action_default_equiv as the external usefulness gauge.
+
+2. loss_anchor_pv
+
+   observation:
+     0.6784 -> 0.6246, with a best value 0.5773 at step 250.
+
+   status:
+     mildly improving; not the primary failure.
+
+   physical meaning:
+     confirmed object-row point/visual projective distribution consistency:
+       v_hat = normalize(p C), p_hat = normalize(v C^T),
+       L = 0.5 JS(v, v_hat) + 0.5 JS(p, p_hat).
+
+   root-cause read:
+     the point/visual projective bridge is not globally broken.
+
+   action:
+     keep it as a geometry sanity term.  Do not overfit fixes to this scalar.
+
+3. active_same_role_support_overlap_max
+
+   observation:
+     stays <= 0.212 through step 500.
+
+   status:
+     old action-visible duplicate-owner collapse is largely fixed in this run.
+
+   physical meaning:
+     overlap among active object-owner rows only.
+
+   root-cause read:
+     posterior file competition and active owner gating are doing their main
+     job.  This is why the high raw overlap does not immediately imply the
+     action path has collapsed.
+
+   action:
+     keep watching; failure threshold remains the old 0.7-0.95+ collapse band.
+
+4. raw_same_role_support_overlap_max
+
+   observation:
+     0.4713 -> ~1.0 while active overlap stays low.
+
+   status:
+     still bad, but scope-specific: reserve/context rows, not active owners.
+
+   physical meaning:
+     same-role support overlap over all fixed-capacity graph rows, including
+     reserve/context rows that may not be action-visible.
+
+   root-cause read:
+     fixed object-file capacity is larger than the number of confident objects
+     in many CALVIN frames.  Active competition selects one/few owners; leftover
+     reserve/context rows still see the same high-evidence region and drift
+     together.  This is capacity pressure plus weak context supervision, not
+     necessarily duplicate active posterior identity.
+
+   action:
+     separate object files from dense context more explicitly.  Background and
+     peripheral dense tokens should remain available as context carriers rather
+     than being forced to become extra object rows.
+     Added follow-through logging on 2026-05-21:
+       aqr_reserve_same_role_support_overlap_max
+       aqr_reserve_same_role_object_core_overlap_max
+     The next gate can now prove whether raw saturation is reserve/no-object
+     capacity rather than active or context overlap.
+
+5. context_anchor_count
+
+   observation:
+     7.69 -> 1.97.
+
+   status:
+     bad companion symptom of raw overlap saturation.
+
+   physical meaning:
+     number of low-weight rows still acting as peripheral/background carriers.
+
+   root-cause read:
+     the model is losing "peripheral vision" capacity while keeping one/few
+     action-useful owners alive.  That can preserve early action loss but risks
+     longer-horizon generalization and layout sensitivity.
+
+   action:
+     add or preserve a context-retention path for non-object dense evidence.
+     Do not solve this by making every background row a hard object slot.
+
+6. loss_anchor_object_pull
+
+   observation:
+     0.356 -> 1.164.
+
+   status:
+     unresolved mixed diagnostic.
+
+   physical meaning:
+     SmoothL1 pull from object-confirmed graph/posterior centers to sidecar
+     point-space targets.
+
+   root-cause read:
+     this scalar currently conflates graph-anchor center error and posterior
+     file center error.  It can rise even when the active posterior transport
+     distance after fusion is small.  Therefore it identifies a structural
+     tension but not the exact failing submodule.
+
+   action:
+     next code/logging step should split it into graph_pull and posterior_pull,
+     plus expose row weights and target prior mass.  Without that split, any
+     direct fix is underidentified.
+
+7. loss_object_explanation_point
+
+   observation:
+     1.47 -> 6.29.
+
+   status:
+     unresolved and important.
+
+   physical meaning:
+     compactness/point-mask explanation pressure for object candidates.
+
+   root-cause read:
+     sidecar masks are weak sparse contact/motion scaffolds, not exact full
+     instance masks.  If the loss treats them as a persistent compact target,
+     it can fight the posterior/action objective when contact points, motion
+     cores, and full semantic objects differ.
+
+   action:
+     confidence-gate, quality-gate, or anneal this term on sparse/noisy masks.
+     Do not convert sidecar masks into hard labels.
+
+8. loss_mapg_support_diversity / loss_mapg_routing
+
+   observation:
+     diversity worsens moderately; routing mildly worsens.
+
+   status:
+     secondary symptom, not root cause.
+
+   physical meaning:
+     diversity discourages same-role support reuse; routing regularizes
+     anchor-token routing structure.
+
+   root-cause read:
+     these rise because reserve/context rows collapse toward common evidence.
+     Increasing diversity weight alone was historically insufficient and risks
+     fighting active owner selection.
+
+   action:
+     fix context/object decomposition first, then tune diversity if active and
+     downstream overlap still degrade.
+```
+
+Current root-cause conclusion:
+
+```text
+The central remaining problem is not "action training destroys everything" and
+not "point/visual projection is broken."  The current evidence says:
+
+  active object-owner competition is mostly repaired;
+  action loss is in a healthy early band;
+  sidecar/tracklet dataflow is alive;
+  reserve/context rows still collapse;
+  object explanation/pull targets are under-calibrated weak scaffolds.
+
+Therefore the next scientifically clean step is not to add another unrelated
+module.  It is to decompose object files versus dense context, split the mixed
+pull metric, and calibrate sidecar compactness by confidence/quality.
+```
+
+Next verification gate:
+
+```text
+Before trusting another 30K run:
+  1. log graph_pull and posterior_pull separately.
+  2. log object target prior mass and mask quality.
+  3. inspect 50/100/200/300/500 after restart.
+  4. require active overlap to stay low and context count not to collapse.
+  5. require action_default_equiv to stay in the early-good band.
+
+If graph_pull rises but posterior_pull is stable:
+  repair graph candidate/sidecar assignment.
+
+If posterior_pull rises but graph_pull is stable:
+  repair posterior binding/write-through.
+
+If both are stable but object_explanation_point rises:
+  the compactness target is too strict/noisy; gate or anneal it.
+
+If action worsens while object metrics improve:
+  object supervision is overpowering VLA co-training; lower object weights or
+  stage the schedule.
+```
+
+### 2026-05-21 Split-Pull Frozen-Policy 300-Step Gate
+
+Run:
+
+```text
+picf_a7_slot_splitpull_frozen_policy_300_20260521
+
+launcher:
+  scripts/experiments/picf_aqr_owm_202605_active/
+    run_a7_slot_splitpull_frozen_policy_300_20260521.sh
+
+contract:
+  freeze PaliGemma, PI0.5 action pressure, Sonata, V-JEPA, AnyTouch;
+  train PICF/AQR/posterior/slot/OEML/sidecar routing stack;
+  full sidecar root:
+    /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+```
+
+Interim metrics:
+
+```text
+step 50:
+  loss_total = 0.15999
+  loss_anchor_object_pull = 0.34821
+  loss_anchor_object_pull_graph = 0.32296
+  loss_anchor_object_pull_posterior = 0.39706
+  loss_anchor_object_pull_target_mass_mean = 0.91040
+  loss_object_explanation_point = 1.43001
+  active_same_role_support_overlap_max = 0.00418
+  raw_same_role_support_overlap_max = 0.45544
+  downstream_same_role_support_overlap_max = 0.28494
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  context_anchor_count = 7.735
+
+step 100:
+  loss_total = 0.13953
+  loss_anchor_object_pull = 0.26883
+  loss_anchor_object_pull_graph = 0.25054
+  loss_anchor_object_pull_posterior = 0.29998
+  loss_anchor_object_pull_target_mass_mean = 0.95280
+  loss_object_explanation_point = 1.81894
+  active_same_role_support_overlap_max = 0.01363
+  raw_same_role_support_overlap_max = 0.75059
+  downstream_same_role_support_overlap_max = 0.41240
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  context_anchor_count = 7.365
+
+step 200:
+  loss_total = 0.14757
+  loss_anchor_object_pull = 0.26552
+  loss_anchor_object_pull_graph = 0.25601
+  loss_anchor_object_pull_posterior = 0.28424
+  loss_anchor_object_pull_target_mass_mean = 0.98444
+  loss_object_explanation_point = 2.21727
+  active_same_role_support_overlap_max = 0.02295
+  raw_same_role_support_overlap_max = 0.99022
+  downstream_same_role_support_overlap_max = 0.43976
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  context_anchor_count = 6.065
+```
+
+Interim read:
+
+```text
+fixed or strongly improved:
+  sidecar-to-graph path is alive:
+    graph pull is lower than the interrupted 30K window and improves by step 100.
+  graph-to-posterior write-through is alive:
+    posterior pull improves from 0.397 to 0.284 by step 200.
+  active object-owner duplicate collapse is not recurring:
+    active overlap stays below 0.023 through step 200.
+  posterior active duplicate overlap remains exactly 0.
+
+not fixed:
+  raw same-role overlap rises to 0.99 because reserve/context rows still cluster.
+  context count declines from 7.7 to 6.1.
+  loss_object_explanation_point rises monotonically.
+
+root-cause update:
+  the remaining failure is no longer "anchors cannot reach sidecar objects".
+  The split proves graph and posterior object-owner paths are functional.  The
+  unresolved problem is the interaction between reserve/context rows and the
+  OEML point-compactness target.  Sidecar masks are useful weak measurements,
+  but the compactness/explanation term is stricter than the noisy sparse mask
+  evidence can justify.
+
+pending:
+  step 300 final gate and overlay inspection.
+```
+
+Final 300-step metrics:
+
+```text
+step 250:
+  loss_total = 0.16062
+  loss_anchor_object_pull = 0.31666
+  loss_anchor_object_pull_graph = 0.31341
+  loss_anchor_object_pull_posterior = 0.32173
+  loss_anchor_object_pull_target_mass_mean = 0.99963
+  loss_anchor_pv = 0.59546
+  loss_object_explanation_point = 1.97679
+  loss_object_explanation_contact = 0.48737
+  loss_object_explanation_duplicate = 0.09680
+  active_same_role_support_overlap_max = 0.00899
+  raw_same_role_support_overlap_max = 0.97303
+  downstream_same_role_support_overlap_max = 0.43558
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  context_anchor_count = 7.005
+  posterior_recycle_rate = 0.09287
+  posterior_owner_transport_active_dist_mean = 0.00296
+  object_candidate_owner_geometry_active_dist_mean = 0.000234
+  owm_proposal_valid_fraction = 0.86917
+  owm_tracklet_valid_fraction = 0.96884
+
+step 300:
+  loss_total = 0.09667
+  loss_anchor_object_pull = 0.14183
+  loss_anchor_object_pull_graph = 0.14536
+  loss_anchor_object_pull_posterior = 0.13167
+  loss_anchor_object_pull_target_mass_mean = 1.03759
+  loss_anchor_pv = 0.54491
+  loss_object_explanation_point = 1.90588
+  loss_object_explanation_contact = 0.43113
+  loss_object_explanation_duplicate = 0.04387
+  active_same_role_support_overlap_max = 0.00684
+  raw_same_role_support_overlap_max = 0.94493
+  downstream_same_role_support_overlap_max = 0.43680
+  posterior_file_competition_active_duplicate_overlap_max = 0.0
+  context_anchor_count = 7.230
+  posterior_recycle_rate = 0.08878
+  posterior_owner_transport_active_dist_mean = 0.00193
+  object_candidate_owner_geometry_active_dist_mean = 0.000133
+  owm_proposal_valid_fraction = 0.92667
+  owm_tracklet_valid_fraction = 0.99862
+```
+
+Final read:
+
+```text
+clearly fixed relative to the old failures:
+  active object-owner support collapse:
+    0.004 -> 0.023 -> 0.0068, never entering the historical 0.7-0.99 band.
+  posterior active duplicate collapse:
+    exactly 0.0 at every logged gate.
+  graph-to-sidecar and posterior-to-sidecar pull:
+    graph pull 0.323 -> 0.145,
+    posterior pull 0.397 -> 0.132.
+  point/visual bridge:
+    loss_anchor_pv 0.683 -> 0.545.
+  lifecycle instability:
+    posterior_recycle_rate remains around 0.09 instead of saturating.
+  sidecar dataflow:
+    proposal valid fraction ends at 0.927,
+    tracklet valid fraction ends at 0.999.
+
+still not clean:
+  raw same-role support overlap:
+    still high at 0.945, because raw includes reserve/context rows.
+  downstream same-role support overlap:
+    stays around 0.43; lower than raw but not negligible.
+  loss_object_explanation_point:
+    improved from its 200-step peak but remains higher than step 50.
+```
+
+Updated root cause:
+
+```text
+The 300-step split falsifies the strongest previous failure hypothesis:
+  "object sidecar evidence cannot pull graph/posterior anchors."
+
+Both graph and posterior pull improve substantially.  The active object file is
+not losing the object.  Therefore the remaining loss symptoms are not caused by
+a missing owner transport path or broken object-candidate assignment.
+
+The remaining issue is a scope mismatch:
+  active object-owner rows behave correctly,
+  reserve/context rows still share support because they are not independent
+  object hypotheses,
+  object_explanation_point still treats sparse/noisy sidecar point masks as a
+  compactness signal that is stricter than the weak scaffold can justify.
+
+This is why raw overlap can remain high while active overlap, posterior
+duplicates, graph pull, posterior pull, recycle rate, and overlays are healthy.
+```
+
+Loss-by-loss issue list after the final gate:
+
+```text
+1. loss_anchor_object_pull
+   status:
+     fixed for the graph/posterior transport path in this diagnostic.
+   evidence:
+     total 0.348 -> 0.142,
+     graph 0.323 -> 0.145,
+     posterior 0.397 -> 0.132.
+   remaining risk:
+     may still oscillate under full action/PaliGemma co-training.
+   next check:
+     keep split metrics in every long run; do not collapse them back into one
+     scalar.
+
+2. loss_anchor_pv
+   status:
+     healthy.
+   evidence:
+     0.683 -> 0.545.
+   interpretation:
+     point/visual projective agreement is not the root failure.
+   next check:
+     watch under full action pressure only.
+
+3. loss_object_explanation_point
+   status:
+     partially improved but unresolved.
+   evidence:
+     1.430 -> 2.217 peak -> 1.906.
+   root cause:
+     sidecar masks are contact/motion weak scaffolds.  They identify the object
+     core/contact region, not a dense exact instance mask.  A strict compactness
+     loss can punish an otherwise useful object file when the object support is
+     elongated, partially visible, or mixed with contact/gripper points.
+   clean repair if needed:
+     confidence/quality-gate this term by sidecar quality, tracklet stability,
+     and candidate mass.  Do not convert sidecar masks to hard segmentation
+     labels.
+
+4. raw_same_role_support_overlap_max
+   status:
+     still high, but no longer an active-collapse proof.
+   evidence:
+     0.455 -> 0.945, while active overlap ends at 0.0068.
+   root cause:
+     raw scope includes reserve/context rows.  Those rows are deliberately
+     capacity/background carriers, not confirmed object files.  If only one or
+     two true objects are exposed, the remaining fixed-capacity rows can share
+     the same dense/background support without entering the posterior active
+     owner set.
+   clean repair if needed:
+     report raw/context/active separately and keep dense context as context,
+     not as forced object files.  Do not add a blind stronger diversity loss
+     against all rows.
+   2026-05-21 follow-through:
+     add reserve-scope overlap metrics:
+       aqr_reserve_same_role_support_overlap_max
+       aqr_reserve_same_role_object_core_overlap_max
+     This closes the last ambiguity in the raw-overlap scalar.  If reserve is
+     high while active and downstream remain low, raw overlap is a no-object
+     capacity artifact, not a slot-binding failure.
+
+5. downstream_same_role_support_overlap_max
+   status:
+     acceptable but not ideal.
+   evidence:
+     0.285 -> 0.437.
+   root cause:
+     downstream still sees context/reserve carriers as auxiliary graph evidence.
+   clean repair if needed:
+     add a context-attention budget/regularizer only for non-object context
+     rows, preserving dense evidence while preventing many identical context
+     prefixes.
+
+6. active_same_role_support_overlap_max
+   status:
+     fixed in this diagnostic.
+   evidence:
+     always below 0.023, final 0.0068.
+   interpretation:
+     posterior file competition and active owner gating are doing their job.
+
+7. posterior_file_competition_active_duplicate_overlap_max
+   status:
+     fixed.
+   evidence:
+     exactly 0.0 at every gate.
+
+8. posterior_recycle_rate
+   status:
+     healthy.
+   evidence:
+     around 0.09, no saturation.
+
+9. loss_action_default_equiv
+   status:
+     diagnostic only in this frozen-policy run because action weight is zero.
+   evidence:
+     0.14-ish across the run.
+   interpretation:
+     not comparable as trained action progress here; use it only as a frozen
+     readout sanity number.
+```
+
+Decision:
+
+```text
+Do not restart a 30K full train solely because raw overlap is high.
+Do not claim all losses are solved.
+
+The correct next step is one of:
+  A. run a short full-policy gate with the same split metrics if we want to see
+     whether action/PaliGemma pressure reintroduces active collapse;
+  B. implement a principled object_explanation_point confidence gate if the
+     user wants to reduce the remaining compactness risk before another long
+     run.
+
+The mathematically unjustified next steps are:
+  add another global overlap penalty,
+  force reserve/context rows to be objects,
+  revive blind SAM,
+  treat sidecar masks as hard truth,
+  remove dense context from the action path.
+```
+
+### 2026-05-21 Reserve-Scope Raw-Overlap Audit Run
+
+Why this run exists:
+
+```text
+The previous 300-step split-pull gate showed that graph and posterior object
+pull improved, active overlap stayed near zero, and posterior active duplicate
+overlap stayed exactly zero.  The only ambiguous bad scalar was raw
+same_role_support_overlap_max.
+
+Historically, we tried increasing same-role competition, diversity losses,
+active-slot filtering, geometry duplicate gates, context gates, posterior file
+competition, object-owner transport, and sidecar proposal/mask routing.  The
+consistent outcome was:
+  active-object collapse can be fixed,
+  raw fixed-capacity overlap often remains high.
+
+This matches the slot literature: MetaSlot/QASA-style methods suppress or mask
+duplicate/no-object slots instead of forcing every unused fixed slot to become a
+distinct object.  Therefore raw overlap must be decomposed before another model
+change.
+```
+
+Code follow-through:
+
+```text
+src/openpi/picf/core/pipeline.py:
+  now logs reserve/no-object overlap:
+    aqr_reserve_same_role_support_overlap_max
+    aqr_reserve_same_role_support_overlap_mean
+    aqr_reserve_same_role_object_core_overlap_max
+    aqr_reserve_same_role_object_core_overlap_mean
+
+scripts/picf_core_train.py:
+  OWM_DEBUG_METRIC_KEYS now exports these metrics to JSONL.
+
+2026-05-21 local follow-through tightening:
+  reserve_bool is now defined as:
+    downstream <= epsilon AND NOT active
+  context_bool remains:
+    downstream > epsilon AND NOT active
+  This makes active/context/reserve attribution mutually exclusive for future
+  audits.  The running A7 gate was launched before this local tightening, but
+  step-50 active rows already had downstream exposure, so the first read is not
+  expected to change materially.
+```
+
+Run:
+
+```text
+experiment:
+  picf_a7_slot_reserveaudit_frozen_policy_300_20260521
+
+launcher:
+  scripts/experiments/picf_aqr_owm_202605_active/
+    run_a7_slot_splitpull_frozen_policy_300_20260521.sh
+
+remote log:
+  /mnt/picf_run_logs/picf_a7_slot_reserveaudit_frozen_policy_300_20260521.log
+
+contract:
+  identical to the previous split-pull 300-step gate, except for the added
+  reserve-scope observability.
+```
+
+Decision rule:
+
+```text
+If raw overlap is high but:
+  active overlap is low,
+  downstream overlap is bounded,
+  reserve overlap is high,
+  posterior active duplicate overlap is zero,
+  graph/posterior pull improve,
+then raw overlap is a reserve/no-object artifact and should not trigger another
+global diversity/competition repair.
+
+If context/downstream overlap rises with reserve overlap:
+  fix context budget/attention, not active object ownership.
+
+If active overlap rises:
+  revisit active owner/file competition.
+```
+
+First live read:
+
+```text
+step 50:
+  loss_total                                  0.1581
+  loss_anchor_object_pull                    0.3429
+  loss_anchor_object_pull_graph              0.3186
+  loss_anchor_object_pull_posterior          0.3899
+  loss_anchor_object_pull_target_mass_mean   0.9129
+  loss_anchor_pv                             0.6793
+  loss_object_explanation_point              1.4307
+  raw_same_role_support_overlap_max          0.4581
+  active_same_role_support_overlap_max       0.0044
+  context_same_role_support_overlap_max      0.1865
+  reserve_same_role_support_overlap_max      0.3105
+  downstream_same_role_support_overlap_max   0.2825
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       7.725
+  reserve_anchor_fraction                    0.633
+  posterior_recycle_rate                     0.0898
+  owm_proposal_valid_fraction                0.8250
+  owm_tracklet_valid_fraction                0.9690
+
+initial interpretation:
+  This does not reproduce the old active-owner collapse.  The active object
+  rows are nearly non-overlapping, posterior duplicate overlap is zero, and
+  tracklet/proposal sidecar dataflow is alive.  Continue to step 100/200 before
+  classifying raw overlap as harmless reserve capacity, because prior runs
+  sometimes showed delayed context/downstream rebound.
+
+step 100:
+  loss_total                                  0.1545
+  loss_anchor_object_pull                    0.3100
+  loss_anchor_object_pull_graph              0.3024
+  loss_anchor_object_pull_posterior          0.3211
+  loss_anchor_object_pull_target_mass_mean   0.9730
+  loss_anchor_pv                             0.6230
+  loss_object_explanation_point              1.8431
+  raw_same_role_support_overlap_max          0.6192
+  active_same_role_support_overlap_max       0.0099
+  context_same_role_support_overlap_max      0.3447
+  reserve_same_role_support_overlap_max      0.5555
+  downstream_same_role_support_overlap_max   0.3753
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       7.325
+  reserve_anchor_fraction                    0.646
+  posterior_recycle_rate                     0.1012
+  owm_proposal_valid_fraction                0.8492
+  owm_tracklet_valid_fraction                0.9890
+
+step-100 decision:
+  continue.  This does not justify another architectural patch yet.  Active
+  object owners remain almost non-overlapping, posterior active duplicate
+  overlap remains zero, graph and posterior pull improve, and point/visual
+  consistency improves.  Raw overlap rises with reserve/context overlap, which
+  is exactly the ambiguity this audit was designed to expose.  The main watch
+  item is loss_object_explanation_point, which rises from 1.43 to 1.84 and must
+  be checked at 200/300 before deciding whether compactness/sidecar quality
+  gating needs another repair.
+
+step 150:
+  loss_total                                  0.1708
+  loss_anchor_object_pull                    0.3195
+  loss_anchor_object_pull_graph              0.3142
+  loss_anchor_object_pull_posterior          0.3282
+  loss_anchor_pv                             0.5670
+  loss_object_explanation_point              2.4404
+  raw_same_role_support_overlap_max          0.9983
+  active_same_role_support_overlap_max       0.0482
+  context_same_role_support_overlap_max      0.3074
+  reserve_same_role_support_overlap_max      0.9981
+  downstream_same_role_support_overlap_max   0.4144
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       3.705
+  reserve_anchor_fraction                    0.796
+  posterior_recycle_rate                     0.1141
+
+step-150 interpretation:
+  raw overlap saturation is now explained almost entirely by reserve/no-object
+  rows.  This is not the old active duplicate-owner failure: active overlap is
+  still low and posterior active duplicate overlap remains zero.  However,
+  context capacity is shrinking quickly and downstream overlap is rising into a
+  moderate-risk band.  The next decision point is step 200:
+    if active remains low and downstream stabilizes, classify raw as reserve
+    telemetry and keep the architecture;
+    if downstream/context continue to deteriorate, repair context budget /
+    peripheral attention, not active owner binding.
+
+step 200:
+  loss_total                                  0.1393
+  loss_anchor_object_pull                    0.2548
+  loss_anchor_object_pull_graph              0.2539
+  loss_anchor_object_pull_posterior          0.2556
+  loss_anchor_object_pull_target_mass_mean   0.9898
+  loss_anchor_pv                             0.5335
+  loss_object_explanation_point              2.0168
+  raw_same_role_support_overlap_max          0.9993
+  active_same_role_support_overlap_max       0.0383
+  context_same_role_support_overlap_max      0.2002
+  reserve_same_role_support_overlap_max      0.9992
+  downstream_same_role_support_overlap_max   0.3642
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       2.325
+  reserve_anchor_fraction                    0.858
+  posterior_recycle_rate                     0.1127
+  owm_proposal_valid_fraction                0.8600
+  owm_tracklet_valid_fraction                0.9792
+
+step-200 interpretation:
+  Continue to 300.  The old failure is not present: active overlap remains low,
+  posterior duplicate overlap remains zero, downstream overlap decreases from
+  the step-150 bump, and graph/posterior pull plus PV both improve.  The high
+  raw overlap is now almost entirely a reserve/no-object effect.  Context count
+  continues to compress; this should be monitored as a dense-context capacity
+  question, but it is not evidence that object-owner binding collapsed.
+
+step 250:
+  loss_total                                  0.2955
+  loss_anchor_object_pull                    0.6748
+  loss_anchor_object_pull_graph              0.6410
+  loss_anchor_object_pull_posterior          0.7427
+  loss_anchor_object_pull_target_mass_mean   1.0100
+  loss_anchor_pv                             0.5372
+  loss_object_explanation_point              2.4484
+  raw_same_role_support_overlap_max          0.9993
+  active_same_role_support_overlap_max       0.0732
+  context_same_role_support_overlap_max      0.2772
+  reserve_same_role_support_overlap_max      0.9993
+  downstream_same_role_support_overlap_max   0.4130
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       3.045
+  reserve_anchor_fraction                    0.822
+  posterior_recycle_rate                     0.1000
+  owm_proposal_valid_fraction                0.8692
+  owm_tracklet_valid_fraction                0.9688
+
+step 300:
+  loss_total                                  0.2417
+  loss_anchor_object_pull                    0.5113
+  loss_anchor_object_pull_graph              0.4674
+  loss_anchor_object_pull_posterior          0.5964
+  loss_anchor_object_pull_target_mass_mean   1.0415
+  loss_anchor_pv                             0.5398
+  loss_object_explanation_point              2.6793
+  raw_same_role_support_overlap_max          0.9952
+  active_same_role_support_overlap_max       0.0253
+  context_same_role_support_overlap_max      0.3658
+  reserve_same_role_support_overlap_max      0.9933
+  downstream_same_role_support_overlap_max   0.4236
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       4.700
+  reserve_anchor_fraction                    0.756
+  posterior_recycle_rate                     0.1013
+  owm_proposal_valid_fraction                0.9267
+  owm_tracklet_valid_fraction                0.9986
+
+final 300-step reserveaudit conclusion:
+  The old catastrophic same-role active-owner collapse is not reproduced.
+  active_same_role_support_overlap_max stays low across the full gate:
+    0.0044 -> 0.0099 -> 0.0482 -> 0.0383 -> 0.0732 -> 0.0253
+  posterior_active_duplicate_overlap_max stays exactly 0.0 at every measured
+  gate.  Therefore the active object owners are not all becoming the same
+  posterior object file.
+
+  raw_same_role_support_overlap_max still saturates:
+    0.4581 -> 0.6192 -> 0.9983 -> 0.9993 -> 0.9993 -> 0.9952
+  but reserve_same_role_support_overlap_max tracks it:
+    0.3105 -> 0.5555 -> 0.9981 -> 0.9992 -> 0.9993 -> 0.9933
+  so the raw scalar is primarily a fixed-capacity reserve/no-object telemetry
+  artifact, not evidence that active object binding collapsed.
+
+  The remaining real watch items are:
+    context/downstream capacity:
+      downstream overlap stays moderate at 0.28-0.42 and context count
+      compresses before recovering.
+    posterior-side weak pull:
+      loss_anchor_object_pull improves through step 200 but rebounds at
+      250/300, with posterior pull higher than graph pull at the endpoint.
+    point explanation compactness:
+      loss_object_explanation_point remains noisy/rising, so sidecar quality
+      should stay weak/gated and must not be treated as hard object truth.
+
+decision:
+  Do not add another global raw same-role overlap penalty.
+  Do not force reserve/context rows to become distinct objects.
+  Keep active/context/reserve decomposition as the acceptance contract.
+  For the next full-policy gate, judge active owner collapse by active overlap,
+  downstream overlap, posterior duplicate overlap, and split graph/posterior
+  object-pull, not by raw fixed-capacity overlap alone.
+
+completion:
+  remote A7 run completed at 300/300 and saved:
+    /mnt/checkpoints/picf_core/picf_core/
+      picf_a7_slot_reserveaudit_frozen_policy_300_20260521/300
+  tmux exited normally and both A7 GPUs were idle after completion.
+
+local validation after documenting the result:
+  git diff --check: PASS
+  py_compile pipeline/training/train/test entrypoints: PASS
+  verify_picf_owm_contract.py: PASS
+  picf_owm_strict_diagnose.py --fail-on-fail: PASS
+  picf_owm_dataflow_trace.py --fail-on-fail: PASS
+  picf_owm_mvtrack_deep_audit.py --fail-on-fail: PASS
+  targeted pytest suite: 140 passed
+```
+
+### 2026-05-21 Strict-Scope Reserve Audit Relaunch
+
+Why this relaunch exists:
+
+```text
+The completed reserveaudit run was enough to classify raw overlap as mostly
+reserve/no-object telemetry.  After that run, the local code tightened the
+diagnostic definitions so active/context/reserve are mutually exclusive.  This
+strict-scope relaunch verifies the same conclusion with the exact code that is
+now in the workspace and with the paper-aligned complete-deployment rule
+documented in PICF_AQR_OWM_SLOT_PAPER_DATAFLOW_COMPARE_20260521_TEMP.md.
+```
+
+Run:
+
+```text
+experiment:
+  picf_a7_slot_reserveaudit_strictscope_frozen_policy_300_20260521
+
+launcher:
+  scripts/experiments/picf_aqr_owm_202605_active/
+    run_a7_slot_reserveaudit_strictscope_frozen_policy_300_20260521.sh
+
+remote log:
+  /mnt/picf_run_logs/
+    picf_a7_slot_reserveaudit_strictscope_frozen_policy_300_20260521.log
+
+contract:
+  freeze PaliGemma/action head/Sonata/V-JEPA/AnyTouch;
+  train PICF/AQR/posterior/object-file routing and sidecar/contact-motion path;
+  inspect 100/200/300 before any long-run decision.
+```
+
+Local and remote preflight:
+
+```text
+local:
+  git diff --check: PASS
+  py_compile: PASS
+  verify_picf_owm_contract.py: PASS
+  picf_owm_strict_diagnose.py --fail-on-fail: PASS
+  picf_owm_mvtrack_deep_audit.py --fail-on-fail: PASS
+  targeted pytest suite: 131 passed
+
+remote A7:
+  py_compile: PASS
+  verify_picf_owm_contract.py: PASS
+  picf_owm_mvtrack_deep_audit.py --fail-on-fail: PASS
+  launch started in tmux session:
+    picf_a7_slot_reserveaudit_strictscope_300_20260521
+```
+
+Live gate:
+
+```text
+step 50:
+  loss_total                                  0.1619
+  loss_anchor_object_pull                    0.3529
+  loss_anchor_object_pull_graph              0.3345
+  loss_anchor_object_pull_posterior          0.3871
+  loss_anchor_object_pull_target_mass_mean   0.9061
+  loss_anchor_pv                             0.6839
+  loss_object_explanation_point              1.4474
+  raw_same_role_support_overlap_max          0.4596
+  active_same_role_support_overlap_max       0.0053
+  active_same_role_object_core_overlap_max   0.0005
+  context_same_role_support_overlap_max      0.1884
+  reserve_same_role_support_overlap_max      0.3185
+  downstream_same_role_support_overlap_max   0.2909
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       7.655
+  reserve_anchor_fraction                    0.629
+  posterior_recycle_rate                     0.0920
+  owm_proposal_valid_fraction                0.8250
+  owm_tracklet_valid_fraction                0.9690
+
+step 100:
+  loss_total                                  0.1283
+  loss_anchor_object_pull                    0.2351
+  loss_anchor_object_pull_graph              0.2283
+  loss_anchor_object_pull_posterior          0.2445
+  loss_anchor_object_pull_target_mass_mean   0.9628
+  loss_anchor_pv                             0.6355
+  loss_object_explanation_point              1.8327
+  raw_same_role_support_overlap_max          0.5988
+  active_same_role_support_overlap_max       0.0107
+  active_same_role_object_core_overlap_max   0.0023
+  context_same_role_support_overlap_max      0.2938
+  reserve_same_role_support_overlap_max      0.5038
+  downstream_same_role_support_overlap_max   0.3301
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       7.265
+  reserve_anchor_fraction                    0.645
+  posterior_recycle_rate                     0.0940
+  owm_proposal_valid_fraction                0.8492
+  owm_tracklet_valid_fraction                0.9890
+
+step-100 strict-scope interpretation:
+  The old active-owner collapse is not reproduced.  Raw overlap rises, but the
+  active object rows remain separated, active object-core overlap is nearly
+  zero, posterior active duplicate overlap remains exactly zero, and both graph
+  and posterior object-pull improve.  This is consistent with the fixed-capacity
+  no-object/reserve interpretation from MetaSlot/QASA-style slot diagnostics.
+
+decision:
+  Continue to step 200/300.  Do not add another raw all-row overlap penalty.
+  Only revisit model math if active overlap, downstream overlap, posterior
+  active duplicates, or split graph/posterior pull deteriorate together.
+
+step 150:
+  loss_total                                  0.1407
+  loss_anchor_object_pull                    0.2496
+  loss_anchor_object_pull_graph              0.2419
+  loss_anchor_object_pull_posterior          0.2632
+  loss_anchor_object_pull_target_mass_mean   0.9454
+  loss_anchor_pv                             0.5975
+  loss_object_explanation_point              2.1452
+  raw_same_role_support_overlap_max          0.9336
+  active_same_role_support_overlap_max       0.0157
+  active_same_role_object_core_overlap_max   0.0083
+  context_same_role_support_overlap_max      0.3751
+  reserve_same_role_support_overlap_max      0.8806
+  downstream_same_role_support_overlap_max   0.4021
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       5.995
+  reserve_anchor_fraction                    0.696
+  posterior_recycle_rate                     0.1127
+
+step 200:
+  loss_total                                  0.1886
+  loss_anchor_object_pull                    0.3949
+  loss_anchor_object_pull_graph              0.4043
+  loss_anchor_object_pull_posterior          0.3754
+  loss_anchor_object_pull_target_mass_mean   0.9850
+  loss_anchor_pv                             0.5692
+  loss_object_explanation_point              1.9902
+  raw_same_role_support_overlap_max          0.9918
+  active_same_role_support_overlap_max       0.0311
+  active_same_role_object_core_overlap_max   0.0039
+  context_same_role_support_overlap_max      0.4122
+  reserve_same_role_support_overlap_max      0.9891
+  downstream_same_role_support_overlap_max   0.4424
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       5.715
+  reserve_anchor_fraction                    0.709
+  posterior_recycle_rate                     0.1049
+  owm_proposal_valid_fraction                0.8600
+  owm_tracklet_valid_fraction                0.9792
+
+step-200 strict-scope interpretation:
+  Raw overlap now saturates, but reserve overlap saturates with it. Active
+  support overlap remains low, active object-core overlap remains near zero,
+  and posterior active duplicate overlap remains exactly zero. This confirms
+  that the old many-active-owner collapse is still not present.
+
+  The nontrivial watch item is downstream/context capacity: downstream overlap
+  reaches 0.4424 and context rows are still visible. This is a context-budget /
+  dense-peripheral-routing question, not evidence that every active object
+  owner has collapsed to the same object. Do not repair it with a global raw
+  diversity term, because that would again penalize legitimate reserve/no-object
+  rows and conflicts with the MetaSlot/QASA variable-count interpretation.
+
+decision:
+  Continue to step 300. At 300, classify the remaining issue as one of:
+    healthy reserve telemetry,
+    context/downstream budget pressure,
+    or true active-owner collapse.
+
+step 250:
+  loss_total                                  0.3149
+  loss_anchor_object_pull                    0.7115
+  loss_anchor_object_pull_graph              0.7325
+  loss_anchor_object_pull_posterior          0.6564
+  loss_anchor_object_pull_target_mass_mean   1.0061
+  loss_anchor_pv                             0.5683
+  loss_object_explanation_point              2.7385
+  raw_same_role_support_overlap_max          0.9980
+  active_same_role_support_overlap_max       0.1062
+  active_same_role_object_core_overlap_max   0.0069
+  context_same_role_support_overlap_max      0.4420
+  reserve_same_role_support_overlap_max      0.9977
+  downstream_same_role_support_overlap_max   0.5199
+  posterior_active_duplicate_overlap_max     0.0
+
+step 300:
+  loss_total                                  0.4438
+  loss_anchor_object_pull                    1.0477
+  loss_anchor_object_pull_graph              1.0905
+  loss_anchor_object_pull_posterior          0.9829
+  loss_anchor_object_pull_target_mass_mean   1.0397
+  loss_anchor_pv                             0.5665
+  loss_object_explanation_point              3.3188
+  raw_same_role_support_overlap_max          0.9984
+  active_same_role_support_overlap_max       0.1452
+  active_same_role_object_core_overlap_max   0.0091
+  context_same_role_support_overlap_max      0.4185
+  reserve_same_role_support_overlap_max      0.9982
+  downstream_same_role_support_overlap_max   0.5217
+  posterior_active_duplicate_overlap_max     0.0
+  context_anchor_count                       5.270
+  reserve_anchor_fraction                    0.724
+  posterior_recycle_rate                     0.1059
+  owm_proposal_valid_fraction                0.9267
+  owm_tracklet_valid_fraction                0.9986
+
+final strict-scope diagnosis:
+  The old active-owner duplicate collapse is still not reproduced:
+    posterior_active_duplicate_overlap_max stays exactly 0.0;
+    active object-core overlap remains near zero;
+    active support overlap ends at 0.145, far below the old collapse band.
+
+  However, the run is not a clean pass. The real late-stage issues are:
+    1. weak object-pull drift:
+       loss_anchor_object_pull improves through step 100, then rises sharply
+       after 200. Both graph and posterior terms drift, so this is not only a
+       posterior update bug.
+    2. context/downstream pressure:
+       downstream_same_role_support_overlap_max rises to about 0.52 while raw
+       and reserve saturate. This means some same-role context capacity remains
+       action-visible enough to duplicate broad supports.
+    3. point explanation compactness:
+       loss_object_explanation_point rises to 3.32, so the sidecar/contact
+       object explanation remains a weak cue and must not be treated as hard
+       object truth.
+
+root-cause boundary:
+  Do not fix raw overlap. Raw is explained by reserve/no-object capacity.
+  Do inspect object-pull weighting/normalization and context/downstream budget.
+```
+```
+
+### 2026-05-21 follow-up repair: object-pull target quality gate
+
+Status:
+
+```text
+implemented locally; A7 rerun pending.
+```
+
+Root cause:
+
+```text
+The strict-scope run proved raw overlap was mostly reserve/no-object telemetry,
+but it also showed late object-pull drift.  The previous object-pull target
+used max-union over weak owner/proposal/task/point priors.  That can turn broad
+or tailed contact-motion evidence into a hard geometric center.
+```
+
+Repair:
+
+```text
+1. Compute anchor_object_pull target center from a high-confidence TopCore of
+   the weak target prior, not from the entire weak max-union tail.
+2. Compute compactness quality q_j from the target core in point space.
+3. Weight object-pull rows by q_j and drop rows below the minimum target
+   quality threshold.
+4. Restore quality-guided context gating by default, so low-quality duplicate
+   context rows do not remain action-visible.
+```
+
+New metric:
+
+```text
+loss_anchor_object_pull_target_quality_mean
+```
+
+Local validation:
+
+```text
+targeted pytest:
+  scripts/picf_core_train_test.py
+  training_test::test_anchor_object_pull_ignores_broad_noisy_target_tail
+
+result:
+  129 passed
+
+strict scripts:
+  verify_picf_owm_contract.py PASS
+  picf_owm_strict_diagnose.py --fail-on-fail PASS
+  picf_owm_dataflow_trace.py --fail-on-fail PASS
+  picf_owm_mvtrack_deep_audit.py --fail-on-fail PASS
+
+core regression:
+  pipeline_test.py + training_test.py
+  134 passed
+```
+
+Next required gate:
+
+```text
+Launch:
+  scripts/experiments/picf_aqr_owm_202605_active/run_a7_slot_qualitytarget_frozen_policy_300_20260521.sh
+
+This is a fresh 300-step frozen PaliGemma/action-head validation on A7.
+Do not open a 30000-step run until object_pull, object_explanation_point and
+downstream overlap pass the 100/200/300 checks.
+```
+
+### 2026-05-21 A7 quality-target live gate
+
+Run:
+
+```text
+picf_a7_slot_qualitytarget_frozen_policy_300_20260521
+```
+
+Config:
+
+```text
+frozen:
+  PaliGemma
+  PI0.5 action loss/head pressure
+  Sonata/V-JEPA/AnyTouch pretrained backbones
+
+trainable:
+  PICF/AQR/posterior/OEML object-file stack
+
+sidecar:
+  /mnt/picf_sidecars/contact_motion_full_tracklets_clean_20260520
+```
+
+step 50:
+
+```text
+loss_total                                  0.1475
+loss_anchor_object_pull                    0.3128
+loss_anchor_object_pull_graph              0.2699
+loss_anchor_object_pull_posterior          0.3381
+loss_anchor_object_pull_target_quality     0.5183
+loss_object_explanation_point              1.4126
+raw_same_role_support_overlap_max          0.4583
+active_same_role_support_overlap_max       0.0061
+active_same_role_object_core_overlap_max   0.0007
+context_same_role_support_overlap_max      0.0213
+downstream_same_role_support_overlap_max   0.0298
+reserve_same_role_support_overlap_max      0.4212
+posterior_active_duplicate_overlap_max     0.0
+```
+
+step 100:
+
+```text
+loss_total                                  0.1669
+loss_anchor_object_pull                    0.3109
+loss_anchor_object_pull_graph              0.2385
+loss_anchor_object_pull_posterior          0.3164
+loss_anchor_object_pull_target_quality     0.5078
+loss_object_explanation_point              2.4107
+raw_same_role_support_overlap_max          0.6349
+active_same_role_support_overlap_max       0.0155
+active_same_role_object_core_overlap_max   0.0020
+context_same_role_support_overlap_max      0.0810
+downstream_same_role_support_overlap_max   0.1126
+reserve_same_role_support_overlap_max      0.6015
+posterior_active_duplicate_overlap_max     0.0
+```
+
+step 150:
+
+```text
+loss_total                                  0.1845
+loss_anchor_object_pull                    0.3438
+loss_anchor_object_pull_graph              0.2747
+loss_anchor_object_pull_posterior          0.3985
+loss_anchor_object_pull_target_quality     0.4753
+loss_object_explanation_point              2.6571
+raw_same_role_support_overlap_max          0.8048
+active_same_role_support_overlap_max       0.0089
+active_same_role_object_core_overlap_max   0.0020
+context_same_role_support_overlap_max      0.1011
+downstream_same_role_support_overlap_max   0.1428
+reserve_same_role_support_overlap_max      0.7657
+posterior_active_duplicate_overlap_max     0.0
+```
+
+step 200:
+
+```text
+loss_total                                  0.1869
+loss_anchor_object_pull                    0.3631
+loss_anchor_object_pull_graph              0.3233
+loss_anchor_object_pull_posterior          0.3883
+loss_anchor_object_pull_target_quality     0.5216
+loss_object_explanation_point              2.4545
+raw_same_role_support_overlap_max          0.9531
+active_same_role_support_overlap_max       0.0294
+active_same_role_object_core_overlap_max   0.0049
+context_same_role_support_overlap_max      0.0952
+downstream_same_role_support_overlap_max   0.1586
+reserve_same_role_support_overlap_max      0.9488
+posterior_active_duplicate_overlap_max     0.0
+posterior_recycle_rate                     0.0017
+```
+
+step 250:
+
+```text
+loss_total                                  0.2015
+loss_anchor_object_pull                    0.4142
+loss_anchor_object_pull_graph              0.3721
+loss_anchor_object_pull_posterior          0.4419
+loss_anchor_object_pull_target_quality     0.5103
+loss_object_explanation_point              2.2829
+raw_same_role_support_overlap_max          0.9921
+active_same_role_support_overlap_max       0.0216
+active_same_role_object_core_overlap_max   0.0032
+context_same_role_support_overlap_max      0.1340
+downstream_same_role_support_overlap_max   0.2046
+reserve_same_role_support_overlap_max      0.9912
+posterior_active_duplicate_overlap_max     0.0
+posterior_recycle_rate                     0.0022
+```
+
+step 300:
+
+```text
+loss_total                                  0.1872
+loss_anchor_object_pull                    0.3417
+loss_anchor_object_pull_graph              0.2734
+loss_anchor_object_pull_posterior          0.3023
+loss_anchor_object_pull_target_quality     0.5728
+loss_object_explanation_point              2.8956
+raw_same_role_support_overlap_max          0.9831
+active_same_role_support_overlap_max       0.0349
+active_same_role_object_core_overlap_max   0.0035
+context_same_role_support_overlap_max      0.1343
+downstream_same_role_support_overlap_max   0.2125
+reserve_same_role_support_overlap_max      0.9801
+posterior_active_duplicate_overlap_max     0.0
+posterior_recycle_rate                     0.0019
+```
+
+Interpretation through step 100:
+
+```text
+fixed:
+  The context/downstream pressure is materially lower than strict-scope:
+    step 100 downstream overlap 0.1126 vs old 0.3301.
+  Active object rows remain clean:
+    active support overlap 0.0155;
+    active object-core overlap 0.0020;
+    active duplicate overlap 0.0.
+  Step-100 overlay visually places active anchors on the sidecar mask for
+  move_the_door_to_the_right.
+
+not yet fixed:
+  loss_anchor_object_pull no longer falls to the old step-100 minimum
+  0.2351; it stays around 0.31 because low-quality weak targets are no longer
+  allowed to act as strong teachers.
+
+watch:
+  loss_object_explanation_point rises to 2.4107.  This is still below the old
+  worst runs, but worse than strict-scope step 100 (1.8327).  Step 200/300 must
+  decide whether this is bounded sidecar noise or a remaining target-quality
+  problem.
+```
+
+Interpretation through step 200:
+
+```text
+fixed:
+  The old late object-pull explosion is not reproduced:
+    quality-target run: 0.3128 -> 0.3109 -> 0.3438 -> 0.3631
+    strict-scope run:   0.3529 -> 0.2351 -> 0.2496 -> 0.3949
+  The new run is more conservative at step 100, but it remains bounded by
+  step 200 while strict-scope had already begun drifting.
+
+  Downstream/context pressure is much lower:
+    step 200 downstream overlap 0.1586 vs old 0.4424.
+
+still unresolved:
+  loss_object_explanation_point remains high:
+    new step 200 2.4545 vs old step 200 1.9902.
+  This suggests sidecar/contact point compactness is the remaining weak
+  target-quality bottleneck, not active-owner duplicate collapse.
+
+overlay audit:
+  step 100 and step 200 active anchors are visually on the sidecar masks for
+  the sampled door/switch tasks.  The current failure mode is therefore no
+  longer "active anchor cannot reach the mask" in these samples.
+```
+
+Final 300-step gate conclusion:
+
+```text
+passed:
+  active-owner duplicate collapse is fixed in this run:
+    posterior_active_duplicate_overlap_max remains 0.0.
+  active object rows remain separated:
+    active support overlap <= 0.035;
+    active object-core overlap <= 0.005.
+  downstream/context pressure is much lower than strict-scope:
+    step 300 downstream overlap 0.2125 vs old 0.5217.
+  object-pull late explosion is fixed relative to strict-scope:
+    new step 300 object_pull 0.3417 vs old 1.0477.
+  target quality is now visible and bounded:
+    target_quality_mean stays about 0.48-0.57.
+  overlays at steps 100/200/300 put active anchors on the sidecar masks for
+    sampled door/switch/red-block tasks.
+
+not passed:
+  loss_object_explanation_point remains high and noisy:
+    new step 300 2.8956 vs old strict-scope 3.3188.
+  This is an improvement over the old worst endpoint, but not a clean bounded
+  compactness result.  It should be treated as the remaining sidecar/OEML point
+  compactness issue before 30K.
+
+decision:
+  Do not open 30K yet on this exact setting.  The next repair should target
+  OEML point explanation target quality/weighting or decouple that diagnostic
+  from the object-pull success gate.  Do not reintroduce global raw-overlap
+  penalties; raw overlap is still reserve/no-object telemetry.
+```
+
+### 2026-05-21 OEML point-quality repair
+
+Root cause from code follow-through:
+
+```text
+pipeline:
+  point_mask_j = normalized object explanation mask over point evidence.
+  p_j = normalized point spatial variance of point_mask_j.
+  point_quality_j = exp(-0.5 * clamp(p_j)).
+  explanation_quality_j includes point_quality_j.
+
+old loss:
+  L_point = sum_j explanation_quality_j * p_j / sum_j explanation_quality_j
+
+problem:
+  If all active rows in a batch have noisy/sparse point masks, the same quality
+  appears in numerator and denominator, so the reliability factor cancels.
+  The term still behaves like a hard compactness label even when sidecar/contact
+  evidence is weak, broad, or partially contaminated by trajectory tails.
+```
+
+Deployed repair:
+
+```text
+state:
+  PicfObjectExplanationState now also stores:
+    anchor_base_quality
+    anchor_point_quality
+
+loss:
+  point compactness is now a quality-gated robust weak likelihood:
+
+    rho(p) = -2 log((1-eta) exp(-p/2) + eta)
+
+    L_point =
+      sum_j base_quality_j * stopgrad(point_quality_j)^alpha * rho(p_j)
+      / (sum_j base_quality_j + eps)
+
+  defaults:
+    eta = 0.05
+    alpha = 1.0
+    min point_quality = 0.05
+
+diagnostic retained:
+  oeml_point_spatial_variance_mean remains the raw compactness telemetry.
+  oeml_point_quality_mean/max are now logged separately.
+```
+
+Why this is not a cosmetic loss suppression:
+
+```text
+It matches the QASA/MetaSlot principle that low-quality or duplicate/no-object
+slots should not be treated as hard object truth.  It also preserves the PICF
+contract: dense point/V-JEPA/tactile memory is not pruned, object-pull still
+uses high-confidence target cores, and raw point variance remains visible.
+```
+
+Required next gate:
+
+```text
+run another 300-step frozen PaliGemma/action-head validation.
+
+accept if:
+  active overlap remains low;
+  posterior active duplicate stays zero;
+  object_pull remains bounded;
+  downstream overlap stays below the old 0.5 failure band;
+  loss_object_explanation_point is no longer the dominant rising term;
+  oeml_point_spatial_variance_mean remains reported so bad sidecar masks are
+  not hidden.
+```
+
+300-step ablation result:
+
+```text
+run:
+  picf_a7_slot_qualitytarget_pointrobust_frozen_policy_300_20260521
+
+good:
+  loss_object_explanation_point:
+    0.4764 -> 0.4794 -> 0.5041 -> 0.5089
+  This proves the robust point-quality gate works mechanically.
+
+bad:
+  loss_anchor_object_pull:
+    0.3275 -> 0.3375 -> 0.5315 -> 0.5416
+  downstream_same_role_support_overlap_max:
+    0.0350 -> 0.0756 -> 0.3364 -> 0.2588
+  active_same_role_support_overlap_max:
+    0.0061 -> 0.0098 -> 0.1135 -> 0.0809
+
+comparison to previous quality-target run:
+  previous step 300 object_pull       0.3417
+  point-robust step 300 object_pull   0.5416
+  previous step 300 downstream        0.2125
+  point-robust step 300 downstream    0.2588
+
+decision:
+  Reject point-quality-gated OEML point loss as production default.  It fixes
+  the scalar point loss but weakens useful geometric compactness pressure.
+  Keep the implementation as explicit guarded ablation only:
+    object_explanation_point_quality_gate_enabled = false by default
+    object_explanation_point_outlier_prior = 0 by default
+
+production interpretation:
+  High loss_object_explanation_point is not by itself a blocker if:
+    active overlap remains low;
+    downstream overlap remains below the old failure band;
+    object_pull stays bounded;
+    overlays show active owners on sidecar/contact masks.
+  It should remain a raw weak-target compactness diagnostic, not a required
+  scalar to suppress.
+```
+
+### 2026-05-21 default-sync frozen-policy gate
+
+After rejecting the point-quality robust gate as a production default, the local
+validated code was re-synced to A7 and relaunched as:
+
+```text
+picf_a7_slot_qualitytarget_defaultsync_frozen_policy_300_20260521
+```
+
+Run contract:
+
+```text
+trainable:
+  PICF/AQR/posterior/OEML/router stack
+
+frozen:
+  PaliGemma
+  PI0.5 action head/loss pressure
+  V-JEPA/Sonata/AnyTouch pretrained modules
+
+explicitly not enabled:
+  object_explanation_point_quality_gate_enabled
+  object_explanation_point_outlier_prior
+```
+
+step50:
+
+```text
+loss_total                                      0.1482
+loss_anchor_object_pull                        0.3146
+loss_anchor_object_pull_graph                  0.2711
+loss_anchor_object_pull_posterior              0.3408
+loss_anchor_object_pull_target_quality_mean    0.5144
+loss_object_explanation_point                  1.4150
+oeml_point_spatial_variance_mean               1.5135
+aqr_active_same_role_support_overlap_max       0.0057
+aqr_downstream_same_role_support_overlap_max   0.0329
+aqr_same_role_support_overlap_max              0.4538
+posterior_file_competition_active_duplicate_overlap_max 0.0
+```
+
+step100:
+
+```text
+loss_total                                      0.1496
+loss_anchor_object_pull                        0.2918
+loss_anchor_object_pull_graph                  0.1362
+loss_anchor_object_pull_posterior              0.3138
+loss_anchor_object_pull_target_quality_mean    0.5075
+loss_object_explanation_point                  1.9014
+oeml_point_spatial_variance_mean               1.1603
+aqr_active_same_role_support_overlap_max       0.0039
+aqr_downstream_same_role_support_overlap_max   0.0438
+aqr_same_role_support_overlap_max              0.4514
+posterior_file_competition_active_duplicate_overlap_max 0.0
+```
+
+Interpretation at step100:
+
+```text
+The production default recovered the important owner metrics that the
+point-robust ablation damaged.  Object-pull improves from step50 to step100,
+active/downstream overlap remains very low, and active duplicate overlap stays
+zero.  The raw point compactness scalar is higher than the point-robust
+ablation by design, but raw point spatial variance is lower than step50 and no
+longer justifies another scalar-suppression repair.
+
+Continue this gate to step200/300.  Do not stop it at step100.
+```
+
+completed step sweep:
+
+```text
+step  loss_total  object_pull  graph_pull  posterior_pull  point_loss  point_var  active_ov  downstream_ov  raw_ov  reserve_ov  active_dup
+  50     0.1482       0.3146      0.2711         0.3408       1.4150     1.5135     0.0057        0.0329     0.4538    0.4148       0
+ 100     0.1496       0.2918      0.1362         0.3138       1.9014     1.1603     0.0039        0.0438     0.4514    0.4289       0
+ 150     0.1369       0.2357      0.2120         0.2493       2.1885     0.5581     0.0312        0.1241     0.8716    0.8501       0
+ 200     0.1649       0.3243      0.2796         0.3499       2.0545     0.3591     0.0478        0.1870     0.9838    0.9783       0
+ 250     0.1738       0.3540      0.3060         0.3875       1.9767     0.5740     0.0680        0.2204     0.9943    0.9927       0
+ 300     0.1231       0.2157      0.1528         0.2173       1.9348     0.3652     0.0314        0.1498     0.9962    0.9959       0
+```
+
+completed decision:
+
+```text
+This default-sync gate passes the frozen-policy structural check.
+
+What is fixed in this gate:
+  active-owner duplicate collapse is absent;
+  active support overlap remains low;
+  downstream overlap stays far below the old 0.5-0.8 failure band;
+  object-pull is bounded and improves strongly by step300;
+  point-robust suppression is not needed as a production default.
+
+What is not fixed by this gate:
+  raw overlap still saturates because reserve/no-object rows reuse capacity;
+  this is expected and should not be treated as the same old active collapse;
+  behavior acceptance still requires action-aware long training and CALVIN/video
+  evidence.
+```
+
+2026-05-21 default-sync 30K action-aware follow-up:
+
+```text
+launcher:
+  scripts/experiments/picf_aqr_owm_202605_active/
+  run_a7_actionaware_defaultsync_long30k_ckpt500_20260521.sh
+
+purpose:
+  Test whether the frozen-policy structural repair survives production-relevant
+  action/PaliGemma pressure.
+
+contract:
+  action_weight=0.50
+  semantic_trainable=true
+  semantic_lr_scale=0.25
+  frozen pretrained backbones: Sonata, V-JEPA, AnyTouch
+  steps=30000
+  save_interval=500
+  keep_last_checkpoints=3
+  log_interval=50
+  anchor_overlay_interval=100
+
+online smoke rule:
+  Treat the first 100-200 steps as a live gate.  Stop early only if active
+  owner overlap, posterior active duplicate overlap, recycle saturation, or
+  overlays reproduce the historical active-collapse failure.  Do not stop only
+  because raw same-role overlap saturates; the completed reserve audit shows
+  raw overlap is dominated by reserve/no-object fixed-capacity rows.
+
+action-weight rule:
+  Do not start above 0.50.  If action_default_equiv plateaus while structure
+  remains healthy, resume from one of the 500-step checkpoints with a staged
+  action-weight intervention.  This keeps the plateau question separate from
+  the structural acceptance question.
+```
+
+Planned action-dominant continuation after step500:
+
+```text
+script:
+  scripts/experiments/picf_aqr_owm_202605_active/
+  run_a7_actionaware_defaultsync_action2_from500_long30k_20260521.sh
+
+resume checkpoint:
+  /mnt/checkpoints/picf_core/picf_core/
+  picf_a7_actionaware_defaultsync_long30k_ckpt500_20260521/500
+
+action_weight:
+  2.0
+
+gate before launching:
+  step500 checkpoint exists;
+  active duplicate overlap is 0 or near 0;
+  active same-role support overlap remains below the historical fail band;
+  recycle is not saturated;
+  overlays do not show active-owner collapse.
+
+gate after launching:
+  watch to at least step700.  If action_weight=2.0 immediately drives active
+  collapse or recycle saturation, stop this continuation and retain the 0.50
+  run as the safer baseline.
+```
+
+Step500 handoff observation:
+
+```text
+source run:
+  picf_a7_actionaware_defaultsync_long30k_ckpt500_20260521
+
+step500 metrics:
+  loss_total=0.6659
+  loss_action_default_equiv=0.0644
+  aqr_active_same_role_support_overlap_max=0.1394
+  aqr_downstream_same_role_support_overlap_max=0.3168
+  aqr_same_role_support_overlap_max=0.9997
+  aqr_reserve_same_role_support_overlap_max=0.9997
+  posterior_file_competition_active_duplicate_overlap_max=0
+  posterior_recycle_rate=0.0004
+  loss_anchor_object_pull=1.4949
+
+decision:
+  The hard active-owner gate passed, so the action-dominant continuation was
+  allowed.  The elevated object-pull/downstream metrics make this a pressure
+  test, not a clean final acceptance.  If action=2.0 worsens active overlap,
+  recycle, or object-pull, revert to the safer action=0.50 baseline and treat
+  the owner-target alignment term as the next repair target.
+```
+
+Action-dominant step700 observation:
+
+```text
+run:
+  picf_a7_actionaware_defaultsync_action2_from500_long30k_20260521
+
+resume:
+  source step=500
+  action_weight=2.0
+  loss_action_weight_scale=1.0
+
+step  total   align   action_eq  active_ov  downstream_ov  active_dup  recycle  object_pull
+550   0.4960  0.4350  0.0609     0.0601     0.3159         0           0.0791   0.9662
+600   0.4952  0.4384  0.0568     0.0880     0.3506         0           0.1172   0.9592
+650   0.3626  0.3111  0.0515     0.1803     0.3514         0           0.1143   0.5487
+700   0.3390  0.2930  0.0460     0.1285     0.2337         0           0.1169   0.4271
+
+interpretation:
+  The action-dominant continuation did not reproduce the old active-collapse or
+  recycle-saturation failures through step700.  It improved both action and
+  owner-target alignment after the elevated step500 handoff.  Continue the run,
+  but keep watching downstream overlap and overlays at later 100-step intervals.
+```
+
+Action-dominant step1000 observation:
+
+```text
+run:
+  picf_a7_actionaware_defaultsync_action2_from500_long30k_20260521
+
+checkpoint:
+  /mnt/checkpoints/picf_core/picf_core/
+  picf_a7_actionaware_defaultsync_action2_from500_long30k_20260521/1000
+
+step  total   align   action_eq  active_ov  downstream_ov  active_dup  recycle  object_pull
+550   0.4960  0.4350  0.0609     0.0601     0.3159         0           0.0791   0.9662
+600   0.4952  0.4384  0.0568     0.0880     0.3506         0           0.1172   0.9592
+650   0.3626  0.3111  0.0515     0.1803     0.3514         0           0.1143   0.5487
+700   0.3390  0.2930  0.0460     0.1285     0.2337         0           0.1169   0.4271
+750   0.3177  0.2658  0.0519     0.0889     0.1269         0           0.1199   0.3262
+800   0.3065  0.2587  0.0478     0.0891     0.1200         0           0.1204   0.3184
+850   0.2599  0.2073  0.0526     0.0602     0.1451         0           0.1222   0.1437
+900   0.2442  0.1947  0.0496     0.0600     0.1845         0           0.1269   0.0905
+950   0.2813  0.2315  0.0498     0.0649     0.1614         0           0.1279   0.2002
+1000  0.3547  0.3025  0.0522     0.1336     0.1908         0           0.1199   0.4006
+
+decision:
+  The run is healthy enough to continue.  Action has moved down versus the
+  first action-2.0 interval but is oscillating around 0.05, so do not raise
+  action weight above legacy/default scale yet.  The old hard failures remain
+  absent: active duplicate overlap is 0, active overlap stays low, recycle does
+  not saturate, and downstream overlap is controlled.  Owner-target pull bounced
+  at step1000 after improving sharply through step900; keep it as the next watch
+  item rather than restarting.  Raw slot-JEPA telemetry is large, but this run
+  has lambda_slot_jepa=0; it is not part of the optimized objective.
+```
+
+## 2026-05-22 Weak-Scaffold Decay Issue
+
+Observed in `picf_a7_actionaware_defaultsync_action2_from0_long30k_20260522`:
+
+```text
+step  action_eq  alignment  object_pull  object_point  active_ov  downstream_ov
+100   0.0720     0.1258     0.2260       1.8507        0.0228     0.1142
+200   0.0599     0.2328     0.4773       2.7311        0.1165     0.2977
+300   0.0628     0.3510     0.7561       3.7503        0.2277     0.3230
+450   0.0639     0.5343     1.1703       5.6222        0.2379     0.3391
+```
+
+Root cause:
+
+```text
+The action scale is now normal, but sidecar/OEML scaffold remains at the
+bootstrap strength forever.  By step450, object_pull alone contributes about
+0.410 to total loss, while action contributes about 0.064.  The sidecar teacher
+is therefore no longer weak measurement evidence; it dominates optimization.
+This is a curriculum/weighting error, not a reason to add another slot module.
+```
+
+Accepted repair:
+
+```text
+code:
+  scripts/picf_core_train.py now supports object-scaffold decay.
+
+fields scaled:
+  lambda_anchor_object_pull
+  lambda_object_explanation_point
+  lambda_object_explanation_contact
+  lambda_object_explanation_duplicate
+  lambda_object_explanation_background
+  lambda_mapg_support_diversity
+
+production continuation:
+  scripts/experiments/picf_aqr_owm_202605_active/
+  run_a7_actionaware_qgdecay_from500_long30k_20260522.sh
+
+schedule:
+  cosine, start=500, end=1500, floor=0.10
+
+quality:
+  anchor_object_pull_target_quality_power=2.0
+  anchor_object_pull_target_quality_min=0.05
+  object_explanation_point_quality_gate remains disabled by default because
+  the previous ablation reduced the scalar point loss but worsened owner pull.
+```
+
+Expected effect:
+
+```text
+At the step450 scale, a 0.10 long-run scaffold floor would reduce the dominant
+sidecar contribution from about 0.53 to about 0.053, comparable to action.
+During 500-1500 cosine decay, compact masks still guide owner binding, while
+diffuse/noisy masks stop dominating action and dense context learning.
+```
+
+Acceptance:
+
+```text
+must improve:
+  loss_total_minus_action should fall after decay begins
+  loss_action_default_equiv should leave the 0.06 plateau or at least not worsen
+  loss_anchor_object_pull should no longer rise monotonically
+  loss_object_explanation_point can remain noisy telemetry but its weighted
+  contribution must no longer dominate total
+
+must stay safe:
+  posterior_file_competition_active_duplicate_overlap_max == 0
+  active_same_role_support_overlap_max < 0.30
+  downstream_same_role_support_overlap_max < 0.45
+  posterior_recycle_rate not saturated
+```
+
+## 2026-05-24 Action-Phase / Optimizer-State Issue
+
+Current runs:
+
+```text
+A7 continuous long run:
+  picf_a7_actionprefix_rmsnorm_long30k_20260524
+
+A5 model-only resume / fresh-optimizer probe:
+  picf_a5_optreset_from1000_action2_probe1500_20260524
+  resume ckpt: A7 step1000 model-only checkpoint
+```
+
+Latest checked metrics:
+
+```text
+A7 step1700:
+  loss_total                         0.0628
+  loss_action_default_equiv          0.0542
+  loss_action_active7                0.2456
+  loss_anchor_object_pull            0.1398
+  loss_anchor_pv                     0.6312
+  loss_slot_jepa_raw                 13598.9
+  aqr_active_same_role_overlap_max   0.0461
+  aqr_downstream_same_role_overlap   0.1122
+  posterior_identity_switch_rate     0.1800
+  posterior_recycle_rate             0.1357
+  grad_norm                          0.278
+  nonfinite action prefix            0
+
+A5 step1350:
+  loss_total                         0.0656
+  loss_action_default_equiv          0.0466
+  loss_action_active7                0.2112
+  loss_anchor_object_pull            0.2512
+  loss_anchor_pv                     0.5588
+  loss_slot_jepa_raw                 5.08
+  aqr_active_same_role_overlap_max   0.0943
+  aqr_downstream_same_role_overlap   0.1002
+  posterior_identity_switch_rate     0.1839
+  posterior_recycle_rate             0.1308
+  grad_norm                          0.282
+```
+
+Interpretation:
+
+```text
+fixed / healthy relative to the old failure modes:
+  active overlap no longer collapses toward 1.0;
+  downstream overlap is controlled;
+  recycle is not saturating;
+  action prefix nonfinite rate remains 0;
+  gradients are small/stable;
+  A5 fresh-optimizer continuation proves the representation can still lower
+  action after the A7 step1000 plateau.
+
+still open:
+  A7 continuous optimizer state lets action hover around 0.05 instead of
+  continuing the A5-style drop toward 0.04;
+  raw loss_slot_jepa can explode on A7, but lambda_slot_jepa is zero and it is
+  diagnostic only;
+  loss_anchor_object_pull still oscillates by sample/owner quality and should
+  be treated as a weak-teacher measurement, not as hard truth;
+  raw same-role overlap remains near 1.0, but current action-visible active
+  and downstream overlaps are the acceptance metrics.
+```
+
+Root cause hypothesis:
+
+```text
+This is no longer primarily an anchor-collapse problem.  It is an optimization
+phase-boundary problem.  The same model checkpoint improves action much faster
+when resumed with fresh optimizer/scheduler state on A5.  In Adam-style
+training, stale first/second moments from the earlier mixed belief/object phase
+can become miscalibrated after the objective shifts to action-dominant polish.
+
+This does not usually appear as strongly in vanilla PI0.5 because its objective
+is more homogeneous: action learning is the main target from the beginning.
+PICF has a deliberate phase change: weak object scaffold -> active object
+ownership -> action utilization.  That phase change should be represented in
+the optimizer state, not only in scalar loss weights.
+```
+
+Accepted next experiment:
+
+```text
+Run a staged model-only resume at the action-polish boundary.
+
+Candidate boundary:
+  ckpt1000 or ckpt1500, whichever has healthier overlays and active/downstream
+  overlap.
+
+Stage-2 recipe:
+  resume model weights only;
+  reset Adam/optimizer state;
+  use short-tail or lower-LR action-polish schedule;
+  keep action weight at normal/default-dominant scale;
+  keep sidecar/object scaffold at weak floor;
+  keep lambda_slot_jepa/support_pred/binding_consistency = 0;
+  keep anchor overlays every 100 steps and loss details every 50 steps.
+
+Acceptance:
+  loss_action_default_equiv should beat the continuous A7 run over the same
+  step interval;
+  active/downstream overlap should remain controlled;
+  loss_anchor_pv and loss_anchor_object_pull should not monotonically worsen;
+  raw slot_jepa explosion remains non-blocking only while lambda_slot_jepa=0.
+```
+
+## 2026-05-25 Action-Polish Continuity Status
+
+Accepted continuation:
+
+```text
+picf_a7_from_a5_1500_freshopt_actionpolish_30k_20260524
+```
+
+Step-2500 status:
+
+```text
+loss_action_default_equiv          0.0363
+loss_total                         0.0496
+loss_anchor_pv                     0.5316
+loss_anchor_object_pull            0.4165
+active same-role support overlap   0.1300
+downstream same-role support       0.1289
+posterior_identity_switch_rate     0.2106
+posterior_recycle_rate             0.1284
+```
+
+Closed by this run, relative to the prior May failure modes:
+
+```text
+1. The action objective is no longer trapped in the A7 continuous 0.05-0.056
+   band.  It reached 0.0345 at step2350 and 0.0363 at step2500.
+
+2. Active/downstream anchor overlap has not returned to the old 0.9+ collapse
+   regime.
+
+3. Posterior recycle is not saturated.
+
+4. The step1500 model-only/fresh-optimizer transition is a useful phase-boundary
+   repair and should be represented explicitly in future training recipes.
+```
+
+Still open:
+
+```text
+1. CALVIN/video behavior evidence is still pending.  The 2500 checkpoint is a
+   valid small-eval candidate, but the active run should not be interrupted
+   solely for eval while it is still improving.
+
+2. loss_anchor_object_pull remains noisy because sidecar/contact proposal
+   quality is weak-teacher evidence, not hard object truth.
+
+3. raw same-role overlap remains 1.0 and must continue to be interpreted as
+   reserve/inactive telemetry unless active/downstream overlap also fails.
+
+4. raw slot_jepa remains telemetry only; lambda_slot_jepa must stay 0 until the
+   normalized/matched version has its own acceptance run.
+```
+
+Next gate:
+
+```text
+Watch step3000 and step3500 before changing weights or resetting optimizer.
+If action remains in the 0.03x band and active/downstream overlap stays below
+the warning band, preserve continuity and continue the run.
+```
+
+Follow-up causal probe:
+
+```text
+run:
+  picf_pc1_from_a7_2500_freshopt_lr5e5_30k_20260525
+
+purpose:
+  resume A7 step2500 with fresh optimizer to determine whether the later
+  action rebound is optimizer-state/phase driven or checkpoint/data-state
+  driven.
+
+important:
+  use num_train_steps=30000 even though the run may be stopped early.  A short
+  total horizon changes the LR schedule and is not comparable to the maintained
+  long-run recipe.
+```
+
+Low-LR control:
+
+```text
+run:
+  picf_pc1_from_a7_2500_freshopt_lr2e5_30k_20260525
+
+purpose:
+  reuse the exact A7 step2500 checkpoint and fresh-optimizer setup, but lower
+  LR from 5e-5 to 2e-5 while keeping the 30000-step schedule.  This separates
+  fresh-optimizer benefit from possible high-LR structure noise.
+
+acceptance:
+  action should stay materially below the A7 continuous 0.045-0.053 band;
+  active/downstream same-role overlap should not climb above the warning band;
+  anchor-object-pull variance should be lower than the 5e-5 probe.
+```
+
+Execution correction:
+
+```text
+The strict A7 step2500 LR=2e-5 control is no longer runnable because the A7
+checkpoint retention window removed the step2500 directory.  The active
+replacement is:
+
+  picf_pc1_from_a7_4500_freshopt_lr2e5_30k_20260525
+
+This is a current-phase test, not a strict step2500 paired control.
+```
+
+2026-05-26 update:
+
+```text
+The 2e-5 PC1 current-phase control has been stopped after showing safe structure
+but only partial action release.  The maintained A7 line remains running as the
+continuous-optimizer reference.
+
+New active issue probe:
+  picf_pc1_from_a7_5500_freshopt_midlr_actionstable_ckpt1000_20260526
+
+Question:
+  Is the rebound mainly an underpowered optimizer phase at 2e-5, or does it
+  persist under a middle LR fresh-optimizer continuation from the more mature
+  A7 step5500 weights?
+
+Checkpoint retention:
+  save every 1000 steps, keep last 5.
+```
+
+PC1 mid-LR conclusion and frozen-PICF causal probe:
+
+```text
+Resolved evidence:
+  picf_pc1_from_a7_5500_freshopt_midlr_actionstable_ckpt1000_20260526
+  briefly reached loss_action_default_equiv ~= 0.0285 but rebounded to the
+  0.04x band by steps 6550-6850.
+
+Open root-cause question:
+  Does action rebound happen because PICF core belief/prefix values keep moving
+  under structural/object losses while the policy path is adapting?
+
+New diagnostic:
+  picf_pc1_freezepicf_policyonly_from_pc1_6000_action2_30k_20260526
+
+Required invariants:
+  picf_trainable_scope=policy_only
+  all core.* parameters frozen
+  semantic/action non-core path trainable
+  all structural/object scaffold losses set to 0
+  PICF forward still enabled; do not switch to picf_mode=ablated
+
+Why this is not a production recipe:
+  This is a causal probe.  It intentionally prevents PICF from improving so we
+  can test whether a stationary prefix removes rebound.  If successful, the
+  production answer is staged prefix stabilization or a gated context/prefix
+  schedule, not permanently freezing PICF.
+```
+
+## 2026-05-29 Step-Indexed Resume Bug Closure
+
+Status:
+
+```text
+Resolved as code-level bug, still under corrected-run behavior monitoring.
+```
+
+Root cause:
+
+```text
+The old resumed 7000->7600 action rebound evidence was contaminated by a
+stateful sampled-window RNG.  Resume branches replayed early-window streams, so
+step-matched action curves were not valid causal comparisons.
+```
+
+Fix:
+
+```text
+scripts/picf_core_train.py:
+  _step_indexed_window_rng(seed, rank, step, micro_step, retry_count)
+  source.window(flat_index, rng=sample_rng)
+  --step-indexed-window-rng default true
+  --no-step-indexed-window-rng legacy reproduction only
+
+scripts/verify_picf_owm_contract.py:
+  trainer_window_rng_is_resume_safe
+
+scripts/picf_core_train_test.py:
+  test_step_indexed_window_rng_is_resume_stable_and_step_specific
+  test_normalize_train_args_enables_step_indexed_window_rng_by_default
+```
+
+Current monitored run:
+
+```text
+picf_a7_stepindexed_actionprefix_ema_from7000_30k_20260529
+
+Observed corrected metrics:
+  7050 action_default=0.050193 active/downstream=0.044/0.057
+  7100 action_default=0.051401 active/downstream=0.070/0.078
+  7150 action_default=0.042441 active/downstream=0.110/0.110
+  7200 action_default=0.037938 active/downstream=0.080/0.078
+  7250 action_default=0.050864 active/downstream=0.085/0.093
+  7300 action_default=0.043123 active/downstream=0.080/0.084
+  7350 action_default=0.039770 active/downstream=0.085/0.084
+  7400 action_default=0.045796 active/downstream=0.065/0.068
+  7450 action_default=0.045965 active/downstream=0.135/0.128
+  7500 action_default=0.042314 active/downstream=0.165/0.175
+  7550 action_default=0.044523 active/downstream=0.085/0.090
+
+Decision:
+  Structural gates passed through 7550, but the run was stopped as a production
+  candidate because action remained around 0.04 instead of the expected 0.02
+  reference range.
+
+Next required issue:
+  Add and run a fixed-window no-update action probe before any further
+  architecture/loss rewrite.
+
+Implemented tool:
+  scripts/picf_fixed_window_action_probe.py
+
+Why:
+  The corrected step-indexed stream is not the same sampled-window stream as
+  the old 0.02 reference, so live train-window scalar loss is not a stationary
+  comparator.  Compare preserved checkpoints on identical accepted windows.
+```
+
+Local validation added to the root-cause document:
+
+```text
+docs/PICF_AQR_OWM_ACTION_REBOUND_ROOT_CAUSE_20260529_TEMP.md
+```
+
+Additional strict local audit rerun:
+
+```text
+docs/PICF_AQR_OWM_STEPINDEXED_RUN_LOCAL_AUDIT_20260529_TEMP.md
+
+Result:
+  compileall, contract verifier, strict diagnose, dataflow trace,
+  MVTrack deep audit, professor-grade audit, binding/competition/action-visible
+  audits, focused trainer tests, and full PICF regression all pass.
+
+Current state:
+  Step-indexed resume bug is code-closed.  Production action-quality acceptance
+  remains open pending fixed-window probe results.
+```
+
+## 2026-05-31 Action-Visible Interface Bottleneck
+
+Status:
+
+```text
+Open under E7 diagnostic; root cause narrowed substantially.
+```
+
+Evidence already established:
+
+```text
+Fixed-window no-update probe on the same 24 accepted windows:
+
+gate0:
+  loss_action_default_equiv=0.064012
+
+gate07:
+  loss_action_default_equiv=0.064106
+
+fusion24:
+  loss_action_default_equiv=0.064091
+
+append24:
+  loss_action_default_equiv=0.076344
+```
+
+Interpretation:
+
+```text
+PICF prefix/context is not exerting useful action leverage through passive
+extra-prefix or fixed-prefix fusion. Direct append is harmful because it grows
+the PI prefix and shifts action suffix positions. This rules out raw overlap as
+the primary action plateau cause at this checkpoint.
+```
+
+Root-cause dataflow defects found while deploying E7:
+
+```text
+1. PICF context width != action suffix width.
+   PICF context: 2048 PI prefix width.
+   Action suffix: 1024 action expert width.
+   Fix: explicit trainable action_context_in_proj before suffix cross-attn.
+
+2. FSDP cannot manage a scalar gate parameter.
+   Fix: action_context_gate_logit is a [1] tensor.
+
+3. FSDP use_orig_params=False cannot flatten mixed frozen/trainable params
+   inside adapter-only semantic root.
+   Fix for this diagnostic: use DDP.
+   Production full semantic cotrain can still use FSDP because the semantic root
+   is uniformly trainable under backbone_only/model_only.
+```
+
+Implemented E7 design:
+
+```text
+action_context_integration=suffix_cross_attention
+semantic_trainable_scope=action_adapter_only
+action_context_stopgrad=1
+picf_core_lr_scale=0.001
+training_strategy=ddp
+```
+
+Acceptance:
+
+```text
+E7 must show pi_context_adapter_* metrics in JSONL and demonstrate whether
+action-side cross-attention can lower action loss versus E6. If it does not,
+the remaining bottleneck is downstream action-head/backbone adaptation rather
+than slot routing or raw overlap.
+```
+
+E7 step9150 result:
+
+```text
+loss_action_default_equiv=0.047400
+loss_total_minus_action=0.010265
+active/downstream overlap=0.200000 / 0.188100
+pi_context_adapter_token_count=28
+pi_context_adapter_gate=0.119178
+pi_context_adapter_attention_entropy_mean=3.075562
+pi_context_adapter_residual_rms_mean=0.269857
+```
+
+Decision:
+
+```text
+adapter dataflow is alive, but adapter-only has not improved action loss over
+the step9100 prefix-fusion baseline (`0.044162`).  This is not evidence for a
+slot-overlap relapse; it narrows the live root cause to action-side readout
+adaptation.
+
+Next:
+  run E8 from the same step9100 checkpoint with
+  `semantic_trainable_scope=action_head_and_adapter` and the same
+  `suffix_cross_attention` path.
+```
+
+E7 step9200 confirmation:
+
+```text
+loss_action_default_equiv=0.047333
+loss_total_minus_action=0.010093
+active/downstream overlap=0.100000 / 0.097959
+loss_slot_jepa=0.862420
+loss_mapg_routing=0.422907
+```
+
+Closure:
+
+```text
+E7 is stopped at the 9200 decision gate.  Structure got healthier while action
+did not, so repeating overlap/slot-loss repairs here would be non-causal.  E8
+is the correct next diagnostic: suffix_cross_attention with action head/time
+MLP trainable.
+```
+
+E8 step9200 result:
+
+```text
+scope:
+  action_head_and_adapter
+
+loss_action_default_equiv:
+  9150 = 0.047409
+  9200 = 0.047135
+
+grad_norm_group_semantic_backbone:
+  9150 = 0.239949
+  9200 = 0.177523
+
+active/downstream overlap at 9200:
+  0.100000 / 0.097957
+```
+
+Decision:
+
+```text
+E8 proves action-head/time-MLP gradients are live but insufficient.  The live
+root is now the frozen semantic/action transformer interface: the action
+expert/backbone must cotrain with the suffix-side PICF belief adapter.  Start
+E9 with `semantic_trainable_scope=backbone_only` and keep the same suffix
+cross-attention path.
+```
+
+E9 implementation blocker:
+
+```text
+status:
+  first E9 launch crashed before training
+
+error:
+  Action context adapter dimension mismatch:
+  context=(1, 28, 2048) suffix=(1, 16, 1024)
+
+root cause:
+  FSDP wraps `action_context_in_proj`, so runtime type is no longer bare
+  `nn.Linear`.  The projection bridge rejected a valid wrapped module before
+  calling it.  Therefore this is an implementation compatibility issue, not
+  evidence that `backbone_only + suffix_cross_attention` failed.
+
+fix:
+  projection bridge now accepts generic `nn.Module` wrappers, optionally
+  unwraps `.module` / `._fsdp_wrapped_module` for feature checks, calls the
+  projection, then validates output width.
+
+validation:
+  local wrapper/policy tests and contract/dataflow audits pass.
+
+next:
+  rerun E9 as
+  `picf_a7_stepindexed_from9100_suffixadapter_backbone_retry1_9400_20260531`.
+```
+
+E9 retry1 follow-up:
+
+```text
+status:
+  retry1 passed the projection mismatch and entered the first FSDP training
+  step, then rank0 terminated with SIGSEGV before metrics.
+
+root cause:
+  The adapter projections were incorrectly treated as nested FSDP runtime hot
+  leaves.  They are tiny trainable interface projections, not large transformer
+  leaves.  Nested full-sharding them adds no mathematical value and destabilizes
+  the production backward path.
+
+fix:
+  keep `action_context_*` trainable but remove them from
+  `fsdp_runtime_leaf_module_specs`; they now live under the semantic root FSDP
+  boundary.  This preserves the same suffix-cross-attention map while removing
+  the unstable nested-FSDP small-module boundary.
+
+next:
+  run retry2 and require at least the 9150 metrics row before treating E9 as a
+  real loss diagnostic.
+```
+
+E9 retry2 closure:
+
+```text
+status:
+  mechanically passed; scientifically invalid as final action diagnostic
+
+observed:
+  step9150 action_default_equiv=0.048359
+  non_action=0.010331
+  active/downstream overlap=0.170000/0.171056
+  adapter gate/residual=0.119175/0.271960
+  semantic_backbone grad=0.339463
+
+why not final:
+  This run used NUM_TRAIN_STEPS=9400 from a step9100 checkpoint, so the cosine
+  LR schedule was already at the tail (`semantic_backbone lr ~= 2.0e-5`).  The
+  same project documentation says resumed action diagnostics must preserve the
+  30K horizon; otherwise the optimizer/LR condition is not comparable.
+
+fix:
+  `run_a7_stepindexed_from9100_suffixadapter_backbone_300_20260531.sh` now
+  defaults to NUM_TRAIN_STEPS=30000 and an h30k experiment name.  Rerun this
+  production-horizon E9 before declaring the backbone/action-transformer path
+  ineffective.
+
+remaining open issue:
+  action plateau under the correct production LR horizon.  Do not reopen raw
+  overlap or sidecar-noise as primary causes unless active/downstream overlap
+  or non-action budget fails at the corrected horizon.
+```
+
+E9-h30k result:
+
+```text
+run:
+  picf_a7_stepindexed_from9100_suffixadapter_backbone_h30k_20260531
+
+9150:
+  action_default_equiv=0.055658
+  non_action=0.010807
+  active/downstream=0.134979/0.136243
+  slot_jepa=0.671574
+  semantic_backbone_lr=5.9407e-5
+
+9200:
+  action_default_equiv=0.055003
+  non_action=0.010334
+  active/downstream=0.089954/0.082378
+  slot_jepa=0.584209
+  semantic_backbone_lr=5.9300e-5
+```
+
+Root-cause update:
+
+```text
+The corrected h30k horizon does not rescue E9.  It makes the structure healthier
+but action worse than E7/E8.  This strongly rejects raw overlap, slot_jepa, and
+sidecar structure as the immediate cause of the action plateau.  The live cause
+is the action-side cotrain boundary: fully trainable semantic/action backbone at
+`SEMANTIC_LR_SCALE=1.0` drifts the PI action basis faster than the new suffix
+PICF adapter can become useful.
+
+Next run:
+  picf_a7_stepindexed_from9100_suffixadapter_backbone_sem035_h30k_20260531
+
+Only intended repair:
+  keep suffix_cross_attention and h30k, but restore the large backbone LR scale
+  to 0.35 while leaving policy_head LR high.
+```
+
+E10 result:
+
+```text
+run:
+  picf_a7_stepindexed_from9100_suffixadapter_backbone_sem035_h30k_20260531
+
+9150:
+  action_default_equiv=0.048495
+  non_action=0.011015
+  active/downstream=0.184977/0.186723
+  object_pull=0.225764
+  slot_jepa=0.729864
+  semantic_backbone_lr=2.079e-5
+
+9200:
+  action_default_equiv=0.047530
+  non_action=0.010215
+  active/downstream=0.089956/0.086722
+  object_pull=0.150400
+  slot_jepa=0.583056
+  semantic_backbone_lr=2.075e-5
+```
+
+Root-cause update:
+
+```text
+E10 resolves the E9 high-LR degradation but does not exceed E7/E8 and remains
+worse than the E6 prefix-fusion reference.  The immediate cause is no longer
+raw overlap or slot loss; the live unknown is the action-interface topology.
+
+Next matched control:
+  picf_a7_stepindexed_from9100_prefixfusion_sem035_h30k_20260531
+
+Only intended change from E10:
+  ACTION_CONTEXT_INTEGRATION=suffix_cross_attention -> prefix_fusion
+
+E11 startup:
+  tmux=e11_prefixfusion_sem035_h30k_20260531
+  resumed_step=9100
+  num_steps=30000
+  action_context_integration=prefix_fusion
+  semantic_trainable_scope=backbone_only
+  semantic_backbone_lr=2.45e-5
+  policy_head_lr=7.0e-5
+  picf_core_lr=7.0e-8
+```
+
+E11 result:
+
+```text
+9150:
+  action_default_equiv=0.047375
+  non_action=0.010323
+  active/downstream=0.184988/0.176964
+  anchor_pv=0.501754
+  object_pull=0.159862
+  slot_jepa=0.803113
+  semantic_backbone_lr=2.079e-5
+
+9200:
+  action_default_equiv=0.047304
+  non_action=0.010585
+  active/downstream=0.114996/0.103346
+  anchor_pv=0.500755
+  object_pull=0.187458
+  slot_jepa=0.777948
+  semantic_backbone_lr=2.075e-5
+```
+
+Issue update:
+
+```text
+E11 does not recover the E6 prefix-fusion reference band.  It is only marginally
+better than E10 and essentially in the E7/E8 band.  This means the remaining
+action plateau is not explained by suffix-vs-prefix topology alone.
+
+Next decisive control:
+  picf_a7_stepindexed_from9100_prefixonly_sem035_h30k_20260531
+
+Only intended change:
+  ACTION_CONTEXT_TOKENS=0
+
+Purpose:
+  isolate whether dense PICF action-context tokens are the remaining action-path
+  noise source.  If prefix-only recovers action, dense context should be retired
+  or heavily gated from the maintained action path.  If prefix-only is still
+  flat, the remaining cause is the step9100 basin / train stream / optimizer
+  boundary rather than the dense context channel.
+```
+
+E12 launch:
+
+```text
+tmux:
+  e12_prefixonly_sem035_h30k_20260531
+
+run:
+  picf_a7_stepindexed_from9100_prefixonly_sem035_h30k_20260531
+
+confirmed command-line boundary:
+  resume checkpoint        = prefixfusion step9100
+  num_steps                = 30000
+  semantic_trainable_scope = backbone_only
+  semantic_lr_scale        = 0.35
+  action_context_tokens    = 0
+  action_context_integration = prefix_fusion
+  unroll/burnin            = 2 / 1
+  frozen backbones         = Sonata / V-JEPA / AnyTouch
+
+startup speed:
+  first steps ~= 24-26 sec/step
+
+readout:
+  step9150 is the first decisive readout.
+  step9200 is the confirmation readout if 9150 is ambiguous.
+```
+
+E12 result and root-cause refinement:
+
+```text
+9150:
+  action_default_equiv=0.047398
+  non_action=0.009776
+  active/downstream=0.140000/0.140714
+  object_pull=0.111165
+  slot_jepa=0.813201
+  policy_lr=5.941e-5
+  semantic_lr=2.079e-5
+  pi_context_token_count=0
+
+Conclusion:
+  Dense action-context tokens are not the action plateau root cause.  Removing
+  them gives essentially the same action value as E11.
+
+New confirmed mismatch:
+  source E6 step9100 policy_lr ~= 2.006e-5
+  source E6 step9100 semantic_lr ~= 7.020e-6
+  resumed h30k step9150 policy_lr ~= 5.941e-5
+  resumed h30k step9150 semantic_lr ~= 2.079e-5
+
+Issue:
+  h30k resume diagnostics were LR-discontinuous with the source checkpoint.
+  They restarted an already low-LR checkpoint with roughly 3x action/semantic
+  LR, causing action-path drift while structure metrics stayed healthy.
+```
+
+E13 repair:
+
+```text
+run:
+  picf_a7_stepindexed_from9100_lrcontinuity_prefixfusion_h30k_20260531
+
+only intended repair:
+  LR=2.0e-5
+  MIN_LR=2.0e-5
+  SEMANTIC_LR_SCALE=0.35
+  ACTION_CONTEXT_INTEGRATION=prefix_fusion
+  ACTION_CONTEXT_TOKENS=24
+
+Expected:
+  if LR discontinuity was the root cause, action at 9150 should return toward
+  the E6 source band rather than stay in the E10/E11/E12 0.047 band.
+```
+
+E13 9150 result:
+
+```text
+9150:
+  action_default_equiv=0.046477
+  non_action=0.010350
+  active/downstream=0.200000/0.191951
+  object_pull=0.167834
+  slot_jepa=0.821991
+  policy_lr=2.000e-5
+  semantic_lr=7.000e-6
+
+Interpretation:
+  LR continuity improves action versus the 0.047-0.048 band, so the LR
+  discontinuity is a real cause.  It does not fully recover the source E6
+  0.044 band at 9150, so this is not yet a complete fix.
+
+Next read:
+  wait to 9200.  If action continues down, keep LR-continuity as the maintained
+  resume rule.  If action stays near 0.046+, the next issue is missing optimizer
+  state or source/train-window mismatch, not a slot-loss problem.
+```
+
+E13 9200 final:
+
+```text
+9200:
+  action_default_equiv=0.046615
+  non_action=0.010613
+  active/downstream=0.095000/0.090000
+  anchor_pv=0.498752
+  object_pull=0.192729
+  slot_jepa=0.701867
+  recycle=0.099770
+  policy_lr=2.000e-5
+  semantic_lr=7.000e-6
+```
+
+Issue status:
+
+```text
+Partially fixed:
+  LR discontinuity.  E13 is better than the E10/E11/E12 0.047-0.048 band.
+
+Not fixed by LR continuity alone:
+  source E6 0.044 action band was not restored.
+
+New hard facts:
+  source /9100 checkpoint has no optimizer.pt;
+  E13 /9200 checkpoint has no optimizer.pt;
+  trainer supports --optimizer-checkpoint-mode full, but these runs used
+  model-only and therefore reinitialized Adam on resume.
+
+Next required test:
+  exact-window replay on the source step9100 windows.  Do not use fixed64 as a
+  global claim.  The launched probe compares source /9100 and E13 /9200 on the
+  same 100 window_trace records:
+
+    /mnt/picf_exact_window_probes/e6_step9100_rank01_windows.jsonl
+    /mnt/picf_exact_window_probes/e6_vs_e13_9100_windows_20260531/
+```
+
+Maintained rule update:
+
+```text
+Any future long run that may be resumed for action-loss comparison must use
+--optimizer-checkpoint-mode full at phase boundaries.  model-only checkpoints
+remain acceptable for eval/export, but they must not be used as evidence that a
+continued optimizer trajectory is healthy or unhealthy.
+```
+
+Implementation added:
+
+```text
+script:
+  scripts/experiments/picf_aqr_owm_202605_active/
+  run_a7_stepindexed_from9100_lrcontinuity_fullopt_prefixfusion_h30k_20260531.sh
+
+contract:
+  LR=2e-5
+  MIN_LR=2e-5
+  SEMANTIC_LR_SCALE=0.35
+  ACTION_CONTEXT_INTEGRATION=prefix_fusion
+  ACTION_CONTEXT_TOKENS=24
+  OPTIMIZER_CHECKPOINT_MODE=full
+  SAVE_INTERVAL=1000
+  KEEP_LAST_CHECKPOINTS=5
+
+local checks:
+  bash -n passed
+  git diff --check passed
+  targeted checkpoint tests: 7 passed
+```
+
+Exact-window source check:
+
+```text
+source /9100 evaluated on source E6 step9100 exact windows:
+  accepted windows = 100
+  action_default_equiv mean = 0.041924
+  active/downstream overlap mean = 0.130000 / 0.122288
+  slot_jepa mean = 0.883698
+  recycle mean = 0.101549
+
+Implication:
+  source /9100 is not broken under the current probe.  If E13 /9200 is worse on
+  these same windows, the degradation is from resumed training after /9100, not
+  from an invalid probe or the old fixed64 comparison.
+```
+
+Exact-window E13 result:
+
+```text
+same 100 source E6 step9100 windows:
+  source /9100 action_default_equiv = 0.041924
+  E13 /9200 action_default_equiv    = 0.042149
+  delta                             = +0.000225
+
+structure:
+  slot_jepa improves from 0.883698 to 0.710429
+  active overlap improves from 0.130000 to 0.115000
+  downstream overlap improves from 0.122288 to 0.118174
+  recycle stays essentially equal, 0.101549 -> 0.100065
+```
+
+Root-cause update:
+
+```text
+The apparent E13 action gap is not a same-window weight regression.  The E13
+checkpoint is effectively action-equivalent to source /9100 on the exact source
+windows.  The 0.0466 training-log value at E13 step9200 is therefore dominated
+by later-window/difficulty non-stationarity.
+
+Issue class changes from:
+  "PICF/action-context architecture is likely degrading action"
+
+to:
+  "rolling train-window action loss is not a stationary quality metric; resume
+   studies require exact-window or stratified held-window controls."
+
+Still keep:
+  full optimizer checkpoints for future resume hygiene.
+
+Do not do:
+  another slot-structure rewrite solely because a later rolling window logs a
+  higher action mean.
 ```

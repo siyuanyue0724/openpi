@@ -3,6 +3,8 @@ from __future__ import annotations
 from collections.abc import Sequence
 import dataclasses
 import math
+import os
+import time
 from typing import Any
 
 import numpy as np
@@ -70,6 +72,31 @@ def _resolve_dtype(config: PicfCoreConfig) -> torch.dtype:
     if config.dtype == "bfloat16":
         return torch.bfloat16
     return torch.float32
+
+
+def _runtime_timing_enabled() -> bool:
+    return os.environ.get("OPENPI_PICF_TIMING_BREAKDOWN", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sync_cuda_for_timing() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _timing_start(enabled: bool) -> float:
+    if enabled:
+        _sync_cuda_for_timing()
+        return time.perf_counter()
+    return 0.0
+
+
+def _timing_record(timing: dict[str, float], name: str, start: float, enabled: bool) -> None:
+    if not enabled:
+        return
+    _sync_cuda_for_timing()
+    timing[f"{name}_ms"] = (time.perf_counter() - start) * 1000.0
+
+
 def _to_tensor(
     value: torch.Tensor | np.ndarray | Sequence[float] | float | int,
     *,
@@ -1007,6 +1034,7 @@ class PicfFullCore(nn.Module):
         self.config = config or PicfCoreConfig()
         self.device = _resolve_device(self.config)
         self.dtype = _resolve_dtype(self.config)
+        self._last_observe_timing: dict[str, float] = {}
         self.pointcloud_builder = pointcloud_builder
         self.local_frame = local_frame or EndEffectorLocalFrame()
         self.point_feature_extractor = point_feature_extractor
@@ -1445,6 +1473,16 @@ class PicfFullCore(nn.Module):
             semantic_trunk_dim,
             heads,
             ff_chunk_size=self.config.tokenwise_ff_chunk_size,
+        )
+        self.register_buffer(
+            "action_prefix_teacher_tokens",
+            torch.zeros((self.config.pi_prefix_queries, semantic_trunk_dim), dtype=torch.float32),
+            persistent=True,
+        )
+        self.register_buffer(
+            "action_prefix_teacher_initialized",
+            torch.zeros((), dtype=torch.float32),
+            persistent=True,
         )
         self.future_condition_reader = CrossAttentionRead(
             semantic_trunk_dim,
@@ -6097,6 +6135,8 @@ class PicfFullCore(nn.Module):
             candidate_coverage=graph.object_candidate_coverage,
             candidate_background=graph.object_candidate_background,
             candidate_duplicate_overlap=graph.object_candidate_duplicate_overlap,
+            anchor_base_quality=quality,
+            anchor_point_quality=point_quality,
         )
 
     def _mapg_slot_assignment(
@@ -6462,20 +6502,14 @@ class PicfFullCore(nn.Module):
             pg_h = self.mapg_pg_proj(pg_priors @ pg_tokens)
         visual_h = self.mapg_visual_proj(p_v @ token_field.visual_tokens) if self.mapg_visual_proj is not None else torch.zeros_like(pg_h)
         point_h = torch.zeros_like(visual_h)
-        point_valid = torch.zeros((anchor_count,), device=self.device, dtype=torch.bool)
         if p_p is not None and point_count > 0 and self.mapg_point_proj is not None:
             point_h = self.mapg_point_proj(p_p @ token_field.point_tokens)
-            point_valid = _row_has_mass(p_p, eps=self.config.epsilon_a)
         tactile_h = torch.zeros_like(visual_h)
-        tactile_valid = torch.zeros((anchor_count,), device=self.device, dtype=torch.bool)
         if p_t is not None and tactile_count > 0 and self.mapg_tactile_proj is not None:
             tactile_h = self.mapg_tactile_proj(p_t @ token_field.tactile_tokens)
-            tactile_valid = _row_has_mass(p_t, eps=self.config.epsilon_a)
         post_h = torch.zeros_like(visual_h)
-        post_valid = torch.zeros((anchor_count,), device=self.device, dtype=torch.bool)
         if p_post is not None and previous is not None and self.mapg_posterior_proj is not None:
             post_h = self.mapg_posterior_proj(p_post @ previous.posterior.tokens.to(device=self.device, dtype=self.dtype))
-            post_valid = _row_has_mass(p_post, eps=self.config.epsilon_a)
         pg_conf = _distribution_confidence(pg_priors, eps=self.config.epsilon_a, floor=floor)
         visual_conf = _distribution_confidence(p_v, eps=self.config.epsilon_a, floor=floor)
         point_conf = _distribution_confidence(p_p, eps=self.config.epsilon_a, floor=floor)
@@ -7182,6 +7216,13 @@ class PicfFullCore(nn.Module):
             pi_prefix_tokens, _ = self.pi_prefix_reader(pi_queries, control_tokens[None, :], attn_bias=pi_reader_bias)
         else:
             pi_prefix_tokens, _ = self.pi_prefix_reader(pi_queries, control_tokens[None, :])
+        (
+            pi_prefix_tokens,
+            pi_prefix_pre_rms,
+            pi_prefix_post_rms,
+            pi_prefix_scale,
+            pi_prefix_gate,
+        ) = self._stabilize_action_prefix_tokens(pi_prefix_tokens)
         future_queries = self.predictive_query_tokens.to(device=self.device, dtype=self.dtype)[None, :]
         future_reader_bias = None
         if graph_bias is not None and graph_tokens is not None:
@@ -7208,7 +7249,74 @@ class PicfFullCore(nn.Module):
             pi_prefix_tokens=pi_prefix_tokens[0],
             future_condition_tokens=future_condition_tokens[0],
             graph_tokens=graph_tokens,
+            pi_prefix_pre_rms=pi_prefix_pre_rms[0] if pi_prefix_pre_rms is not None else None,
+            pi_prefix_post_rms=pi_prefix_post_rms[0] if pi_prefix_post_rms is not None else None,
+            pi_prefix_scale=pi_prefix_scale[0] if pi_prefix_scale is not None else None,
+            pi_prefix_gate=pi_prefix_gate[0] if pi_prefix_gate is not None else None,
         )
+
+    def _stabilize_action_prefix_tokens(
+        self,
+        tokens: torch.Tensor,
+    ) -> tuple[torch.Tensor, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None, torch.Tensor | None]:
+        """Normalize PICF action-prefix scale before PI0.5 consumes it.
+
+        The action prefix is an adapter interface between the belief router and
+        the pretrained semantic/action stack.  Direction/content should remain
+        trainable, but absolute recurrent scale is not a reliable confidence
+        channel and was the strongest suspect in the late action-loss rebound.
+        """
+
+        if not isinstance(tokens, torch.Tensor) or tokens.numel() == 0 or not tokens.is_floating_point():
+            return tokens, None, None, None, None
+        mode = str(getattr(self.config, "action_prefix_norm_mode", "none")).strip().lower().replace("-", "_")
+        eps = max(float(getattr(self.config, "action_prefix_norm_eps", 1.0e-6)), 1.0e-12)
+        target = max(float(getattr(self.config, "action_prefix_rms_target", 1.0)), eps)
+        out = torch.nan_to_num(tokens, nan=0.0, posinf=0.0, neginf=0.0)
+        value_clip = float(getattr(self.config, "action_prefix_value_clip", 0.0))
+        if value_clip > 0.0:
+            out = out.clamp(min=-value_clip, max=value_clip)
+        gate_value = max(0.0, min(float(getattr(self.config, "action_prefix_output_gate", 1.0)), 1.0))
+        gate = torch.full(out.shape[:-1], gate_value, device=out.device, dtype=out.dtype)
+        pre_rms = torch.sqrt(torch.mean(out.detach().to(dtype=torch.float32).square(), dim=-1) + eps).to(
+            device=out.device,
+            dtype=out.dtype,
+        )
+        if mode in {"", "none", "off", "disabled"}:
+            scale = torch.ones((*out.shape[:-1], 1), device=out.device, dtype=out.dtype)
+        elif mode in {"rmsnorm", "rms_norm"}:
+            rms = torch.sqrt(torch.mean(out.to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps).to(
+                device=out.device,
+                dtype=out.dtype,
+            )
+            scale = target / torch.clamp(rms, min=eps)
+            out = out * scale
+        elif mode in {"rmscap", "rms_cap"}:
+            rms = torch.sqrt(torch.mean(out.to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps).to(
+                device=out.device,
+                dtype=out.dtype,
+            )
+            scale = torch.clamp(target / torch.clamp(rms, min=eps), max=1.0)
+            out = out * scale
+        elif mode in {"layernorm", "layer_norm"}:
+            mean = out.mean(dim=-1, keepdim=True)
+            centered = out - mean
+            rms = torch.sqrt(torch.mean(centered.to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps).to(
+                device=out.device,
+                dtype=out.dtype,
+            )
+            scale = target / torch.clamp(rms, min=eps)
+            out = centered * scale
+        else:
+            raise ValueError(f"Unsupported action_prefix_norm_mode={mode!r}")
+        if gate_value != 1.0:
+            out = out * gate[..., None]
+        post_rms = torch.sqrt(torch.mean(out.detach().to(dtype=torch.float32).square(), dim=-1) + eps).to(
+            device=out.device,
+            dtype=out.dtype,
+        )
+        scale_out = scale.squeeze(-1).detach().to(device=out.device, dtype=out.dtype)
+        return out, pre_rms.detach(), post_rms.detach(), scale_out, gate.detach()
 
     def _build_physical_predictive_basis(
         self,
@@ -10595,7 +10703,6 @@ class PicfFullCore(nn.Module):
             )
         meta = self._build_runtime_meta(observation, observation.runtime_meta)
         frame_context = self._point_subset(observation) if meta.point_contract_ok else None
-        point_features = self._extract_point_features(frame_context, None) if frame_context is not None else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
         clip_snapshot = None
         if visual_map_override is None and self.clip_buffers:
             clip_snapshot = {name: buffer.snapshot() for name, buffer in self.clip_buffers.items()}
@@ -10718,8 +10825,14 @@ class PicfFullCore(nn.Module):
         visual_map_override: torch.Tensor | np.ndarray | None = None,
         semantic_override: torch.Tensor | np.ndarray | None = None,
     ) -> _ObservedStepState:
+        timing_enabled = _runtime_timing_enabled()
+        timing: dict[str, float] = {}
+        total_start = _timing_start(timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         if observation.G_t is None:
             observation.G_t = self.local_frame.make_transform(observation.robot_obs)
+        _timing_record(timing, "local_frame", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         if observation.point_set is None:
             focus_centers_world = _focus_centers_world_from_observation(observation)
             observation.point_set = self.pointcloud_builder(
@@ -10733,12 +10846,16 @@ class PicfFullCore(nn.Module):
                     "focus_radius_m": self.config.crop_radius_m,
                 }
             )
+        _timing_record(timing, "pointcloud_build", stage_start, timing_enabled)
         if observation.reset_scaffold:
             previous = None
+        stage_start = _timing_start(timing_enabled)
         meta = self._build_runtime_meta(observation, previous.runtime_meta if previous is not None else None)
+        _timing_record(timing, "runtime_meta", stage_start, timing_enabled)
         graph_can_run_without_points = bool(self.config.mapg_enabled) or bool(self.config.aqr_mapg_enabled)
         if previous is None and not meta.point_contract_ok and not graph_can_run_without_points:
             raise RuntimeError("PICF core requires a valid xyzrgb point cloud on the first control step.")
+        stage_start = _timing_start(timing_enabled)
         local_frame_context = self._point_subset(observation) if meta.point_contract_ok else None
         if (
             previous is None
@@ -10752,10 +10869,20 @@ class PicfFullCore(nn.Module):
             if local_frame_context is not None and point_features_override is None
             else local_frame_context
         )
+        _timing_record(timing, "point_context", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         point_features = self._extract_point_features(point_context, point_features_override) if point_context is not None else torch.zeros((0, 3), device=self.device, dtype=self.dtype)
+        _timing_record(timing, "point_features", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         visual_map, temporal_visual_maps = self._visual_maps(observation, visual_map_override, meta)
+        _timing_record(timing, "visual_maps", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         tactile_bundle = self._tactile_features(observation, meta)
+        _timing_record(timing, "tactile_features", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         semantic = self._semantic_context(observation, previous, semantic_override)
+        _timing_record(timing, "semantic_context", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         token_field, dense_memory = self._build_token_field(
             observation,
             point_context,
@@ -10766,13 +10893,19 @@ class PicfFullCore(nn.Module):
             meta,
             previous,
         )
+        _timing_record(timing, "token_field", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         proprio = _to_tensor(
             np.asarray(observation.proprio if observation.proprio is not None else observation.robot_obs, dtype=np.float32).reshape(-1),
             device=self.device,
             dtype=self.dtype,
         )
         proprio_token = self.proprio_proj(proprio[None, :])[0]
+        _timing_record(timing, "proprio", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         vl_grounding = self._build_vl_grounding(semantic=semantic, token_field=token_field)
+        _timing_record(timing, "vl_grounding", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         if bool(self.config.aqr_mapg_enabled):
             anchor_prior_graph = self._build_aqr_anchor_graph(
                 semantic=semantic,
@@ -10789,15 +10922,25 @@ class PicfFullCore(nn.Module):
                 previous=previous,
                 vl_grounding=vl_grounding,
             )
+        _timing_record(timing, "anchor_graph", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         object_explanation = self._build_object_explanation_measurements(token_field, anchor_prior_graph)
+        _timing_record(timing, "object_explanation", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         observation_anchors = self._build_observation_anchors(
             token_field,
             dense_memory,
             vl_grounding=vl_grounding,
             anchor_graph=anchor_prior_graph,
         )
+        _timing_record(timing, "observation_anchors", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         current_targets, availability = self._current_targets(observation, local_frame_context, visual_map, dense_memory)
+        _timing_record(timing, "current_targets", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         innovation_token, innovation_norm = self._innovation(previous, current_targets, availability)
+        _timing_record(timing, "innovation", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         posterior = self._posterior_update(
             previous,
             observation,
@@ -10807,6 +10950,8 @@ class PicfFullCore(nn.Module):
             anchor_graph=anchor_prior_graph,
             innovation_norm=innovation_norm,
         )
+        _timing_record(timing, "posterior_update", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         task_readout = self._build_task_readout(
             token_field,
             dense_memory,
@@ -10816,6 +10961,8 @@ class PicfFullCore(nn.Module):
             vl_grounding=vl_grounding,
             anchor_graph=anchor_prior_graph,
         )
+        _timing_record(timing, "task_readout", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         conditioned_control = self._build_conditioned_control_state(
             posterior,
             innovation_token,
@@ -10823,7 +10970,12 @@ class PicfFullCore(nn.Module):
             task_readout,
             anchor_graph=anchor_prior_graph,
         )
+        _timing_record(timing, "conditioned_control", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         hold_reason = self._hold_reason(meta, posterior, innovation_token)
+        _timing_record(timing, "hold_reason", stage_start, timing_enabled)
+        _timing_record(timing, "observe_total", total_start, timing_enabled)
+        self._last_observe_timing = timing
         return _ObservedStepState(
             runtime_meta=meta,
             G_t=_to_tensor(observation.G_t, device=self.device, dtype=self.dtype),
@@ -11107,6 +11259,40 @@ class PicfFullCore(nn.Module):
             "innovation_norm": float(torch.linalg.norm(observed.innovation_token).item()),
             "hold_triggered": 1.0 if observed.control.hold_reason is not None else 0.0,
         }
+        prefix_tokens = observed.conditioned_control.pi_prefix_tokens
+        if isinstance(prefix_tokens, torch.Tensor) and prefix_tokens.numel() > 0:
+            prefix_float = prefix_tokens.detach().to(device=self.device, dtype=torch.float32)
+            prefix_rms = torch.sqrt(torch.mean(prefix_float.square(), dim=-1) + 1.0e-12)
+            prefix_norm = torch.linalg.norm(prefix_float, dim=-1)
+            debug["pi_prefix_norm_mode_enabled"] = (
+                0.0
+                if str(getattr(self.config, "action_prefix_norm_mode", "none")).strip().lower() in {"", "none", "off", "disabled"}
+                else 1.0
+            )
+            debug["pi_prefix_norm_mean"] = float(prefix_norm.mean().item())
+            debug["pi_prefix_norm_max"] = float(prefix_norm.max().item())
+            debug["pi_prefix_rms_mean"] = float(prefix_rms.mean().item())
+            debug["pi_prefix_rms_max"] = float(prefix_rms.max().item())
+            debug["pi_prefix_max_abs"] = float(torch.amax(torch.abs(prefix_float)).item())
+            debug["pi_prefix_nonfinite_count"] = float((~torch.isfinite(prefix_float)).to(dtype=torch.float32).sum().item())
+        if observed.conditioned_control.pi_prefix_pre_rms is not None and observed.conditioned_control.pi_prefix_pre_rms.numel() > 0:
+            pre = observed.conditioned_control.pi_prefix_pre_rms.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+            debug["pi_prefix_pre_rms_mean"] = float(pre.mean().item())
+            debug["pi_prefix_pre_rms_max"] = float(pre.max().item())
+        if observed.conditioned_control.pi_prefix_post_rms is not None and observed.conditioned_control.pi_prefix_post_rms.numel() > 0:
+            post = observed.conditioned_control.pi_prefix_post_rms.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+            debug["pi_prefix_post_rms_mean"] = float(post.mean().item())
+            debug["pi_prefix_post_rms_max"] = float(post.max().item())
+        if observed.conditioned_control.pi_prefix_scale is not None and observed.conditioned_control.pi_prefix_scale.numel() > 0:
+            scale = observed.conditioned_control.pi_prefix_scale.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+            debug["pi_prefix_scale_mean"] = float(scale.mean().item())
+            debug["pi_prefix_scale_min"] = float(scale.min().item())
+            debug["pi_prefix_scale_max"] = float(scale.max().item())
+        if observed.conditioned_control.pi_prefix_gate is not None and observed.conditioned_control.pi_prefix_gate.numel() > 0:
+            gate = observed.conditioned_control.pi_prefix_gate.detach().to(device=self.device, dtype=torch.float32).reshape(-1)
+            debug["pi_prefix_gate_mean"] = float(gate.mean().item())
+            debug["pi_prefix_gate_min"] = float(gate.min().item())
+            debug["pi_prefix_gate_max"] = float(gate.max().item())
         if observed.innovation_norm.numel() > 0:
             innov = observed.innovation_norm.detach().to(device=self.device, dtype=self.dtype).reshape(-1)
             debug["innovation_norm_visual"] = float(innov[0].item()) if innov.numel() > 0 else 0.0
@@ -11197,6 +11383,10 @@ class PicfFullCore(nn.Module):
                 debug["oeml_duplicate_overlap_mean"] = float(oeml.anchor_duplicate_overlap.mean().item()) if oeml.anchor_duplicate_overlap.numel() > 0 else 0.0
                 debug["oeml_feature_variance_mean"] = float(oeml.anchor_feature_variance.mean().item()) if oeml.anchor_feature_variance.numel() > 0 else 0.0
                 debug["oeml_point_spatial_variance_mean"] = float(oeml.point_spatial_variance.mean().item()) if oeml.point_spatial_variance.numel() > 0 else 0.0
+                if oeml.anchor_point_quality is not None and oeml.anchor_point_quality.numel() > 0:
+                    point_quality = torch.clamp(oeml.anchor_point_quality.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
+                    debug["oeml_point_quality_mean"] = float(point_quality.mean().item())
+                    debug["oeml_point_quality_max"] = float(point_quality.max().item())
                 debug["oeml_contact_explanation_score"] = float(oeml.contact_explanation_score.item())
                 if oeml.background_mask_visual is not None and oeml.background_mask_visual.numel() > 0:
                     debug["oeml_visual_background_mean"] = float(oeml.background_mask_visual.mean().item())
@@ -11313,6 +11503,20 @@ class PicfFullCore(nn.Module):
                     debug["aqr_object_candidate_duplicate_overlap_max"] = float(
                         graph.object_candidate_duplicate_overlap.to(device=self.device, dtype=self.dtype).max().item()
                     )
+                if graph.object_explanation_quality is not None and graph.object_explanation_quality.numel() > 0:
+                    explanation_quality = torch.clamp(
+                        graph.object_explanation_quality.to(device=self.device, dtype=self.dtype).reshape(-1),
+                        min=0.0,
+                        max=1.0,
+                    )
+                    debug["aqr_object_explanation_quality_mean"] = float(explanation_quality.mean().item())
+                    debug["aqr_object_explanation_quality_max"] = float(explanation_quality.max().item())
+                    if graph.anchor_active is not None and graph.anchor_active.numel() == explanation_quality.numel():
+                        active = graph.anchor_active.to(device=self.device, dtype=torch.bool).reshape(-1)
+                        if bool(active.any().item()):
+                            debug["aqr_object_explanation_quality_active_mean"] = float(
+                                explanation_quality[active].mean().item()
+                            )
             if graph.slot_quality is not None and bool(graph.slot_quality.valid.item()):
                 sq = graph.slot_quality
                 object_quality = torch.clamp(sq.object_quality.to(device=self.device, dtype=self.dtype), min=0.0, max=1.0)
@@ -11555,7 +11759,7 @@ class PicfFullCore(nn.Module):
                             max=1.0,
                         )
                         context_bool = (downstream > self.config.epsilon_a) & (~active_bool)
-                        reserve_bool = downstream <= self.config.epsilon_a
+                        reserve_bool = (downstream <= self.config.epsilon_a) & (~active_bool)
                         debug["aqr_context_anchor_count"] = float(context_bool.to(dtype=self.dtype).sum().item())
                         debug["aqr_reserve_anchor_fraction"] = float(reserve_bool.to(dtype=self.dtype).mean().item())
                         if bool(context_bool.any().item()):
@@ -11566,6 +11770,7 @@ class PicfFullCore(nn.Module):
                             downstream > self.config.epsilon_a
                         )[None, :]
                         context_pair_mask = pair_mask & context_bool[:, None] & context_bool[None, :]
+                        reserve_pair_mask = pair_mask & reserve_bool[:, None] & reserve_bool[None, :]
                         if bool(downstream_pair_mask.any().item()):
                             debug["aqr_downstream_same_role_support_overlap_max"] = float(overlap[downstream_pair_mask].max().item())
                             debug["aqr_downstream_same_role_support_overlap_mean"] = float(overlap[downstream_pair_mask].mean().item())
@@ -11596,6 +11801,21 @@ class PicfFullCore(nn.Module):
                             debug["aqr_context_same_role_support_overlap_mean"] = 0.0
                             debug["aqr_context_same_role_object_core_overlap_max"] = 0.0
                             debug["aqr_context_same_role_object_core_overlap_mean"] = 0.0
+                        if bool(reserve_pair_mask.any().item()):
+                            debug["aqr_reserve_same_role_support_overlap_max"] = float(overlap[reserve_pair_mask].max().item())
+                            debug["aqr_reserve_same_role_support_overlap_mean"] = float(overlap[reserve_pair_mask].mean().item())
+                            if object_core_overlap is not None:
+                                debug["aqr_reserve_same_role_object_core_overlap_max"] = float(
+                                    object_core_overlap[reserve_pair_mask].max().item()
+                                )
+                                debug["aqr_reserve_same_role_object_core_overlap_mean"] = float(
+                                    object_core_overlap[reserve_pair_mask].mean().item()
+                                )
+                        else:
+                            debug["aqr_reserve_same_role_support_overlap_max"] = 0.0
+                            debug["aqr_reserve_same_role_support_overlap_mean"] = 0.0
+                            debug["aqr_reserve_same_role_object_core_overlap_max"] = 0.0
+                            debug["aqr_reserve_same_role_object_core_overlap_mean"] = 0.0
                     active_pair_mask = pair_mask & active_bool[:, None] & active_bool[None, :]
                     if bool(active_pair_mask.any().item()):
                         debug["aqr_active_same_role_support_overlap_max"] = float(overlap[active_pair_mask].max().item())

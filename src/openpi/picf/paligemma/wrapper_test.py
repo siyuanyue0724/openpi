@@ -51,6 +51,17 @@ class _TinyPaliGemmaWithExpert(torch.nn.Module):
         self.gemma_expert = _TinyGemmaExpert()
 
 
+class _TinyWrappedLinear(torch.nn.Module):
+    """FSDP-like wrapper that forwards to a Linear but is not an nn.Linear."""
+
+    def __init__(self, linear: torch.nn.Linear) -> None:
+        super().__init__()
+        self.module = linear
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        return self.module(inputs)
+
+
 class _TinyRuntimeSelfAttn(torch.nn.Module):
     def __init__(self) -> None:
         super().__init__()
@@ -160,6 +171,11 @@ def test_fsdp_runtime_leaf_module_specs_cover_direct_call_hot_path_modules() -> 
     encoder.action_out_proj = torch.nn.Linear(3, 7)
     encoder.time_mlp_in = torch.nn.Linear(3, 3)
     encoder.time_mlp_out = torch.nn.Linear(3, 3)
+    encoder.action_context_in_proj = torch.nn.Linear(6, 3, bias=False)
+    encoder.action_context_q_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_k_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_v_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_out_proj = torch.nn.Linear(3, 3, bias=False)
 
     specs = _Pi0PaliGemmaSemanticEncoder.fsdp_runtime_leaf_module_specs(encoder)
 
@@ -169,6 +185,194 @@ def test_fsdp_runtime_leaf_module_specs_cover_direct_call_hot_path_modules() -> 
     assert sum(1 for _, name, _ in specs if name == "q_proj") == 4
     assert sum(1 for _, name, _ in specs if name == "mlp") == 4
     assert ("action_out_proj", "uniform_recursive") in [(name, mode) for _, name, mode in specs]
+    assert "action_context_in_proj" not in [name for _, name, _ in specs]
+    assert "action_context_q_proj" not in [name for _, name, _ in specs]
+    assert "action_context_out_proj" not in [name for _, name, _ in specs]
+
+
+def test_pi0_trainable_scope_action_head_only_freezes_semantic_stack() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.trainable = True
+    encoder.trainable_scope = "action_head_only"
+    encoder.paligemma_with_expert = _TinyRuntimePaliGemmaWithExpert()
+    encoder.action_in_proj = torch.nn.Linear(7, 3)
+    encoder.action_out_proj = torch.nn.Linear(3, 7)
+    encoder.time_mlp_in = torch.nn.Linear(3, 3)
+    encoder.time_mlp_out = torch.nn.Linear(3, 3)
+
+    _Pi0PaliGemmaSemanticEncoder._apply_trainable_scope(encoder)
+
+    trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
+    assert "paligemma_with_expert.paligemma.language_model.embed_tokens.weight" not in trainable
+    assert "paligemma_with_expert.gemma_expert.model.layers.0.self_attn.q_proj.weight" not in trainable
+    assert "action_in_proj.weight" in trainable
+    assert "action_out_proj.weight" in trainable
+    assert "time_mlp_in.weight" in trainable
+    assert "time_mlp_out.weight" in trainable
+
+
+def test_pi0_trainable_scope_all_unfreezes_semantic_stack() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.trainable = True
+    encoder.trainable_scope = "all"
+    encoder.paligemma_with_expert = _TinyRuntimePaliGemmaWithExpert()
+    encoder.action_in_proj = torch.nn.Linear(7, 3)
+    encoder.action_out_proj = torch.nn.Linear(3, 7)
+    encoder.time_mlp_in = torch.nn.Linear(3, 3)
+    encoder.time_mlp_out = torch.nn.Linear(3, 3)
+
+    _Pi0PaliGemmaSemanticEncoder._apply_trainable_scope(encoder)
+
+    assert all(param.requires_grad for param in encoder.parameters())
+
+
+def test_pi0_trainable_scope_backbone_only_matches_historical_full_cotrain_boundary() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.trainable = True
+    encoder.trainable_scope = "backbone_only"
+    encoder.paligemma_with_expert = _TinyRuntimePaliGemmaWithExpert()
+    encoder.action_in_proj = torch.nn.Linear(7, 3)
+    encoder.action_out_proj = torch.nn.Linear(3, 7)
+    encoder.time_mlp_in = torch.nn.Linear(3, 3)
+    encoder.time_mlp_out = torch.nn.Linear(3, 3)
+
+    _Pi0PaliGemmaSemanticEncoder._apply_trainable_scope(encoder)
+
+    trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
+    assert "paligemma_with_expert.paligemma.language_model.embed_tokens.weight" in trainable
+    assert "paligemma_with_expert.gemma_expert.model.layers.0.self_attn.q_proj.weight" in trainable
+    assert "action_in_proj.weight" not in trainable
+    assert "action_out_proj.weight" not in trainable
+    assert "time_mlp_in.weight" not in trainable
+    assert "time_mlp_out.weight" not in trainable
+
+
+def test_pi0_trainable_scope_action_adapter_only_trains_only_context_adapter() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.trainable = True
+    encoder.trainable_scope = "action_adapter_only"
+    encoder.paligemma_with_expert = _TinyRuntimePaliGemmaWithExpert()
+    encoder.action_in_proj = torch.nn.Linear(7, 3)
+    encoder.action_out_proj = torch.nn.Linear(3, 7)
+    encoder.time_mlp_in = torch.nn.Linear(3, 3)
+    encoder.time_mlp_out = torch.nn.Linear(3, 3)
+    encoder.action_context_in_proj = torch.nn.Linear(6, 3, bias=False)
+    encoder.action_context_q_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_k_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_v_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_out_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
+
+    _Pi0PaliGemmaSemanticEncoder._apply_trainable_scope(encoder)
+
+    trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
+    assert "paligemma_with_expert.paligemma.language_model.embed_tokens.weight" not in trainable
+    assert "paligemma_with_expert.gemma_expert.model.layers.0.self_attn.q_proj.weight" not in trainable
+    assert "action_in_proj.weight" not in trainable
+    assert "action_out_proj.weight" not in trainable
+    assert "time_mlp_in.weight" not in trainable
+    assert "time_mlp_out.weight" not in trainable
+    assert "action_context_in_proj.weight" in trainable
+    assert "action_context_q_proj.weight" in trainable
+    assert "action_context_k_proj.weight" in trainable
+    assert "action_context_v_proj.weight" in trainable
+    assert "action_context_out_proj.weight" in trainable
+    assert "action_context_gate_logit" in trainable
+
+
+def test_pi0_action_context_adapter_keeps_suffix_shape_and_reports_metrics() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.action_context_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_out_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_gate_logit = torch.nn.Parameter(torch.tensor([0.0]))
+    encoder.action_context_adapter_rms_cap = True
+    _Pi0PaliGemmaSemanticEncoder._reset_action_context_adapter_parameters(encoder)
+
+    suffix = torch.randn((2, 3, 4), dtype=torch.float32)
+    context = torch.randn((2, 5, 4), dtype=torch.float32)
+    adapted, metrics = _Pi0PaliGemmaSemanticEncoder._apply_action_context_adapter(encoder, suffix, context)
+
+    assert adapted.shape == suffix.shape
+    assert not torch.allclose(adapted, suffix)
+    assert metrics["picf_action_context_adapter_token_count"].item() == pytest.approx(5.0)
+    assert metrics["picf_action_context_adapter_gate"].item() == pytest.approx(0.5)
+    assert torch.isfinite(metrics["picf_action_context_adapter_attention_entropy_mean"])
+    assert torch.isfinite(metrics["picf_action_context_adapter_residual_rms_mean"])
+
+
+def test_pi0_action_context_adapter_projects_prefix_width_context_to_action_width() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.action_context_in_proj = torch.nn.Linear(6, 4, bias=False)
+    encoder.action_context_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_out_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_gate_logit = torch.nn.Parameter(torch.tensor([0.0]))
+    encoder.action_context_adapter_rms_cap = True
+    _Pi0PaliGemmaSemanticEncoder._reset_action_context_adapter_parameters(encoder)
+
+    suffix = torch.randn((1, 3, 4), dtype=torch.float32)
+    prefix_width_context = torch.randn((1, 5, 6), dtype=torch.float32)
+    adapted, metrics = _Pi0PaliGemmaSemanticEncoder._apply_action_context_adapter(
+        encoder,
+        suffix,
+        prefix_width_context,
+    )
+
+    assert adapted.shape == suffix.shape
+    assert metrics["picf_action_context_adapter_token_count"].item() == pytest.approx(5.0)
+
+
+def test_pi0_action_context_adapter_accepts_wrapped_input_projection() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.action_context_in_proj = _TinyWrappedLinear(torch.nn.Linear(6, 4, bias=False))
+    encoder.action_context_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_out_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_gate_logit = torch.nn.Parameter(torch.tensor([0.0]))
+    encoder.action_context_adapter_rms_cap = True
+
+    suffix = torch.randn((1, 3, 4), dtype=torch.float32)
+    prefix_width_context = torch.randn((1, 5, 6), dtype=torch.float32)
+    adapted, metrics = _Pi0PaliGemmaSemanticEncoder._apply_action_context_adapter(
+        encoder,
+        suffix,
+        prefix_width_context,
+    )
+
+    assert adapted.shape == suffix.shape
+    assert metrics["picf_action_context_adapter_token_count"].item() == pytest.approx(5.0)
+
+
+@pytest.mark.parametrize(
+    ("scope", "expected"),
+    [
+        ("all", True),
+        ("backbone_only", True),
+        ("model_only", True),
+        ("action_head_only", False),
+    ],
+)
+def test_pi0_trainable_scope_backbone_only_keeps_native_checkpointing_boundary(
+    scope: str,
+    expected: bool,
+) -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.trainable = True
+    encoder.trainable_scope = scope
+
+    assert _Pi0PaliGemmaSemanticEncoder._trains_semantic_backbone(encoder) is expected
 
 
 def test_outer_semantic_encoder_proxies_runtime_leaf_specs() -> None:

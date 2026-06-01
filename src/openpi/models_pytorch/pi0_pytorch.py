@@ -1196,7 +1196,10 @@ class PI0Pytorch(nn.Module):
     def _prepare_attention_masks_4d(self, att_2d_masks):
         """Helper method to prepare 4D attention masks for transformer."""
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
-        return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
+        # Keep the additive mask finite and stable after bf16/fp16 casts.  A
+        # very large negative fp32 value can produce NaNs in SDPA after dtype
+        # conversion; -1e4 is sufficient to zero masked positions in softmax.
+        return torch.where(att_2d_masks_4d, 0.0, -1.0e4)
 
     def _preprocess_observation(self, observation, *, train=True):
         """Helper method to preprocess observation."""

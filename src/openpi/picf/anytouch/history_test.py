@@ -25,3 +25,20 @@ def test_tactile_history_uses_stride_sampling() -> None:
     assert [int(frame[0, 0, 0]) for frame in clip] == [0, 2, 4, 6]
     assert history.background_for("digit") is not None
     assert history.latest_pose("digit") is not None
+
+
+def test_tactile_history_snapshot_restore_roundtrip() -> None:
+    history = MultiSensorTactileClipBuffer(num_frames=3, frame_stride=1)
+    for step in range(3):
+        history.push(_packet(step), segment_id=7, reset=(step == 0))
+    snapshot = history.snapshot()
+
+    history.push(_packet(99), segment_id=7, reset=False)
+    assert [int(frame[0, 0, 0]) for frame in history.get_clip("digit")] == [1, 2, 99]
+
+    history.restore(snapshot)
+
+    assert history.sensor_names == ("digit",)
+    assert [int(frame[0, 0, 0]) for frame in history.get_clip("digit")] == [0, 1, 2]
+    assert history.background_for("digit") is not None
+    assert history.latest_pose("digit") is not None

@@ -15,6 +15,7 @@ class PaliGemmaSemanticConfig:
     device: str | None = None
     dtype: str = "bfloat16"
     trainable: bool = False
+    trainable_scope: str = "backbone_only"
     gradient_checkpointing: bool = True
     include_gripper_image: bool = True
     max_length: int = 256
@@ -28,3 +29,5 @@ class PaliGemmaSemanticConfig:
     tokenwise_chunk_size: int = 0
     projection_chunk_size: int | None = None
     mlp_chunk_size: int | None = None
+    action_context_adapter_gate_init: float = -2.0
+    action_context_adapter_rms_cap: bool = True

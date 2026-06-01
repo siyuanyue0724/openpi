@@ -14,6 +14,13 @@ Current PICF documents:
    tracklet-guided sidecars, not blind SAM, when enabling
    `--proposal-memory-enabled`. The current post-SAM-archive training recipe is
    documented in `README_v2.2.md` under `Live long-run recipe`.
+   The latest local full gate is
+   [`docs/PICF_AQR_OWM_LOCAL_FULL_AUDIT_20260522_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_LOCAL_FULL_AUDIT_20260522_TEMP.md);
+   it is the current code-level audit record before behavior-level 30k/CALVIN
+   acceptance.
+   The current mathematical/documentation navigation layer is
+   [`docs/PICF_AQR_OWM_MATH_CONSISTENCY_AND_DOC_INDEX_20260522_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_MATH_CONSISTENCY_AND_DOC_INDEX_20260522_TEMP.md);
+   read it before reopening older raw-overlap, SAM, or slot-paper threads.
 2. [`PICF_AQR_OWM_CURRENT_STATE_20260518.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_CURRENT_STATE_20260518.md)
    Compact current-state cleanup report: production-maintained modules,
    guarded/data-dependent modules, legacy/off-by-default modules, code

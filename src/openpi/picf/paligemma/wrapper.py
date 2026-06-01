@@ -20,7 +20,6 @@ from torch import nn
 from safetensors import safe_open
 from transformers import AutoProcessor
 from transformers import PaliGemmaForConditionalGeneration
-from transformers.models.auto import CONFIG_MAPPING
 
 import openpi.models.gemma as _gemma
 from openpi.models.tokenizer import PaligemmaTokenizer
@@ -78,6 +77,29 @@ def _masked_position_ids(pad_mask: torch.Tensor) -> torch.Tensor:
         raise ValueError(f"Expected 2D pad mask, got shape={tuple(pad_mask.shape)}")
     cumsum = torch.cumsum(pad_mask.to(torch.int64), dim=1) - 1
     return torch.where(pad_mask, cumsum, torch.zeros_like(cumsum))
+
+
+def _runtime_timing_enabled() -> bool:
+    return os.environ.get("OPENPI_PICF_TIMING_BREAKDOWN", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _sync_cuda_for_timing() -> None:
+    if torch.cuda.is_available():
+        torch.cuda.synchronize()
+
+
+def _timing_start(enabled: bool) -> float:
+    if enabled:
+        _sync_cuda_for_timing()
+        return time.perf_counter()
+    return 0.0
+
+
+def _timing_record(timing: dict[str, float], name: str, start: float, enabled: bool) -> None:
+    if not enabled:
+        return
+    _sync_cuda_for_timing()
+    timing[f"{name}_ms"] = (time.perf_counter() - start) * 1000.0
 
 
 def _recover_flow_target(x_t: torch.Tensor, v_t: torch.Tensor, time_expanded: torch.Tensor) -> torch.Tensor:
@@ -402,6 +424,7 @@ class _HFPaliGemmaSemanticEncoder(nn.Module):
         self.source = "hf"
         self.gradient_checkpointing_enabled = False
         self.gradient_checkpointing_non_reentrant = False
+        self._last_runtime_timing: dict[str, float] = {}
         model_id = config.checkpoint_path or config.model_name
         local_only = Path(model_id).expanduser().exists()
         self.processor = AutoProcessor.from_pretrained(
@@ -553,6 +576,21 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         self.device = _resolve_device(config)
         self.dtype = _resolve_dtype(config, self.device)
         self.trainable = bool(config.trainable)
+        self.trainable_scope = str(getattr(config, "trainable_scope", "backbone_only")).strip().lower().replace("-", "_")
+        if self.trainable_scope not in {
+            "all",
+            "backbone_only",
+            "model_only",
+            "action_head_only",
+            "action_adapter_only",
+            "action_head_and_adapter",
+        }:
+            raise ValueError(
+                "PaliGemmaSemanticConfig.trainable_scope must be one of "
+                "{'all', 'backbone_only', 'model_only', 'action_head_only', "
+                "'action_adapter_only', 'action_head_and_adapter'}, got "
+                f"{getattr(config, 'trainable_scope', None)!r}."
+            )
         self.source = "pi0_pytorch"
         self.gradient_checkpointing_enabled = False
         self.gradient_checkpointing_non_reentrant = False
@@ -577,6 +615,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             precision=precision,
             pi05=bool(config.pi05),
         )
+        paligemma_config = _gemma.get_config(paligemma_variant)
         action_expert_config = _gemma.get_config(config.action_expert_variant)
         self.action_in_proj = nn.Linear(self.model_action_dim, action_expert_config.width)
         self.action_out_proj = nn.Linear(action_expert_config.width, self.model_action_dim)
@@ -584,6 +623,16 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             raise RuntimeError("PICF PI0 action restoration only supports pi05=True.")
         self.time_mlp_in = nn.Linear(action_expert_config.width, action_expert_config.width)
         self.time_mlp_out = nn.Linear(action_expert_config.width, action_expert_config.width)
+        self.action_context_in_proj = nn.Linear(paligemma_config.width, action_expert_config.width, bias=False)
+        self.action_context_q_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
+        self.action_context_k_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
+        self.action_context_v_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
+        self.action_context_out_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
+        self.action_context_gate_logit = nn.Parameter(
+            torch.tensor([float(getattr(config, "action_context_adapter_gate_init", -2.0))], dtype=torch.float32)
+        )
+        self.action_context_adapter_rms_cap = bool(getattr(config, "action_context_adapter_rms_cap", True))
+        self._reset_action_context_adapter_parameters()
         self._load_full_pi0_weights(checkpoint)
         self._drop_unused_generation_heads()
         self.to(device=self.device)
@@ -595,7 +644,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             if prompt_state_mode == "none" or prompt_state_path is None
             else PicfStateNormalizer.from_path(prompt_state_path, mode=prompt_state_mode)
         )
-        if self.trainable:
+        if self.trainable and self._trains_semantic_backbone():
             if hasattr(self.paligemma_with_expert.paligemma, "gradient_checkpointing_disable"):
                 self.paligemma_with_expert.paligemma.gradient_checkpointing_disable()
             if config.gradient_checkpointing and hasattr(self, "gradient_checkpointing_enable"):
@@ -608,12 +657,99 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         else:
             self.eval()
 
-        for parameter in self.model.parameters():
-            parameter.requires_grad_(bool(self.trainable))
+        self._apply_trainable_scope()
 
     @property
     def model(self) -> PaliGemmaWithExpertModel:
         return self.paligemma_with_expert
+
+    def _trains_semantic_backbone(self) -> bool:
+        return bool(self.trainable and self.trainable_scope in {"all", "backbone_only", "model_only"})
+
+    def _action_context_adapter_modules(self) -> tuple[nn.Module, ...]:
+        modules = (
+            getattr(self, "action_context_in_proj", None),
+            getattr(self, "action_context_q_proj", None),
+            getattr(self, "action_context_k_proj", None),
+            getattr(self, "action_context_v_proj", None),
+            getattr(self, "action_context_out_proj", None),
+        )
+        return tuple(module for module in modules if isinstance(module, nn.Module))
+
+    def _reset_action_context_adapter_parameters(self) -> None:
+        """Initialize the action-side context adapter as a conservative residual.
+
+        Query/key projections use standard attention initialization.  Value and
+        output projections start near identity so a small learned gate can expose
+        PICF belief context without requiring the action expert to discover a
+        new token vocabulary from scratch.
+        """
+
+        if isinstance(getattr(self, "action_context_in_proj", None), nn.Linear):
+            nn.init.xavier_uniform_(self.action_context_in_proj.weight)
+        nn.init.xavier_uniform_(self.action_context_q_proj.weight)
+        nn.init.xavier_uniform_(self.action_context_k_proj.weight)
+        nn.init.eye_(self.action_context_v_proj.weight)
+        nn.init.eye_(self.action_context_out_proj.weight)
+
+    def _apply_trainable_scope(self) -> None:
+        for parameter in self.parameters():
+            parameter.requires_grad_(False)
+        if not self.trainable:
+            return
+        if self.trainable_scope == "all":
+            for parameter in self.parameters():
+                parameter.requires_grad_(True)
+            return
+        if self.trainable_scope in {"backbone_only", "model_only"}:
+            # Historical full-cotrain contract: train the restored PI0/PaliGemma
+            # semantic stack while keeping wrapper-local flow projection/time
+            # heads fixed.  This preserves PaliGemma cotrain without moving the
+            # small PI0 flow calibration heads into a separate trainable/FSDP
+            # path.  The action-context adapter is part of the PICF/action
+            # interface, so it remains trainable with the semantic backbone.
+            for parameter in self.model.parameters():
+                parameter.requires_grad_(True)
+            for module in self._action_context_adapter_modules():
+                module.train()
+                for parameter in module.parameters():
+                    parameter.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
+                self.action_context_gate_logit.requires_grad_(True)
+            return
+        if self.trainable_scope == "action_head_only":
+            for module in (self.action_in_proj, self.action_out_proj, self.time_mlp_in, self.time_mlp_out):
+                module.train()
+                for parameter in module.parameters():
+                    parameter.requires_grad_(True)
+            return
+        if self.trainable_scope == "action_adapter_only":
+            for module in self._action_context_adapter_modules():
+                module.train()
+                for parameter in module.parameters():
+                    parameter.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
+                self.action_context_gate_logit.requires_grad_(True)
+            return
+        if self.trainable_scope == "action_head_and_adapter":
+            for module in (
+                self.action_in_proj,
+                self.action_out_proj,
+                self.time_mlp_in,
+                self.time_mlp_out,
+                *self._action_context_adapter_modules(),
+            ):
+                module.train()
+                for parameter in module.parameters():
+                    parameter.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
+                self.action_context_gate_logit.requires_grad_(True)
+            return
+        raise AssertionError(f"Unhandled trainable_scope={self.trainable_scope!r}")
+
+    @property
+    def last_runtime_timing(self) -> dict[str, float]:
+        return dict(self._last_runtime_timing)
 
     def _build_paligemma_with_expert(
         self,
@@ -998,12 +1134,21 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
 
     def _prepare_attention_masks_4d(self, att_2d_masks: torch.Tensor) -> torch.Tensor:
         att_2d_masks_4d = att_2d_masks[:, None, :, :]
-        return torch.where(att_2d_masks_4d, 0.0, -2.3819763e38)
+        # Use a bf16/fp16-safe additive mask.  The original PI0 value
+        # (-2.38e38) is finite in fp32/bf16, but it can drive SDPA/Gemma expert
+        # kernels into NaN on long prefix+suffix forwards after the mask is cast
+        # to the query dtype.  -1e4 is still effectively zero probability after
+        # softmax, while remaining numerically stable across fp32/bf16/fp16.
+        return torch.where(att_2d_masks_4d, 0.0, -1.0e4)
 
     def encode_observation(self, observation: PicfObservation) -> PaliGemmaSemanticFeatures:
+        timing_enabled = _runtime_timing_enabled()
+        timing: dict[str, float] = {}
+        total_start = _timing_start(timing_enabled)
         use_grad = bool(self.trainable and self.training)
         context = contextlib.nullcontext() if use_grad else torch.inference_mode()
         with context:
+            stage_start = _timing_start(timing_enabled)
             (
                 prefix_embs,
                 prefix_pad_masks,
@@ -1015,9 +1160,12 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 image_view_names,
                 image_view_transforms,
             ) = self._embed_prefix(observation)
+            _timing_record(timing, "encode_embed_prefix", stage_start, timing_enabled)
+            stage_start = _timing_start(timing_enabled)
             att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
             position_ids = _masked_position_ids(prefix_pad_masks)
             attn_mask_4d = self._prepare_attention_masks_4d(att_2d_masks).to(dtype=prefix_embs.dtype)
+            _timing_record(timing, "encode_masks", stage_start, timing_enabled)
 
             def _forward_prefix(
                 embeddings: torch.Tensor,
@@ -1033,7 +1181,10 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 )
                 return outputs[0]
 
+            stage_start = _timing_start(timing_enabled)
             prefix_output = self._apply_checkpoint(_forward_prefix, prefix_embs, attn_mask_4d, position_ids)
+            _timing_record(timing, "encode_prefix_forward", stage_start, timing_enabled)
+            stage_start = _timing_start(timing_enabled)
             image_hidden = prefix_output[:, :image_token_count, :] if image_token_count > 0 else None
             text_hidden = prefix_output[:, image_token_count:, :]
             image_tokens = None if image_hidden is None else image_hidden[0]
@@ -1041,7 +1192,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             if not use_grad:
                 image_tokens = None if image_tokens is None else image_tokens.detach().clone()
                 text_tokens = text_tokens.detach().clone()
-            return PaliGemmaSemanticFeatures(
+            result = PaliGemmaSemanticFeatures(
                 tokens=_take_valid_prefix_tokens(prefix_output[0], prefix_pad_masks[0]),
                 summary=_summary_from_outputs(
                     hidden_states=text_hidden,
@@ -1058,6 +1209,10 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 image_view_names=image_view_names,
                 image_view_transforms=image_view_transforms,
             )
+            _timing_record(timing, "encode_pack_features", stage_start, timing_enabled)
+            _timing_record(timing, "encode_total", total_start, timing_enabled)
+            self._last_runtime_timing = timing
+            return result
 
     def supports_pi0_action_generation(self) -> bool:
         return True
@@ -1132,6 +1287,105 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         )[None, :].expand(bsize, action_steps)
         return action_emb, pad_masks, att_masks, adarms_cond
 
+    def _apply_action_context_adapter(
+        self,
+        suffix_embs: torch.Tensor,
+        context_tokens: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Let action tokens directly read PICF belief/context tokens.
+
+        Passive extra-prefix tokens preserve the original PI API but can be
+        ignored by the action expert. This adapter is the explicit action-side
+        route: action suffix tokens query bounded PICF context through gated
+        cross-attention while the prefix length and suffix position ids remain
+        unchanged.
+        """
+
+        if context_tokens is None or not isinstance(context_tokens, torch.Tensor) or context_tokens.numel() == 0:
+            return suffix_embs, {}
+        if suffix_embs.ndim != 3:
+            raise ValueError(f"Expected suffix embeddings [B,H,D], got {tuple(suffix_embs.shape)}")
+        if context_tokens.ndim == 2:
+            context_tokens = context_tokens[None, :, :]
+        if context_tokens.ndim != 3:
+            raise ValueError(f"Expected action context [T,D] or [B,T,D], got {tuple(context_tokens.shape)}")
+        if context_tokens.shape[0] == 1 and suffix_embs.shape[0] != 1:
+            context_tokens = context_tokens.expand(suffix_embs.shape[0], -1, -1)
+        if context_tokens.shape[0] != suffix_embs.shape[0]:
+            raise ValueError(
+                "Action context adapter batch mismatch: "
+                f"context={tuple(context_tokens.shape)} suffix={tuple(suffix_embs.shape)}"
+            )
+
+        dtype = suffix_embs.dtype
+        device = suffix_embs.device
+        context = context_tokens.to(device=device, dtype=dtype)
+        if context.shape[-1] != suffix_embs.shape[-1]:
+            in_proj = getattr(self, "action_context_in_proj", None)
+            if not isinstance(in_proj, nn.Module):
+                raise ValueError(
+                    "Action context adapter dimension mismatch: "
+                    f"context={tuple(context.shape)} suffix={tuple(suffix_embs.shape)}"
+                )
+            in_features = getattr(in_proj, "in_features", None)
+            out_features = getattr(in_proj, "out_features", None)
+            wrapped_module = getattr(in_proj, "module", None)
+            if not isinstance(wrapped_module, nn.Module):
+                wrapped_module = getattr(in_proj, "_fsdp_wrapped_module", None)
+            if isinstance(wrapped_module, nn.Module):
+                in_features = getattr(wrapped_module, "in_features", in_features)
+                out_features = getattr(wrapped_module, "out_features", out_features)
+            if in_features is not None and int(context.shape[-1]) != int(in_features):
+                raise ValueError(
+                    "Action context adapter input projection mismatch: "
+                    f"context={tuple(context.shape)} in_features={int(in_features)}"
+                )
+            if out_features is not None and int(suffix_embs.shape[-1]) != int(out_features):
+                raise ValueError(
+                    "Action context adapter output projection mismatch: "
+                    f"suffix={tuple(suffix_embs.shape)} out_features={int(out_features)}"
+                )
+            context = in_proj(context)
+            if context.shape[-1] != suffix_embs.shape[-1]:
+                raise ValueError(
+                    "Action context adapter projection returned wrong width: "
+                    f"context={tuple(context.shape)} suffix={tuple(suffix_embs.shape)}"
+                )
+        suffix_norm = torch.nn.functional.layer_norm(suffix_embs, (suffix_embs.shape[-1],))
+        context_norm = torch.nn.functional.layer_norm(context, (context.shape[-1],))
+        q = self.action_context_q_proj(suffix_norm)
+        k = self.action_context_k_proj(context_norm)
+        v = self.action_context_v_proj(context)
+        logits = torch.matmul(q.to(dtype=torch.float32), k.to(dtype=torch.float32).transpose(-1, -2))
+        logits = logits * (float(suffix_embs.shape[-1]) ** -0.5)
+        attn = torch.softmax(logits, dim=-1).to(device=device, dtype=dtype)
+        residual = self.action_context_out_proj(torch.matmul(attn, v))
+
+        eps = 1.0e-6
+        suffix_rms = torch.sqrt(torch.mean(suffix_embs.detach().to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps)
+        residual_rms = torch.sqrt(torch.mean(residual.to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps)
+        if bool(getattr(self, "action_context_adapter_rms_cap", True)):
+            cap = torch.clamp(suffix_rms / torch.clamp(residual_rms, min=eps), max=1.0)
+            residual = residual * cap.to(device=device, dtype=dtype)
+        gate = torch.sigmoid(self.action_context_gate_logit.to(device=device, dtype=torch.float32)).to(dtype=dtype)
+        adapted = suffix_embs + gate * residual
+
+        entropy = -(attn.to(dtype=torch.float32) * torch.log(torch.clamp(attn.to(dtype=torch.float32), min=1.0e-12))).sum(
+            dim=-1
+        )
+        zero = adapted.reshape(-1)[0].detach() * 0.0
+        metrics = {
+            "picf_action_context_adapter_token_count": zero + float(context.shape[1]),
+            "picf_action_context_adapter_gate": zero + gate.detach().to(device=device, dtype=dtype),
+            "picf_action_context_adapter_attention_entropy_mean": entropy.detach().mean().to(device=device, dtype=dtype),
+            "picf_action_context_adapter_residual_rms_mean": torch.sqrt(
+                torch.mean(residual.detach().to(dtype=torch.float32).square(), dim=-1)
+            )
+            .mean()
+            .to(device=device, dtype=dtype),
+        }
+        return adapted, metrics
+
     def _prepare_action_chunk_target(
         self,
         action_chunk_target: torch.Tensor | np.ndarray,
@@ -1160,6 +1414,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         features: PaliGemmaSemanticFeatures,
         *,
         extra_prefix_tokens: torch.Tensor | None,
+        extra_action_context_tokens: torch.Tensor | None = None,
         action_chunk_target: torch.Tensor | np.ndarray,
         noise: torch.Tensor | None = None,
         time: torch.Tensor | None = None,
@@ -1183,6 +1438,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             extra_prefix_tokens=extra_prefix_tokens,
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self._embed_suffix(x_t, time)
+        suffix_embs, adapter_metrics = self._apply_action_context_adapter(suffix_embs, extra_action_context_tokens)
         model_dtype = self._model_runtime_dtype()
         if model_dtype in (torch.bfloat16, torch.float16):
             prefix_embs = prefix_embs.to(dtype=model_dtype)
@@ -1224,6 +1480,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             "action_gripper": grip,
             "predicted_action": predicted[0],
             "predicted_chunk": predicted_chunk[0],
+            **adapter_metrics,
         }
 
     @torch.no_grad()
@@ -1232,9 +1489,14 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         features: PaliGemmaSemanticFeatures,
         *,
         extra_prefix_tokens: torch.Tensor | None,
+        extra_action_context_tokens: torch.Tensor | None = None,
         noise: torch.Tensor | None = None,
         num_steps: int | None = None,
     ) -> torch.Tensor:
+        timing_enabled = _runtime_timing_enabled()
+        timing: dict[str, float] = {}
+        total_start = _timing_start(timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         prefix_embs, prefix_pad_masks, prefix_att_masks = self._combine_prefix(
             features,
             extra_prefix_tokens=extra_prefix_tokens,
@@ -1242,8 +1504,12 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         model_dtype = self._model_runtime_dtype()
         if model_dtype in (torch.bfloat16, torch.float16):
             prefix_embs = prefix_embs.to(dtype=model_dtype)
+        _timing_record(timing, "sample_combine_prefix", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
         prefix_att_2d_masks_4d = self._prepare_attention_masks_4d(prefix_att_2d_masks).to(dtype=prefix_embs.dtype)
+        _timing_record(timing, "sample_prefix_masks", stage_start, timing_enabled)
+        stage_start = _timing_start(timing_enabled)
         _, past_key_values = self.paligemma_with_expert.forward(
             attention_mask=prefix_att_2d_masks_4d,
             position_ids=_masked_position_ids(prefix_pad_masks),
@@ -1251,15 +1517,24 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             inputs_embeds=[prefix_embs, None],
             use_cache=True,
         )
+        _timing_record(timing, "sample_prefix_kv_forward", stage_start, timing_enabled)
         if noise is None:
+            stage_start = _timing_start(timing_enabled)
             noise = torch.randn((1, self.action_horizon, self.model_action_dim), device=self.device, dtype=torch.float32)
+            _timing_record(timing, "sample_noise", stage_start, timing_enabled)
         x_t = noise
         steps = int(num_steps or self.denoise_steps)
         dt = torch.tensor(-1.0 / max(steps, 1), dtype=torch.float32, device=self.device)
         time = torch.tensor(1.0, dtype=torch.float32, device=self.device)
+        denoise_start = _timing_start(timing_enabled)
         while time >= (-dt / 2):
+            step_start = _timing_start(timing_enabled)
             timestep = time.expand(1)
             suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self._embed_suffix(x_t, timestep)
+            suffix_embs, _adapter_metrics = self._apply_action_context_adapter(
+                suffix_embs,
+                extra_action_context_tokens,
+            )
             suffix_len = suffix_pad_masks.shape[1]
             prefix_len = prefix_pad_masks.shape[1]
             prefix_pad_2d = prefix_pad_masks[:, None, :].expand(1, suffix_len, prefix_len)
@@ -1284,6 +1559,10 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             v_t = self.action_out_proj(suffix_out)
             x_t = x_t + dt * v_t
             time += dt
+            _timing_record(timing, "sample_denoise_last_step", step_start, False)
+        _timing_record(timing, "sample_denoise_loop", denoise_start, timing_enabled)
+        _timing_record(timing, "sample_total", total_start, timing_enabled)
+        self._last_runtime_timing = timing
         return x_t[0]
 
     def forward(self, op: str, /, *args: Any, **kwargs: Any):
@@ -1333,6 +1612,13 @@ class PaliGemmaSemanticEncoder(nn.Module):
         if fn is None:
             raise RuntimeError("Semantic encoder does not implement PI0 action chunk sampling.")
         return fn(*args, **kwargs)
+
+    @property
+    def last_runtime_timing(self) -> dict[str, float]:
+        value = getattr(self.encoder, "last_runtime_timing", None)
+        if isinstance(value, dict):
+            return dict(value)
+        return {}
 
     def fsdp_runtime_leaf_module_specs(self) -> list[tuple[nn.Module, str, str]]:
         fn = getattr(self.encoder, "fsdp_runtime_leaf_module_specs", None)

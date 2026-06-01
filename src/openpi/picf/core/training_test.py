@@ -453,9 +453,16 @@ def test_transition_loss_computes_guarded_owm_objectives_when_weighted(tmp_path:
     )
 
     assert torch.isfinite(losses.slot_jepa)
+    assert torch.isfinite(losses.slot_jepa_direction)
+    assert torch.isfinite(losses.slot_jepa_log_norm)
+    assert torch.isfinite(losses.slot_jepa_pred_norm)
+    assert torch.isfinite(losses.slot_jepa_target_norm)
+    assert torch.isfinite(losses.slot_jepa_matched_target_norm)
     assert torch.isfinite(losses.support_pred)
     assert torch.isfinite(losses.binding_consistency)
     assert losses.slot_jepa.item() >= 0.0
+    assert losses.slot_jepa_direction.item() >= 0.0
+    assert losses.slot_jepa_log_norm.item() >= 0.0
     assert losses.support_pred.item() >= 0.0
     assert losses.binding_consistency.item() >= 0.0
 
@@ -522,6 +529,11 @@ def test_slot_jepa_prefers_next_posterior_teacher_over_visual_fallback(tmp_path:
     # rather than the old index-aligned MSE. The important contract here is that
     # the detached posterior teacher is used instead of the zero visual fallback.
     assert torch.isfinite(losses.slot_jepa)
+    assert torch.isfinite(losses.slot_jepa_direction)
+    assert torch.isfinite(losses.slot_jepa_log_norm)
+    assert torch.isfinite(losses.slot_jepa_pred_norm)
+    assert torch.isfinite(losses.slot_jepa_target_norm)
+    assert torch.isfinite(losses.slot_jepa_matched_target_norm)
     assert losses.slot_jepa.item() > 0.5
 
 
@@ -1366,6 +1378,53 @@ def test_object_explanation_point_loss_is_bounded_for_noisy_sidecar_tail() -> No
         lambda_object_explanation_point=1.0,
         object_explanation_active_object_only=False,
         object_explanation_point_loss_clip=8.0,
+        object_explanation_point_quality_gate_enabled=True,
+        object_explanation_point_outlier_prior=0.05,
+    )
+
+    total, _feature, point, _contact, _duplicate, _background = _object_explanation_loss(
+        state,
+        cfg,
+        reference=torch.zeros((), dtype=dtype),
+        eps=1e-6,
+    )
+
+    assert torch.isfinite(point)
+    assert float(point.item()) < 0.5
+    torch.testing.assert_close(total, point)
+
+
+def test_object_explanation_point_loss_default_preserves_raw_compactness_signal() -> None:
+    dtype = torch.float32
+    oeml = PicfObjectExplanationState(
+        object_mask_visual=None,
+        background_mask_visual=None,
+        object_mask_temporal=None,
+        background_mask_temporal=None,
+        object_mask_point=None,
+        background_mask_point=None,
+        object_mask_tactile=None,
+        background_mask_tactile=None,
+        object_mask_tracklet=None,
+        background_mask_tracklet=None,
+        object_mask_proposal=None,
+        background_mask_proposal=None,
+        anchor_quality=torch.ones((2,), dtype=dtype),
+        anchor_duplicate_overlap=torch.zeros((2, 2), dtype=dtype),
+        anchor_feature_variance=torch.zeros((2,), dtype=dtype),
+        point_spatial_variance=torch.tensor([1000.0, 4.0], dtype=dtype),
+        contact_explanation_score=torch.tensor(0.0, dtype=dtype),
+        valid=torch.tensor(True),
+    )
+    state = SimpleNamespace(
+        object_explanation=oeml,
+        anchor_prior_graph=None,
+        token_field=SimpleNamespace(tactile_contact_prob=None),
+    )
+    cfg = PicfTransitionLossConfig(
+        lambda_object_explanation_point=1.0,
+        object_explanation_active_object_only=False,
+        object_explanation_point_loss_clip=8.0,
     )
 
     total, _feature, point, _contact, _duplicate, _background = _object_explanation_loss(
@@ -1377,3 +1436,70 @@ def test_object_explanation_point_loss_is_bounded_for_noisy_sidecar_tail() -> No
 
     torch.testing.assert_close(point, torch.tensor(6.0, dtype=dtype))
     torch.testing.assert_close(total, point)
+
+
+def test_anchor_object_pull_ignores_broad_noisy_target_tail() -> None:
+    dtype = torch.float32
+    points = torch.tensor(
+        [
+            [0.0, 0.0, 0.0],
+            [0.01, 0.0, 0.0],
+            [1.0, 0.0, 0.0],
+            [1.1, 0.0, 0.0],
+        ],
+        dtype=dtype,
+    )
+    graph = SimpleNamespace(
+        anchor_x=torch.zeros((2, 3), dtype=dtype),
+        anchor_tokens=torch.zeros((2, 4), dtype=dtype),
+        anchor_active=torch.ones((2,), dtype=dtype),
+        anchor_roles=torch.ones((2,), dtype=torch.long),
+        object_candidate_owner_point_priors=torch.tensor(
+            [
+                [1.0, 1.0, 0.0, 0.0],
+                [1.0, 0.0, 1.0, 0.0],
+            ],
+            dtype=dtype,
+        ),
+        proposal_anchor_seed_priors=None,
+        proposal_point_priors=None,
+        task_owner_point_priors=None,
+    )
+    token_field = SimpleNamespace(
+        fused_tokens=torch.zeros((1, 4), dtype=dtype),
+        point_positions=points,
+        point_positions_world=points,
+        projective_geometry=None,
+        point_align_embeddings=torch.zeros((0, 4), dtype=dtype),
+        visual_align_embeddings=torch.zeros((0, 4), dtype=dtype),
+        tactile_align_embeddings=torch.zeros((0, 4), dtype=dtype),
+        tactile_positions_world=torch.zeros((0, 3), dtype=dtype),
+        tactile_contact_prob=None,
+        tactile_contact_gate=torch.zeros((0,), dtype=dtype),
+        tactile_normals_world=None,
+        tactile_group_ids=None,
+    )
+    state = SimpleNamespace(token_field=token_field, anchor_prior_graph=graph)
+
+    robust = compute_alignment_loss(
+        state,
+        config=PicfAlignmentLossConfig(
+            lambda_anchor_object_pull=1.0,
+            lambda_pt=0.0,
+            anchor_object_pull_target_quality_gate_enabled=True,
+            anchor_object_pull_target_quality_sigma_m=0.08,
+            anchor_object_pull_target_quality_min=0.05,
+        ),
+    )
+    ungated = compute_alignment_loss(
+        state,
+        config=PicfAlignmentLossConfig(
+            lambda_anchor_object_pull=1.0,
+            lambda_pt=0.0,
+            anchor_object_pull_target_quality_gate_enabled=False,
+        ),
+    )
+
+    assert torch.isfinite(robust.anchor_object_pull)
+    assert float(robust.anchor_object_pull_target_quality_mean.item()) > 0.9
+    assert float(robust.anchor_object_pull.item()) < float(ungated.anchor_object_pull.item())
