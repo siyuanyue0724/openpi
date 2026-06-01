@@ -903,3 +903,25 @@ This is the next required gate before another 30K claim.  The gate must show
 adapter metrics in JSONL and either improve same-window action loss relative to
 E6 or prove that downstream action-head/backbone adaptation, not PICF routing,
 is the remaining bottleneck.
+
+## 2026-06-02 Six-GPU E23 Follow-Through
+
+Use this launcher when a 6xA100-40GB machine is available:
+
+```text
+scripts/experiments/picf_aqr_owm_202605_active/
+  run_6x40g_e23_bucketbalanced_noactioncond_from11000_30k_20260602.sh
+```
+
+This is the maintained hardware-scaled follow-through after E23.  It keeps the
+same model/loss contract as E23, but changes the gradient estimator from
+2 bucket-balanced windows/update to 6 bucket-balanced windows/update.  The point
+is to test the E21/E23 causal hypothesis without adding another module or
+changing the action interface again.
+
+Detailed math and guardrails:
+
+```text
+docs/PICF_AQR_OWM_ACTION_READOUT_CAUSAL_AUDIT_20260601_TEMP.md
+  section 45
+```

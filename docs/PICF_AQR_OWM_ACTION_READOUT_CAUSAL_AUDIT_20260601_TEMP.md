@@ -3933,3 +3933,74 @@ If only 2 GPUs are available:
   keep E23 as the best runnable approximation, but interpret slow action
   descent as expected under a weak 2-window gradient estimator.
 ```
+
+## 45. Six-GPU Follow-Through Plan
+
+Date: 2026-06-02
+
+Launcher:
+
+```text
+scripts/experiments/picf_aqr_owm_202605_active/
+  run_6x40g_e23_bucketbalanced_noactioncond_from11000_30k_20260602.sh
+```
+
+Rationale:
+
+```text
+E21 exact-window diagnostic:
+  12 windows per optimizer update;
+  strongest observed action descent;
+  not a production sampler.
+
+E23 two-GPU production approximation:
+  2 windows per optimizer update;
+  action stable but slow;
+  active/downstream structure healthy.
+
+6x40GB plan:
+  6 windows per optimizer update;
+  no gradient accumulation;
+  no extra per-rank activation memory;
+  closer to E21 while preserving the normal bucket-balanced CALVIN trainer.
+```
+
+Mathematical contract:
+
+```text
+Let g_i(theta) be the per-window gradient.
+
+2-GPU E23 estimates:
+  g_hat_2 = (g_1 + g_2) / 2
+
+6-GPU follow-through estimates:
+  g_hat_6 = (1/6) sum_{i=1}^6 g_i
+
+If task-family gradient variance dominates the action plateau, then:
+  Var[g_hat_6] ~= Var[g_hat_2] / 3
+
+This tests the root-cause hypothesis without changing the model contract.
+It is not a new module and not a loss rewrite.
+```
+
+Guardrails:
+
+```text
+direct PICF action condition:
+  disabled
+
+action pressure:
+  same E23/E14H action4 setting
+
+PICF core LR:
+  low constant, same maintained E23 contract
+
+resume:
+  model-only from E14H step 11000
+
+sidecar:
+  full clean contact-motion tracklet sidecar
+
+save:
+  every 1000 steps, keep last 5
+```
