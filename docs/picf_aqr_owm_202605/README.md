@@ -21,6 +21,35 @@ Current action-readout / balanced-gradient ledger:
 docs/PICF_AQR_OWM_ACTION_READOUT_CAUSAL_AUDIT_20260601_TEMP.md
 ```
 
+Current small-window logical-batch gate:
+
+```text
+docs/PICF_AQR_OWM_ACTION_READOUT_CAUSAL_AUDIT_20260601_TEMP.md#48-e24-logical-batch-plan
+```
+
+2026-06-02 update:
+
+```text
+E21b2 showed that exact-window K=2 updates can improve deterministic
+all-window action eval, but do not reproduce E21's fast K=12 descent.
+
+The maintained interpretation is now:
+  the action path has capacity;
+  direct optimizer resets are not the root explanation;
+  the missing production ingredient is task-balanced logical optimizer
+  updates that approximate the intended multi-task gradient under small
+  physical batches.
+
+Next quick gates:
+  E24a exact12 windows_per_step=4
+  E24b exact12 windows_per_step=6
+
+Do not start another 30K run from this branch until E24 establishes whether
+K=4/K=6 approximates E21.  If it does, production training should implement
+task-balanced logical updates via micro-batch accumulation and per-task loss
+normalization rather than relying on naive random small batches.
+```
+
 2026-06-02 status:
 
 ```text
