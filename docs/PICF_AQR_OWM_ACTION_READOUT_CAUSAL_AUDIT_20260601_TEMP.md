@@ -4168,3 +4168,115 @@ metrics. Before another E21-like run, add per-rank startup tracing around:
   _load_checkpoint_sequential_across_ranks
   the post-resume distributed barrier
 ```
+
+## 47. E21b2 Exact-Window Small-Batch Probe
+
+Date: 2026-06-02
+
+Question:
+
+```text
+E21 proved that the action path can descend when every optimizer update sees
+the full stratified 12-window objective.  It did not answer whether a smaller
+update, still cycling through the same task set, is stable.
+
+E21b2 tests exactly that missing point:
+  same checkpoint;
+  same stratified12 exact windows;
+  same action-head/adapter-only trainable scope;
+  same PICF runtime with direct PICF action conditioning disabled;
+  windows_per_step = 2 instead of 12.
+```
+
+Mathematical object:
+
+```math
+g_t^{(2)}
+  = \frac{1}{2}
+    \left(\nabla_\theta L_{i_t}(\theta_t)
+          + \nabla_\theta L_{j_t}(\theta_t)\right)
+```
+
+where the index pair cycles through the fixed 12-window set.  This differs
+from E21:
+
+```math
+g_t^{(12)}
+  = \nabla_\theta \frac{1}{12}\sum_{i=1}^{12} L_i(\theta_t)
+```
+
+Decision rule:
+
+```text
+If E21b2 descends on all-window deterministic eval and stays below step0:
+  two-window updates may be sufficient when the sequence is deterministic and
+  balanced over a short cycle.
+
+If E21b2 train rows dip but all-window eval rebounds:
+  the problem is not fixed by simply cycling through task buckets.  The action
+  update itself is too task-family-biased when each optimizer step sees only
+  two windows.
+
+If E21b2 behaves like E21:
+  production should focus on better bucket rotation / small-batch curriculum.
+
+If E21b2 behaves like E20f:
+  production needs an architectural or optimization mechanism that reduces
+  cross-task gradient conflict at small update batches, rather than relying on
+  more GPUs.
+```
+
+Remote run:
+
+```text
+host:
+  px-cloud1 / Zky12J / 2xA100-40GB
+
+worktree:
+  /root/openpi_e21b2_1b07eab
+
+run root:
+  /root/picf_exact_window_probes/action_bridge_capacity_20260601/
+  ckpt11000_exact12_det_controls/e21b2_windows2_policyonly_180
+
+tmux:
+  picf_e21b2_windows2
+
+tail:
+  tail -f /root/picf_exact_window_probes/action_bridge_capacity_20260601/ckpt11000_exact12_det_controls/e21b2_windows2_policyonly_180/run.log
+```
+
+Early read:
+
+```text
+step0 deterministic all-window eval:
+  loss_action_default_equiv mean = 0.0370217793
+
+step30 deterministic all-window eval:
+  loss_action_default_equiv mean = 0.0333460527
+
+step60 deterministic all-window eval:
+  loss_action_default_equiv mean = 0.0342119768
+
+train rows:
+  step10 recent = 0.0326874721
+  step20 recent = 0.0384596322
+  step30 recent = 0.0375019123
+  step40 recent = 0.0302849101
+  step50 recent = 0.0332465792
+  step60 recent = 0.0312920111
+  step70 recent = 0.0260460178
+```
+
+Provisional interpretation:
+
+```text
+windows_per_step=2 is not immediately dead: all-window eval improves at step30.
+
+But it is weaker than E21:
+  E21 step20 reached 0.0259354621;
+  E21b2 step60 is still 0.0342119768.
+
+The step30->step60 rise already suggests that two-window updates still carry
+task-pair bias.  Continue to step90/180 before final classification.
+```
