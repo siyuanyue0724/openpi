@@ -4570,3 +4570,71 @@ It is:
   task/modality, otherwise it will keep under-approximating the intended
   multi-task gradient.
 ```
+
+Final E24 stop read:
+
+```text
+E24a K=4:
+  step0 eval mean  = 0.0370217793
+  step30 eval mean = 0.0348250197
+  step60 eval mean = 0.0311698666
+  step90 eval mean = 0.0276452027
+
+  recent train:
+    step70 = 0.0273251744
+    step80 = 0.0305925471
+    step90 = 0.0304972849
+
+E24b K=6:
+  step0 eval mean  = 0.0370217793
+  step30 eval mean = 0.0343819553
+  step60 eval mean = 0.0307366948
+
+  recent train:
+    step40 = 0.0314234595
+    step50 = 0.0289648724
+    step60 = 0.0277007616
+
+Runs were stopped after this read to avoid spending more GPU on a diagnostic
+whose answer is already clear.
+```
+
+Final E24 interpretation:
+
+```text
+1. More task windows per logical update is a real positive direction.
+   K=4 improves all-window eval from 0.0370 to 0.0276.
+
+2. The improvement is not E21-fast.
+   E21 reached 0.0259 by step20 with K=12.  E24a K=4 needed step90 to approach
+   that region.  This means the production issue is still update-estimator
+   quality, not action-capacity absence.
+
+3. K=6 is not obviously better than K=4.
+   At similar micro-window exposure, K=4 has more optimizer updates and better
+   all-window eval.  Therefore blindly maximizing accumulation width is not
+   the right production fix.
+
+4. The next production recipe should target K≈4 task-balanced logical updates:
+   enough task coverage to reduce single-task gradient variance, but not so
+   much accumulation that the action head receives too few optimizer updates.
+
+5. Per-task/per-modality normalization remains missing from this exact-window
+   probe.  E24 only controls which windows enter an update; it does not yet
+   normalize bucket losses before aggregation.  That is the next required
+   implementation step before another 30K run.
+```
+
+Maintained next action:
+
+```text
+Implement a production logical-batch path that approximates E24a:
+  - each optimizer step covers about 4 task families/windows;
+  - losses are aggregated per bucket before weighting;
+  - AdamW/scheduler/EMA step once per logical update;
+  - progress bar remains enabled;
+  - per-bucket action loss, total loss, grad norm, and sample counts are logged.
+
+Do not use E24 fixed windows as the final training recipe.  They are a causal
+diagnostic showing that balanced logical updates are necessary.
+```

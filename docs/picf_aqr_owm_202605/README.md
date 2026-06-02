@@ -44,10 +44,19 @@ Next quick gates:
   E24a exact12 windows_per_step=4
   E24b exact12 windows_per_step=6
 
-Do not start another 30K run from this branch until E24 establishes whether
-K=4/K=6 approximates E21.  If it does, production training should implement
-task-balanced logical updates via micro-batch accumulation and per-task loss
-normalization rather than relying on naive random small batches.
+E24 result:
+  K=4 exact-window eval improved 0.0370217793 -> 0.0276452027 by step90.
+  K=6 exact-window eval improved 0.0370217793 -> 0.0307366948 by step60.
+
+Interpretation:
+  balanced logical updates are necessary and useful;
+  K=4 is a better speed/update-count tradeoff than blindly increasing K;
+  this is still slower than E21 K=12 step20, so production needs explicit
+  task-balanced logical updates plus per-task/per-modality loss normalization.
+
+Do not start another 30K random-small-batch run from this branch.  The next
+maintained production change should implement K≈4 task-balanced logical
+optimizer steps, not rely on naive random batches or optimizer resets.
 ```
 
 2026-06-02 status:
