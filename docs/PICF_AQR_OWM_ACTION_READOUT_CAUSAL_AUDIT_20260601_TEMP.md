@@ -4532,3 +4532,41 @@ physical windows without loss decomposition.
 
 Continue E24 to step60 to rule out delayed convergence before changing code.
 ```
+
+Step60 read:
+
+```text
+E24a K=4:
+  step0 eval mean  = 0.0370217793
+  step30 eval mean = 0.0348250197
+  step60 eval mean = 0.0311698666
+
+  recent train:
+    step40 = 0.0337900947
+    step50 = 0.0298160967
+    step60 = 0.0314307816
+
+E24b K=6:
+  step0 eval mean  = 0.0370217793
+  step30 eval mean = 0.0343819553
+  step40 recent train = 0.0314234595
+  step60 eval pending
+```
+
+Interpretation at step60:
+
+```text
+K=4 is a real positive signal: all-window eval improves monotonically through
+step60.
+
+But K=4 still does not match E21's step20 descent to 0.0259354621.  Its
+behavior is closer to a slow/noisy approximation of the all-window gradient.
+
+The correct production conclusion is therefore not "small batch is hopeless".
+It is:
+  naive small batch is insufficient;
+  K=4/K=6 logical coverage helps;
+  production must make logical optimizer steps explicit and normalized by
+  task/modality, otherwise it will keep under-approximating the intended
+  multi-task gradient.
+```
