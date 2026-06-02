@@ -4499,3 +4499,36 @@ simply increase GPU count.  It should make the optimizer step logical:
 AdamW, scheduler, EMA, and checkpoint step counters must advance only once per
 logical update.
 ```
+
+Step30 read:
+
+```text
+E24a K=4:
+  step0 eval mean = 0.0370217793
+  step30 eval mean = 0.0348250197
+  step10 recent train = 0.0357231202
+  step20 recent train = 0.0350576217
+  step30 recent train = 0.0356868175
+  step40 recent train = 0.0337900947
+
+E24b K=6:
+  step0 eval mean = 0.0370217793
+  step30 eval mean = 0.0343819553
+  step10 recent train = 0.0364600931
+  step20 recent train = 0.0347884616
+  step30 recent train = 0.0330343677
+```
+
+Interpretation at step30:
+
+```text
+K=4/K=6 are valid and running, but they do not reproduce E21's fast descent.
+E21 reached 0.0259354621 by step20 on the same exact support.
+
+Therefore the remaining issue is not solved by "slightly more windows/update".
+The likely next production ingredient is a true logical optimizer step with
+per-task normalized losses and/or conflict-aware weighting, not merely more
+physical windows without loss decomposition.
+
+Continue E24 to step60 to rule out delayed convergence before changing code.
+```
