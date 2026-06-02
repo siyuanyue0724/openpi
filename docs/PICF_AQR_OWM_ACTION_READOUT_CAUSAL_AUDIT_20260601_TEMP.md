@@ -4004,3 +4004,114 @@ sidecar:
 save:
   every 1000 steps, keep last 5
 ```
+
+## 46. Six-Window Follow-Through Result And 12-Window Next Step
+
+Date: 2026-06-02
+
+Run:
+
+```text
+picf_6x40g_e23_bucketbalanced_noactioncond_from11000_30k_20260602
+resume: E14H step 11000
+hardware: 6xA100-40GB
+world_size: 6
+accum_steps: 1
+effective windows/update: 6
+window_activation_checkpointing: false
+```
+
+Observed structured metrics:
+
+```text
+step 11050:
+  loss_action_default_equiv = 0.0440368
+  loss_total                = 0.0990952
+  loss_total_minus_action   = 0.0110215
+  active support overlap    = 0.164923
+  downstream support overlap= 0.154397
+
+step 11800:
+  loss_action_default_equiv = 0.0404126
+  loss_total                = 0.0911475
+  loss_total_minus_action   = 0.0103223
+  active support overlap    = 0.0700000
+  downstream support overlap= 0.0693600
+
+step 11850:
+  loss_action_default_equiv = 0.0433774
+  loss_total                = 0.0965711
+  loss_total_minus_action   = 0.00981638
+  active support overlap    = 0.0916667
+  downstream support overlap= 0.0901238
+  raw same-role overlap     = 1.0
+```
+
+Interpretation:
+
+```text
+The 6-window run exceeded the requested 500-step observation window.
+
+Positive:
+  active/downstream support overlap stayed healthy;
+  raw overlap is still reserve/inactive dominated and is not the action blocker;
+  total-minus-action stayed small and stable;
+  sidecar/object pull did not destabilize the graph.
+
+Negative:
+  action did not reproduce E21-style rapid descent;
+  loss_action_default_equiv only moved from 0.0440 to 0.0434 over the
+  structured 11050->11850 interval, with a best transient point around 0.0404.
+
+Conclusion:
+  6 windows/update improves estimator diversity relative to 2-window E23,
+  but it is not enough evidence for final 30K acceptance.
+```
+
+Next launcher:
+
+```text
+scripts/experiments/picf_aqr_owm_202605_active/
+  run_6x40g_e21like_accum2_windowckpt_noactioncond_from11000_30k_20260602.sh
+```
+
+Contract:
+
+```text
+world_size = 6
+accum_steps = 2
+effective windows/update = 12
+window_activation_checkpointing = true
+training_strategy = fsdp_full_shard
+optimizer_checkpoint_mode = model-only
+```
+
+Mathematical reason:
+
+```text
+Let g_i(theta) be per-window gradients.
+
+Current 6-window run:
+  g_hat_6 = (1/6) sum_i g_i
+
+E21-like run:
+  g_hat_12 = (1/12) sum_i g_i
+
+Under task-family gradient variance, the 12-window estimator should have:
+  Var[g_hat_12] ~= Var[g_hat_6] / 2
+
+This is the closest production-compatible test of the E21 evidence on the
+available 6x40GB hardware. It changes estimator quality, not model semantics.
+```
+
+Decision rule:
+
+```text
+If E21-like 12-window restores action descent while preserving active/downstream
+overlap, the remaining blocker was gradient estimator/task-family mixing.
+
+If it still plateaus near 0.04 after a comparable 500-step observation window,
+the blocker is not just windows/update; reopen the action-readout objective,
+sampling curriculum, and context injection design rather than continuing
+long-run compute.
+```
