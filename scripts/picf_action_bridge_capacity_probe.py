@@ -11,6 +11,11 @@ import types
 
 import torch
 
+try:  # Keep JSON logs on stdout; tqdm writes progress to stderr only.
+    import tqdm.auto as _tqdm_auto
+except Exception:  # pragma: no cover - optional runtime convenience.
+    _tqdm_auto = None
+
 if __package__ in (None, ""):
     _REPO_ROOT = Path(__file__).resolve().parents[1]
     sys.path.insert(0, str(_REPO_ROOT))
@@ -359,6 +364,11 @@ def main() -> None:
     parser.add_argument("--eval-every", type=int, default=0)
     parser.add_argument("--max-eval-windows", type=int, default=12)
     parser.add_argument(
+        "--progress",
+        action="store_true",
+        help="Show a tqdm progress bar on stderr while preserving JSON stdout logs.",
+    )
+    parser.add_argument(
         "--deterministic-eval-seed",
         type=int,
         default=None,
@@ -653,6 +663,20 @@ def main() -> None:
 
         rows: list[dict[str, Any]] = []
         windows_per_step = int(args.windows_per_step)
+        pbar = None
+        if bool(args.progress):
+            if _tqdm_auto is None:
+                print(
+                    json.dumps({"stage": "progress_unavailable", "reason": "tqdm import failed"}, sort_keys=True),
+                    flush=True,
+                )
+            else:
+                pbar = _tqdm_auto.tqdm(
+                    total=int(args.steps),
+                    desc=f"PICF exact probe K={windows_per_step}",
+                    dynamic_ncols=True,
+                    file=sys.stderr,
+                )
         for step in range(1, int(args.steps) + 1):
             optimizer.zero_grad(set_to_none=True)
             micro_snapshots: list[dict[str, Any]] = []
@@ -712,6 +736,16 @@ def main() -> None:
                 }
                 print(json.dumps(log_row, sort_keys=True), flush=True)
 
+            if pbar is not None:
+                pbar.set_postfix(
+                    {
+                        "step": int(step),
+                        "loss": f"{float(row.get(str(args.action_loss_key), row['optimized_loss'])):.5f}",
+                        "recent": f"{float(_mean_recent(rows, str(args.action_loss_key), min(10, len(rows))) or row['optimized_loss']):.5f}",
+                    }
+                )
+                pbar.update(1)
+
             if int(args.eval_every) > 0 and step % int(args.eval_every) == 0:
                 eval_rows = _evaluate_prepared(
                     trainer,
@@ -730,6 +764,9 @@ def main() -> None:
                     "elapsed_s": round(time.time() - started, 3),
                 }
                 print(json.dumps(eval_summary, sort_keys=True), flush=True)
+
+        if pbar is not None:
+            pbar.close()
 
         if bool(args.eval_before_after):
             eval_rows = _evaluate_prepared(

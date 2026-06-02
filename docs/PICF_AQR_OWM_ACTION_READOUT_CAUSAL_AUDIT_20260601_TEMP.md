@@ -4280,3 +4280,222 @@ But it is weaker than E21:
 The step30->step60 rise already suggests that two-window updates still carry
 task-pair bias.  Continue to step90/180 before final classification.
 ```
+
+Step120 update:
+
+```text
+step90 deterministic all-window eval:
+  loss_action_default_equiv mean = 0.0300650926
+
+step120 deterministic all-window eval:
+  loss_action_default_equiv mean = 0.0308203372
+
+recent train rows:
+  step70  windows [6,7]   loss_action_default_equiv = 0.0260460178
+  step80  windows [2,3]   loss_action_default_equiv = 0.0337364814
+  step90  windows [10,11] loss_action_default_equiv = 0.0330096092
+  step100 windows [6,7]   loss_action_default_equiv = 0.0305383532
+  step110 windows [2,3]   loss_action_default_equiv = 0.0367153912
+  step120 windows [10,11] loss_action_default_equiv = 0.0291963909
+```
+
+E21b2 conclusion:
+
+```text
+windows_per_step=2 can learn, but it does not reproduce E21's fast
+all-window descent.
+
+The remaining gap is not explained by action-head incapacity:
+  E21 already showed action-head/adapter capacity on the same checkpoint,
+  same exact windows, and same action loss.
+
+The remaining gap is the update estimator:
+  K=2 gradients are still task-pair-biased;
+  K=12 gradients approximate the intended multi-task objective on this
+  diagnostic support.
+```
+
+## 48. E24 Logical-Batch Plan
+
+Date: 2026-06-02
+
+This section replaces the optimizer-reset interpretation with a stricter
+multi-task-gradient interpretation.
+
+Target objective:
+
+```math
+L(\theta)
+  = \sum_{b \in \mathcal{B}} q_b
+    \mathbb{E}_{x \sim \mathcal{D}_b}
+      \left[\ell_b(\theta; x)\right],
+
+G(\theta)
+  = \nabla_\theta L(\theta)
+  = \sum_{b \in \mathcal{B}} q_b
+    \mathbb{E}_{x \sim \mathcal{D}_b}
+      \left[\nabla_\theta \ell_b(\theta; x)\right].
+```
+
+Here `b` is not merely a dataset id.  For CALVIN it should at minimum include
+coarse task family:
+
+```text
+drawer
+switch_button_light
+slider
+block_push
+block_lift
+block_other
+other
+```
+
+Small physical batch estimator:
+
+```math
+\hat{G}_K(\theta)
+  = \frac{1}{K}\sum_{k=1}^{K}
+      \nabla_\theta \ell_{b_k}(\theta; x_k).
+```
+
+If `K` covers only one or two task families, then:
+
+```math
+\mathrm{Var}[\hat{G}_K]
+  =
+    \frac{1}{K}\mathbb{E}_b
+      \left[\lVert \nabla L_b - G \rVert^2\right]
+    + \text{within-task variance}.
+```
+
+This is the observed failure mode:
+
+```text
+E20f:
+  K=1 exact-window sequential updates can descend on the current window and
+  then rebound on all-window eval.
+
+E21:
+  K=12 exact-window logical update descends quickly because every optimizer
+  step approximates the fixed multi-task objective.
+
+E21b2:
+  K=2 exact-window logical update descends, but more slowly and with noisier
+  all-window eval.
+
+E23 production:
+  bucket-balanced 2-GPU updates saw only two physical windows/update and did
+  not reproduce E21's descent, even though bucket cycling was enabled.
+```
+
+Therefore the next test is not another single optimizer tweak.  It is a
+controlled estimator-width test:
+
+```text
+E24a:
+  exact12 windows_per_step=4
+  action-head/adapter-only
+  PICF action condition disabled
+  step0/30/60/90/120 deterministic all-window eval
+
+E24b:
+  exact12 windows_per_step=6
+  action-head/adapter-only
+  PICF action condition disabled
+  step0/30/60/90 deterministic all-window eval
+
+Decision:
+  If K=4/K=6 approach E21, production training must implement task-balanced
+  logical updates with gradient accumulation or equivalent loss aggregation.
+
+  If K=4/K=6 remain close to E21b2, then action readout itself needs a
+  stronger but still insulated bridge before production long training.
+
+  If K=4/K=6 regress, stop and inspect code/dataflow before any 30k run.
+```
+
+This is not a small-dataset-specific trick.  Fixed exact windows are only a
+diagnostic support.  The scalable production principle is:
+
+```text
+Each optimizer step should approximate the intended task-mixture gradient.
+
+Physical batch size may remain small, but the logical update must cover a
+balanced task/modality/embodiment mixture through micro-batch accumulation,
+per-task loss normalization, or a dedicated logical-batch sampler.
+```
+
+Relevant external alignment:
+
+```text
+VLA Foundry:
+  supports probabilistic dataset mixing, batch balancing ratios, gradient
+  accumulation, and multi-dataset normalization.  This supports controlled
+  mixture construction rather than naive global random batches.
+
+ABot-M0:
+  emphasizes cleaning/standardization and compares trajectory-uniform,
+  task-uniform, and embodiment-uniform balancing.  This supports treating
+  task family as a first-class sampling axis.
+
+PiKE:
+  treats batch construction and adaptive task mixing as the central control
+  variable under multi-task gradient conflict.  This supports measuring
+  gradient conflict after fixed logical-batch baselines are established.
+
+Knowledge Insulation / pi0.5:
+  supports separating continuous action expert gradients from the VLM
+  backbone.  In current code this is partially covered by
+  action_head_and_adapter scope, PICF action-condition disabling, and
+  action_context_stopgrad.  It does not remove the need for task-balanced
+  logical updates.
+
+OpenVLA-OFT:
+  supports chunked continuous action output and stable L1/continuous action
+  fine-tuning.  Current PI0.5 action path already uses continuous action
+  chunks/flow; the unresolved issue is update composition, not action-token
+  autoregression.
+```
+
+Code follow-through:
+
+```text
+scripts/picf_core_train.py:
+  _calvin_prompt_bucket() defines coarse CALVIN task families.
+  _CalvinTransitionSource.bucket_to_slot_indices builds bucket membership.
+  balanced_bucket_slot_index() cycles buckets by step/rank/micro-step.
+  accum_steps controls micro-batch accumulation before optimizer.step().
+  tqdm progress exists for production training.
+
+scripts/picf_action_bridge_capacity_probe.py:
+  windows_per_step implements exact-window logical batch width.
+  --progress now shows a stderr progress bar without corrupting JSON logs.
+
+src/openpi/picf/policy.py:
+  picf_action_condition_enabled can disable direct PICF action conditioning.
+  action_context_stopgrad prevents PICF context from receiving direct action
+  gradients when action context is used.
+
+src/openpi/picf/paligemma/wrapper.py:
+  action_context adapter is gated cross-attention into the action suffix.
+  action output is chunked continuous action flow, not discrete AR action
+  token prediction.
+```
+
+Production implication after E24:
+
+```text
+If E24 confirms K>=4 or K>=6 is sufficient, the next production run should not
+simply increase GPU count.  It should make the optimizer step logical:
+
+  for each update:
+    sample K task families without replacement or by temperature weights;
+    sample one or more windows per family;
+    compute per-family normalized losses;
+    accumulate gradients;
+    step AdamW once;
+    log per-family losses and gradient norms.
+
+AdamW, scheduler, EMA, and checkpoint step counters must advance only once per
+logical update.
+```
