@@ -4115,3 +4115,56 @@ the blocker is not just windows/update; reopen the action-readout objective,
 sampling curriculum, and context injection design rather than continuing
 long-run compute.
 ```
+
+Observed startup audit, 2026-06-02:
+
+```text
+Remote:
+  6xA100-40GB px-cloud2 / wEODGx
+
+Known-good run:
+  picf_6x40g_e23_bucketbalanced_noactioncond_from11000_30k_20260602
+  world_size=6
+  accum_steps=1
+  training_strategy=fsdp_full_shard
+  status=ran past the 500-step observation window
+
+Attempted E21-like run:
+  picf_6x40g_e21like_accum2_windowckpt_noactioncond_from11000_30k_20260602
+  world_size=6
+  accum_steps=2
+  training_strategy=fsdp_full_shard
+  window_activation_checkpointing=1
+  status=did not reach Training config; no loss rows produced
+
+Control diagnostic:
+  picf_diag_accum2_no_wckpt_from11000_11001b_20260602
+  world_size=6
+  accum_steps=2
+  training_strategy=fsdp_full_shard
+  window_activation_checkpointing=0
+  status=also did not reach Training config within the startup window
+
+Additional check:
+  standalone torchrun --nproc_per_node=6 rank sanity passed on the same host.
+```
+
+Interpretation:
+
+```text
+This is not an action-loss result and not an OOM result.
+
+The 12-window attempt currently exposes a project startup incompatibility in the
+6-rank FSDP + accum_steps=2 + model-only resume path. Since both
+window_checkpointing=1 and window_checkpointing=0 variants stalled before
+Training config, the first suspect is the accum=2/FSDP/resume startup path
+rather than the checkpointed forward itself.
+
+Do not cite the 12-window attempt as plateau evidence. It produced no training
+metrics. Before another E21-like run, add per-rank startup tracing around:
+  _build_model_sequential_across_ranks
+  _wrap_model_for_training_strategy
+  _build_optimizer
+  _load_checkpoint_sequential_across_ranks
+  the post-resume distributed barrier
+```
