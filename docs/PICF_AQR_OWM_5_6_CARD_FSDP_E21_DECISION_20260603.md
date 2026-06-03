@@ -196,8 +196,43 @@ same accum2 startup/memory risk
 less direct comparability to E21
 ```
 
-Do not spend a long 5-card run unless the 6-card startup gate fails for a
-hardware-specific reason and K10 is needed as a fallback diagnostic.
+Maintained K10 launcher:
+
+```text
+scripts/experiments/picf_aqr_owm_202605_active/
+  run_5x40g_e21like_accum2_k10_startup_gate_20260603.sh
+```
+
+5 cards can also run a slower, more conservative coverage gate:
+
+```text
+world_size=5, accum_steps=3 -> K=15
+```
+
+This exceeds E21's K12 window count.  It should be used only after K10 proves
+startup/dataflow health, because each optimizer update performs three
+micro-forwards/backwards per rank.  It uses FSDP synchronization on every
+accumulation micro-step to reduce the accumulated-gradient memory peak on 40GB
+cards.
+
+Maintained K15 launcher:
+
+```text
+scripts/experiments/picf_aqr_owm_202605_active/
+  run_5x40g_e21like_accum3_k15_syncmicro_startup_gate_20260603.sh
+```
+
+5-card decision rule:
+
+```text
+1. Run K10 first for 50-100 resumed steps.
+2. If K10 fails startup/OOM, do not try K15; wait for 6/8 cards or reduce model
+   memory through a separate precompute project.
+3. If K10 starts but action remains plateaued while structure is healthy, test
+   K15 for 20-50 resumed steps.
+4. Do not treat K10 as strict E21 evidence; it is a lower-coverage diagnostic.
+5. Treat K15 as a slower coverage stress test, not as a free speedup.
+```
 
 ## Required Gate Sequence
 

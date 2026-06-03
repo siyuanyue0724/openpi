@@ -64,6 +64,13 @@ docs/PICF_AQR_OWM_5_6_CARD_FSDP_E21_DECISION_20260603.md
   E21 window-count contract while trading communication time for lower FSDP
   accumulation memory.  Use the startup gate before any long run.
 
+2026-06-03 5-card note:
+  the same decision doc now includes two maintained 5-card routes:
+  `run_5x40g_e21like_accum2_k10_startup_gate_20260603.sh` for the fast K10
+  diagnostic, and `run_5x40g_e21like_accum3_k15_syncmicro_startup_gate_20260603.sh`
+  for the slower K15 coverage stress test.  K10 is not strict E21 evidence
+  because it has fewer logical windows/update than E21 K12.
+
 Legacy logical-batch implementation note:
 
 ```text
