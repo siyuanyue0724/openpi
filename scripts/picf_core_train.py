@@ -9943,7 +9943,7 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s step_indexed_window_rng=%s calvin_balanced_bucket_sampler=%s calvin_bucket_sampling_mode=%s calvin_bucket_temperature_alpha=%s calvin_bucket_weight_spec=%r calvin_bucket_sample_without_replacement=%s logical_batch_task_count=%s logical_batch_bucket_normalization=%s logical_batch_log_bucket_metrics=%s calvin_buckets=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s anchor_overlay_dump_signatures=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s fsdp_sync_each_accum_micro=%s step_indexed_window_rng=%s calvin_balanced_bucket_sampler=%s calvin_bucket_sampling_mode=%s calvin_bucket_temperature_alpha=%s calvin_bucket_weight_spec=%r calvin_bucket_sample_without_replacement=%s logical_batch_task_count=%s logical_batch_bucket_normalization=%s logical_batch_log_bucket_metrics=%s calvin_buckets=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s anchor_overlay_dump_signatures=%s wandb=%s",
                 world_size,
                 args.training_strategy,
                 args.picf_mode,
@@ -9964,6 +9964,7 @@ def train(args: argparse.Namespace) -> None:
                 args.optimizer_sharding,
                 args.optimizer_checkpoint_mode,
                 bool(getattr(args, "window_activation_checkpointing", False)),
+                bool(getattr(args, "fsdp_sync_each_accum_micro", False)),
                 bool(getattr(args, "step_indexed_window_rng", True)),
                 bool(getattr(args, "calvin_balanced_bucket_sampler", False)),
                 str(getattr(args, "calvin_bucket_sampling_mode", "round_robin")),
@@ -10891,7 +10892,14 @@ def train(args: argparse.Namespace) -> None:
                 )
                 sync_context: Any = _training_model_no_sync(
                     model,
-                    enabled=bool(world_size > 1 and micro_step < args.accum_steps - 1),
+                    enabled=bool(
+                        world_size > 1
+                        and micro_step < args.accum_steps - 1
+                        and not (
+                            _is_fsdp_training(args)
+                            and bool(getattr(args, "fsdp_sync_each_accum_micro", False))
+                        )
+                    ),
                 )
                 # Keep all ranks aligned before entering the DDP-wrapped forward.
                 # The exact DDP probe is stable with an explicit post-preflight barrier,
@@ -11452,6 +11460,17 @@ def main() -> None:
         ),
     )
     parser.add_argument("--accum-steps", type=int, default=1)
+    parser.add_argument(
+        "--fsdp-sync-each-accum-micro",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "For training_strategy=fsdp_full_shard with accum_steps>1, synchronize/reduce gradients on every "
+            "micro-step instead of wrapping non-final micro-steps in FSDP no_sync().  This is slower because it "
+            "communicates every micro-step, but it avoids retaining multiple unsynchronized FSDP gradient shards/full "
+            "gradients in memory.  Use it for low-card E21-style K12 attempts such as 4 GPUs x accum=3."
+        ),
+    )
     parser.add_argument(
         "--calvin-balanced-bucket-sampler",
         action=argparse.BooleanOptionalAction,

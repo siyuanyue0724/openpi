@@ -295,6 +295,66 @@ objective or context bridge instead of spending a long run.
   stronger than E21 window count, but inherits accum2 startup/memory risk.
 ```
 
+## 4-Card Slow K12 Option
+
+4 cards can match the E21 window count by using:
+
+```text
+world_size=4
+accum_steps=3
+effective windows/update=12
+```
+
+This is mathematically valid only if the three micro-batches per rank are
+accumulated before a single `optimizer.step()`.  Running two or three ordinary
+optimizer steps is not equivalent, because AdamW moments and parameters change
+between steps.
+
+The maintained low-card route is:
+
+```text
+FSDP full shard
+window activation checkpointing
+FSDP sync on every accumulation micro-step
+optimizer step once per K12 logical update
+```
+
+The extra FSDP sync is deliberate.  It trades speed for lower accumulation
+memory: non-final micro-steps do not sit inside FSDP `no_sync()`, so gradients
+can be reduced/sharded each micro-step while AdamW still updates once after all
+12 logical windows.
+
+Launchers:
+
+```text
+scripts/experiments/picf_aqr_owm_202605_active/
+  run_4x40g_e21like_accum3_syncmicro_startup_gate_20260603.sh
+
+scripts/experiments/picf_aqr_owm_202605_active/
+  run_4x40g_e21like_accum3_syncmicro_30k_20260603.sh
+```
+
+Expected tradeoff:
+
+```text
+more communication than FSDP no_sync accumulation;
+roughly 3 micro-forwards/backwards per optimizer step per rank;
+lower peak accumulation memory than unsynchronized FSDP no_sync;
+same K12 estimator as E21 if the gate emits logical_batch_global_micro_count=12.
+```
+
+Run order:
+
+```text
+1. Run the 4-card startup gate to step11002.
+2. If it emits valid K12 metrics, run a 100-300 step quality gate.
+3. If action improves toward E21 and structure stays healthy, use it while
+   waiting for 8 cards.
+4. If startup or memory fails, do not keep weakening the model semantics; wait
+   for 6/8 cards or add frozen-feature precompute as a separate speed/memory
+   project.
+```
+
 ## Maintained Conclusion
 
 ```text

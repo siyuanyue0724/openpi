@@ -57,6 +57,13 @@ Current 5/6-card FSDP E21 reproduction decision:
 docs/PICF_AQR_OWM_5_6_CARD_FSDP_E21_DECISION_20260603.md
 ```
 
+2026-06-03 4-card note:
+  the same decision doc now includes a slow K12 route for 4xA100-40GB:
+  `world_size=4`, `accum_steps=3`, strict logical-batch normalization, window
+  activation checkpointing, and `--fsdp-sync-each-accum-micro`.  This keeps the
+  E21 window-count contract while trading communication time for lower FSDP
+  accumulation memory.  Use the startup gate before any long run.
+
 Legacy logical-batch implementation note:
 
 ```text
