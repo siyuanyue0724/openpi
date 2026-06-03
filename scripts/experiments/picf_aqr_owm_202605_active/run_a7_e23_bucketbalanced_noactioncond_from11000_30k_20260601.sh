@@ -29,7 +29,18 @@ export ANCHOR_OVERLAY_INTERVAL="${ANCHOR_OVERLAY_INTERVAL:-100}"
 # under the current token budget, even with window activation checkpointing.
 export ACCUM_STEPS="${ACCUM_STEPS:-1}"
 export CALVIN_BALANCED_BUCKET_SAMPLER="${CALVIN_BALANCED_BUCKET_SAMPLER:-1}"
+export CALVIN_BUCKET_SAMPLING_MODE="${CALVIN_BUCKET_SAMPLING_MODE:-task_uniform}"
+export CALVIN_BUCKET_TEMPERATURE_ALPHA="${CALVIN_BUCKET_TEMPERATURE_ALPHA:-0.0}"
+export CALVIN_BUCKET_WEIGHT_SPEC="${CALVIN_BUCKET_WEIGHT_SPEC:-}"
 export WINDOW_ACTIVATION_CHECKPOINTING="${WINDOW_ACTIVATION_CHECKPOINTING:-0}"
+
+# E26 logical-batch contract.  `NUM_TRAIN_STEPS` remains an absolute target
+# step when resuming; use RESUME_STEP + additional_steps, not just the delta.
+# Set LOGICAL_BATCH_TASK_COUNT to WORLD_SIZE * ACCUM_STEPS when enabling strict
+# task-family-balanced loss scaling.
+export LOGICAL_BATCH_TASK_COUNT="${LOGICAL_BATCH_TASK_COUNT:-0}"
+export LOGICAL_BATCH_BUCKET_NORMALIZATION="${LOGICAL_BATCH_BUCKET_NORMALIZATION:-0}"
+export LOGICAL_BATCH_LOG_BUCKET_METRICS="${LOGICAL_BATCH_LOG_BUCKET_METRICS:-0}"
 
 # Preserve the E14 action-pressure setting, but remove the unproven direct PICF
 # action condition so this run validates the balanced native action path first.

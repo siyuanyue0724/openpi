@@ -27,6 +27,42 @@ Current small-window logical-batch gate:
 docs/PICF_AQR_OWM_ACTION_READOUT_CAUSAL_AUDIT_20260601_TEMP.md#48-e24-logical-batch-plan
 ```
 
+Active deployment checklist:
+
+```text
+docs/PICF_AQR_OWM_FULL_VLA_TRAINING_SYSTEM_PLAN_20260602.md
+```
+
+Current 8-hour full VLA repair matrix:
+
+```text
+docs/PICF_AQR_OWM_8H_FULL_VLA_REPAIR_MATRIX_20260603.md
+```
+
+Current post-G10 bridge/data root-cause matrix:
+
+```text
+docs/PICF_AQR_OWM_G11_FULL_VLA_BRIDGE_AND_DATA_PLAN_20260603.md
+```
+
+Current all-requested-method G12 test plan:
+
+```text
+docs/PICF_AQR_OWM_G12_ALL_REQUESTED_VLA_METHODS_TEST_PLAN_20260603.md
+```
+
+Current 5/6-card FSDP E21 reproduction decision:
+
+```text
+docs/PICF_AQR_OWM_5_6_CARD_FSDP_E21_DECISION_20260603.md
+```
+
+Legacy logical-batch implementation note:
+
+```text
+docs/PICF_AQR_OWM_LOGICAL_BATCH_DEPLOYMENT_PLAN_20260602.md
+```
+
 2026-06-02 update:
 
 ```text
@@ -57,6 +93,207 @@ Interpretation:
 Do not start another 30K random-small-batch run from this branch.  The next
 maintained production change should implement K≈4 task-balanced logical
 optimizer steps, not rely on naive random batches or optimizer resets.
+
+The active checklist for the full VLA training-system repair is:
+  docs/PICF_AQR_OWM_FULL_VLA_TRAINING_SYSTEM_PLAN_20260602.md
+
+The older logical-batch-only plan is retained as historical math/background:
+  docs/PICF_AQR_OWM_LOGICAL_BATCH_DEPLOYMENT_PLAN_20260602.md
+
+2026-06-02 follow-through:
+  the active plan now includes explicit CALVIN bucket sampling modes
+  (`round_robin`, `task_uniform`, `trajectory`, `temperature`), strict bucket
+  ratio specs, target-aware per-bucket logical-loss normalization, per-bucket
+  metrics, a no-model sampler audit, K2 production sanity, and K4 reduced-scope
+  infrastructure proof.
+
+  The same plan now also contains a strict requested-point coverage matrix:
+  it separates what is actually deployed and tested from what is intentionally
+  deferred.  Static task-uniform, temperature, explicit-ratio, per-bucket
+  normalization, and scoped PCGrad have been tested.  Bounded PiKE-style
+  dynamic mixing is implemented and its G12-DYN dataflow is confirmed active;
+  action worsened by steps 11040/11050 after a transient structural
+  improvement, so DYN is rejected as an action fix for the current CALVIN gate.
+  Scoped CAGrad-lite is also implemented and tested.  G12-CAGrad improved
+  structure (`anchor_pv`, `anchor_object_pull`, `mapg_routing`) but action
+  moved 0.040583 -> 0.042519 -> 0.042945 by step11030, so CAGrad is rejected
+  as an action fix.
+  G13 action-boundary decomposition is now tested and rejected as an action
+  fix under the same K4 task-covered logical-batch contract:
+  `action_head_only`, `action_adapter_only`, and `action_head_and_adapter`
+  all improved structural/object terms while action moved from about
+  0.0406-0.0409 to about 0.0425-0.0429 by step11020/11030.  Therefore the
+  remaining issue is not isolated to a wrapper-local action projection or to
+  the PICF-to-action context adapter alone.  G14 then tested action-expert
+  capacity.  The production K4 estimator remained the desired target, but
+  `g14_backbone_k4_capacity` was resource-rejected on 2x40GB before its first
+  optimizer step.  The reduced `g14_backbone_k2_capacity` fallback was rejected
+  as an action fix after action moved `0.054177 -> 0.043810 -> 0.046595`.
+  The all-scope upper-bound capacity test `g14_all_k2_capacity` was also
+  rejected after action moved `0.054227 -> 0.044066 -> 0.046744`.
+  Therefore merely unlocking more PaliGemma/action-stack capacity is not the
+  missing piece.  G15 then tested robust action objectives.  Huber and L1 both
+  improved some structure terms while canonical historical action MSE failed
+  to improve, so scalar robust objectives are also rejected.  The current
+  executable gate is G16: action-expert-only conditional routing under the
+  already-proven K4 task-covered logical-batch contract.  Do not summarize this
+  branch as "only increased batch"; the implemented change is controlled
+  task-bucket mixture plus target-aware logical-batch loss normalization plus
+  an action-suffix expert router.  Also do not summarize it as "all 2025-2026
+  VLA ideas have been fully deployed"; embodiment adapters remain future-data
+  dependent, and System2 planning remains pseudo-label dependent.
+
+  2026-06-03 G16 launch note:
+    the first G16 router launch exposed a real implementation bug before any
+    optimizer step: `_summary_from_outputs()` returns text+image concatenated
+    summaries, so `features.summary` was 4096-wide while the first router
+    projection expected 2048.  This was fixed by adding an explicit
+    text+image pair-summary projection plus tests.  Do not treat launch-0 as a
+    training-signal failure.  Launch-1 was interrupted by an operator-side
+    diagnostic signal before a valid loss readout.  Launch-2 reached checkpoint
+    restore but emitted no optimizer-step loss within the runtime gate, so it
+    is also invalid as model-quality evidence.  A K1 single-bucket sanity run
+    then exposed the real remaining blocker: old step11000 checkpoints lacked
+    the newly added `action_expert_router_*` parameters and the checkpoint
+    migration allowlist did not yet include them.  The fix narrowly allows
+    only missing action-expert-router keys, with local and remote targeted
+    tests passing.  The repaired K1 run emitted valid step11001/11002 rows:
+      /mnt/picf_run_logs/g16_action_expert_router_20260603/g16_sanity_k1_launch.log
+    K1 is only a runtime/compatibility pass; the valid quality gate is now a
+    clean K4 dual-GPU restart whose first accepted row must include
+    `pi_action_expert_router_*` metrics and no shape/runtime error.
+    Launch-3 is that repaired K4 restart:
+      /mnt/picf_run_logs/g16_action_expert_router_20260603/g16_router4_rank64_k4_launch3.log
+    Early step11001-step11023 rows pass the bounded-router runtime check:
+    logical batch covers 4 buckets per step, router gate stays near 0.07586,
+    entropy stays near ln(4), top expert weight moves only gently from 0.25
+    to about 0.275, and router residual RMS remains small.  This is not yet a
+    final convergence decision; wait for the completed K4 gate through target
+    step 11120.  The completed launch-3 reached target and saved step11120,
+    but it is rejected as an action-convergence fix: first20 action mean was
+    0.041605, last20 action mean was 0.042844, and all-step mean was 0.045286.
+    Structure losses stayed bounded, so this is not a structural-collapse
+    failure; action-expert-only routing is implemented and stable, but
+    insufficient to solve the current action platform under K4.
+
+  G14 handoff:
+    doc = docs/PICF_AQR_OWM_G12_ALL_REQUESTED_VLA_METHODS_TEST_PLAN_20260603.md
+    launcher = scripts/experiments/picf_aqr_owm_202605_active/run_a7_g14_action_expert_capacity_20260603.sh
+
+  A real resume bug was also found and fixed: `--optimizer-checkpoint-mode`
+  was parsed and logged, but checkpoint loading still restored `optimizer.pt`
+  whenever present.  This broke reduced-scope diagnostics with changed
+  trainable sets under FSDP.  `model-only` now truly skips optimizer state on
+  load and save.
+
+2026-06-02 F7/F8 follow-through:
+  F7b finally measured the actual task-bucket gradient conflict instead of
+  guessing from sampled train loss.  On checkpoint step11000, `loss_action`
+  produced strong negative cosine in the semantic/action trainable group:
+  negative_fraction=0.4667 and min_cosine=-0.3768.  The same action loss had
+  zero gradient into `picf_core`, confirming the current action/PICF boundary.
+  Structural `loss_total_minus_action` on `picf_core` was only mildly
+  conflicting: negative_fraction=0.2000 and min_cosine=-0.0891.
+
+  Maintained conclusion:
+    the next controlled test is not "increase batch only", not MoE, and not
+    whole-model PCGrad.  It is K4 task-covered logical batching with per-bucket
+    normalization in a memory-safe action adapter scope.
+
+  Active F8 launcher:
+    scripts/experiments/picf_aqr_owm_202605_active/run_a7_f8_k4_action_adapter_taskuniform_from11000_11100_20260602.sh
+
+  F8 contract:
+    world_size=2, accum_steps=2, logical_batch_task_count=4,
+    bucket_sampling=task_uniform, per-bucket normalization on,
+    action on, semantic_trainable_scope=action_head_and_adapter,
+    PICF core trainable.  If F8 fits and action improves versus E27/F4/F6b,
+    root cause is task coverage/action-gradient variance.  If F8 fits but
+    remains flat, the next evidence-based candidate is adapter-only
+    PCGrad/CAGrad, not a full architecture rewrite.
+
+  F8 correction:
+    the first F8 run exposed a sampler-contract bug rather than a model
+    conclusion.  Non-round-robin bucket sampling was independent per
+    micro-window, so K=4 could still repeat one task bucket in the same
+    optimizer step.  The repaired contract is now:
+      one global bucket sequence per optimizer step;
+      default weighted sampling without replacement;
+      rank/micro-step indexes into the shared sequence;
+      concrete window sampling remains randomized inside the selected bucket.
+    Re-run F8 only after local sampler tests and the bucket audit show
+    `logical_batch_distinct_bucket_count=4` for K=4 when enough buckets exist.
+
+  Repaired F8r result:
+    F8r passed the actual K4 contract at steps 11010/11020/11030:
+    `logical_batch_global_micro_count=4` and
+    `logical_batch_distinct_bucket_count=4` on every logged row.  Structure
+    metrics were healthy (`active/downstream_same_role_overlap` improved from
+    about 0.10 to 0.05), but action did not improve:
+    `loss_action_default_equiv = 0.04069 -> 0.04256 -> 0.04293`.
+    This means task-covered K4 logical batching is a necessary dataflow repair
+    but is not sufficient to restore action descent.  The next controlled
+    experiment is F9a adapter insulation: same K4 sampler and normalization,
+    semantic/action adapter frozen, policy/action head trainable, PICF core at
+    the same very-low LR.
+
+  F9a result:
+    F9a also passed the K4 contract, and startup confirmed
+    `semantic=paligemma(trainable=False scope=action_head_and_adapter)`.
+    Optimizer groups were only `picf_core` and `policy_head`.  It did not
+    improve action: `loss_action_default_equiv = 0.04120 -> 0.04302` at
+    steps 11010/11020.  It also collapsed `grad_norm` to 0.00243 at step11020.
+    This rejects the simple freeze-adapter fix.  Remaining evidence says the
+    adapter path is useful but conflicting: keep it trainable, but control its
+    per-task gradients or weights.  Next branch is F9b controlled adapter
+    training, not another sampler-only or freeze-only rerun.
+
+  F9b telemetry repair:
+    F9b v1 launched with per-bucket action EMA normalization, but step11010
+    metrics did not contain any `logical_batch_action_bucket_*` scale/EMA
+    fields.  The row was numerically F8r-like
+    (`loss_action_default_equiv=0.040658`) but was not a valid dynamic-scaling
+    acceptance result because gamma_b could not be audited.  The trainer now
+    copies all scalar `logical_batch_action_bucket_*` fields from the logical
+    step info into `metrics.jsonl`.  F9b v2 exposed one more issue: scale
+    telemetry was rank-local even though `distinct_bucket_count=4` was global.
+    The trainer now gathers per-bucket scale values across DDP ranks before
+    emitting mean/min/max and per-bucket scale fields.  F9b v3 step11010 passed
+    the telemetry gate:
+    `picf_f9b_k4_action_adapter_bucketema_v3_wor_11000_to11100_20260602`,
+    `distinct_bucket_count=4`,
+    selected buckets=`block_other,block_push,slider,switch_button_light`,
+    `scale_mean=0.982459`, `scale_min=0.761508`, `scale_max=1.089727`.
+    Optimization is not yet proven: step11010 action is still F8r-like
+    (`loss_action_default_equiv=0.040670`), so step11020+ is the decision point.
+
+  F9b result:
+    step11020 rejected F9b as an optimization fix.  Dataflow stayed correct
+    (`logical_batch_distinct_bucket_count=4`, global scale fields complete),
+    and structure stayed healthy (`active_same_role_support_overlap=0.075`,
+    `downstream_same_role_support_overlap=0.078`), but action did not descend:
+    `loss_action_default_equiv=0.040670 -> 0.042547`.  Therefore the cheap
+    GradNorm/PiKE-like per-bucket action-scale branch is insufficient.  Do not
+    repeat sampler-only, freeze-adapter, or scalar bucket-weighting runs.  The
+    next evidence-based branch is adapter-only PCGrad/CAGrad on the
+    semantic/action adapter + policy/action head path, or a stronger
+    Knowledge-Insulation-style action-boundary gate.
+
+  F9c result:
+    F9c implemented the adapter-only PCGrad path scoped to the
+    semantic/action trainable group.  FSDP + activation checkpoint +
+    autograd.grad PCGrad is not a valid production path in this implementation:
+    it failed during checkpoint recompute with a setStorage/storage-size
+    runtime error.  The DDP/no-checkpoint control did run and passed telemetry:
+    K4 task-uniform coverage, no-replacement sampling, per-bucket
+    normalization, `logical_batch_gradient_surgery_enabled=true`, and
+    nonzero target parameter tensors.  Optimization still matched F9b/F8r:
+    `loss_action_default_equiv = 0.040648 -> 0.042562` at steps 11010/11020.
+    Therefore F9c is rejected as an optimization fix.  Do not repeat
+    sampler-only, adapter-freeze, scalar bucket-weighting, or semantic-adapter
+    PCGrad branches.  The next non-duplicate direction is explicit
+    action-boundary/action-expert redesign following the
+    Knowledge-Insulation / OpenVLA-OFT line.
 ```
 
 2026-06-02 status:
@@ -670,10 +907,13 @@ Result:
   action_default_equiv min/mean/last = 0.0398339 / 0.0441260 / 0.0475998.
   This does not beat the same-step reset baselines and should not be promoted.
 
-Next:
-  test optimizer-state / schedule transfer with the real production action path
-  semantic_trainable_scope=backbone_only. Do not repeat action_head_only unless
-  the question is specifically wrapper-local head capacity.
+Historical next:
+  this was superseded by the June-03 G12/G13/G14 sequence.  Do not repeat
+  action_head_only unless the question is specifically wrapper-local head
+  capacity.  G14 `all_k2` upper-bound capacity and G15 robust objectives were
+  rejected, so the current executable next gate is G16: action-expert-only
+  conditional routing under the already-proven task-covered logical-batch
+  contract.
 ```
 
 Current strict gate:

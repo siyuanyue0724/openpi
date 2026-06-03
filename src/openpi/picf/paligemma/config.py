@@ -31,3 +31,13 @@ class PaliGemmaSemanticConfig:
     mlp_chunk_size: int | None = None
     action_context_adapter_gate_init: float = -2.0
     action_context_adapter_rms_cap: bool = True
+    action_flow_loss: str = "mse"
+    action_flow_huber_delta: float = 1.0
+    action_flow_time_alpha: float = 1.5
+    action_flow_time_beta: float = 1.0
+    action_expert_router_enabled: bool = False
+    action_expert_router_experts: int = 4
+    action_expert_router_rank: int = 64
+    action_expert_router_gate_init: float = -2.5
+    action_expert_router_temperature: float = 1.0
+    action_expert_router_rms_cap: bool = True

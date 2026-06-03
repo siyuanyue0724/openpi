@@ -117,6 +117,37 @@ def _recover_flow_target(x_t: torch.Tensor, v_t: torch.Tensor, time_expanded: to
     return x_t - (time_expanded * v_t)
 
 
+def _action_flow_objective_loss(
+    target: torch.Tensor,
+    pred: torch.Tensor,
+    *,
+    mode: str = "mse",
+    huber_delta: float = 1.0,
+) -> torch.Tensor:
+    """Action-flow objective with a separate MSE reporting contract.
+
+    PI0.5 parity historically trains and reports MSE on the flow velocity.  G15
+    diagnostics need to test robust action objectives without breaking old
+    `loss_action_default_equiv` comparisons, so the wrapper computes this
+    training objective separately from the canonical MSE report.
+    """
+
+    normalized = str(mode).strip().lower().replace("-", "_")
+    if normalized in {"", "mse", "l2"}:
+        return torch.nn.functional.mse_loss(target, pred)
+    if normalized in {"l1", "mae"}:
+        return torch.nn.functional.l1_loss(target, pred)
+    delta = max(float(huber_delta), 1.0e-6)
+    if normalized in {"huber"}:
+        return torch.nn.functional.huber_loss(target, pred, delta=delta)
+    if normalized in {"smooth_l1", "smoothl1"}:
+        return torch.nn.functional.smooth_l1_loss(target, pred, beta=delta)
+    raise ValueError(
+        "Unsupported action_flow_loss mode "
+        f"{mode!r}; expected one of {{'mse', 'l1', 'huber', 'smooth_l1'}}."
+    )
+
+
 def _assert_index_tensor_in_range(indices: torch.Tensor, *, size: int, name: str) -> None:
     if indices.numel() == 0:
         return
@@ -609,6 +640,24 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         self.model_action_dim = int(config.action_dim)
         self.action_horizon = int(config.action_horizon)
         self.denoise_steps = int(config.denoise_steps)
+        self.action_flow_loss = str(getattr(config, "action_flow_loss", "mse")).strip().lower().replace("-", "_")
+        if self.action_flow_loss not in {"mse", "l2", "l1", "mae", "huber", "smooth_l1", "smoothl1"}:
+            raise ValueError(
+                "PaliGemmaSemanticConfig.action_flow_loss must be one of "
+                "{'mse', 'l1', 'huber', 'smooth_l1'}, got "
+                f"{getattr(config, 'action_flow_loss', None)!r}."
+            )
+        self.action_flow_huber_delta = max(float(getattr(config, "action_flow_huber_delta", 1.0)), 1.0e-6)
+        self.action_flow_time_alpha = max(float(getattr(config, "action_flow_time_alpha", 1.5)), 1.0e-6)
+        self.action_flow_time_beta = max(float(getattr(config, "action_flow_time_beta", 1.0)), 1.0e-6)
+        self.action_expert_router_enabled = bool(getattr(config, "action_expert_router_enabled", False))
+        self.action_expert_router_experts = max(int(getattr(config, "action_expert_router_experts", 4)), 1)
+        self.action_expert_router_rank = max(int(getattr(config, "action_expert_router_rank", 64)), 1)
+        self.action_expert_router_temperature = max(
+            float(getattr(config, "action_expert_router_temperature", 1.0)),
+            1.0e-6,
+        )
+        self.action_expert_router_rms_cap = bool(getattr(config, "action_expert_router_rms_cap", True))
         self.paligemma_with_expert = self._build_paligemma_with_expert(
             paligemma_variant=paligemma_variant,
             action_expert_variant=config.action_expert_variant,
@@ -632,7 +681,27 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             torch.tensor([float(getattr(config, "action_context_adapter_gate_init", -2.0))], dtype=torch.float32)
         )
         self.action_context_adapter_rms_cap = bool(getattr(config, "action_context_adapter_rms_cap", True))
+        self.action_expert_router_summary_proj = nn.Linear(paligemma_config.width, action_expert_config.width, bias=False)
+        self.action_expert_router_summary_pair_proj = nn.Linear(
+            paligemma_config.width * 2,
+            action_expert_config.width,
+            bias=False,
+        )
+        self.action_expert_router_norm = nn.LayerNorm(action_expert_config.width)
+        self.action_expert_router_logits = nn.Linear(action_expert_config.width, self.action_expert_router_experts)
+        self.action_expert_router_down = nn.ModuleList(
+            nn.Linear(action_expert_config.width, self.action_expert_router_rank, bias=False)
+            for _ in range(self.action_expert_router_experts)
+        )
+        self.action_expert_router_up = nn.ModuleList(
+            nn.Linear(self.action_expert_router_rank, action_expert_config.width, bias=False)
+            for _ in range(self.action_expert_router_experts)
+        )
+        self.action_expert_router_gate_logit = nn.Parameter(
+            torch.tensor([float(getattr(config, "action_expert_router_gate_init", -2.5))], dtype=torch.float32)
+        )
         self._reset_action_context_adapter_parameters()
+        self._reset_action_expert_router_parameters()
         self._load_full_pi0_weights(checkpoint)
         self._drop_unused_generation_heads()
         self.to(device=self.device)
@@ -676,6 +745,17 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         )
         return tuple(module for module in modules if isinstance(module, nn.Module))
 
+    def _action_expert_router_modules(self) -> tuple[nn.Module, ...]:
+        modules = (
+            getattr(self, "action_expert_router_summary_proj", None),
+            getattr(self, "action_expert_router_summary_pair_proj", None),
+            getattr(self, "action_expert_router_norm", None),
+            getattr(self, "action_expert_router_logits", None),
+            *(getattr(self, "action_expert_router_down", nn.ModuleList())),
+            *(getattr(self, "action_expert_router_up", nn.ModuleList())),
+        )
+        return tuple(module for module in modules if isinstance(module, nn.Module))
+
     def _reset_action_context_adapter_parameters(self) -> None:
         """Initialize the action-side context adapter as a conservative residual.
 
@@ -691,6 +771,30 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         nn.init.xavier_uniform_(self.action_context_k_proj.weight)
         nn.init.eye_(self.action_context_v_proj.weight)
         nn.init.eye_(self.action_context_out_proj.weight)
+
+    def _reset_action_expert_router_parameters(self) -> None:
+        """Initialize action-expert routing as an identity-preserving adapter.
+
+        The router is a task/semantic-conditioned low-rank residual on action
+        suffix embeddings.  It starts as an exact no-op because all up
+        projections are zero and the learned gate is initialized small.  This
+        gives the action expert an expert-routing path without changing the
+        restored PI0.5 function before training proves the route useful.
+        """
+
+        if isinstance(getattr(self, "action_expert_router_summary_proj", None), nn.Linear):
+            nn.init.xavier_uniform_(self.action_expert_router_summary_proj.weight)
+        if isinstance(getattr(self, "action_expert_router_summary_pair_proj", None), nn.Linear):
+            nn.init.xavier_uniform_(self.action_expert_router_summary_pair_proj.weight)
+        if isinstance(getattr(self, "action_expert_router_logits", None), nn.Linear):
+            nn.init.zeros_(self.action_expert_router_logits.weight)
+            nn.init.zeros_(self.action_expert_router_logits.bias)
+        for down in getattr(self, "action_expert_router_down", ()):
+            if isinstance(down, nn.Linear):
+                nn.init.xavier_uniform_(down.weight)
+        for up in getattr(self, "action_expert_router_up", ()):
+            if isinstance(up, nn.Linear):
+                nn.init.zeros_(up.weight)
 
     def _apply_trainable_scope(self) -> None:
         for parameter in self.parameters():
@@ -716,6 +820,13 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                     parameter.requires_grad_(True)
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
+            if bool(getattr(self, "action_expert_router_enabled", False)):
+                for module in self._action_expert_router_modules():
+                    module.train()
+                    for parameter in module.parameters():
+                        parameter.requires_grad_(True)
+                if isinstance(getattr(self, "action_expert_router_gate_logit", None), nn.Parameter):
+                    self.action_expert_router_gate_logit.requires_grad_(True)
             return
         if self.trainable_scope == "action_head_only":
             for module in (self.action_in_proj, self.action_out_proj, self.time_mlp_in, self.time_mlp_out):
@@ -730,6 +841,13 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                     parameter.requires_grad_(True)
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
+            if bool(getattr(self, "action_expert_router_enabled", False)):
+                for module in self._action_expert_router_modules():
+                    module.train()
+                    for parameter in module.parameters():
+                        parameter.requires_grad_(True)
+                if isinstance(getattr(self, "action_expert_router_gate_logit", None), nn.Parameter):
+                    self.action_expert_router_gate_logit.requires_grad_(True)
             return
         if self.trainable_scope == "action_head_and_adapter":
             for module in (
@@ -738,12 +856,18 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 self.time_mlp_in,
                 self.time_mlp_out,
                 *self._action_context_adapter_modules(),
+                *(self._action_expert_router_modules() if bool(getattr(self, "action_expert_router_enabled", False)) else ()),
             ):
                 module.train()
                 for parameter in module.parameters():
                     parameter.requires_grad_(True)
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
+            if bool(getattr(self, "action_expert_router_enabled", False)) and isinstance(
+                getattr(self, "action_expert_router_gate_logit", None),
+                nn.Parameter,
+            ):
+                self.action_expert_router_gate_logit.requires_grad_(True)
             return
         raise AssertionError(f"Unhandled trainable_scope={self.trainable_scope!r}")
 
@@ -924,6 +1048,19 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 (self, "time_mlp_out", "uniform_recursive"),
             ]
         )
+        if bool(getattr(self, "action_expert_router_enabled", False)):
+            specs.extend(
+                [
+                    (self, "action_expert_router_summary_proj", "uniform_recursive"),
+                    (self, "action_expert_router_summary_pair_proj", "uniform_recursive"),
+                    (self, "action_expert_router_norm", "uniform_recursive"),
+                    (self, "action_expert_router_logits", "uniform_recursive"),
+                ]
+            )
+            for idx in range(len(getattr(self, "action_expert_router_down", ()))):
+                specs.append((self.action_expert_router_down, str(idx), "uniform_recursive"))
+            for idx in range(len(getattr(self, "action_expert_router_up", ()))):
+                specs.append((self.action_expert_router_up, str(idx), "uniform_recursive"))
         return specs
 
     def _model_runtime_dtype(self) -> torch.dtype:
@@ -1386,6 +1523,126 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         }
         return adapted, metrics
 
+    def _apply_action_expert_router(
+        self,
+        suffix_embs: torch.Tensor,
+        features: PaliGemmaSemanticFeatures,
+        context_tokens: torch.Tensor | None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Apply a semantic-conditioned action-expert residual adapter.
+
+        This is the action-only routing path requested by the VLA repair plan:
+        it does not MoE the VLM backbone and does not turn PICF context into a
+        new supervised target.  A detached semantic/PICF condition selects a
+        mixture of low-rank action-suffix experts, and the residual is bounded
+        before entering the restored Gemma action expert.
+        """
+
+        if not bool(getattr(self, "action_expert_router_enabled", False)):
+            return suffix_embs, {}
+        if suffix_embs.ndim != 3:
+            raise ValueError(f"Expected suffix embeddings [B,H,D], got {tuple(suffix_embs.shape)}")
+        dtype = suffix_embs.dtype
+        device = suffix_embs.device
+        batch, _, width = suffix_embs.shape
+
+        summary = features.summary
+        if summary.ndim == 1:
+            summary = summary[None, :]
+        if summary.ndim != 2:
+            raise ValueError(f"Expected semantic summary [D] or [B,D], got {tuple(summary.shape)}")
+        if summary.shape[0] == 1 and batch != 1:
+            summary = summary.expand(batch, -1)
+        if summary.shape[0] != batch:
+            raise ValueError(
+                "Action expert router summary batch mismatch: "
+                f"summary={tuple(summary.shape)} suffix={tuple(suffix_embs.shape)}"
+            )
+        summary = summary.detach().to(device=device, dtype=dtype)
+        single_proj = self.action_expert_router_summary_proj
+        pair_proj = getattr(self, "action_expert_router_summary_pair_proj", None)
+        single_width = int(single_proj.in_features)
+        summary_width = int(summary.shape[-1])
+        if summary_width == single_width:
+            cond = single_proj(summary)
+        elif isinstance(pair_proj, nn.Linear) and summary_width == int(pair_proj.in_features):
+            cond = pair_proj(summary)
+        elif summary_width % single_width == 0:
+            # Future multi-summary variants can concatenate several same-width
+            # summaries.  Average them before the shared projection instead of
+            # silently truncating object/context evidence.
+            summary = summary.reshape(summary.shape[0], summary_width // single_width, single_width).mean(dim=1)
+            cond = single_proj(summary)
+        else:
+            raise ValueError(
+                "Action expert router summary width mismatch: "
+                f"summary={summary_width} single={single_width} "
+                f"pair={getattr(pair_proj, 'in_features', None)}"
+            )
+
+        if context_tokens is not None and isinstance(context_tokens, torch.Tensor) and context_tokens.numel() > 0:
+            context = context_tokens.detach()
+            if context.ndim == 2:
+                context = context[None, :, :]
+            if context.ndim != 3:
+                raise ValueError(f"Expected action router context [T,D] or [B,T,D], got {tuple(context.shape)}")
+            if context.shape[0] == 1 and batch != 1:
+                context = context.expand(batch, -1, -1)
+            if context.shape[0] != batch:
+                raise ValueError(
+                    "Action expert router context batch mismatch: "
+                    f"context={tuple(context.shape)} suffix={tuple(suffix_embs.shape)}"
+                )
+            context = context.to(device=device, dtype=dtype)
+            if context.shape[-1] != width:
+                context = self.action_context_in_proj(context)
+            if context.shape[-1] != width:
+                raise ValueError(
+                    "Action expert router context projection returned wrong width: "
+                    f"context={tuple(context.shape)} suffix={tuple(suffix_embs.shape)}"
+                )
+            cond = cond + context.mean(dim=1)
+
+        cond = self.action_expert_router_norm(cond)
+        logits = self.action_expert_router_logits(cond).to(dtype=torch.float32)
+        logits = logits / float(getattr(self, "action_expert_router_temperature", 1.0))
+        weights = torch.softmax(logits, dim=-1).to(device=device, dtype=dtype)
+
+        suffix_norm = torch.nn.functional.layer_norm(suffix_embs, (width,))
+        residual = torch.zeros_like(suffix_embs)
+        for expert_idx, (down, up) in enumerate(
+            zip(self.action_expert_router_down, self.action_expert_router_up, strict=True)
+        ):
+            expert = up(torch.nn.functional.silu(down(suffix_norm)))
+            residual = residual + weights[:, expert_idx].view(batch, 1, 1) * expert
+
+        eps = 1.0e-6
+        suffix_rms = torch.sqrt(torch.mean(suffix_embs.detach().to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps)
+        residual_rms = torch.sqrt(torch.mean(residual.to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps)
+        if bool(getattr(self, "action_expert_router_rms_cap", True)):
+            cap = torch.clamp(suffix_rms / torch.clamp(residual_rms, min=eps), max=1.0)
+            residual = residual * cap.to(device=device, dtype=dtype)
+        gate = torch.sigmoid(self.action_expert_router_gate_logit.to(device=device, dtype=torch.float32)).to(dtype=dtype)
+        adapted = suffix_embs + gate * residual
+
+        entropy = -(weights.to(dtype=torch.float32) * torch.log(torch.clamp(weights.to(dtype=torch.float32), min=1.0e-12))).sum(
+            dim=-1
+        )
+        top_weight = weights.detach().to(dtype=torch.float32).amax(dim=-1)
+        zero = adapted.reshape(-1)[0].detach() * 0.0
+        metrics = {
+            "picf_action_expert_router_enabled": zero + 1.0,
+            "picf_action_expert_router_gate": zero + gate.detach().to(device=device, dtype=dtype),
+            "picf_action_expert_router_entropy_mean": entropy.detach().mean().to(device=device, dtype=dtype),
+            "picf_action_expert_router_top_weight_mean": top_weight.detach().mean().to(device=device, dtype=dtype),
+            "picf_action_expert_router_residual_rms_mean": torch.sqrt(
+                torch.mean(residual.detach().to(dtype=torch.float32).square(), dim=-1)
+            )
+            .mean()
+            .to(device=device, dtype=dtype),
+        }
+        return adapted, metrics
+
     def _prepare_action_chunk_target(
         self,
         action_chunk_target: torch.Tensor | np.ndarray,
@@ -1425,8 +1682,8 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             noise = torch.randn_like(target)
         if time is None:
             beta = torch.distributions.Beta(
-                torch.tensor(1.5, device=self.device),
-                torch.tensor(1.0, device=self.device),
+                torch.tensor(float(getattr(self, "action_flow_time_alpha", 1.5)), device=self.device),
+                torch.tensor(float(getattr(self, "action_flow_time_beta", 1.0)), device=self.device),
             )
             time = (beta.sample((1,)) * 0.999 + 0.001).to(device=self.device, dtype=dtype)
         time_expanded = time[:, None, None]
@@ -1439,6 +1696,12 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         )
         suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self._embed_suffix(x_t, time)
         suffix_embs, adapter_metrics = self._apply_action_context_adapter(suffix_embs, extra_action_context_tokens)
+        suffix_embs, router_metrics = self._apply_action_expert_router(
+            suffix_embs,
+            features,
+            extra_action_context_tokens,
+        )
+        adapter_metrics.update(router_metrics)
         model_dtype = self._model_runtime_dtype()
         if model_dtype in (torch.bfloat16, torch.float16):
             prefix_embs = prefix_embs.to(dtype=model_dtype)
@@ -1467,17 +1730,43 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             return self.action_out_proj(out)
 
         v_t = self._apply_checkpoint(_project, suffix_out)
-        total = torch.nn.functional.mse_loss(u_t, v_t)
-        pos = torch.nn.functional.mse_loss(u_t[..., :3], v_t[..., :3])
-        rot = torch.nn.functional.mse_loss(u_t[..., 3:6], v_t[..., 3:6])
-        grip = torch.nn.functional.mse_loss(u_t[..., 6:7], v_t[..., 6:7])
+        mse_total = torch.nn.functional.mse_loss(u_t, v_t)
+        mse_pos = torch.nn.functional.mse_loss(u_t[..., :3], v_t[..., :3])
+        mse_rot = torch.nn.functional.mse_loss(u_t[..., 3:6], v_t[..., 3:6])
+        mse_grip = torch.nn.functional.mse_loss(u_t[..., 6:7], v_t[..., 6:7])
+        mode = str(getattr(self, "action_flow_loss", "mse"))
+        huber_delta = float(getattr(self, "action_flow_huber_delta", 1.0))
+        training_total = _action_flow_objective_loss(u_t, v_t, mode=mode, huber_delta=huber_delta)
+        training_pos = _action_flow_objective_loss(u_t[..., :3], v_t[..., :3], mode=mode, huber_delta=huber_delta)
+        training_rot = _action_flow_objective_loss(u_t[..., 3:6], v_t[..., 3:6], mode=mode, huber_delta=huber_delta)
+        training_grip = _action_flow_objective_loss(u_t[..., 6:7], v_t[..., 6:7], mode=mode, huber_delta=huber_delta)
         predicted_chunk = _recover_flow_target(x_t, v_t, time_expanded).detach()
         predicted = predicted_chunk[:, 0, :7]
+        zero = mse_total.detach() * 0.0
         return {
-            "total": total,
-            "action_pos": pos,
-            "action_rot": rot,
-            "action_gripper": grip,
+            # Canonical PI0.5 parity reports.  These keep historical
+            # `loss_action_default_equiv` comparisons valid even when G15 uses
+            # a robust training objective.
+            "total": mse_total,
+            "action_pos": mse_pos,
+            "action_rot": mse_rot,
+            "action_gripper": mse_grip,
+            # Actual action objective used for gradient when the trainer opts
+            # into the training_* keys.
+            "training_total": training_total,
+            "training_action_pos": training_pos,
+            "training_action_rot": training_rot,
+            "training_action_gripper": training_grip,
+            "action_flow_objective_mode_id": zero + {
+                "mse": 0.0,
+                "l2": 0.0,
+                "l1": 1.0,
+                "mae": 1.0,
+                "huber": 2.0,
+                "smooth_l1": 3.0,
+                "smoothl1": 3.0,
+            }.get(str(mode).strip().lower().replace("-", "_"), -1.0),
+            "action_flow_time_mean": zero + time.detach().to(device=mse_total.device, dtype=mse_total.dtype).mean(),
             "predicted_action": predicted[0],
             "predicted_chunk": predicted_chunk[0],
             **adapter_metrics,
@@ -1533,6 +1822,11 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             suffix_embs, suffix_pad_masks, suffix_att_masks, adarms_cond = self._embed_suffix(x_t, timestep)
             suffix_embs, _adapter_metrics = self._apply_action_context_adapter(
                 suffix_embs,
+                extra_action_context_tokens,
+            )
+            suffix_embs, _router_metrics = self._apply_action_expert_router(
+                suffix_embs,
+                features,
                 extra_action_context_tokens,
             )
             suffix_len = suffix_pad_masks.shape[1]

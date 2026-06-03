@@ -1015,6 +1015,7 @@ def make_action_only_transition_loss(
     *,
     reference: torch.Tensor,
     action_loss_override: torch.Tensor,
+    action_default_equiv_override: torch.Tensor | None = None,
     action_pos_override: torch.Tensor | None = None,
     action_rot_override: torch.Tensor | None = None,
     action_gripper_override: torch.Tensor | None = None,
@@ -1033,12 +1034,15 @@ def make_action_only_transition_loss(
     action_rot = action_rot_override if action_rot_override is not None else action_loss_override
     action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_override
     action_active7 = _action_active7_loss(action_pos, action_rot, action_gripper)
-    action_weight_scale = torch.ones((), device=reference.device, dtype=reference.dtype)
+    action_default_equiv = (
+        action_default_equiv_override if action_default_equiv_override is not None else action_loss_override
+    )
+    action_weight_scale = action_loss_override.detach() / torch.clamp(action_default_equiv.detach(), min=1e-6)
     availability = torch.zeros((int(availability_dim),), device=reference.device, dtype=reference.dtype)
     return PicfTransitionLossBreakdown(
         total=action_loss_override,
         action=action_loss_override,
-        action_default_equiv=action_loss_override,
+        action_default_equiv=action_default_equiv,
         action_weight_scale=action_weight_scale,
         action_active7=action_active7,
         action_pos=action_pos,
@@ -2874,6 +2878,7 @@ def compute_transition_loss(
     action_gripper_override: torch.Tensor | None = None,
     action_prefix_trust_override: torch.Tensor | None = None,
     future_targets_override: PicfFutureTargets | None = None,
+    action_default_equiv_override: torch.Tensor | None = None,
 ) -> PicfTransitionLossBreakdown:
     cfg = config or PicfTransitionLossConfig()
     predictive = output_t.state.predictive
@@ -2926,7 +2931,11 @@ def compute_transition_loss(
             action_pos = action_pos.detach()
             action_rot = action_rot.detach()
             action_gripper = action_gripper.detach()
-        action_default_equiv = action_loss_source
+        action_default_equiv = (
+            torch.as_tensor(action_default_equiv_override, device=action_loss_source.device, dtype=action_loss_source.dtype)
+            if action_default_equiv_override is not None
+            else action_loss_source
+        )
         action_loss = _weighted_action_override_loss(
             action_loss_source,
             action_pos,

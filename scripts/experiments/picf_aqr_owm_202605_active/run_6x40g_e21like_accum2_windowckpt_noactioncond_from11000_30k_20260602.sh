@@ -9,6 +9,9 @@ set -euo pipefail
 #   structure healthy, but action stayed near 0.040-0.046. This launcher uses
 #   6 physical GPUs with accum=2, giving 12 windows/update while enabling window
 #   activation checkpointing to keep the per-rank 40GB memory budget feasible.
+#   It also enables the strict logical-batch estimator, so the 12 selected
+#   micro-windows are interpreted as a task-bucket-normalized VLA mixture rather
+#   than as raw micro-step averaging.
 #
 # This is not a new objective and not a new module. It tests whether the remaining
 # action plateau is primarily estimator variance / task-family mixing, rather
@@ -34,6 +37,11 @@ export ANCHOR_OVERLAY_INTERVAL="${ANCHOR_OVERLAY_INTERVAL:-100}"
 
 export ACCUM_STEPS="${ACCUM_STEPS:-2}"
 export CALVIN_BALANCED_BUCKET_SAMPLER="${CALVIN_BALANCED_BUCKET_SAMPLER:-1}"
+export CALVIN_BUCKET_SAMPLING_MODE="${CALVIN_BUCKET_SAMPLING_MODE:-task_uniform}"
+export CALVIN_BUCKET_SAMPLE_WITHOUT_REPLACEMENT="${CALVIN_BUCKET_SAMPLE_WITHOUT_REPLACEMENT:-1}"
+export LOGICAL_BATCH_TASK_COUNT="${LOGICAL_BATCH_TASK_COUNT:-12}"
+export LOGICAL_BATCH_BUCKET_NORMALIZATION="${LOGICAL_BATCH_BUCKET_NORMALIZATION:-1}"
+export LOGICAL_BATCH_LOG_BUCKET_METRICS="${LOGICAL_BATCH_LOG_BUCKET_METRICS:-1}"
 export WINDOW_ACTIVATION_CHECKPOINTING="${WINDOW_ACTIVATION_CHECKPOINTING:-1}"
 
 export TRAINING_STRATEGY="${TRAINING_STRATEGY:-fsdp_full_shard}"

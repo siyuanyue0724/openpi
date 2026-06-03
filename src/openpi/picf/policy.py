@@ -720,6 +720,13 @@ class PicfPi05Policy:
                         ("picf_action_prefix_cos_to_teacher", "pi_prefix_teacher_cos_to_teacher"),
                         ("picf_action_prefix_teacher_blend", "pi_prefix_teacher_blend"),
                         ("picf_action_prefix_teacher_ema_decay", "pi_prefix_teacher_ema_decay"),
+                        ("action_flow_objective_mode_id", "pi_action_flow_objective_mode_id"),
+                        ("action_flow_time_mean", "pi_action_flow_time_mean"),
+                        ("picf_action_expert_router_enabled", "pi_action_expert_router_enabled"),
+                        ("picf_action_expert_router_gate", "pi_action_expert_router_gate"),
+                        ("picf_action_expert_router_entropy_mean", "pi_action_expert_router_entropy_mean"),
+                        ("picf_action_expert_router_top_weight_mean", "pi_action_expert_router_top_weight_mean"),
+                        ("picf_action_expert_router_residual_rms_mean", "pi_action_expert_router_residual_rms_mean"),
                     ):
                         value = flow_override.get(source_key)
                         if isinstance(value, torch.Tensor) and value.numel() > 0:
@@ -806,6 +813,13 @@ class PicfPi05Policy:
                 ("picf_action_prefix_probe_mode_id", "pi_prefix_probe_mode_id"),
                 ("picf_action_prefix_probe_delta_rms_mean", "pi_prefix_probe_delta_rms_mean"),
                 ("picf_action_prefix_probe_post_rms_mean", "pi_prefix_probe_post_rms_mean"),
+                ("action_flow_objective_mode_id", "pi_action_flow_objective_mode_id"),
+                ("action_flow_time_mean", "pi_action_flow_time_mean"),
+                ("picf_action_expert_router_enabled", "pi_action_expert_router_enabled"),
+                ("picf_action_expert_router_gate", "pi_action_expert_router_gate"),
+                ("picf_action_expert_router_entropy_mean", "pi_action_expert_router_entropy_mean"),
+                ("picf_action_expert_router_top_weight_mean", "pi_action_expert_router_top_weight_mean"),
+                ("picf_action_expert_router_residual_rms_mean", "pi_action_expert_router_residual_rms_mean"),
             ):
                 value = flow_override.get(source_key)
                 if isinstance(value, torch.Tensor) and value.numel() > 0:

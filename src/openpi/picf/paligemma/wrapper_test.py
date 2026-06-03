@@ -12,6 +12,7 @@ from openpi.models_pytorch.pi0_pytorch import _ensure_transformers_replace_is_re
 from openpi.picf.action_normalization import PicfStateNormalizer
 from openpi.picf.contracts import PicfObservation
 from openpi.picf.paligemma.wrapper import _checkpoint_inputs_require_grad
+from openpi.picf.paligemma.wrapper import _action_flow_objective_loss
 from openpi.picf.paligemma.wrapper import _enable_gradient_checkpointing_non_reentrant
 from openpi.picf.paligemma.wrapper import _masked_position_ids
 from openpi.picf.paligemma.wrapper import _recover_flow_target
@@ -20,6 +21,7 @@ from openpi.picf.paligemma.wrapper import _stage_local_pi0_config
 from openpi.picf.paligemma.wrapper import _stage_pi0_checkpoint_if_needed
 from openpi.picf.paligemma.wrapper import _take_valid_prefix_tokens
 from openpi.picf.paligemma.wrapper import _Pi0PaliGemmaSemanticEncoder
+from openpi.picf.paligemma.wrapper import PaliGemmaSemanticFeatures
 from openpi.picf.paligemma.wrapper import PaliGemmaSemanticEncoder
 from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 
@@ -255,6 +257,7 @@ def test_pi0_trainable_scope_action_adapter_only_trains_only_context_adapter() -
     torch.nn.Module.__init__(encoder)
     encoder.trainable = True
     encoder.trainable_scope = "action_adapter_only"
+    encoder.action_expert_router_enabled = False
     encoder.paligemma_with_expert = _TinyRuntimePaliGemmaWithExpert()
     encoder.action_in_proj = torch.nn.Linear(7, 3)
     encoder.action_out_proj = torch.nn.Linear(3, 7)
@@ -282,6 +285,48 @@ def test_pi0_trainable_scope_action_adapter_only_trains_only_context_adapter() -
     assert "action_context_v_proj.weight" in trainable
     assert "action_context_out_proj.weight" in trainable
     assert "action_context_gate_logit" in trainable
+
+
+def test_pi0_trainable_scope_action_adapter_only_trains_router_when_enabled() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.trainable = True
+    encoder.trainable_scope = "action_adapter_only"
+    encoder.action_expert_router_enabled = True
+    encoder.paligemma_with_expert = _TinyRuntimePaliGemmaWithExpert()
+    encoder.action_in_proj = torch.nn.Linear(7, 4)
+    encoder.action_out_proj = torch.nn.Linear(4, 7)
+    encoder.time_mlp_in = torch.nn.Linear(4, 4)
+    encoder.time_mlp_out = torch.nn.Linear(4, 4)
+    encoder.action_context_in_proj = torch.nn.Linear(6, 4, bias=False)
+    encoder.action_context_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_out_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
+    encoder.action_expert_router_summary_proj = torch.nn.Linear(6, 4, bias=False)
+    encoder.action_expert_router_summary_pair_proj = torch.nn.Linear(12, 4, bias=False)
+    encoder.action_expert_router_norm = torch.nn.LayerNorm(4)
+    encoder.action_expert_router_logits = torch.nn.Linear(4, 3)
+    encoder.action_expert_router_down = torch.nn.ModuleList(
+        [torch.nn.Linear(4, 2, bias=False) for _ in range(3)]
+    )
+    encoder.action_expert_router_up = torch.nn.ModuleList(
+        [torch.nn.Linear(2, 4, bias=False) for _ in range(3)]
+    )
+    encoder.action_expert_router_gate_logit = torch.nn.Parameter(torch.tensor([-2.5]))
+
+    _Pi0PaliGemmaSemanticEncoder._apply_trainable_scope(encoder)
+
+    trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
+    assert "action_in_proj.weight" not in trainable
+    assert "action_context_q_proj.weight" in trainable
+    assert "action_expert_router_summary_proj.weight" in trainable
+    assert "action_expert_router_summary_pair_proj.weight" in trainable
+    assert "action_expert_router_logits.weight" in trainable
+    assert "action_expert_router_down.0.weight" in trainable
+    assert "action_expert_router_up.0.weight" in trainable
+    assert "action_expert_router_gate_logit" in trainable
 
 
 def test_pi0_action_context_adapter_keeps_suffix_shape_and_reports_metrics() -> None:
@@ -352,6 +397,68 @@ def test_pi0_action_context_adapter_accepts_wrapped_input_projection() -> None:
 
     assert adapted.shape == suffix.shape
     assert metrics["picf_action_context_adapter_token_count"].item() == pytest.approx(5.0)
+
+
+def test_pi0_action_expert_router_starts_as_noop_and_reports_metrics() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.action_expert_router_enabled = True
+    encoder.action_expert_router_temperature = 1.0
+    encoder.action_expert_router_rms_cap = True
+    encoder.action_context_in_proj = torch.nn.Linear(6, 4, bias=False)
+    encoder.action_expert_router_summary_proj = torch.nn.Linear(6, 4, bias=False)
+    encoder.action_expert_router_summary_pair_proj = torch.nn.Linear(12, 4, bias=False)
+    encoder.action_expert_router_norm = torch.nn.LayerNorm(4)
+    encoder.action_expert_router_logits = torch.nn.Linear(4, 3)
+    encoder.action_expert_router_down = torch.nn.ModuleList(
+        [torch.nn.Linear(4, 2, bias=False) for _ in range(3)]
+    )
+    encoder.action_expert_router_up = torch.nn.ModuleList(
+        [torch.nn.Linear(2, 4, bias=False) for _ in range(3)]
+    )
+    encoder.action_expert_router_gate_logit = torch.nn.Parameter(torch.tensor([-2.5]))
+    _Pi0PaliGemmaSemanticEncoder._reset_action_expert_router_parameters(encoder)
+
+    suffix = torch.randn((2, 3, 4), dtype=torch.float32)
+    context = torch.randn((2, 5, 6), dtype=torch.float32)
+    features = PaliGemmaSemanticFeatures(
+        tokens=torch.zeros((2, 1, 6), dtype=torch.float32),
+        summary=torch.randn((2, 12), dtype=torch.float32),
+    )
+    adapted, metrics = _Pi0PaliGemmaSemanticEncoder._apply_action_expert_router(
+        encoder,
+        suffix,
+        features,
+        context,
+    )
+
+    torch.testing.assert_close(adapted, suffix)
+    assert metrics["picf_action_expert_router_enabled"].item() == pytest.approx(1.0)
+    assert metrics["picf_action_expert_router_gate"].item() == pytest.approx(float(torch.sigmoid(torch.tensor(-2.5))))
+    assert metrics["picf_action_expert_router_entropy_mean"].item() == pytest.approx(np.log(3.0), rel=1e-5)
+    assert metrics["picf_action_expert_router_top_weight_mean"].item() == pytest.approx(1.0 / 3.0, rel=1e-5)
+    assert metrics["picf_action_expert_router_residual_rms_mean"].item() == pytest.approx(0.0)
+
+
+def test_pi0_action_expert_router_disabled_is_exact_noop() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.action_expert_router_enabled = False
+
+    suffix = torch.randn((1, 3, 4), dtype=torch.float32)
+    features = PaliGemmaSemanticFeatures(
+        tokens=torch.zeros((1, 1, 6), dtype=torch.float32),
+        summary=torch.randn((1, 6), dtype=torch.float32),
+    )
+    adapted, metrics = _Pi0PaliGemmaSemanticEncoder._apply_action_expert_router(
+        encoder,
+        suffix,
+        features,
+        None,
+    )
+
+    assert adapted is suffix
+    assert metrics == {}
 
 
 @pytest.mark.parametrize(
@@ -818,6 +925,27 @@ def test_recover_flow_target_inverts_pi05_training_parameterization() -> None:
     recovered = _recover_flow_target(x_t, u_t, time_expanded)
 
     torch.testing.assert_close(recovered, target)
+
+
+def test_action_flow_objective_loss_keeps_modes_distinct() -> None:
+    target = torch.tensor([0.0, 0.0, 0.0], dtype=torch.float32)
+    pred = torch.tensor([0.0, 2.0, -4.0], dtype=torch.float32)
+
+    mse = _action_flow_objective_loss(target, pred, mode="mse")
+    l1 = _action_flow_objective_loss(target, pred, mode="l1")
+    huber = _action_flow_objective_loss(target, pred, mode="huber", huber_delta=1.0)
+
+    assert mse.item() == pytest.approx((0.0 + 4.0 + 16.0) / 3.0)
+    assert l1.item() == pytest.approx(2.0)
+    assert 0.0 < huber.item() < mse.item()
+
+
+def test_action_flow_objective_loss_rejects_unknown_mode() -> None:
+    target = torch.zeros(2)
+    pred = torch.ones(2)
+
+    with pytest.raises(ValueError, match="Unsupported action_flow_loss"):
+        _action_flow_objective_loss(target, pred, mode="banana")
 
 
 def test_take_valid_prefix_tokens_uses_right_padded_prefix_slice() -> None:

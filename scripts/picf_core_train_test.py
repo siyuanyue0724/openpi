@@ -20,6 +20,7 @@ from openpi.picf.contracts import PicfObservation
 from openpi.picf.contracts import PicfTactilePacket
 from openpi.picf.contracts import PicfPointCloudFrame
 from openpi.picf.contracts import TactileSensorFrame
+from openpi.picf.core.training import make_action_only_transition_loss
 from openpi.picf.core.pipeline import LazyCrossAttentionRead
 from openpi.picf.fsdp_utils import call_fsdp_method
 from openpi.picf.fsdp_utils import call_module_forward_or_method
@@ -966,6 +967,52 @@ def test_validate_train_args_rejects_invalid_semantic_trainable_scope() -> None:
         _MODULE._validate_train_args(args)
 
 
+def test_validate_train_args_rejects_invalid_semantic_action_flow_loss() -> None:
+    args = _base_args()
+    args.semantic_action_flow_loss = "banana"
+    _MODULE._normalize_train_args(args)
+
+    with pytest.raises(ValueError, match="semantic_action_flow_loss"):
+        _MODULE._validate_train_args(args)
+
+
+def test_validate_train_args_rejects_invalid_semantic_action_expert_router_fields() -> None:
+    args = _base_args()
+    args.semantic_action_expert_router_experts = 0
+    _MODULE._normalize_train_args(args)
+    with pytest.raises(ValueError, match="semantic_action_expert_router_experts"):
+        _MODULE._validate_train_args(args)
+
+    args = _base_args()
+    args.semantic_action_expert_router_rank = 0
+    _MODULE._normalize_train_args(args)
+    with pytest.raises(ValueError, match="semantic_action_expert_router_rank"):
+        _MODULE._validate_train_args(args)
+
+    args = _base_args()
+    args.semantic_action_expert_router_temperature = 0.0
+    _MODULE._normalize_train_args(args)
+    with pytest.raises(ValueError, match="semantic_action_expert_router_temperature"):
+        _MODULE._validate_train_args(args)
+
+
+def test_action_only_loss_preserves_default_equiv_report_for_robust_objective() -> None:
+    reference = torch.zeros((), dtype=torch.float32)
+    training_objective = torch.tensor(0.25, dtype=torch.float32)
+    canonical_mse_report = torch.tensor(0.50, dtype=torch.float32)
+
+    losses = make_action_only_transition_loss(
+        reference=reference,
+        action_loss_override=training_objective,
+        action_default_equiv_override=canonical_mse_report,
+    )
+
+    assert losses.total.item() == pytest.approx(0.25)
+    assert losses.action.item() == pytest.approx(0.25)
+    assert losses.action_default_equiv.item() == pytest.approx(0.50)
+    assert losses.action_weight_scale.item() == pytest.approx(0.5)
+
+
 def test_normalize_train_args_resolves_visual_finetune_mode() -> None:
     args = _base_args()
     args.visual_finetune_mode = "frozen"
@@ -1771,6 +1818,33 @@ def test_fsdp_wrap_root_with_ignored_non_dominant_dtypes_keeps_single_boundary_o
         ), "semantic-style root wrap should not recursively shard internal mixed-dtype subtrees"
 
         optimizer = torch.optim.AdamW(wrapped.parameters(), lr=1e-3)
+        loss = wrapped(torch.randn(2, 4)).sum()
+        loss.backward()
+        optimizer.step()
+
+
+def test_fsdp_wrap_root_ignores_frozen_states_for_partial_trainable_scope_on_cpu() -> None:
+    if _MODULE.FullyShardedDataParallel is None:
+        pytest.skip("FSDP is not available in this torch build.")
+
+    class _PartiallyTrainableRoot(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.frozen_backbone = torch.nn.Linear(4, 4)
+            self.action_adapter = torch.nn.Linear(4, 4)
+            for param in self.frozen_backbone.parameters():
+                param.requires_grad_(False)
+
+        def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+            x = self.frozen_backbone(inputs)
+            return self.action_adapter(x)
+
+    with _single_rank_process_group():
+        module = _PartiallyTrainableRoot()
+        wrapped = _MODULE._fsdp_wrap_root_with_ignored_non_dominant_dtypes(module, device=torch.device("cpu"))
+
+        assert _MODULE._is_fsdp_model(wrapped)
+        optimizer = torch.optim.AdamW([param for param in wrapped.parameters() if param.requires_grad], lr=1e-3)
         loss = wrapped(torch.randn(2, 4)).sum()
         loss.backward()
         optimizer.step()
@@ -3601,6 +3675,56 @@ def test_load_state_dict_picf_compat_skips_shape_mismatches_and_keeps_matching_w
     torch.testing.assert_close(new.core.proj.weight, torch.zeros_like(new.core.proj.weight))
 
 
+def test_load_state_dict_picf_compat_allows_new_action_expert_router_only() -> None:
+    class _Encoder(torch.nn.Module):
+        def __init__(self, *, include_router: bool) -> None:
+            super().__init__()
+            self.base = torch.nn.Linear(3, 3, bias=False)
+            if include_router:
+                self.action_expert_router_gate_logit = torch.nn.Parameter(torch.tensor([-2.5]))
+                self.action_expert_router_summary_proj = torch.nn.Linear(3, 4, bias=False)
+                self.action_expert_router_summary_pair_proj = torch.nn.Linear(6, 4, bias=False)
+                self.action_expert_router_norm = torch.nn.LayerNorm(4)
+                self.action_expert_router_logits = torch.nn.Linear(4, 2)
+                self.action_expert_router_down = torch.nn.ModuleList(
+                    [torch.nn.Linear(4, 2, bias=False) for _ in range(2)]
+                )
+                self.action_expert_router_up = torch.nn.ModuleList(
+                    [torch.nn.Linear(2, 4, bias=False) for _ in range(2)]
+                )
+
+    old = torch.nn.Module()
+    old.semantic_encoder = torch.nn.Module()
+    old.semantic_encoder.encoder = _Encoder(include_router=False)
+    with torch.no_grad():
+        old.semantic_encoder.encoder.base.weight.fill_(0.25)
+
+    new = torch.nn.Module()
+    new.semantic_encoder = torch.nn.Module()
+    new.semantic_encoder.encoder = _Encoder(include_router=True)
+    with torch.no_grad():
+        new.semantic_encoder.encoder.base.weight.zero_()
+        new.semantic_encoder.encoder.action_expert_router_summary_proj.weight.fill_(1.0)
+
+    missing, unexpected, shape_mismatches = _MODULE._load_state_dict_picf_compat(new, old.state_dict())
+
+    assert unexpected == []
+    assert shape_mismatches == []
+    assert "semantic_encoder.encoder.action_expert_router_summary_proj.weight" in missing
+    torch.testing.assert_close(new.semantic_encoder.encoder.base.weight, old.semantic_encoder.encoder.base.weight)
+    torch.testing.assert_close(
+        new.semantic_encoder.encoder.action_expert_router_summary_proj.weight,
+        torch.ones_like(new.semantic_encoder.encoder.action_expert_router_summary_proj.weight),
+    )
+
+    broken = torch.nn.Module()
+    broken.semantic_encoder = torch.nn.Module()
+    broken.semantic_encoder.encoder = _Encoder(include_router=True)
+    broken.unrelated_new_projection = torch.nn.Linear(2, 2, bias=False)
+    with pytest.raises(RuntimeError, match="unrelated_new_projection"):
+        _MODULE._load_state_dict_picf_compat(broken, old.state_dict())
+
+
 def test_checkpoint_loader_accepts_shape_mismatched_trainer_state_with_optimizer_reset(tmp_path: Path) -> None:
     class _OldCore(torch.nn.Module):
         def __init__(self) -> None:
@@ -3649,8 +3773,8 @@ def test_checkpoint_loader_accepts_shape_mismatched_trainer_state_with_optimizer
 def test_load_checkpoint_sequential_across_ranks_serializes_resume_reads(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, int]] = []
 
-    def fake_load_checkpoint(*, path, model, optimizer, device, grad_clip_controller):
-        del path, model, optimizer, device, grad_clip_controller
+    def fake_load_checkpoint(*, path, model, optimizer, device, optimizer_checkpoint_mode, grad_clip_controller):
+        del path, model, optimizer, device, optimizer_checkpoint_mode, grad_clip_controller
         calls.append(("load", 0))
         return 123
 
@@ -3687,8 +3811,8 @@ def test_load_checkpoint_sequential_across_ranks_only_loads_local_rank(monkeypat
     loaded: list[int] = []
     barriers: list[int] = []
 
-    def fake_load_checkpoint(*, path, model, optimizer, device, grad_clip_controller):
-        del path, model, optimizer, device, grad_clip_controller
+    def fake_load_checkpoint(*, path, model, optimizer, device, optimizer_checkpoint_mode, grad_clip_controller):
+        del path, model, optimizer, device, optimizer_checkpoint_mode, grad_clip_controller
         loaded.append(1)
         return 456
 
@@ -3813,3 +3937,305 @@ def test_fsdp_grad_clipping_handles_mixed_grad_dtypes_without_clip_api(monkeypat
     assert math.isclose(total_norm, 5.0, rel_tol=0.0, abs_tol=1e-6)
     torch.testing.assert_close(model.fp32.grad, torch.tensor([2.0], dtype=torch.float32), atol=1e-5, rtol=0)
     torch.testing.assert_close(model.bf16.grad.float(), torch.tensor([1.5], dtype=torch.float32), atol=5e-3, rtol=0)
+
+
+def test_calvin_bucket_sampling_weights_cover_vla_foundry_style_mixtures() -> None:
+    names = ["block_push", "drawer", "switch_button_light"]
+    sizes = {"block_push": 1, "drawer": 3, "switch_button_light": 6}
+
+    task_uniform = _MODULE._compute_bucket_sampling_weights(
+        bucket_names=names,
+        bucket_sizes=sizes,
+        mode="task_uniform",
+        temperature_alpha=0.0,
+        weight_spec="",
+    )
+    assert task_uniform == {name: pytest.approx(1.0 / 3.0) for name in names}
+
+    trajectory = _MODULE._compute_bucket_sampling_weights(
+        bucket_names=names,
+        bucket_sizes=sizes,
+        mode="trajectory",
+        temperature_alpha=0.0,
+        weight_spec="",
+    )
+    assert trajectory["block_push"] == pytest.approx(0.1)
+    assert trajectory["drawer"] == pytest.approx(0.3)
+    assert trajectory["switch_button_light"] == pytest.approx(0.6)
+
+    temperature = _MODULE._compute_bucket_sampling_weights(
+        bucket_names=names,
+        bucket_sizes=sizes,
+        mode="temperature",
+        temperature_alpha=0.5,
+        weight_spec="",
+    )
+    denom = math.sqrt(1.0) + math.sqrt(3.0) + math.sqrt(6.0)
+    assert temperature["block_push"] == pytest.approx(math.sqrt(1.0) / denom)
+    assert temperature["drawer"] == pytest.approx(math.sqrt(3.0) / denom)
+    assert temperature["switch_button_light"] == pytest.approx(math.sqrt(6.0) / denom)
+
+    explicit = _MODULE._compute_bucket_sampling_weights(
+        bucket_names=names,
+        bucket_sizes=sizes,
+        mode="task_uniform",
+        temperature_alpha=0.0,
+        weight_spec="block_push=1,drawer=2,*=0.5",
+    )
+    assert explicit["block_push"] == pytest.approx(1.0 / 3.5)
+    assert explicit["drawer"] == pytest.approx(2.0 / 3.5)
+    assert explicit["switch_button_light"] == pytest.approx(0.5 / 3.5)
+
+
+def test_bucket_sequence_without_replacement_covers_distinct_logical_tasks() -> None:
+    names = ["block_lift", "block_push", "drawer", "slider", "switch_button_light", "other"]
+    weights = {name: 1.0 / float(len(names)) for name in names}
+
+    sequence = _MODULE._bucket_sequence_for_logical_step(
+        bucket_names=names,
+        target_bucket_weights=weights,
+        mode="task_uniform",
+        weight_spec="",
+        seed=17,
+        step=11030,
+        world_size=2,
+        accum_steps=2,
+        without_replacement=True,
+    )
+
+    assert len(sequence) == 4
+    assert len(set(sequence)) == 4
+    assert set(sequence).issubset(set(names))
+
+
+def test_bucket_sequence_without_replacement_repeats_only_after_positive_bucket_exhaustion() -> None:
+    names = ["block_lift", "block_push", "drawer"]
+    weights = {name: 1.0 / float(len(names)) for name in names}
+
+    sequence = _MODULE._bucket_sequence_for_logical_step(
+        bucket_names=names,
+        target_bucket_weights=weights,
+        mode="task_uniform",
+        weight_spec="",
+        seed=17,
+        step=9,
+        world_size=2,
+        accum_steps=2,
+        without_replacement=True,
+    )
+
+    assert len(sequence) == 4
+    assert len(set(sequence[:3])) == 3
+    assert len(set(sequence)) == 3
+
+
+def test_bucket_sequence_round_robin_preserves_historical_order() -> None:
+    names = ["a", "b", "c"]
+    weights = {name: 1.0 / float(len(names)) for name in names}
+
+    sequence = _MODULE._bucket_sequence_for_logical_step(
+        bucket_names=names,
+        target_bucket_weights=weights,
+        mode="round_robin",
+        weight_spec="",
+        seed=999,
+        step=1,
+        world_size=2,
+        accum_steps=2,
+        without_replacement=True,
+    )
+
+    assert sequence == ("b", "c", "a", "b")
+
+
+def test_logical_batch_loss_scales_normalize_duplicated_buckets_without_ddp() -> None:
+    scales, info = _MODULE._logical_batch_loss_scales(
+        ["block_push", "block_push", "drawer"],
+        enabled=True,
+        use_ddp=False,
+        world_size=1,
+        target_bucket_weights={"block_push": 0.8, "drawer": 0.2},
+    )
+
+    assert scales == pytest.approx([0.4, 0.4, 0.2])
+    assert info["logical_batch_global_micro_count"] == 3
+    assert info["logical_batch_distinct_bucket_count"] == 2
+    assert info["logical_batch_bucket_counts"] == {"block_push": 2, "drawer": 1}
+    assert info["logical_batch_bucket_target_weights"] == pytest.approx({"block_push": 0.8, "drawer": 0.2})
+
+
+def test_logical_batch_loss_scales_compensate_ddp_gradient_averaging(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_gather(value, *, use_ddp, world_size):
+        assert value == ["block_push", "drawer"]
+        assert use_ddp is True
+        assert world_size == 2
+        return [["block_push", "drawer"], ["drawer", "slider"]]
+
+    monkeypatch.setattr(_MODULE, "_all_gather_python_object", fake_gather)
+
+    scales, info = _MODULE._logical_batch_loss_scales(
+        ["block_push", "drawer"],
+        enabled=True,
+        use_ddp=True,
+        world_size=2,
+        target_bucket_weights={
+            "block_push": 1.0 / 3.0,
+            "drawer": 1.0 / 3.0,
+            "slider": 1.0 / 3.0,
+        },
+    )
+
+    # DDP averages rank gradients, so each local backward scale is multiplied by
+    # world_size.  Globally, the selected buckets still contribute 1/3 each:
+    # block_push has one micro-window -> 2/3 local scale on rank 0;
+    # drawer has two micro-windows -> 1/3 local scale on each rank.
+    assert scales == pytest.approx([2.0 / 3.0, 1.0 / 3.0])
+    assert info["logical_batch_global_micro_count"] == 4
+    assert info["logical_batch_distinct_bucket_count"] == 3
+    assert info["logical_batch_bucket_counts"] == {"block_push": 1, "drawer": 2, "slider": 1}
+    assert info["logical_batch_bucket_target_weights"] == pytest.approx(
+        {"block_push": 1.0 / 3.0, "drawer": 1.0 / 3.0, "slider": 1.0 / 3.0}
+    )
+
+
+def test_dynamic_bucket_sampling_weights_raise_lagging_high_loss_bucket() -> None:
+    names = ["block_push", "drawer", "slider", "switch_button_light"]
+    base = {name: 0.25 for name in names}
+
+    weights, info = _MODULE._dynamic_bucket_sampling_weights(
+        bucket_names=names,
+        base_weights=base,
+        loss_ema={
+            "block_push": 0.08,
+            "drawer": 0.04,
+            "slider": 0.03,
+            "switch_button_light": 0.04,
+        },
+        previous_loss_ema={
+            "block_push": 0.081,
+            "drawer": 0.052,
+            "slider": 0.038,
+            "switch_button_light": 0.046,
+        },
+        counts={name: 8 for name in names},
+        step=100,
+        warmup_steps=20,
+        min_count=2,
+        eta=0.25,
+        gamma=0.5,
+        clip=2.0,
+        min_mass_fraction=0.05,
+        max_weight=0.35,
+    )
+
+    assert info["logical_batch_dynamic_mixing_active"] is True
+    assert sum(weights.values()) == pytest.approx(1.0)
+    assert weights["block_push"] > base["block_push"]
+    assert weights["slider"] < base["slider"]
+    assert max(weights.values()) <= 0.35 + 1e-9
+    assert min(weights.values()) >= (0.05 / len(names)) - 1e-9
+
+
+def test_dynamic_bucket_sampling_weights_respect_warmup_and_counts() -> None:
+    names = ["block_push", "drawer", "slider"]
+    base = {"block_push": 0.2, "drawer": 0.3, "slider": 0.5}
+
+    warmup_weights, warmup_info = _MODULE._dynamic_bucket_sampling_weights(
+        bucket_names=names,
+        base_weights=base,
+        loss_ema={"block_push": 9.0, "drawer": 1.0, "slider": 1.0},
+        previous_loss_ema={},
+        counts={name: 100 for name in names},
+        step=3,
+        warmup_steps=20,
+        min_count=2,
+        eta=1.0,
+        gamma=0.5,
+        clip=2.0,
+        min_mass_fraction=0.05,
+        max_weight=0.8,
+    )
+    assert warmup_info["logical_batch_dynamic_mixing_active"] is False
+    assert warmup_weights == pytest.approx(base)
+
+    insufficient_weights, insufficient_info = _MODULE._dynamic_bucket_sampling_weights(
+        bucket_names=names,
+        base_weights=base,
+        loss_ema={"block_push": 9.0},
+        previous_loss_ema={},
+        counts={"block_push": 100},
+        step=30,
+        warmup_steps=20,
+        min_count=2,
+        eta=1.0,
+        gamma=0.5,
+        clip=2.0,
+        min_mass_fraction=0.05,
+        max_weight=0.8,
+    )
+    assert insufficient_info["logical_batch_dynamic_mixing_active"] is False
+    assert insufficient_weights == pytest.approx(base)
+
+
+def test_pcgrad_project_and_sum_cancels_direct_gradient_conflict() -> None:
+    projected = _MODULE._pcgrad_project_and_sum(
+        [
+            [torch.tensor([1.0, 0.0])],
+            [torch.tensor([-1.0, 0.0])],
+        ]
+    )
+
+    assert len(projected) == 1
+    assert projected[0] is not None
+    assert torch.allclose(projected[0], torch.zeros(2), atol=1e-6)
+
+
+def test_cagrad_project_and_sum_preserves_aligned_gradient_norm() -> None:
+    projected = _MODULE._cagrad_project_and_sum(
+        [
+            [torch.tensor([1.0, 0.0])],
+            [torch.tensor([1.0, 0.0])],
+        ],
+        alpha=0.4,
+        iters=8,
+        rescale_to_raw_norm=True,
+    )
+
+    assert len(projected) == 1
+    assert projected[0] is not None
+    assert torch.allclose(projected[0], torch.tensor([2.0, 0.0]), atol=1e-6)
+
+
+def test_cagrad_project_and_sum_handles_direct_gradient_conflict() -> None:
+    projected = _MODULE._cagrad_project_and_sum(
+        [
+            [torch.tensor([1.0, 0.0])],
+            [torch.tensor([-1.0, 0.0])],
+        ],
+        alpha=0.4,
+        iters=8,
+        rescale_to_raw_norm=True,
+    )
+
+    assert len(projected) == 1
+    assert projected[0] is not None
+    assert torch.all(torch.isfinite(projected[0]))
+    assert torch.linalg.vector_norm(projected[0]).item() <= 1e-6
+
+
+def test_logical_batch_gradient_surgery_params_selects_requested_owner_group() -> None:
+    class TinyTrainer(torch.nn.Module):
+        def __init__(self) -> None:
+            super().__init__()
+            self.semantic_encoder = torch.nn.Linear(2, 2)
+            self.core = torch.nn.Linear(2, 2)
+            self.policy_head = torch.nn.Linear(2, 2)
+
+    model = TinyTrainer()
+    semantic_params = _MODULE._logical_batch_gradient_surgery_params(model, groups=["semantic"])
+    picf_params = _MODULE._logical_batch_gradient_surgery_params(model, groups=["picf_core"])
+    policy_params = _MODULE._logical_batch_gradient_surgery_params(model, groups=["policy_head"])
+
+    assert {id(param) for param in semantic_params} == {id(param) for param in model.semantic_encoder.parameters()}
+    assert {id(param) for param in picf_params} == {id(param) for param in model.core.parameters()}
+    assert {id(param) for param in policy_params} == {id(param) for param in model.policy_head.parameters()}

@@ -20,6 +20,7 @@ import traceback
 from collections import deque
 from collections.abc import Iterator
 from collections.abc import Mapping
+from collections.abc import MutableMapping
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any
@@ -170,24 +171,28 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "semantic_encoder.encoder.action_context_v_proj.*",
     "semantic_encoder.encoder.action_context_out_proj.*",
     "semantic_encoder.encoder.action_context_gate_logit",
+    "semantic_encoder.encoder.action_expert_router_*",
     "policy.semantic_encoder.encoder.action_context_in_proj.*",
     "policy.semantic_encoder.encoder.action_context_q_proj.*",
     "policy.semantic_encoder.encoder.action_context_k_proj.*",
     "policy.semantic_encoder.encoder.action_context_v_proj.*",
     "policy.semantic_encoder.encoder.action_context_out_proj.*",
     "policy.semantic_encoder.encoder.action_context_gate_logit",
+    "policy.semantic_encoder.encoder.action_expert_router_*",
     "encoder.action_context_in_proj.*",
     "encoder.action_context_q_proj.*",
     "encoder.action_context_k_proj.*",
     "encoder.action_context_v_proj.*",
     "encoder.action_context_out_proj.*",
     "encoder.action_context_gate_logit",
+    "encoder.action_expert_router_*",
     "action_context_in_proj.*",
     "action_context_q_proj.*",
     "action_context_k_proj.*",
     "action_context_v_proj.*",
     "action_context_out_proj.*",
     "action_context_gate_logit",
+    "action_expert_router_*",
     "semantic_prefix_proj.*",
     "posterior_to_control_proj.*",
     "global_post_to_control_proj.*",
@@ -2468,6 +2473,57 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         )
     if bool(getattr(args, "anchor_overlay_dump_signatures", False)) and int(getattr(args, "anchor_overlay_interval", 0)) <= 0:
         raise ValueError("--anchor-overlay-dump-signatures requires --anchor-overlay-interval > 0.")
+    if float(getattr(args, "logical_batch_action_bucket_ema_decay", 0.98)) < 0.0 or float(
+        getattr(args, "logical_batch_action_bucket_ema_decay", 0.98)
+    ) >= 1.0:
+        raise ValueError(
+            "logical_batch_action_bucket_ema_decay must be in [0, 1), "
+            f"got {getattr(args, 'logical_batch_action_bucket_ema_decay', None)}."
+        )
+    if float(getattr(args, "logical_batch_action_bucket_scale_min", 0.5)) <= 0.0:
+        raise ValueError(
+            "logical_batch_action_bucket_scale_min must be > 0, "
+            f"got {getattr(args, 'logical_batch_action_bucket_scale_min', None)}."
+        )
+    if float(getattr(args, "logical_batch_action_bucket_scale_max", 1.5)) < float(
+        getattr(args, "logical_batch_action_bucket_scale_min", 0.5)
+    ):
+        raise ValueError(
+            "logical_batch_action_bucket_scale_max must be >= logical_batch_action_bucket_scale_min, "
+            f"got min={getattr(args, 'logical_batch_action_bucket_scale_min', None)} "
+            f"max={getattr(args, 'logical_batch_action_bucket_scale_max', None)}."
+        )
+    if int(getattr(args, "logical_batch_action_bucket_min_count", 2)) < 1:
+        raise ValueError(
+            "logical_batch_action_bucket_min_count must be >= 1, "
+            f"got {getattr(args, 'logical_batch_action_bucket_min_count', None)}."
+        )
+    gradient_surgery = str(getattr(args, "logical_batch_gradient_surgery", "off")).lower().replace("-", "_")
+    if gradient_surgery not in {"off", "pcgrad", "cagrad"}:
+        raise ValueError(
+            "logical_batch_gradient_surgery must be one of {'off', 'pcgrad', 'cagrad'}, "
+            f"got {getattr(args, 'logical_batch_gradient_surgery', None)!r}."
+        )
+    gradient_surgery_groups = {
+        str(group).strip()
+        for group in str(getattr(args, "logical_batch_gradient_surgery_groups", "")).split(",")
+        if str(group).strip()
+    }
+    valid_gradient_surgery_groups = {"semantic", "policy_head", "picf_core"}
+    invalid_gradient_surgery_groups = sorted(gradient_surgery_groups - valid_gradient_surgery_groups)
+    if invalid_gradient_surgery_groups:
+        raise ValueError(
+            "logical_batch_gradient_surgery_groups contains unsupported groups "
+            f"{invalid_gradient_surgery_groups!r}; valid groups are {sorted(valid_gradient_surgery_groups)!r}."
+        )
+    if gradient_surgery != "off":
+        if not gradient_surgery_groups:
+            raise ValueError("--logical-batch-gradient-surgery requires at least one target group.")
+        if not bool(getattr(args, "logical_batch_bucket_normalization", False)):
+            raise ValueError(
+                "--logical-batch-gradient-surgery requires --logical-batch-bucket-normalization so per-micro "
+                "gradients correspond to the controlled logical-batch objective."
+            )
     semantic_scope_choices = {
         "all",
         "backbone_only",
@@ -2483,6 +2539,24 @@ def _validate_train_args(args: argparse.Namespace) -> None:
             "'action_adapter_only', 'action_head_and_adapter'}, "
             f"got {getattr(args, 'semantic_trainable_scope', None)!r}."
         )
+    action_flow_loss = str(getattr(args, "semantic_action_flow_loss", "mse")).strip().lower().replace("-", "_")
+    if action_flow_loss not in {"mse", "l2", "l1", "mae", "huber", "smooth_l1", "smoothl1"}:
+        raise ValueError(
+            "semantic_action_flow_loss must be one of {'mse', 'l1', 'huber', 'smooth_l1'}, "
+            f"got {getattr(args, 'semantic_action_flow_loss', None)!r}."
+        )
+    if float(getattr(args, "semantic_action_flow_huber_delta", 1.0)) <= 0.0:
+        raise ValueError("semantic_action_flow_huber_delta must be > 0.")
+    if float(getattr(args, "semantic_action_flow_time_alpha", 1.5)) <= 0.0:
+        raise ValueError("semantic_action_flow_time_alpha must be > 0.")
+    if float(getattr(args, "semantic_action_flow_time_beta", 1.0)) <= 0.0:
+        raise ValueError("semantic_action_flow_time_beta must be > 0.")
+    if int(getattr(args, "semantic_action_expert_router_experts", 4)) < 1:
+        raise ValueError("semantic_action_expert_router_experts must be >= 1.")
+    if int(getattr(args, "semantic_action_expert_router_rank", 64)) < 1:
+        raise ValueError("semantic_action_expert_router_rank must be >= 1.")
+    if float(getattr(args, "semantic_action_expert_router_temperature", 1.0)) <= 0.0:
+        raise ValueError("semantic_action_expert_router_temperature must be > 0.")
     for name in (
         "point_backbone_lr_scale",
         "visual_lr_scale",
@@ -3068,9 +3142,12 @@ def _fsdp_wrap_root_with_ignored_non_dominant_dtypes(
     their pre-forward unshard hooks.
 
     For that specific training path we keep one semantic FSDP boundary and leave
-    the minority-dtype trainable parameters unsharded via ``ignored_states``.
-    This preserves the custom forward while still full-sharding the bulk of the
-    semantic parameters.
+    both frozen states and minority-dtype trainable states unsharded via
+    ``ignored_states``.  The frozen-state exclusion is required for partial
+    trainable scopes such as ``action_head_and_adapter`` because flat-parameter
+    FSDP with ``use_orig_params=False`` requires every managed flattened handle
+    to have uniform ``requires_grad``.  This preserves the custom forward while
+    still full-sharding the active semantic action/adapter parameters.
     """
 
     if _is_fsdp_model(module):
@@ -3080,7 +3157,8 @@ def _fsdp_wrap_root_with_ignored_non_dominant_dtypes(
 
     _promote_non_trainable_nonfloating_params_to_buffers(module)
 
-    trainable_params = [param for param in module.parameters() if bool(getattr(param, "requires_grad", False))]
+    managed_params = _collect_fsdp_managed_params_excluding_nested_fsdp(module)
+    trainable_params = [param for param in managed_params if bool(getattr(param, "requires_grad", False))]
     if not trainable_params:
         return module
 
@@ -3089,7 +3167,11 @@ def _fsdp_wrap_root_with_ignored_non_dominant_dtypes(
         dtype_numel[param.dtype] = dtype_numel.get(param.dtype, 0) + int(param.numel())
 
     dominant_dtype = max(dtype_numel, key=dtype_numel.get)
-    ignored_states = [param for param in trainable_params if param.dtype != dominant_dtype]
+    frozen_states = [param for param in managed_params if not bool(getattr(param, "requires_grad", False))]
+    ignored_states = [
+        *frozen_states,
+        *[param for param in trainable_params if param.dtype != dominant_dtype],
+    ]
 
     return FullyShardedDataParallel(
         module,
@@ -3251,6 +3333,358 @@ def _calvin_prompt_bucket(prompt: str) -> str:
     return "other"
 
 
+_CALVIN_BUCKET_SAMPLING_MODES = {"round_robin", "task_uniform", "trajectory", "temperature"}
+
+
+def _normalize_bucket_sampling_mode(value: str) -> str:
+    mode = str(value or "round_robin").strip().lower().replace("-", "_")
+    if mode not in _CALVIN_BUCKET_SAMPLING_MODES:
+        raise ValueError(
+            "calvin bucket sampling mode must be one of "
+            f"{sorted(_CALVIN_BUCKET_SAMPLING_MODES)}, got {value!r}."
+        )
+    return mode
+
+
+def _parse_bucket_weight_spec(spec: str | None) -> dict[str, float]:
+    """Parse a strict VLA-Foundry-style bucket ratio specification.
+
+    Format: ``bucket=weight,bucket=weight``.  Keys may be exact bucket names,
+    sanitized metric fragments, glob patterns, or ``*`` for the default weight.
+    """
+
+    text = str(spec or "").strip()
+    if not text:
+        return {}
+    result: dict[str, float] = {}
+    for raw_part in re.split(r"[,;]", text):
+        part = raw_part.strip()
+        if not part:
+            continue
+        if "=" in part:
+            key, raw_value = part.split("=", 1)
+        elif ":" in part:
+            key, raw_value = part.split(":", 1)
+        else:
+            raise ValueError(
+                "Bucket weight spec entries must use key=value or key:value; "
+                f"got {part!r} in {spec!r}."
+            )
+        key = key.strip()
+        if not key:
+            raise ValueError(f"Bucket weight spec contains an empty key in {spec!r}.")
+        try:
+            value = float(raw_value)
+        except ValueError as exc:
+            raise ValueError(f"Invalid bucket weight {raw_value!r} for key {key!r}.") from exc
+        if not math.isfinite(value) or value < 0.0:
+            raise ValueError(f"Bucket weight for {key!r} must be finite and non-negative, got {value}.")
+        result[key] = value
+    return result
+
+
+def _compute_bucket_sampling_weights(
+    *,
+    bucket_names: Sequence[str],
+    bucket_sizes: Mapping[str, int],
+    mode: str,
+    temperature_alpha: float,
+    weight_spec: str | None,
+) -> dict[str, float]:
+    """Return normalized target q_b for CALVIN task-bucket sampling."""
+
+    names = [str(name) for name in bucket_names]
+    if not names:
+        return {}
+    mode = _normalize_bucket_sampling_mode(mode)
+    alpha = float(temperature_alpha)
+    if not math.isfinite(alpha):
+        raise ValueError(f"calvin_bucket_temperature_alpha must be finite, got {temperature_alpha}.")
+    overrides = _parse_bucket_weight_spec(weight_spec)
+    if overrides:
+        default_weight = overrides.get("*", overrides.get("__default__"))
+        weights: dict[str, float] = {}
+        for name in names:
+            matched: list[float] = []
+            for key, value in overrides.items():
+                if key in {"*", "__default__"}:
+                    continue
+                if key == name or key == _metric_key_fragment(name) or fnmatch.fnmatch(name, key):
+                    matched.append(float(value))
+            if matched:
+                weights[name] = float(matched[-1])
+            elif default_weight is not None:
+                weights[name] = float(default_weight)
+            else:
+                raise ValueError(
+                    "Bucket weight spec did not cover bucket "
+                    f"{name!r}. Add an explicit entry or '*=<weight>'."
+                )
+    else:
+        if mode in {"round_robin", "task_uniform"}:
+            weights = {name: 1.0 for name in names}
+        elif mode == "trajectory":
+            weights = {name: float(max(int(bucket_sizes.get(name, 0)), 0)) for name in names}
+        else:
+            weights = {
+                name: float(max(int(bucket_sizes.get(name, 0)), 0)) ** max(alpha, 0.0)
+                for name in names
+            }
+    total = float(sum(max(float(value), 0.0) for value in weights.values()))
+    if total <= 0.0:
+        raise ValueError(
+            "CALVIN bucket sampling weights sum to zero. "
+            f"mode={mode!r} alpha={alpha} spec={weight_spec!r} sizes={dict(bucket_sizes)!r}."
+        )
+    return {name: max(float(weights[name]), 0.0) / total for name in names}
+
+
+def _normalize_bucket_weights_with_floor_cap(
+    raw_weights: Mapping[str, float],
+    *,
+    floor: float,
+    cap: float,
+) -> dict[str, float]:
+    """Normalize bucket weights under per-bucket floor/cap constraints."""
+
+    names = [str(name) for name in raw_weights]
+    if not names:
+        return {}
+    n = len(names)
+    floor = max(float(floor), 0.0)
+    cap = max(float(cap), 0.0)
+    if floor * float(n) > 1.0:
+        floor = 1.0 / float(n)
+    if cap * float(n) < 1.0:
+        cap = 1.0 / float(n)
+    values = {
+        name: max(float(raw_weights.get(name, 0.0)), 0.0)
+        for name in names
+    }
+    if sum(values.values()) <= 0.0:
+        values = {name: 1.0 for name in names}
+
+    result = {name: floor for name in names}
+    remaining = max(1.0 - floor * float(n), 0.0)
+    free = set(names)
+    while free and remaining > 1e-12:
+        free_total = float(sum(values[name] for name in free))
+        if free_total <= 0.0:
+            share = remaining / float(len(free))
+            proposal = {name: result[name] + share for name in free}
+        else:
+            proposal = {
+                name: result[name] + remaining * float(values[name]) / free_total
+                for name in free
+            }
+        capped = [name for name, value in proposal.items() if value > cap]
+        if not capped:
+            for name, value in proposal.items():
+                result[name] = float(value)
+            remaining = 0.0
+            break
+        for name in capped:
+            result[name] = float(cap)
+            free.remove(name)
+        remaining = max(1.0 - float(sum(result.values())), 0.0)
+    total = float(sum(result.values()))
+    if total <= 0.0:
+        return {name: 1.0 / float(n) for name in names}
+    return {name: float(value) / total for name, value in result.items()}
+
+
+def _zscore_by_name(values: Mapping[str, float], names: Sequence[str]) -> dict[str, float]:
+    data = np.asarray([float(values.get(str(name), 0.0)) for name in names], dtype=np.float64)
+    if data.size == 0:
+        return {}
+    mean = float(np.mean(data))
+    std = float(np.std(data))
+    if std <= 1e-12 or not math.isfinite(std):
+        return {str(name): 0.0 for name in names}
+    return {str(name): float((float(values.get(str(name), 0.0)) - mean) / std) for name in names}
+
+
+def _dynamic_bucket_sampling_weights(
+    *,
+    bucket_names: Sequence[str],
+    base_weights: Mapping[str, float],
+    loss_ema: Mapping[str, float],
+    previous_loss_ema: Mapping[str, float],
+    counts: Mapping[str, int],
+    step: int,
+    warmup_steps: int,
+    min_count: int,
+    eta: float,
+    gamma: float,
+    clip: float,
+    min_mass_fraction: float,
+    max_weight: float,
+) -> tuple[dict[str, float], dict[str, float | int | bool]]:
+    """Return bounded PiKE-style adaptive task-bucket weights.
+
+    The update only changes the sampler target distribution.  It does not
+    change labels, loss definitions, action targets, or PICF semantics.
+    """
+
+    names = [str(name) for name in bucket_names]
+    if not names:
+        return {}, {"logical_batch_dynamic_mixing_enabled": False}
+    base = _normalize_bucket_weights_with_floor_cap(
+        {name: max(float(base_weights.get(name, 0.0)), 0.0) for name in names},
+        floor=0.0,
+        cap=1.0,
+    )
+    if int(step) < int(warmup_steps):
+        info: dict[str, float | int | bool] = {
+            "logical_batch_dynamic_mixing_enabled": True,
+            "logical_batch_dynamic_mixing_active": False,
+            "logical_batch_dynamic_mixing_reason_id": 1,
+            "logical_batch_dynamic_mixing_observed_bucket_count": int(
+                sum(1 for name in names if int(counts.get(name, 0)) > 0)
+            ),
+        }
+        return base, info
+    valid_names = [
+        name
+        for name in names
+        if int(counts.get(name, 0)) >= int(min_count) and float(loss_ema.get(name, 0.0)) > 0.0
+    ]
+    if len(valid_names) < 2:
+        info = {
+            "logical_batch_dynamic_mixing_enabled": True,
+            "logical_batch_dynamic_mixing_active": False,
+            "logical_batch_dynamic_mixing_reason_id": 2,
+            "logical_batch_dynamic_mixing_observed_bucket_count": int(len(valid_names)),
+        }
+        return base, info
+
+    loss_values = {name: float(loss_ema.get(name, 0.0)) for name in valid_names}
+    progress_values = {
+        name: float(previous_loss_ema.get(name, loss_ema.get(name, 0.0))) - float(loss_ema.get(name, 0.0))
+        for name in valid_names
+    }
+    loss_z = _zscore_by_name(loss_values, valid_names)
+    progress_z = _zscore_by_name(progress_values, valid_names)
+    eta = max(float(eta), 0.0)
+    gamma = float(gamma)
+    clip = max(float(clip), 0.0)
+    raw: dict[str, float] = {}
+    lag_values: dict[str, float] = {}
+    for name in names:
+        if name in valid_names:
+            lag = float(loss_z.get(name, 0.0)) - gamma * float(progress_z.get(name, 0.0))
+            if clip > 0.0:
+                lag = min(max(lag, -clip), clip)
+            lag_values[name] = float(lag)
+            raw[name] = float(base.get(name, 0.0)) * math.exp(eta * lag)
+        else:
+            lag_values[name] = 0.0
+            raw[name] = float(base.get(name, 0.0))
+    q_min = max(float(min_mass_fraction), 0.0) / float(len(names))
+    q_max = float(max_weight)
+    weights = _normalize_bucket_weights_with_floor_cap(raw, floor=q_min, cap=q_max)
+    info = {
+        "logical_batch_dynamic_mixing_enabled": True,
+        "logical_batch_dynamic_mixing_active": True,
+        "logical_batch_dynamic_mixing_reason_id": 0,
+        "logical_batch_dynamic_mixing_observed_bucket_count": int(len(valid_names)),
+        "logical_batch_dynamic_mixing_eta": float(eta),
+        "logical_batch_dynamic_mixing_gamma": float(gamma),
+        "logical_batch_dynamic_mixing_clip": float(clip),
+        "logical_batch_dynamic_mixing_min_weight": float(min(weights.values())),
+        "logical_batch_dynamic_mixing_max_weight": float(max(weights.values())),
+    }
+    for name in names:
+        fragment = _metric_key_fragment(name)
+        info[f"logical_batch_dynamic_weight_{fragment}"] = float(weights.get(name, 0.0))
+        info[f"logical_batch_dynamic_lag_{fragment}"] = float(lag_values.get(name, 0.0))
+        info[f"logical_batch_dynamic_loss_ema_{fragment}"] = float(loss_ema.get(name, 0.0))
+        info[f"logical_batch_dynamic_count_{fragment}"] = int(counts.get(name, 0))
+    return weights, info
+
+
+def _bucket_sequence_for_logical_step(
+    *,
+    bucket_names: Sequence[str],
+    target_bucket_weights: Mapping[str, float],
+    mode: str,
+    weight_spec: str | None,
+    seed: int,
+    step: int,
+    world_size: int,
+    accum_steps: int,
+    without_replacement: bool = True,
+) -> tuple[str, ...]:
+    """Return the global bucket sequence for one optimizer step.
+
+    The sequence length is ``world_size * accum_steps`` and is shared by every
+    rank.  Each rank then takes its rank/micro-step slice.  This implements the
+    logical-batch contract from VLA-style data mixing: bucket choice is decided
+    once per optimizer step, while the concrete segment/window inside each
+    bucket remains independently randomized.
+    """
+
+    names = tuple(str(name) for name in bucket_names)
+    if not names:
+        return ()
+    global_micro_count = max(int(world_size), 1) * max(int(accum_steps), 1)
+    if global_micro_count <= 0:
+        return ()
+
+    normalized_mode = _normalize_bucket_sampling_mode(mode)
+    if normalized_mode == "round_robin" and not str(weight_spec or "").strip():
+        base = int(step) * global_micro_count
+        return tuple(names[int(base + offset) % len(names)] for offset in range(global_micro_count))
+
+    raw_weights = np.asarray(
+        [max(float(target_bucket_weights.get(str(name), 0.0)), 0.0) for name in names],
+        dtype=np.float64,
+    )
+    positive = raw_weights > 0.0
+    if not bool(np.any(positive)):
+        raise ValueError(
+            "Bucket sampling target weights contain no positive mass: "
+            f"names={names!r} weights={dict(target_bucket_weights)!r}."
+        )
+
+    rng = np.random.default_rng(
+        np.random.SeedSequence(
+            (
+                int(seed) & 0xFFFFFFFF,
+                int(step) & 0xFFFFFFFF,
+                int(global_micro_count) & 0xFFFFFFFF,
+                0xB00C_2026,
+            )
+        )
+    )
+    eligible_names = np.asarray([names[index] for index, keep in enumerate(positive) if bool(keep)], dtype=object)
+    eligible_weights = raw_weights[positive]
+    eligible_weights = eligible_weights / float(np.sum(eligible_weights))
+
+    if not bool(without_replacement):
+        return tuple(
+            str(bucket)
+            for bucket in rng.choice(
+                eligible_names,
+                size=int(global_micro_count),
+                replace=True,
+                p=eligible_weights,
+            )
+        )
+
+    sequence: list[str] = []
+    while len(sequence) < int(global_micro_count):
+        take = min(int(global_micro_count) - len(sequence), int(len(eligible_names)))
+        chosen = rng.choice(
+            eligible_names,
+            size=int(take),
+            replace=False,
+            p=eligible_weights,
+        )
+        sequence.extend(str(bucket) for bucket in np.asarray(chosen, dtype=object).reshape(-1))
+    return tuple(sequence)
+
+
 def _reduce_mean(value: float, *, device: torch.device, world_size: int) -> float:
     if world_size <= 1:
         return float(value)
@@ -3266,6 +3700,414 @@ def _reduce_sum(value: float, *, device: torch.device, world_size: int) -> float
     tensor = torch.tensor([value], device=device, dtype=torch.float32)
     dist.all_reduce(tensor, op=dist.ReduceOp.SUM)
     return float(tensor.item())
+
+
+def _all_gather_python_object(value: Any, *, use_ddp: bool, world_size: int) -> list[Any]:
+    if not bool(use_ddp) or int(world_size) <= 1:
+        return [value]
+    gathered: list[Any] = [None for _ in range(int(world_size))]
+    dist.all_gather_object(gathered, value)
+    return gathered
+
+
+def _metric_key_fragment(value: str) -> str:
+    fragment = re.sub(r"[^0-9a-zA-Z]+", "_", str(value).strip().lower())
+    fragment = fragment.strip("_")
+    return fragment or "unknown"
+
+
+def _logical_batch_loss_scales(
+    local_buckets: Sequence[str],
+    *,
+    enabled: bool,
+    use_ddp: bool,
+    world_size: int,
+    target_bucket_weights: Mapping[str, float] | None = None,
+) -> tuple[list[float], dict[str, Any]]:
+    """Return local backward scales for a task-balanced logical optimizer step.
+
+    DDP averages gradients across ranks.  To realize a global estimator weight
+    `w_m` for each selected micro-window, each rank must call backward with
+    `world_size * w_m`.
+    """
+
+    local_buckets = [str(bucket) for bucket in local_buckets]
+    if not local_buckets:
+        return [], {
+            "logical_batch_enabled": bool(enabled),
+            "logical_batch_global_micro_count": 0,
+            "logical_batch_distinct_bucket_count": 0,
+        }
+    if not bool(enabled):
+        scale = 1.0 / float(len(local_buckets))
+        return [scale for _ in local_buckets], {
+            "logical_batch_enabled": False,
+            "logical_batch_global_micro_count": int(len(local_buckets) * max(int(world_size), 1)),
+            "logical_batch_distinct_bucket_count": 0,
+        }
+
+    gathered = _all_gather_python_object(local_buckets, use_ddp=use_ddp, world_size=int(world_size))
+    global_buckets: list[str] = []
+    for item in gathered:
+        global_buckets.extend(str(bucket) for bucket in (item or []))
+    bucket_counts: dict[str, int] = {}
+    for bucket in global_buckets:
+        bucket_counts[bucket] = int(bucket_counts.get(bucket, 0)) + 1
+    distinct_buckets = sorted(bucket_counts)
+    if not distinct_buckets:
+        scale = 1.0 / float(len(local_buckets))
+        return [scale for _ in local_buckets], {
+            "logical_batch_enabled": True,
+            "logical_batch_global_micro_count": int(len(global_buckets)),
+            "logical_batch_distinct_bucket_count": 0,
+        }
+
+    raw_target_weights = {str(key): float(value) for key, value in (target_bucket_weights or {}).items()}
+    if raw_target_weights:
+        selected_target_total = float(
+            sum(max(raw_target_weights.get(str(bucket), 0.0), 0.0) for bucket in distinct_buckets)
+        )
+        if selected_target_total <= 0.0:
+            raise ValueError(
+                "Logical-batch target weights assign zero total mass to selected buckets: "
+                f"selected={distinct_buckets!r} target={raw_target_weights!r}."
+            )
+        bucket_weights = {
+            str(bucket): max(raw_target_weights.get(str(bucket), 0.0), 0.0) / selected_target_total
+            for bucket in distinct_buckets
+        }
+    else:
+        uniform_bucket_weight = 1.0 / float(len(distinct_buckets))
+        bucket_weights = {str(bucket): uniform_bucket_weight for bucket in distinct_buckets}
+    ddp_multiplier = float(max(int(world_size), 1))
+    scales = [
+        ddp_multiplier * float(bucket_weights[str(bucket)]) / float(max(bucket_counts[str(bucket)], 1))
+        for bucket in local_buckets
+    ]
+    return scales, {
+        "logical_batch_enabled": True,
+        "logical_batch_global_micro_count": int(len(global_buckets)),
+        "logical_batch_distinct_bucket_count": int(len(distinct_buckets)),
+        "logical_batch_bucket_counts": {str(bucket): int(count) for bucket, count in sorted(bucket_counts.items())},
+        "logical_batch_bucket_target_weights": {
+            str(bucket): float(bucket_weights[str(bucket)]) for bucket in sorted(bucket_weights)
+        },
+    }
+
+
+def _logical_action_bucket_scale(
+    bucket: str,
+    *,
+    ema: Mapping[str, float],
+    counts: Mapping[str, int],
+    min_count: int,
+    scale_min: float,
+    scale_max: float,
+) -> float:
+    """Return a bounded action-gradient scale for one task bucket.
+
+    The displayed action metrics remain unscaled.  This scale only changes the
+    backward action component so high-loss/noisy buckets do not dominate Adam
+    momentum when each physical step has few tasks.
+    """
+
+    bucket = str(bucket)
+    bucket_count = int(counts.get(bucket, 0))
+    bucket_ema = float(ema.get(bucket, 0.0))
+    if bucket_count < int(min_count) or bucket_ema <= 0.0:
+        return 1.0
+    valid = [
+        float(value)
+        for key, value in ema.items()
+        if int(counts.get(str(key), 0)) >= int(min_count) and float(value) > 0.0
+    ]
+    if not valid:
+        return 1.0
+    target = float(sum(valid) / float(len(valid)))
+    if target <= 0.0:
+        return 1.0
+    scale = target / bucket_ema
+    return float(min(max(scale, float(scale_min)), float(scale_max)))
+
+
+def _update_logical_action_bucket_ema(
+    ema: MutableMapping[str, float],
+    counts: MutableMapping[str, int],
+    *,
+    bucket: str,
+    value: float,
+    decay: float,
+    bucket_names: Sequence[str],
+    use_ddp: bool,
+    device: torch.device,
+) -> None:
+    """Update per-bucket action-loss EMA with rank-synchronized observations."""
+
+    bucket_names = [str(name) for name in bucket_names]
+    if not bucket_names:
+        return
+    bucket_to_index = {str(name): idx for idx, name in enumerate(bucket_names)}
+    if str(bucket) not in bucket_to_index:
+        return
+    payload = torch.zeros((len(bucket_names), 2), device=device, dtype=torch.float32)
+    idx = int(bucket_to_index[str(bucket)])
+    payload[idx, 0] = float(value)
+    payload[idx, 1] = 1.0
+    if bool(use_ddp):
+        dist.all_reduce(payload, op=dist.ReduceOp.SUM)
+    decay = float(decay)
+    for name, (loss_sum, count_sum) in zip(bucket_names, payload.detach().cpu().tolist(), strict=True):
+        count = int(round(float(count_sum)))
+        if count <= 0:
+            continue
+        mean_value = float(loss_sum) / float(count)
+        previous_count = int(counts.get(str(name), 0))
+        previous_ema = float(ema.get(str(name), mean_value))
+        ema[str(name)] = float(decay * previous_ema + (1.0 - decay) * mean_value) if previous_count > 0 else mean_value
+        counts[str(name)] = previous_count + count
+
+
+def _optimizer_owner_group_name(name: str) -> str:
+    canonical = _canonical_param_owner_name(name)
+    if canonical.startswith("core."):
+        return "picf_core"
+    if canonical.startswith("semantic_encoder."):
+        return "semantic"
+    return "policy_head"
+
+
+def _logical_batch_gradient_surgery_params(
+    model: torch.nn.Module,
+    *,
+    groups: Sequence[str],
+) -> list[torch.nn.Parameter]:
+    requested = {str(group).strip() for group in groups if str(group).strip()}
+    if not requested:
+        return []
+    params: list[torch.nn.Parameter] = []
+    seen: set[int] = set()
+    for name, param in model.named_parameters():
+        if not bool(getattr(param, "requires_grad", False)):
+            continue
+        if isinstance(param, UninitializedParameter):
+            continue
+        if _optimizer_owner_group_name(name) not in requested:
+            continue
+        if id(param) in seen:
+            continue
+        params.append(param)
+        seen.add(id(param))
+    return params
+
+
+def _logical_batch_autograd_grads(
+    loss: torch.Tensor,
+    params: Sequence[torch.nn.Parameter],
+) -> list[torch.Tensor | None]:
+    if not params:
+        return []
+    grads = torch.autograd.grad(
+        loss,
+        list(params),
+        retain_graph=True,
+        allow_unused=True,
+    )
+    return [None if grad is None else grad.detach().clone() for grad in grads]
+
+
+def _grad_list_dot(a: Sequence[torch.Tensor | None], b: Sequence[torch.Tensor | None]) -> torch.Tensor:
+    device: torch.device | None = None
+    dtype: torch.dtype | None = None
+    for tensor in list(a) + list(b):
+        if tensor is not None:
+            device = tensor.device
+            dtype = tensor.dtype
+            break
+    if device is None:
+        return torch.zeros((), dtype=torch.float32)
+    total = torch.zeros((), device=device, dtype=dtype or torch.float32)
+    for ga, gb in zip(a, b, strict=True):
+        if ga is None or gb is None:
+            continue
+        total = total + torch.sum(ga * gb)
+    return total
+
+
+def _pcgrad_project_and_sum(
+    grad_lists: Sequence[Sequence[torch.Tensor | None]],
+    *,
+    eps: float = 1e-12,
+) -> list[torch.Tensor | None]:
+    """Return the summed PCGrad gradient over local task/micro gradients."""
+
+    if not grad_lists:
+        return []
+    projected: list[list[torch.Tensor | None]] = [
+        [None if grad is None else grad.clone() for grad in grads]
+        for grads in grad_lists
+    ]
+    references: list[list[torch.Tensor | None]] = [
+        [None if grad is None else grad.detach() for grad in grads]
+        for grads in grad_lists
+    ]
+    for idx, grads in enumerate(projected):
+        for ref_idx, ref in enumerate(references):
+            if idx == ref_idx:
+                continue
+            dot = _grad_list_dot(grads, ref)
+            if float(dot.detach().cpu().item()) >= 0.0:
+                continue
+            denom = _grad_list_dot(ref, ref).detach()
+            if float(denom.detach().cpu().item()) <= float(eps):
+                continue
+            coeff = dot / (denom + float(eps))
+            for param_idx, (grad, ref_grad) in enumerate(zip(grads, ref, strict=True)):
+                if grad is None or ref_grad is None:
+                    continue
+                grads[param_idx] = grad - coeff.to(device=grad.device, dtype=grad.dtype) * ref_grad
+    combined: list[torch.Tensor | None] = []
+    for param_idx in range(len(projected[0])):
+        total: torch.Tensor | None = None
+        for grads in projected:
+            grad = grads[param_idx]
+            if grad is None:
+                continue
+            total = grad.clone() if total is None else total + grad
+        combined.append(total)
+    return combined
+
+
+def _project_simplex_vector(vector: torch.Tensor) -> torch.Tensor:
+    """Project a 1-D tensor onto the probability simplex."""
+
+    if vector.ndim != 1:
+        raise ValueError(f"Expected a 1-D tensor for simplex projection, got shape={tuple(vector.shape)}.")
+    if vector.numel() == 0:
+        return vector
+    sorted_values, _ = torch.sort(vector, descending=True)
+    cssv = torch.cumsum(sorted_values, dim=0) - 1.0
+    ranks = torch.arange(1, int(vector.numel()) + 1, device=vector.device, dtype=vector.dtype)
+    support = sorted_values - cssv / ranks > 0
+    if not bool(torch.any(support).item()):
+        return torch.full_like(vector, 1.0 / float(vector.numel()))
+    rho = int(torch.nonzero(support, as_tuple=False)[-1].item())
+    theta = cssv[rho] / float(rho + 1)
+    return torch.clamp(vector - theta, min=0.0)
+
+
+def _gradient_surgery_gram_matrix(
+    grad_lists: Sequence[Sequence[torch.Tensor | None]],
+) -> torch.Tensor:
+    """Return the CPU float64 Gram matrix for local task/micro gradients."""
+
+    task_count = int(len(grad_lists))
+    gram = torch.zeros((task_count, task_count), dtype=torch.float64)
+    for row in range(task_count):
+        for col in range(row, task_count):
+            value = _grad_list_dot(grad_lists[row], grad_lists[col]).detach().to(device="cpu", dtype=torch.float64)
+            gram[row, col] = value
+            gram[col, row] = value
+    return gram
+
+
+def _combine_grad_lists_with_coefficients(
+    grad_lists: Sequence[Sequence[torch.Tensor | None]],
+    coefficients: Sequence[float],
+) -> list[torch.Tensor | None]:
+    if not grad_lists:
+        return []
+    if len(grad_lists) != len(coefficients):
+        raise ValueError("Gradient list / coefficient length mismatch.")
+    combined: list[torch.Tensor | None] = []
+    for param_idx in range(len(grad_lists[0])):
+        total: torch.Tensor | None = None
+        for grads, coeff in zip(grad_lists, coefficients, strict=True):
+            grad = grads[param_idx]
+            if grad is None:
+                continue
+            scaled = grad * float(coeff)
+            total = scaled.clone() if total is None else total + scaled
+        combined.append(total)
+    return combined
+
+
+def _cagrad_project_and_sum(
+    grad_lists: Sequence[Sequence[torch.Tensor | None]],
+    *,
+    alpha: float = 0.4,
+    iters: int = 20,
+    eps: float = 1e-12,
+    rescale_to_raw_norm: bool = True,
+) -> list[torch.Tensor | None]:
+    """Return a scoped CAGrad update over local task/micro gradients.
+
+    This follows the CAGrad dual form over the simplex:
+
+        min_w <g_w, g_0> + alpha * ||g_0|| * ||g_w||
+
+    where g_0 is the raw logical-batch gradient and g_w is a convex
+    combination of local task gradients.  The optional norm-preserving rescale
+    keeps the adapter update magnitude comparable to the raw logical-batch
+    gradient, which is important here because CAGrad is used as a scoped
+    bridge/action conflict diagnostic rather than a whole-model optimizer.
+    """
+
+    if not grad_lists:
+        return []
+    task_count = int(len(grad_lists))
+    if task_count == 1 or float(alpha) <= 0.0:
+        return _combine_grad_lists_with_coefficients(grad_lists, [1.0] * task_count)
+
+    gram = _gradient_surgery_gram_matrix(grad_lists)
+    raw_coeff = torch.ones((task_count,), dtype=torch.float64)
+    raw_norm_sq = torch.clamp(raw_coeff @ gram @ raw_coeff, min=0.0)
+    raw_norm = torch.sqrt(raw_norm_sq + float(eps))
+    if not bool(torch.isfinite(raw_norm).item()) or float(raw_norm.item()) <= float(eps):
+        return _combine_grad_lists_with_coefficients(grad_lists, [1.0] * task_count)
+
+    weights = torch.full((task_count,), 1.0 / float(task_count), dtype=torch.float64)
+    # A small, deterministic projected-gradient solver is sufficient because
+    # K == logical micro count is small in all production gates.
+    lipschitz = float(torch.linalg.matrix_norm(gram, ord=2).item()) + float(eps)
+    step_size = 1.0 / (lipschitz * (1.0 + float(alpha)) + float(eps))
+    for _ in range(max(1, int(iters))):
+        gw_norm = torch.sqrt(torch.clamp(weights @ gram @ weights, min=0.0) + float(eps))
+        grad_obj = gram @ raw_coeff + float(alpha) * raw_norm * (gram @ weights) / gw_norm
+        weights = _project_simplex_vector(weights - step_size * grad_obj)
+
+    gw_norm = torch.sqrt(torch.clamp(weights @ gram @ weights, min=0.0) + float(eps))
+    if not bool(torch.isfinite(gw_norm).item()) or float(gw_norm.item()) <= float(eps):
+        return _combine_grad_lists_with_coefficients(grad_lists, [1.0] * task_count)
+    cagrad_coeff = raw_coeff + float(alpha) * float(raw_norm.item() / gw_norm.item()) * weights
+    if bool(rescale_to_raw_norm):
+        update_norm_sq = torch.clamp(cagrad_coeff @ gram @ cagrad_coeff, min=0.0)
+        update_norm = torch.sqrt(update_norm_sq + float(eps))
+        if bool(torch.isfinite(update_norm).item()) and float(update_norm.item()) > float(eps):
+            cagrad_coeff = cagrad_coeff * float(raw_norm.item() / update_norm.item())
+    return _combine_grad_lists_with_coefficients(
+        grad_lists,
+        [float(value) for value in cagrad_coeff.tolist()],
+    )
+
+
+def _assign_and_sync_gradient_surgery_grads(
+    params: Sequence[torch.nn.Parameter],
+    grads: Sequence[torch.Tensor | None],
+    *,
+    use_ddp: bool,
+    world_size: int,
+) -> None:
+    if len(params) != len(grads):
+        raise ValueError("Gradient surgery parameter/gradient length mismatch.")
+    for param, grad in zip(params, grads, strict=True):
+        if grad is None:
+            param.grad = None
+            continue
+        assigned = grad.to(device=param.device, dtype=param.dtype)
+        if bool(use_ddp):
+            dist.all_reduce(assigned, op=dist.ReduceOp.SUM)
+            assigned = assigned / float(max(int(world_size), 1))
+        param.grad = assigned
 
 
 def _grad_norm(parameters: Iterator[torch.nn.Parameter]) -> float:
@@ -3538,6 +4380,16 @@ class _TransitionWindow:
 
 
 @dataclasses.dataclass(frozen=True)
+class _PreparedTrainingMicroWindow:
+    micro_step: int
+    flat_index: int
+    sampled_bucket: str
+    retry_count: int
+    point_counts: tuple[int, ...]
+    window: _TransitionWindow
+
+
+@dataclasses.dataclass(frozen=True)
 class _SegmentSamplingSlot:
     segment_id: int
     first_valid_start_step_id: int
@@ -3561,6 +4413,25 @@ class _PendingTransitionLoss:
     tactile_active_rate: torch.Tensor
     owm_debug_metrics: dict[str, torch.Tensor]
     policy_forward_sec: float
+
+
+def _flow_training_total(flow: dict[str, torch.Tensor] | None) -> torch.Tensor | None:
+    if flow is None:
+        return None
+    return flow.get("training_total", flow["total"])
+
+
+def _flow_training_component(flow: dict[str, torch.Tensor] | None, component: str) -> torch.Tensor | None:
+    if flow is None:
+        return None
+    training_key = f"training_{component}"
+    return flow.get(training_key, flow[component])
+
+
+def _flow_default_equiv(flow: dict[str, torch.Tensor] | None) -> torch.Tensor | None:
+    if flow is None:
+        return None
+    return flow.get("mse_total", flow["total"])
 
 
 def _window_trace_record(
@@ -3811,6 +4682,10 @@ class _CalvinTransitionSource:
         mvtrack_sidecar_root: str | Path | None = None,
         mvtrack_sidecar_proposal_nearest_max_gap: int = 0,
         segment_indices: Sequence[int] | None = None,
+        bucket_sampling_mode: str = "round_robin",
+        bucket_temperature_alpha: float = 0.0,
+        bucket_weight_spec: str | None = None,
+        bucket_sample_without_replacement: bool = True,
     ) -> None:
         if int(unroll_steps) < 1:
             raise ValueError(f"unroll_steps must be >= 1, got {unroll_steps}")
@@ -3898,6 +4773,20 @@ class _CalvinTransitionSource:
         self.bucket_names: tuple[str, ...] = tuple(
             sorted(bucket for bucket, indices in self.bucket_to_slot_indices.items() if indices)
         )
+        self.bucket_sampling_mode = _normalize_bucket_sampling_mode(bucket_sampling_mode)
+        self.bucket_temperature_alpha = float(bucket_temperature_alpha)
+        self.bucket_weight_spec = str(bucket_weight_spec or "").strip()
+        self.bucket_sample_without_replacement = bool(bucket_sample_without_replacement)
+        self.bucket_segment_counts: dict[str, int] = {
+            str(bucket): int(len(indices)) for bucket, indices in sorted(self.bucket_to_slot_indices.items())
+        }
+        self.bucket_target_weights: dict[str, float] = _compute_bucket_sampling_weights(
+            bucket_names=self.bucket_names,
+            bucket_sizes=self.bucket_segment_counts,
+            mode=self.bucket_sampling_mode,
+            temperature_alpha=self.bucket_temperature_alpha,
+            weight_spec=self.bucket_weight_spec,
+        )
 
     def __len__(self) -> int:
         return len(self.segment_sampling_slots)
@@ -3930,12 +4819,19 @@ class _CalvinTransitionSource:
         )
         if not self.bucket_names:
             return int(sample_rng.integers(0, len(self))), "unbucketed", sample_rng
-        global_micro = (
-            int(step) * max(int(world_size), 1) * max(int(accum_steps), 1)
-            + int(rank) * max(int(accum_steps), 1)
-            + int(micro_step)
+        bucket_sequence = _bucket_sequence_for_logical_step(
+            bucket_names=self.bucket_names,
+            target_bucket_weights=self.bucket_target_weights,
+            mode=self.bucket_sampling_mode,
+            weight_spec=self.bucket_weight_spec,
+            seed=int(seed),
+            step=int(step),
+            world_size=int(world_size),
+            accum_steps=int(accum_steps),
+            without_replacement=bool(self.bucket_sample_without_replacement),
         )
-        bucket = self.bucket_names[int(global_micro) % len(self.bucket_names)]
+        global_micro_in_step = int(rank) * max(int(accum_steps), 1) + int(micro_step)
+        bucket = str(bucket_sequence[int(global_micro_in_step) % len(bucket_sequence)])
         candidates = self.bucket_to_slot_indices[bucket]
         slot_index = int(candidates[int(sample_rng.integers(0, len(candidates)))])
         return slot_index, bucket, sample_rng
@@ -4398,6 +5294,13 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "pi_context_adapter_gate",
     "pi_context_adapter_attention_entropy_mean",
     "pi_context_adapter_residual_rms_mean",
+    "pi_action_flow_objective_mode_id",
+    "pi_action_flow_time_mean",
+    "pi_action_expert_router_enabled",
+    "pi_action_expert_router_gate",
+    "pi_action_expert_router_entropy_mean",
+    "pi_action_expert_router_top_weight_mean",
+    "pi_action_expert_router_residual_rms_mean",
     "pi_context_probe_mode_id",
     "pi_context_probe_delta_rms_mean",
     "pi_context_probe_post_rms_mean",
@@ -4753,6 +5656,80 @@ class _MetricAccumulator:
         }
 
 
+_BUCKET_LOG_OUTPUT_KEYS = (
+    "loss_total",
+    "loss_action_default_equiv",
+    "loss_total_minus_action",
+    "loss_anchor_pv",
+    "loss_anchor_object_pull",
+    "loss_mapg_routing",
+    "loss_slot_jepa",
+)
+
+
+@dataclasses.dataclass
+class _BucketMetricAccumulator:
+    counts: dict[str, int] = dataclasses.field(default_factory=dict)
+    totals: dict[str, dict[str, float]] = dataclasses.field(default_factory=dict)
+
+    def update_from_outputs(self, bucket: str, outputs: dict[str, torch.Tensor]) -> None:
+        bucket_key = str(bucket)
+        self.counts[bucket_key] = int(self.counts.get(bucket_key, 0)) + 1
+        bucket_totals = self.totals.setdefault(bucket_key, {})
+        zero_reference = outputs.get("loss_total")
+        for key in _BUCKET_LOG_OUTPUT_KEYS:
+            value = outputs.get(key)
+            if value is None:
+                if zero_reference is None:
+                    continue
+                value = zero_reference * 0.0
+            bucket_totals[key] = float(bucket_totals.get(key, 0.0)) + float(value.detach().item())
+
+    def records(self) -> dict[str, dict[str, float]]:
+        records: dict[str, dict[str, float]] = {}
+        for bucket, count in sorted(self.counts.items()):
+            denom = max(int(count), 1)
+            values: dict[str, float] = {"count": float(denom)}
+            for key, total in sorted(self.totals.get(bucket, {}).items()):
+                values[key] = float(total) / float(denom)
+            records[str(bucket)] = values
+        return records
+
+
+def _merge_bucket_metric_records(records: Sequence[dict[str, dict[str, float]]]) -> dict[str, dict[str, float]]:
+    merged_counts: dict[str, float] = {}
+    merged_totals: dict[str, dict[str, float]] = {}
+    for record in records:
+        for bucket, values in (record or {}).items():
+            count = float(values.get("count", 0.0))
+            if count <= 0.0:
+                continue
+            merged_counts[bucket] = float(merged_counts.get(bucket, 0.0)) + count
+            totals = merged_totals.setdefault(bucket, {})
+            for key, value in values.items():
+                if key == "count":
+                    continue
+                totals[key] = float(totals.get(key, 0.0)) + float(value) * count
+    merged: dict[str, dict[str, float]] = {}
+    for bucket, count in sorted(merged_counts.items()):
+        denom = max(float(count), 1.0)
+        values = {"count": float(count)}
+        for key, total in sorted(merged_totals.get(bucket, {}).items()):
+            values[key] = float(total) / denom
+        merged[bucket] = values
+    return merged
+
+
+def _flatten_bucket_metric_records(records: Mapping[str, Mapping[str, float]]) -> dict[str, float]:
+    flat: dict[str, float] = {}
+    for bucket, values in sorted((records or {}).items()):
+        bucket_fragment = _metric_key_fragment(str(bucket))
+        for key, value in sorted(values.items()):
+            key_fragment = _metric_key_fragment(str(key))
+            flat[f"bucket_{bucket_fragment}_{key_fragment}"] = float(value)
+    return flat
+
+
 class _PicfWindowTrainer(torch.nn.Module):
     def __init__(
         self,
@@ -4925,10 +5902,11 @@ class _PicfWindowTrainer(torch.nn.Module):
             zero = torch.zeros((), device=reference.device, dtype=reference.dtype)
             losses = make_action_only_transition_loss(
                 reference=reference,
-                action_loss_override=policy_forward.flow_override["total"],
-                action_pos_override=policy_forward.flow_override["action_pos"],
-                action_rot_override=policy_forward.flow_override["action_rot"],
-                action_gripper_override=policy_forward.flow_override["action_gripper"],
+                action_loss_override=_flow_training_total(policy_forward.flow_override),
+                action_default_equiv_override=_flow_default_equiv(policy_forward.flow_override),
+                action_pos_override=_flow_training_component(policy_forward.flow_override, "action_pos"),
+                action_rot_override=_flow_training_component(policy_forward.flow_override, "action_rot"),
+                action_gripper_override=_flow_training_component(policy_forward.flow_override, "action_gripper"),
             )
             totals.append(losses.total)
             metrics = self._accumulate_loss_metrics(
@@ -5155,10 +6133,11 @@ class _PicfWindowTrainer(torch.nn.Module):
                     action_target=pending.action_target,
                     next_visual_map_override=pending.next_visual_map_override,
                     config=self.loss_config,
-                    action_loss_override=None if pending.flow_override is None else pending.flow_override["total"],
-                    action_pos_override=None if pending.flow_override is None else pending.flow_override["action_pos"],
-                    action_rot_override=None if pending.flow_override is None else pending.flow_override["action_rot"],
-                    action_gripper_override=None if pending.flow_override is None else pending.flow_override["action_gripper"],
+                    action_loss_override=_flow_training_total(pending.flow_override),
+                    action_default_equiv_override=_flow_default_equiv(pending.flow_override),
+                    action_pos_override=_flow_training_component(pending.flow_override, "action_pos"),
+                    action_rot_override=_flow_training_component(pending.flow_override, "action_rot"),
+                    action_gripper_override=_flow_training_component(pending.flow_override, "action_gripper"),
                     action_prefix_trust_override=(
                         None
                         if pending.flow_override is None
@@ -5405,10 +6384,11 @@ class _PicfWindowTrainer(torch.nn.Module):
                 action_target=pending.action_target,
                 next_visual_map_override=pending.next_visual_map_override,
                 config=self.loss_config,
-                action_loss_override=None if pending.flow_override is None else pending.flow_override["total"],
-                action_pos_override=None if pending.flow_override is None else pending.flow_override["action_pos"],
-                action_rot_override=None if pending.flow_override is None else pending.flow_override["action_rot"],
-                action_gripper_override=None if pending.flow_override is None else pending.flow_override["action_gripper"],
+                action_loss_override=_flow_training_total(pending.flow_override),
+                action_default_equiv_override=_flow_default_equiv(pending.flow_override),
+                action_pos_override=_flow_training_component(pending.flow_override, "action_pos"),
+                action_rot_override=_flow_training_component(pending.flow_override, "action_rot"),
+                action_gripper_override=_flow_training_component(pending.flow_override, "action_gripper"),
                 action_prefix_trust_override=(
                     None
                     if pending.flow_override is None
@@ -6319,19 +7299,28 @@ def _load_checkpoint(
     model: torch.nn.Module,
     optimizer: torch.optim.Optimizer,
     device: torch.device,
+    optimizer_checkpoint_mode: str = "auto",
     grad_clip_controller: _GradClipController | None = None,
 ) -> int:
     module = _unwrap_training_model(model)
+    optimizer_checkpoint_mode = str(optimizer_checkpoint_mode or "auto").lower().replace("-", "_")
+    load_optimizer_state = optimizer_checkpoint_mode != "model_only"
     if path.is_dir():
         model_state = torch.load(path / "model.pt", map_location=device, weights_only=False)
         metadata = torch.load(path / "metadata.pt", map_location=device, weights_only=False)
         optimizer_path = path / "optimizer.pt"
         optimizer_state = (
             torch.load(optimizer_path, map_location=device, weights_only=False)
-            if optimizer_path.exists()
+            if load_optimizer_state and optimizer_path.exists()
             else None
         )
         optimizer_loaded = optimizer_state is not None
+        if not load_optimizer_state and optimizer_path.exists():
+            logging.info(
+                "optimizer_checkpoint_mode=%s; skipping optimizer state from checkpoint %s.",
+                optimizer_checkpoint_mode,
+                path,
+            )
         if _is_fsdp_model(model):
             if _is_ablated_semantic_only_model_state(model_state):
                 _load_ablated_semantic_only_model_state(module=module, model_state=model_state)
@@ -6422,9 +7411,16 @@ def _load_checkpoint(
             model=model,
             optimizer=optimizer,
             device=device,
+            optimizer_checkpoint_mode=optimizer_checkpoint_mode,
             grad_clip_controller=grad_clip_controller,
         )
-    optimizer_loaded = True
+    optimizer_loaded = bool(load_optimizer_state)
+    if not load_optimizer_state and payload.get("optimizer") is not None:
+        logging.info(
+            "optimizer_checkpoint_mode=%s; skipping optimizer payload from checkpoint %s.",
+            optimizer_checkpoint_mode,
+            path,
+        )
     if _is_fsdp_model(model):
         if _is_ablated_semantic_only_model_state(payload["model"]):
             _load_ablated_semantic_only_model_state(module=module, model_state=payload["model"])
@@ -6508,6 +7504,7 @@ def _load_checkpoint_sequential_across_ranks(
     device: torch.device,
     rank: int,
     world_size: int,
+    optimizer_checkpoint_mode: str = "auto",
     grad_clip_controller: _GradClipController | None = None,
 ) -> int:
     """Avoid shared-filesystem page-read stalls by serializing DDP checkpoint loads.
@@ -6522,6 +7519,7 @@ def _load_checkpoint_sequential_across_ranks(
             model=model,
             optimizer=optimizer,
             device=device,
+            optimizer_checkpoint_mode=optimizer_checkpoint_mode,
             grad_clip_controller=grad_clip_controller,
         )
         _distributed_barrier(use_ddp=world_size > 1, device=device)
@@ -6536,6 +7534,7 @@ def _load_checkpoint_sequential_across_ranks(
             model=model,
             optimizer=optimizer,
             device=device,
+            optimizer_checkpoint_mode=optimizer_checkpoint_mode,
             grad_clip_controller=grad_clip_controller,
         )
     loaded_step = 0
@@ -6546,6 +7545,7 @@ def _load_checkpoint_sequential_across_ranks(
                 model=model,
                 optimizer=optimizer,
                 device=device,
+                optimizer_checkpoint_mode=optimizer_checkpoint_mode,
                 grad_clip_controller=grad_clip_controller,
             )
         _distributed_barrier(use_ddp=True, device=device)
@@ -7761,6 +8761,24 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 action_context_adapter_rms_cap=bool(
                     getattr(args, "semantic_action_context_adapter_rms_cap", True)
                 ),
+                action_flow_loss=str(getattr(args, "semantic_action_flow_loss", "mse")),
+                action_flow_huber_delta=float(getattr(args, "semantic_action_flow_huber_delta", 1.0)),
+                action_flow_time_alpha=float(getattr(args, "semantic_action_flow_time_alpha", 1.5)),
+                action_flow_time_beta=float(getattr(args, "semantic_action_flow_time_beta", 1.0)),
+                action_expert_router_enabled=bool(
+                    getattr(args, "semantic_action_expert_router_enabled", False)
+                ),
+                action_expert_router_experts=int(getattr(args, "semantic_action_expert_router_experts", 4)),
+                action_expert_router_rank=int(getattr(args, "semantic_action_expert_router_rank", 64)),
+                action_expert_router_gate_init=float(
+                    getattr(args, "semantic_action_expert_router_gate_init", -2.5)
+                ),
+                action_expert_router_temperature=float(
+                    getattr(args, "semantic_action_expert_router_temperature", 1.0)
+                ),
+                action_expert_router_rms_cap=bool(
+                    getattr(args, "semantic_action_expert_router_rms_cap", True)
+                ),
             )
         )
     else:
@@ -8659,7 +9677,133 @@ def train(args: argparse.Namespace) -> None:
             augmentation_mode=args.picf_augmentation_mode,
             photometric_strength=args.picf_photometric_strength,
             segment_indices=calvin_segment_indices,
+            bucket_sampling_mode=getattr(args, "calvin_bucket_sampling_mode", "round_robin"),
+            bucket_temperature_alpha=float(getattr(args, "calvin_bucket_temperature_alpha", 0.0)),
+            bucket_weight_spec=getattr(args, "calvin_bucket_weight_spec", ""),
+            bucket_sample_without_replacement=bool(
+                getattr(args, "calvin_bucket_sample_without_replacement", True)
+            ),
         )
+        expected_logical_task_count = int(world_size) * int(args.accum_steps)
+        requested_logical_task_count = int(getattr(args, "logical_batch_task_count", 0))
+        logical_batch_normalization = bool(getattr(args, "logical_batch_bucket_normalization", False))
+        logical_batch_logging = bool(getattr(args, "logical_batch_log_bucket_metrics", False))
+        logical_action_bucket_ema_normalization = bool(
+            getattr(args, "logical_batch_action_bucket_ema_normalization", False)
+        )
+        logical_action_bucket_ema_decay = float(getattr(args, "logical_batch_action_bucket_ema_decay", 0.98))
+        logical_action_bucket_scale_min = float(getattr(args, "logical_batch_action_bucket_scale_min", 0.5))
+        logical_action_bucket_scale_max = float(getattr(args, "logical_batch_action_bucket_scale_max", 1.5))
+        logical_action_bucket_min_count = int(getattr(args, "logical_batch_action_bucket_min_count", 2))
+        logical_action_bucket_loss_ema: dict[str, float] = {}
+        logical_action_bucket_loss_ema_counts: dict[str, int] = {}
+        logical_dynamic_mixing_enabled = bool(getattr(args, "logical_batch_dynamic_mixing", False))
+        logical_dynamic_mixing_base_weights = dict(source.bucket_target_weights)
+        logical_dynamic_mixing_loss_ema: dict[str, float] = {}
+        logical_dynamic_mixing_loss_ema_previous: dict[str, float] = {}
+        logical_dynamic_mixing_loss_ema_counts: dict[str, int] = {}
+        logical_dynamic_mixing_decay = float(getattr(args, "logical_batch_dynamic_mixing_decay", 0.95))
+        logical_dynamic_mixing_warmup_steps = int(getattr(args, "logical_batch_dynamic_mixing_warmup_steps", 50))
+        logical_dynamic_mixing_min_count = int(getattr(args, "logical_batch_dynamic_mixing_min_count", 2))
+        logical_dynamic_mixing_eta = float(getattr(args, "logical_batch_dynamic_mixing_eta", 0.25))
+        logical_dynamic_mixing_gamma = float(getattr(args, "logical_batch_dynamic_mixing_gamma", 0.5))
+        logical_dynamic_mixing_clip = float(getattr(args, "logical_batch_dynamic_mixing_clip", 2.0))
+        logical_dynamic_mixing_min_mass_fraction = float(
+            getattr(args, "logical_batch_dynamic_mixing_min_mass_fraction", 0.05)
+        )
+        logical_dynamic_mixing_max_weight = float(getattr(args, "logical_batch_dynamic_mixing_max_weight", 0.35))
+        logical_gradient_surgery_mode = str(
+            getattr(args, "logical_batch_gradient_surgery", "off")
+        ).lower().replace("-", "_")
+        logical_gradient_surgery_groups = [
+            group.strip()
+            for group in str(getattr(args, "logical_batch_gradient_surgery_groups", "semantic")).split(",")
+            if group.strip()
+        ]
+        logical_gradient_surgery_eps = float(getattr(args, "logical_batch_gradient_surgery_eps", 1e-12))
+        logical_gradient_surgery_cagrad_alpha = float(
+            getattr(args, "logical_batch_gradient_surgery_cagrad_alpha", 0.4)
+        )
+        logical_gradient_surgery_cagrad_iters = int(
+            getattr(args, "logical_batch_gradient_surgery_cagrad_iters", 20)
+        )
+        logical_gradient_surgery_cagrad_rescale = bool(
+            getattr(args, "logical_batch_gradient_surgery_cagrad_rescale", True)
+        )
+        if requested_logical_task_count > 0 and requested_logical_task_count != expected_logical_task_count:
+            raise ValueError(
+                "--logical-batch-task-count must equal WORLD_SIZE * --accum-steps for this production "
+                f"contract. Requested {requested_logical_task_count}, runtime expects {expected_logical_task_count}."
+            )
+        if (requested_logical_task_count > 0 or logical_batch_normalization) and not bool(
+            getattr(args, "calvin_balanced_bucket_sampler", False)
+        ):
+            raise ValueError(
+                "Logical-batch training requires --calvin-balanced-bucket-sampler so bucket metadata is controlled."
+            )
+        if (
+            (
+                str(getattr(args, "calvin_bucket_sampling_mode", "round_robin")).lower().replace("-", "_")
+                != "round_robin"
+                or str(getattr(args, "calvin_bucket_weight_spec", "") or "").strip()
+            )
+            and not bool(getattr(args, "calvin_balanced_bucket_sampler", False))
+        ):
+            raise ValueError(
+                "CALVIN bucket sampling modes/weights require --calvin-balanced-bucket-sampler. "
+                "Otherwise the dataloader is intentionally global random."
+            )
+        if logical_batch_normalization and not source.bucket_names:
+            raise RuntimeError("Logical-batch bucket normalization requested, but CALVIN source has no task buckets.")
+        if logical_action_bucket_ema_normalization and not logical_batch_normalization:
+            raise ValueError(
+                "--logical-batch-action-bucket-ema-normalization requires --logical-batch-bucket-normalization "
+                "so action-component scaling is applied inside a controlled logical-batch estimator."
+            )
+        if logical_dynamic_mixing_enabled and not logical_batch_normalization:
+            raise ValueError(
+                "--logical-batch-dynamic-mixing requires --logical-batch-bucket-normalization so sampling q_b(t) "
+                "and the logical-batch loss estimator use the same target distribution."
+            )
+        if is_main:
+            logging.info(
+                "Logical-batch config: requested_task_count=%s runtime_task_count=%s bucket_normalization=%s "
+                "bucket_metrics=%s bucket_sampling_mode=%s bucket_temperature_alpha=%s bucket_weight_spec=%r "
+                "bucket_sample_without_replacement=%s action_bucket_ema_normalization=%s "
+                "action_bucket_ema_decay=%s action_bucket_scale_min=%s action_bucket_scale_max=%s "
+                "action_bucket_min_count=%s dynamic_mixing=%s dynamic_mixing_decay=%s "
+                "dynamic_mixing_warmup_steps=%s dynamic_mixing_min_count=%s dynamic_mixing_eta=%s "
+                "dynamic_mixing_gamma=%s dynamic_mixing_clip=%s dynamic_mixing_min_mass_fraction=%s "
+                "dynamic_mixing_max_weight=%s gradient_surgery=%s gradient_surgery_groups=%s "
+                "bucket_names=%s bucket_segment_counts=%s bucket_target_weights=%s",
+                requested_logical_task_count,
+                expected_logical_task_count,
+                logical_batch_normalization,
+                logical_batch_logging,
+                source.bucket_sampling_mode,
+                source.bucket_temperature_alpha,
+                source.bucket_weight_spec,
+                source.bucket_sample_without_replacement,
+                logical_action_bucket_ema_normalization,
+                logical_action_bucket_ema_decay,
+                logical_action_bucket_scale_min,
+                logical_action_bucket_scale_max,
+                logical_action_bucket_min_count,
+                logical_dynamic_mixing_enabled,
+                logical_dynamic_mixing_decay,
+                logical_dynamic_mixing_warmup_steps,
+                logical_dynamic_mixing_min_count,
+                logical_dynamic_mixing_eta,
+                logical_dynamic_mixing_gamma,
+                logical_dynamic_mixing_clip,
+                logical_dynamic_mixing_min_mass_fraction,
+                logical_dynamic_mixing_max_weight,
+                logical_gradient_surgery_mode,
+                ",".join(logical_gradient_surgery_groups),
+                ",".join(source.bucket_names),
+                source.bucket_segment_counts,
+                source.bucket_target_weights,
+            )
 
         core, semantic_encoder, use_visual_override = _build_model_sequential_across_ranks(
             args,
@@ -8702,8 +9846,27 @@ def train(args: argparse.Namespace) -> None:
                 model,
                 device_ids=[device.index] if device.type == "cuda" else None,
                 find_unused_parameters=True,
-                gradient_as_bucket_view=True,
+                gradient_as_bucket_view=bool(logical_gradient_surgery_mode == "off"),
                 static_graph=False,
+            )
+        logical_gradient_surgery_params: list[torch.nn.Parameter] = []
+        if logical_gradient_surgery_mode != "off":
+            logical_gradient_surgery_params = _logical_batch_gradient_surgery_params(
+                model,
+                groups=logical_gradient_surgery_groups,
+            )
+            if not logical_gradient_surgery_params:
+                raise RuntimeError(
+                    "logical_batch_gradient_surgery matched no trainable parameters; "
+                    f"groups={logical_gradient_surgery_groups!r}."
+                )
+        if is_main:
+            logging.info(
+                "Logical-batch gradient surgery: mode=%s groups=%s param_tensors=%s param_numel=%s",
+                logical_gradient_surgery_mode,
+                ",".join(logical_gradient_surgery_groups),
+                len(logical_gradient_surgery_params),
+                int(sum(0 if isinstance(param, UninitializedParameter) else param.numel() for param in logical_gradient_surgery_params)),
             )
 
         start_step = 0
@@ -8722,6 +9885,7 @@ def train(args: argparse.Namespace) -> None:
                 device=device,
                 rank=rank,
                 world_size=world_size,
+                optimizer_checkpoint_mode=str(args.optimizer_checkpoint_mode),
                 grad_clip_controller=grad_clip_controller,
             )
             logging.info("Resumed from %s at step=%s", resume_path, start_step)
@@ -8746,6 +9910,8 @@ def train(args: argparse.Namespace) -> None:
 
         rng = np.random.default_rng(args.seed + 17 * rank)
         metric_accum = _MetricAccumulator()
+        bucket_metric_accum = _BucketMetricAccumulator()
+        last_logical_batch_step_info: dict[str, Any] = {}
         interval_start = time.time()
         steps_in_interval = 0
         retried_windows_interval = 0
@@ -8777,7 +9943,7 @@ def train(args: argparse.Namespace) -> None:
             effective_global_batch = int(world_size * args.accum_steps)
             warmup_fraction = 100.0 * float(args.warmup_steps) / float(max(args.num_train_steps, 1))
             logging.info(
-                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s step_indexed_window_rng=%s calvin_balanced_bucket_sampler=%s calvin_buckets=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s anchor_overlay_dump_signatures=%s wandb=%s",
+                "Training config: world_size=%s training_strategy=%s picf_mode=%s trainable_scope=%s trainable_numel=%s total_numel=%s accum_steps=%s effective_global_batch=%s num_steps=%s lr=%s min_lr=%s warmup=%s save_interval=%s unroll_steps=%s burnin_steps=%s burnin_mode=%s effective_window_steps=%s optimizer_sharding=%s optimizer_checkpoint_mode=%s window_activation_checkpointing=%s step_indexed_window_rng=%s calvin_balanced_bucket_sampler=%s calvin_bucket_sampling_mode=%s calvin_bucket_temperature_alpha=%s calvin_bucket_weight_spec=%r calvin_bucket_sample_without_replacement=%s logical_batch_task_count=%s logical_batch_bucket_normalization=%s logical_batch_log_bucket_metrics=%s calvin_buckets=%s anchor_overlay_interval=%s anchor_overlay_max_anchors=%s anchor_overlay_dump_signatures=%s wandb=%s",
                 world_size,
                 args.training_strategy,
                 args.picf_mode,
@@ -8800,6 +9966,13 @@ def train(args: argparse.Namespace) -> None:
                 bool(getattr(args, "window_activation_checkpointing", False)),
                 bool(getattr(args, "step_indexed_window_rng", True)),
                 bool(getattr(args, "calvin_balanced_bucket_sampler", False)),
+                str(getattr(args, "calvin_bucket_sampling_mode", "round_robin")),
+                float(getattr(args, "calvin_bucket_temperature_alpha", 0.0)),
+                str(getattr(args, "calvin_bucket_weight_spec", "")),
+                bool(getattr(args, "calvin_bucket_sample_without_replacement", True)),
+                int(getattr(args, "logical_batch_task_count", 0)),
+                bool(getattr(args, "logical_batch_bucket_normalization", False)),
+                bool(getattr(args, "logical_batch_log_bucket_metrics", False)),
                 ",".join(getattr(source, "bucket_names", ())),
                 int(getattr(args, "anchor_overlay_interval", 0)),
                 int(getattr(args, "anchor_overlay_max_anchors", 64)),
@@ -9388,6 +10561,25 @@ def train(args: argparse.Namespace) -> None:
                 str(getattr(args, "semantic_trainable_scope", "backbone_only")),
             )
             logging.info(
+                "Action-flow objective contract: train_loss=%s huber_delta=%s time_beta=(%s,%s) "
+                "canonical_mse_report=loss_action_default_equiv",
+                str(getattr(args, "semantic_action_flow_loss", "mse")),
+                float(getattr(args, "semantic_action_flow_huber_delta", 1.0)),
+                float(getattr(args, "semantic_action_flow_time_alpha", 1.5)),
+                float(getattr(args, "semantic_action_flow_time_beta", 1.0)),
+            )
+            logging.info(
+                "Action-expert router contract: enabled=%s experts=%s rank=%s gate_init=%s temperature=%s "
+                "rms_cap=%s scope=%s",
+                bool(getattr(args, "semantic_action_expert_router_enabled", False)),
+                int(getattr(args, "semantic_action_expert_router_experts", 4)),
+                int(getattr(args, "semantic_action_expert_router_rank", 64)),
+                float(getattr(args, "semantic_action_expert_router_gate_init", -2.5)),
+                float(getattr(args, "semantic_action_expert_router_temperature", 1.0)),
+                bool(getattr(args, "semantic_action_expert_router_rms_cap", True)),
+                str(getattr(args, "semantic_trainable_scope", "backbone_only")),
+            )
+            logging.info(
                 "Frozen feature cache contract: vjepa_mode=%s vjepa_root=%s vjepa_temporal_slices=%s "
                 "vjepa_storage_dtype=%s valid_only_when_visual_trainable_false=%s",
                 str(getattr(args, "vjepa_feature_cache_mode", "off")),
@@ -9516,6 +10708,26 @@ def train(args: argparse.Namespace) -> None:
             optimizer.zero_grad(set_to_none=True)
             if debug_phase_enabled:
                 logging.info("phase step=%s rank=%s zero_grad_done", int(step + 1), rank)
+            current_bucket_target_weights = dict(source.bucket_target_weights)
+            dynamic_mixing_step_info: dict[str, float | int | bool] = {}
+            if logical_dynamic_mixing_enabled:
+                current_bucket_target_weights, dynamic_mixing_step_info = _dynamic_bucket_sampling_weights(
+                    bucket_names=source.bucket_names,
+                    base_weights=logical_dynamic_mixing_base_weights,
+                    loss_ema=logical_dynamic_mixing_loss_ema,
+                    previous_loss_ema=logical_dynamic_mixing_loss_ema_previous,
+                    counts=logical_dynamic_mixing_loss_ema_counts,
+                    step=int(step),
+                    warmup_steps=logical_dynamic_mixing_warmup_steps,
+                    min_count=logical_dynamic_mixing_min_count,
+                    eta=logical_dynamic_mixing_eta,
+                    gamma=logical_dynamic_mixing_gamma,
+                    clip=logical_dynamic_mixing_clip,
+                    min_mass_fraction=logical_dynamic_mixing_min_mass_fraction,
+                    max_weight=logical_dynamic_mixing_max_weight,
+                )
+                source.bucket_target_weights = dict(current_bucket_target_weights)
+                logical_dynamic_mixing_loss_ema_previous = dict(logical_dynamic_mixing_loss_ema)
             trainer_module = _unwrap_training_model(model)
             scheduled_loss_config, object_scaffold_decay_scale = _scheduled_loss_config(
                 base_loss_config,
@@ -9539,10 +10751,8 @@ def train(args: argparse.Namespace) -> None:
                 and not capture_visual_diagnostics
                 and not capture_anchor_overlay_step
             )
+            prepared_micro_windows: list[_PreparedTrainingMicroWindow] = []
             for micro_step in range(args.accum_steps):
-                capture_anchor_overlay = bool(
-                    capture_anchor_overlay_step and micro_step == int(args.accum_steps) - 1
-                )
                 sample_start = time.perf_counter()
                 retry_count = 0
                 if debug_phase_enabled:
@@ -9642,8 +10852,43 @@ def train(args: argparse.Namespace) -> None:
                                 window.start_step_id,
                                 retry_count,
                                 args.max_empty_window_retries,
-                            )
+                        )
                         continue
+                prepared_micro_windows.append(
+                    _PreparedTrainingMicroWindow(
+                        micro_step=int(micro_step),
+                        flat_index=int(flat_index),
+                        sampled_bucket=str(sampled_bucket),
+                        retry_count=int(retry_count),
+                        point_counts=tuple(int(count) for count in window_point_counts),
+                        window=window,
+                    )
+                )
+
+            logical_loss_scales, last_logical_batch_step_info = _logical_batch_loss_scales(
+                [prepared.sampled_bucket for prepared in prepared_micro_windows],
+                enabled=logical_batch_normalization,
+                use_ddp=use_ddp,
+                world_size=int(world_size),
+                target_bucket_weights=current_bucket_target_weights,
+            )
+            if dynamic_mixing_step_info:
+                last_logical_batch_step_info.update(dynamic_mixing_step_info)
+            outputs: dict[str, torch.Tensor] = {}
+            window = prepared_micro_windows[-1].window
+            logical_action_bucket_scales_used: list[float] = []
+            logical_action_bucket_scale_by_bucket: dict[str, list[float]] = {}
+            logical_gradient_surgery_local_grads: list[list[torch.Tensor | None]] = []
+            for prepared, logical_loss_scale in zip(prepared_micro_windows, logical_loss_scales, strict=True):
+                micro_step = int(prepared.micro_step)
+                flat_index = int(prepared.flat_index)
+                sampled_bucket = str(prepared.sampled_bucket)
+                retry_count = int(prepared.retry_count)
+                window_point_counts = tuple(int(count) for count in prepared.point_counts)
+                window = prepared.window
+                capture_anchor_overlay = bool(
+                    capture_anchor_overlay_step and micro_step == int(args.accum_steps) - 1
+                )
                 sync_context: Any = _training_model_no_sync(
                     model,
                     enabled=bool(world_size > 1 and micro_step < args.accum_steps - 1),
@@ -9688,19 +10933,21 @@ def train(args: argparse.Namespace) -> None:
                             "sampled_bucket": str(sampled_bucket),
                             "retry_count": int(retry_count),
                             "point_counts": tuple(int(count) for count in window_point_counts),
+                            "logical_loss_scale": float(logical_loss_scale),
                         }
                     )
-                    window_trace_interval.append(
-                        _window_trace_record(
-                            window,
-                            global_step=int(step + 1),
-                            micro_step=int(micro_step + 1),
-                            rank=rank,
-                            flat_index=int(flat_index),
-                            retry_count=int(retry_count),
-                            point_counts=tuple(int(count) for count in window_point_counts),
-                        )
+                    trace_entry = _window_trace_record(
+                        window,
+                        global_step=int(step + 1),
+                        micro_step=int(micro_step + 1),
+                        rank=rank,
+                        flat_index=int(flat_index),
+                        retry_count=int(retry_count),
+                        point_counts=tuple(int(count) for count in window_point_counts),
                     )
+                    trace_entry["sampled_bucket"] = str(sampled_bucket)
+                    trace_entry["logical_loss_scale"] = float(logical_loss_scale)
+                    window_trace_interval.append(trace_entry)
                     try:
                         forward_label = None
                         if debug_phase_enabled:
@@ -9750,7 +10997,59 @@ def train(args: argparse.Namespace) -> None:
                         if debug_cuda_sync and device.type == "cuda":
                             torch.cuda.synchronize(device=device)
                         backward_start = time.perf_counter()
-                        (outputs["loss_total"] / float(args.accum_steps)).backward()
+                        loss_for_backward = outputs["loss_total"]
+                        action_bucket_scale = 1.0
+                        if (
+                            logical_action_bucket_ema_normalization
+                            and "loss_total_minus_action" in outputs
+                            and "loss_total" in outputs
+                        ):
+                            action_bucket_scale = _logical_action_bucket_scale(
+                                sampled_bucket,
+                                ema=logical_action_bucket_loss_ema,
+                                counts=logical_action_bucket_loss_ema_counts,
+                                min_count=logical_action_bucket_min_count,
+                                scale_min=logical_action_bucket_scale_min,
+                                scale_max=logical_action_bucket_scale_max,
+                            )
+                            non_action_loss = outputs["loss_total_minus_action"]
+                            action_component = outputs["loss_total"] - non_action_loss
+                            loss_for_backward = non_action_loss + action_component * float(action_bucket_scale)
+                            logical_action_bucket_scales_used.append(float(action_bucket_scale))
+                            logical_action_bucket_scale_by_bucket.setdefault(str(sampled_bucket), []).append(
+                                float(action_bucket_scale)
+                            )
+                        scaled_loss_for_backward = loss_for_backward * float(logical_loss_scale)
+                        if logical_gradient_surgery_mode in {"pcgrad", "cagrad"}:
+                            logical_gradient_surgery_local_grads.append(
+                                _logical_batch_autograd_grads(
+                                    scaled_loss_for_backward,
+                                    logical_gradient_surgery_params,
+                                )
+                            )
+                        scaled_loss_for_backward.backward()
+                        if logical_action_bucket_ema_normalization and "loss_action_default_equiv" in outputs:
+                            _update_logical_action_bucket_ema(
+                                logical_action_bucket_loss_ema,
+                                logical_action_bucket_loss_ema_counts,
+                                bucket=sampled_bucket,
+                                value=float(outputs["loss_action_default_equiv"].detach().item()),
+                                decay=logical_action_bucket_ema_decay,
+                                bucket_names=source.bucket_names,
+                                use_ddp=use_ddp,
+                                device=device,
+                            )
+                        if logical_dynamic_mixing_enabled and "loss_action_default_equiv" in outputs:
+                            _update_logical_action_bucket_ema(
+                                logical_dynamic_mixing_loss_ema,
+                                logical_dynamic_mixing_loss_ema_counts,
+                                bucket=sampled_bucket,
+                                value=float(outputs["loss_action_default_equiv"].detach().item()),
+                                decay=logical_dynamic_mixing_decay,
+                                bucket_names=source.bucket_names,
+                                use_ddp=use_ddp,
+                                device=device,
+                            )
                         if debug_phase_enabled:
                             logging.info("%s backward_sec=%.3f", forward_label, time.perf_counter() - backward_start)
                         if debug_cuda_sync and device.type == "cuda":
@@ -9772,6 +11071,105 @@ def train(args: argparse.Namespace) -> None:
                             logging.error("Recent tensor index trace before failure: %s", _dump_debug_index_trace())
                         raise
                 metric_accum.update_from_outputs(outputs)
+                if logical_batch_logging:
+                    bucket_metric_accum.update_from_outputs(sampled_bucket, outputs)
+
+            if logical_gradient_surgery_mode in {"pcgrad", "cagrad"}:
+                if logical_gradient_surgery_mode == "pcgrad":
+                    projected_grads = _pcgrad_project_and_sum(
+                        logical_gradient_surgery_local_grads,
+                        eps=logical_gradient_surgery_eps,
+                    )
+                    logical_gradient_surgery_mode_id = 1
+                else:
+                    projected_grads = _cagrad_project_and_sum(
+                        logical_gradient_surgery_local_grads,
+                        alpha=logical_gradient_surgery_cagrad_alpha,
+                        iters=logical_gradient_surgery_cagrad_iters,
+                        eps=logical_gradient_surgery_eps,
+                        rescale_to_raw_norm=logical_gradient_surgery_cagrad_rescale,
+                    )
+                    logical_gradient_surgery_mode_id = 2
+                _assign_and_sync_gradient_surgery_grads(
+                    logical_gradient_surgery_params,
+                    projected_grads,
+                    use_ddp=use_ddp,
+                    world_size=int(world_size),
+                )
+                last_logical_batch_step_info.update(
+                    {
+                        "logical_batch_gradient_surgery_enabled": True,
+                        "logical_batch_gradient_surgery_mode_id": int(logical_gradient_surgery_mode_id),
+                        "logical_batch_gradient_surgery_local_micro_count": int(
+                            len(logical_gradient_surgery_local_grads)
+                        ),
+                        "logical_batch_gradient_surgery_target_param_tensors": int(
+                            len(logical_gradient_surgery_params)
+                        ),
+                        "logical_batch_gradient_surgery_cagrad_alpha": float(
+                            logical_gradient_surgery_cagrad_alpha
+                        ),
+                        "logical_batch_gradient_surgery_cagrad_iters": int(
+                            logical_gradient_surgery_cagrad_iters
+                        ),
+                        "logical_batch_gradient_surgery_cagrad_rescale": bool(
+                            logical_gradient_surgery_cagrad_rescale
+                        ),
+                    }
+                )
+
+            if logical_action_bucket_ema_normalization:
+                gathered_scale_by_bucket = _all_gather_python_object(
+                    logical_action_bucket_scale_by_bucket,
+                    use_ddp=use_ddp,
+                    world_size=int(world_size),
+                )
+                global_action_bucket_scale_by_bucket: dict[str, list[float]] = {}
+                for rank_record in gathered_scale_by_bucket:
+                    if not isinstance(rank_record, Mapping):
+                        continue
+                    for bucket, values in rank_record.items():
+                        bucket_key = str(bucket)
+                        if isinstance(values, Sequence) and not isinstance(values, (str, bytes)):
+                            global_action_bucket_scale_by_bucket.setdefault(bucket_key, []).extend(
+                                float(value) for value in values
+                            )
+                global_action_bucket_scales_used = [
+                    float(value)
+                    for values in global_action_bucket_scale_by_bucket.values()
+                    for value in values
+                ]
+                if global_action_bucket_scales_used:
+                    last_logical_batch_step_info.update(
+                        {
+                            "logical_batch_action_bucket_ema_normalization": True,
+                            "logical_batch_action_bucket_scale_mean": float(
+                                sum(global_action_bucket_scales_used)
+                                / float(len(global_action_bucket_scales_used))
+                            ),
+                            "logical_batch_action_bucket_scale_min": float(
+                                min(global_action_bucket_scales_used)
+                            ),
+                            "logical_batch_action_bucket_scale_max": float(
+                                max(global_action_bucket_scales_used)
+                            ),
+                        }
+                    )
+                else:
+                    last_logical_batch_step_info["logical_batch_action_bucket_ema_normalization"] = True
+                for bucket, values in sorted(global_action_bucket_scale_by_bucket.items()):
+                    fragment = _metric_key_fragment(bucket)
+                    last_logical_batch_step_info[f"logical_batch_action_bucket_scale_{fragment}"] = float(
+                        sum(values) / float(max(len(values), 1))
+                    )
+                for bucket in source.bucket_names:
+                    fragment = _metric_key_fragment(bucket)
+                    last_logical_batch_step_info[f"logical_batch_action_bucket_ema_{fragment}"] = float(
+                        logical_action_bucket_loss_ema.get(str(bucket), 0.0)
+                    )
+                    last_logical_batch_step_info[f"logical_batch_action_bucket_ema_count_{fragment}"] = int(
+                        logical_action_bucket_loss_ema_counts.get(str(bucket), 0)
+                    )
 
             clip_start = time.perf_counter()
             grad_issue = _collect_nonfinite_gradient_diagnostics(model, optimizer=optimizer, max_items=24)
@@ -9827,6 +11225,43 @@ def train(args: argparse.Namespace) -> None:
                     preclip_local_grad = _reduce_mean(preclip_local_grad, device=device, world_size=world_size)
                     local_grad = _reduce_mean(local_grad, device=device, world_size=world_size)
                     retried_windows = _reduce_sum(retried_windows, device=device, world_size=world_size)
+                logical_batch_record: dict[str, float | int | bool] = {
+                    "logical_batch_enabled": bool(last_logical_batch_step_info.get("logical_batch_enabled", False)),
+                    "logical_batch_global_micro_count": int(
+                        last_logical_batch_step_info.get("logical_batch_global_micro_count", 0)
+                    ),
+                    "logical_batch_distinct_bucket_count": int(
+                        last_logical_batch_step_info.get("logical_batch_distinct_bucket_count", 0)
+                    ),
+                }
+                for bucket, count in dict(last_logical_batch_step_info.get("logical_batch_bucket_counts", {})).items():
+                    logical_batch_record[f"logical_batch_selected_{_metric_key_fragment(str(bucket))}_count"] = int(count)
+                for bucket, weight in dict(
+                    last_logical_batch_step_info.get("logical_batch_bucket_target_weights", {})
+                ).items():
+                    logical_batch_record[f"logical_batch_target_{_metric_key_fragment(str(bucket))}_weight"] = float(weight)
+                for key, value in last_logical_batch_step_info.items():
+                    if not (
+                        str(key).startswith("logical_batch_action_bucket_")
+                        or str(key).startswith("logical_batch_gradient_surgery_")
+                        or str(key).startswith("logical_batch_dynamic_")
+                    ):
+                        continue
+                    if isinstance(value, bool):
+                        logical_batch_record[str(key)] = bool(value)
+                    elif isinstance(value, int):
+                        logical_batch_record[str(key)] = int(value)
+                    elif isinstance(value, float):
+                        logical_batch_record[str(key)] = float(value)
+                bucket_metric_record: dict[str, float] = {}
+                if logical_batch_logging:
+                    gathered_bucket_records = _all_gather_python_object(
+                        bucket_metric_accum.records(),
+                        use_ddp=use_ddp,
+                        world_size=int(world_size),
+                    )
+                    merged_bucket_records = _merge_bucket_metric_records(gathered_bucket_records)
+                    bucket_metric_record = _flatten_bucket_metric_records(merged_bucket_records)
                 if is_main:
                     record = {
                         "step": int(step + 1),
@@ -9845,6 +11280,8 @@ def train(args: argparse.Namespace) -> None:
                         "picf_core_lr_runtime_multiplier": float(picf_core_runtime_lr_multiplier),
                         "picf_core_lr_effective_scale": float(args.picf_core_lr_scale)
                         * float(picf_core_runtime_lr_multiplier),
+                        **logical_batch_record,
+                        **bucket_metric_record,
                         **_optimizer_group_grad_metrics(optimizer),
                         **averages,
                     }
@@ -9867,6 +11304,7 @@ def train(args: argparse.Namespace) -> None:
                     with window_trace_path.open("a", encoding="utf-8") as fh:
                         fh.write(json.dumps(trace_record, sort_keys=True) + "\n")
                 metric_accum = _MetricAccumulator()
+                bucket_metric_accum = _BucketMetricAccumulator()
                 window_trace_interval = []
                 interval_start = time.time()
                 steps_in_interval = 0
@@ -10022,6 +11460,139 @@ def main() -> None:
             "Sample CALVIN segment slots in deterministic coarse task buckets across rank/micro-steps. "
             "This approximates the balanced exact-window objective used by the action-readout causal probes "
             "without changing model inputs or adding losses."
+        ),
+    )
+    parser.add_argument(
+        "--calvin-bucket-sampling-mode",
+        type=str,
+        choices=sorted(_CALVIN_BUCKET_SAMPLING_MODES),
+        default="round_robin",
+        help=(
+            "Target distribution for --calvin-balanced-bucket-sampler. "
+            "round_robin keeps the historical deterministic bucket cycle; task_uniform samples task families uniformly; "
+            "trajectory samples proportional to segment count; temperature samples proportional to N_b ** alpha."
+        ),
+    )
+    parser.add_argument(
+        "--calvin-bucket-temperature-alpha",
+        type=float,
+        default=0.0,
+        help=(
+            "Alpha for --calvin-bucket-sampling-mode=temperature. "
+            "0 is task-uniform, 1 is trajectory-proportional."
+        ),
+    )
+    parser.add_argument(
+        "--calvin-bucket-weight-spec",
+        type=str,
+        default="",
+        help=(
+            "Optional explicit VLA-Foundry-style bucket ratio, e.g. "
+            "'block_push=1,drawer=1,switch_button_light=1,*=0.5'. "
+            "When set, every bucket must match an entry or '*=<weight>'."
+        ),
+    )
+    parser.add_argument(
+        "--calvin-bucket-sample-without-replacement",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "For non-round-robin bucket modes, sample one shared bucket sequence per optimizer step without "
+            "replacement before repeating.  This is the production logical-batch contract: with K<=num_buckets, "
+            "one optimizer update cannot be dominated by duplicate task buckets.  Use --no-calvin-bucket-sample-without-replacement "
+            "only to reproduce the older independent-with-replacement sampler."
+        ),
+    )
+    parser.add_argument(
+        "--logical-batch-task-count",
+        type=int,
+        default=0,
+        help=(
+            "Strict logical-batch contract size.  When >0 it must equal WORLD_SIZE * --accum-steps. "
+            "This prevents accidentally running a supposed balanced run with the wrong optimizer-step coverage."
+        ),
+    )
+    parser.add_argument(
+        "--logical-batch-bucket-normalization",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Scale each micro-window loss by a task-bucket-balanced logical-batch estimator before backward. "
+            "Requires --calvin-balanced-bucket-sampler."
+        ),
+    )
+    parser.add_argument(
+        "--logical-batch-log-bucket-metrics",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Emit flattened per-task-bucket loss metrics into metrics.jsonl. "
+            "This is low overhead and intended for diagnosing multi-task gradient coverage."
+        ),
+    )
+    parser.add_argument(
+        "--logical-batch-action-bucket-ema-normalization",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Apply a bounded per-bucket EMA scale to only the action component during backward. "
+            "Displayed action losses stay unscaled and comparable; this is a controlled F9b "
+            "adapter-conflict diagnostic, not a metric change."
+        ),
+    )
+    parser.add_argument("--logical-batch-action-bucket-ema-decay", type=float, default=0.98)
+    parser.add_argument("--logical-batch-action-bucket-scale-min", type=float, default=0.5)
+    parser.add_argument("--logical-batch-action-bucket-scale-max", type=float, default=1.5)
+    parser.add_argument("--logical-batch-action-bucket-min-count", type=int, default=2)
+    parser.add_argument(
+        "--logical-batch-dynamic-mixing",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable bounded PiKE-style dynamic task-bucket sampling.  The base distribution remains "
+            "--calvin-bucket-sampling-mode/--calvin-bucket-weight-spec; dynamic mixing only adjusts q_b(t) "
+            "from per-bucket action-loss EMA/progress and uses the same q_b(t) in logical-batch loss scaling."
+        ),
+    )
+    parser.add_argument("--logical-batch-dynamic-mixing-decay", type=float, default=0.95)
+    parser.add_argument("--logical-batch-dynamic-mixing-warmup-steps", type=int, default=50)
+    parser.add_argument("--logical-batch-dynamic-mixing-min-count", type=int, default=2)
+    parser.add_argument("--logical-batch-dynamic-mixing-eta", type=float, default=0.25)
+    parser.add_argument("--logical-batch-dynamic-mixing-gamma", type=float, default=0.5)
+    parser.add_argument("--logical-batch-dynamic-mixing-clip", type=float, default=2.0)
+    parser.add_argument("--logical-batch-dynamic-mixing-min-mass-fraction", type=float, default=0.05)
+    parser.add_argument("--logical-batch-dynamic-mixing-max-weight", type=float, default=0.35)
+    parser.add_argument(
+        "--logical-batch-gradient-surgery",
+        choices=["off", "pcgrad", "cagrad"],
+        default="off",
+        help=(
+            "Optional adapter-level gradient surgery after logical-batch backward. "
+            "pcgrad collects per-micro gradients for the selected parameter groups, projects away negative "
+            "task-bucket components, overwrites only those group gradients, and leaves all other gradients unchanged. "
+            "cagrad uses a scoped conflict-averse simplex update over the same per-micro gradients."
+        ),
+    )
+    parser.add_argument(
+        "--logical-batch-gradient-surgery-groups",
+        type=str,
+        default="semantic",
+        help=(
+            "Comma-separated optimizer-owner groups for gradient surgery: semantic, policy_head, picf_core. "
+            "The evidence-backed default branch is semantic only; do not include picf_core unless a probe "
+            "shows strong structural-loss conflict there."
+        ),
+    )
+    parser.add_argument("--logical-batch-gradient-surgery-eps", type=float, default=1e-12)
+    parser.add_argument("--logical-batch-gradient-surgery-cagrad-alpha", type=float, default=0.4)
+    parser.add_argument("--logical-batch-gradient-surgery-cagrad-iters", type=int, default=20)
+    parser.add_argument(
+        "--logical-batch-gradient-surgery-cagrad-rescale",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help=(
+            "Rescale the scoped CAGrad update to the raw logical-batch gradient norm. "
+            "This keeps adapter/action-head update magnitude comparable while changing conflict direction."
         ),
     )
     parser.add_argument("--max-empty-window-retries", type=int, default=32)
@@ -10837,6 +12408,73 @@ def main() -> None:
         action=argparse.BooleanOptionalAction,
         default=True,
         help="Cap action-context adapter residual RMS to the current action suffix RMS.",
+    )
+    parser.add_argument(
+        "--semantic-action-flow-loss",
+        choices=["mse", "l1", "huber", "smooth_l1"],
+        default="mse",
+        help=(
+            "Training objective for PI0.5 flow velocity. The canonical MSE report remains "
+            "loss_action_default_equiv for comparison with historical 4-22 runs; non-MSE modes "
+            "only change the gradient objective."
+        ),
+    )
+    parser.add_argument(
+        "--semantic-action-flow-huber-delta",
+        type=float,
+        default=1.0,
+        help="Delta/beta for huber or smooth_l1 action-flow objective.",
+    )
+    parser.add_argument(
+        "--semantic-action-flow-time-alpha",
+        type=float,
+        default=1.5,
+        help="Beta distribution alpha for PI0.5 action-flow training time sampling.",
+    )
+    parser.add_argument(
+        "--semantic-action-flow-time-beta",
+        type=float,
+        default=1.0,
+        help="Beta distribution beta for PI0.5 action-flow training time sampling.",
+    )
+    parser.add_argument(
+        "--semantic-action-expert-router-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable semantic/PICF-conditioned low-rank expert routing on PI0.5 action suffix tokens. "
+            "This is action-expert-only routing; it does not MoE the VLM backbone."
+        ),
+    )
+    parser.add_argument(
+        "--semantic-action-expert-router-experts",
+        type=int,
+        default=4,
+        help="Number of low-rank action suffix experts for --semantic-action-expert-router-enabled.",
+    )
+    parser.add_argument(
+        "--semantic-action-expert-router-rank",
+        type=int,
+        default=64,
+        help="Low-rank bottleneck size for each action expert router residual.",
+    )
+    parser.add_argument(
+        "--semantic-action-expert-router-gate-init",
+        type=float,
+        default=-2.5,
+        help="Initial logit for the action-expert router residual gate; sigmoid(-2.5) ~= 0.076.",
+    )
+    parser.add_argument(
+        "--semantic-action-expert-router-temperature",
+        type=float,
+        default=1.0,
+        help="Softmax temperature for action-expert router mixture weights.",
+    )
+    parser.add_argument(
+        "--semantic-action-expert-router-rms-cap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cap action-expert router residual RMS to current action suffix RMS.",
     )
     parser.add_argument("--semantic-lr-scale", type=float, default=0.25)
     parser.add_argument("--semantic-gradient-checkpointing", action=argparse.BooleanOptionalAction, default=None)
