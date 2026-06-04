@@ -456,6 +456,354 @@ Next non-repeated direction:
   action-representation objective rather than more sampler/optimizer repair.
 ```
 
+## 3.6 Parity Control F: Old 4-22 Online Stream Shape
+
+Run:
+
+```text
+picf_g28_oldstream_pi05ablated_200_20260605
+```
+
+Purpose:
+
+```text
+G27 answered "old action shell + current K4 sampler" and failed.  The remaining
+strict parity question is whether current code can still reproduce the old
+4-22 online train-stream behavior when the sampler shape is also old-like.
+
+This is diagnostic only.  It is not a scalable final recipe because it removes
+task-balanced logical updates.  Its purpose is to separate two hypotheses:
+
+H1. Balanced K4 objective is materially harder than the old online stream.
+    If true, G28 should descend much faster than G27/G26 despite being less
+    scalable.  Then the fix is not to keep old sampling, but to recover its
+    action-descent signal inside a scalable balanced objective.
+
+H2. Current code/action path cannot reproduce old 4-22 behavior even under an
+    old-like stream.  If true, the root is a code/trainer/action-path regression
+    or an old-metric comparability issue, not K4 mixing.
+```
+
+Effective critical values:
+
+```text
+accum_steps = 1
+calvin_bucket_sampling_mode = round_robin
+logical_batch_task_count = 0
+logical_batch_bucket_normalization = false
+logical_batch_dynamic_mixing = false
+logical_batch_gradient_surgery = off
+logical_batch_action_bucket_ema_normalization = false
+semantic_trainable_scope = action_head_and_adapter
+semantic_lr_scale = 0.25
+grad_clip_norm = 1.0
+picf_mode = ablated
+burnin_steps = 0
+semantic_action_context_flow_residual_enabled = false
+```
+
+Tail:
+
+```bash
+ssh -i /tmp/picf_g22_key -p 26120 root@px-cloud1.matpool.com 'tail -f /mnt/picf_run_logs/picf_g28_oldstream_pi05ablated_200_20260605.log'
+```
+
+Startup verification:
+
+```text
+05:20:59 remote log entered PICF Training.
+
+world_size = 2
+training_strategy = fsdp_full_shard
+picf_mode = ablated
+trainable_numel = 13,751,362
+total_numel = 3,744,957,843
+accum_steps = 1
+effective_global_batch = 2
+num_steps = 200
+lr = 2e-4
+min_lr = 2e-5
+warmup = 600
+unroll_steps = 2
+burnin_steps = 0
+effective_window_steps = 2
+calvin_bucket_sampling_mode = round_robin
+logical_batch_task_count = 0
+logical_batch_bucket_normalization = false
+```
+
+Step50:
+
+```text
+loss_action_default_equiv = 0.1581168175
+
+comparison:
+  G26 current-shell K4 step50 = 0.1291981190
+  G27 old-args K4 step50     = 0.1529971361
+  G28 old-stream step50      = 0.1581168175
+```
+
+Step50 reading:
+
+```text
+The old online-stream shape does not immediately reproduce the historical
+4-22 low-loss behavior in current code.  It is worse than both G26 and G27 at
+step50.  Continue only to step100 as the final old-stream parity gate; if it
+remains high, stop and treat "old sampling shape" as rejected under current
+code.
+```
+
+Step100:
+
+```text
+loss_action_default_equiv = 0.1537972242
+
+comparison:
+  G26 current-shell K4 step100 = 0.0770749152
+  G27 old-args K4 step100     = 0.1471613646
+  G28 old-stream step100      = 0.1537972242
+```
+
+Step100 decision:
+
+```text
+Stop G28.  Old online-stream shape plus old action shell does not recover the
+historical 4-22 low-loss behavior under current code.  It is worse than the
+current-shell K4 control and slightly worse than old-args K4.
+
+Rejected hypotheses:
+  1. "Old stream shape alone fixes the action plateau."
+  2. "Old action shell plus old stream shape is enough under current code."
+
+Remaining strict parity gap:
+  current action shell + old online-stream shape.
+
+This is the only unclosed sampler/action-shell parity cell:
+  G26 = current shell + K4
+  G27 = old shell + K4
+  G28 = old shell + old stream
+  G29 = current shell + old stream
+```
+
+## 3.7 Parity Control G: Current Shell With Old Stream Shape
+
+Planned run:
+
+```text
+picf_g29_currentshell_oldstream_pi05ablated_200_20260605
+```
+
+Purpose:
+
+```text
+G28 shows that restoring old shell and old stream together fails.  G29 closes
+the final controlled cell by preserving the better current action shell while
+removing K4 balancing.  This tests whether K4/task-balanced objective is the
+only reason the current shell plateaus around 0.064.
+
+If G29 drops below G26 step100/200 clearly, K4 is a major difficulty amplifier
+and the next scalable fix should improve logical-batch coverage/curriculum
+without reverting to old sampling.
+
+If G29 is also high, current-code fresh PI0.5 action descent is not explained
+by K4 or old-shell deltas.  Then the root is current trainer/action-path parity
+or old metric comparability, and further PICF/sampler changes are not the right
+next experiment.
+```
+
+Critical values:
+
+```text
+picf_mode = ablated
+semantic_trainable_scope = backbone_only
+semantic_lr_scale = 1.0
+accum_steps = 1
+calvin_bucket_sampling_mode = round_robin
+logical_batch_task_count = 0
+logical_batch_bucket_normalization = false
+logical_batch_dynamic_mixing = false
+logical_batch_gradient_surgery = off
+logical_batch_action_bucket_ema_normalization = false
+burnin_steps = 0
+semantic_action_context_flow_residual_enabled = false
+```
+
+Tail:
+
+```bash
+ssh -i /tmp/picf_g22_key -p 26120 root@px-cloud1.matpool.com 'tail -f /mnt/picf_run_logs/picf_g29_currentshell_oldstream_pi05ablated_200_20260605.log'
+```
+
+Startup verification:
+
+```text
+05:41:55 remote log entered PICF Training.
+
+world_size = 2
+training_strategy = fsdp_full_shard
+picf_mode = ablated
+trainable_numel = 3,362,853,650
+total_numel = 3,744,949,651
+accum_steps = 1
+effective_global_batch = 2
+num_steps = 200
+lr = 2e-5
+warmup = 20
+unroll_steps = 2
+burnin_steps = 0
+calvin_bucket_sampling_mode = round_robin
+logical_batch_task_count = 0
+logical_batch_bucket_normalization = false
+semantic_trainable_scope = backbone_only
+semantic_action_context_flow_residual_enabled = false
+```
+
+Important boundary:
+
+```text
+G29 is not the old light action-head shell.  It keeps the current action shell
+and current semantic training boundary, which trains a large semantic-backbone
+parameter set under an old-like online stream.  This closes the question:
+can the current shell itself recover old-like descent if K4 balancing is
+removed?
+```
+
+Step50:
+
+```text
+loss_action_default_equiv = 0.1035719067
+
+comparison:
+  G26 current-shell K4 step50 = 0.1291981190
+  G27 old-args K4 step50     = 0.1529971361
+  G28 old-stream step50      = 0.1581168175
+  G29 current-shell oldstream step50 = 0.1035719067
+```
+
+Step50 reading:
+
+```text
+Current shell + old stream is the best of the old-stream/action-shell parity
+controls so far.  It is better than G26 at step50, but this is not enough to
+claim success because G26 reached 0.077075 by step100 and 0.064 by step200/300.
+Continue to step100.  If G29 cannot beat G26 step100, "remove K4 balancing" is
+not sufficient as a scalable repair.
+```
+
+Step100:
+
+```text
+loss_action_default_equiv = 0.0706284866
+loss_action_active7       = 0.3209846914
+loss_action_pos           = 0.2633489072
+loss_action_rot           = 0.3439514339
+loss_action_gripper       = 0.4249917865
+
+bucket losses:
+  block_lift          = 0.0818857601
+  block_other         = 0.0609806129
+  block_push          = 0.0519489014
+  drawer              = 0.0707569626
+  other               = 0.0784570306
+  slider              = 0.0616720705
+  switch_button_light = 0.0900231499
+
+comparison:
+  G26 current-shell K4 step100       = 0.0770749152
+  G27 old-args K4 step100            = 0.1471613646
+  G28 old-shell oldstream step100    = 0.1537972242
+  G29 current-shell oldstream step100 = 0.0706284866
+```
+
+Step100 reading:
+
+```text
+Current shell + old stream beats the K4 current-shell control at step100 and
+is much better than both old-action-shell controls.  This closes two failed
+hypotheses:
+  1. The old action shell is required for descent.
+  2. Old shell + old stream recreates the old 4-22 behavior.
+
+However, G29 is still far from the historical 4-22 late online band
+(roughly 0.02-0.03).  The single-step progress rows also show intermittent
+local lows around 0.02-0.03 mixed with higher windows, so the remaining
+question is whether old-stream/current-shell gives stable descent or only
+local contiguous-task dips.  Continue to step200 before making the next
+deployment decision.
+```
+
+Step150:
+
+```text
+loss_action_default_equiv = 0.0693937242
+loss_action_active7       = 0.3160532713
+
+progress-row window means:
+  steps 001-050 mean = 0.108502
+  steps 051-100 mean = 0.069720
+  steps 101-150 mean = 0.066614
+```
+
+Step150 reading:
+
+```text
+G29 continues to show local low-loss rows, but the 50-step mean has stabilized
+near 0.066 rather than approaching the historical 0.02-0.03 online band.  This
+is already strong evidence that old-stream/current-shell recovers local
+contiguous-window fitting but not stable 4-22-style action descent.  Keep the
+run only until step200 to close the planned gate.
+```
+
+Step200:
+
+```text
+loss_action_default_equiv = 0.0672983676
+loss_action_active7       = 0.3066750765
+loss_action_pos           = 0.2644939423
+loss_action_rot           = 0.3411909938
+loss_action_gripper       = 0.3296708465
+grad_norm                 = 0.9264690876
+
+bucket losses:
+  block_lift          = 0.0597598653
+  block_other         = 0.0653010977
+  block_push          = 0.0545745368
+  drawer              = 0.0742415699
+  other               = 0.0818029729
+  slider              = 0.0489311984
+  switch_button_light = 0.0857013091
+
+progress-row window means:
+  steps 001-050 mean = 0.108502
+  steps 051-100 mean = 0.069720
+  steps 101-150 mean = 0.066614
+  steps 151-200 mean = 0.069016
+  steps 001-199 mean = 0.078291
+```
+
+Step200 final decision:
+
+```text
+Stop the old-stream/action-shell parity line.
+
+G29 confirms that the current action shell with old online-stream shape is the
+best of the parity controls, but it still plateaus in the same 0.06-0.07 band
+as the current K4 ablation.  The intermittent rows near 0.02-0.03 are local
+contiguous-window dips, not a stable old 4-22-style descent regime.
+
+Rejected as root fixes:
+  1. old action shell;
+  2. old online stream shape;
+  3. old shell + old stream;
+  4. K4 removal alone.
+
+The remaining root is not "we forgot VLA Foundry / ABot-M0 / PiKE style data
+mixing."  Those mechanisms exist and have been tested.  The remaining high
+value branch is action-path capacity/parity: why the current native PI0.5-style
+action path cannot maintain historical low loss across task windows under the
+current trainer and parameter boundary.
+```
+
 ## 4. Next Decision Tree
 
 At step100/200/300 of the live ablation:
@@ -496,6 +844,17 @@ If ablated descends early but later rebounds:
 [x] Start old 4-22 args + current K4 sampler parity control.
 [x] Record G27 step50/100 and decide whether action-shell parity fixes the
     plateau: no, rejected at step100.
+[x] Start old action shell + old online-stream parity control.
+[x] Record G28 step50/100 and decide whether old stream shape fixes the
+    plateau: no, rejected at step100.
+[x] Start current action shell + old online-stream parity control.
+[x] Record G29 step50/100 and decide whether K4 alone explains the current
+    platform: partial.  G29 beats G26 at step100, but does not recover the
+    historical 0.02-0.03 band.  Step200 is required to distinguish stable
+    descent from local-window dips.
+[x] Record G29 step200 and decide whether to keep old-stream evidence as a
+    curriculum signal or reject it as non-scalable local-window fitting:
+    rejected as a root fix.  It gives local-window dips but no stable descent.
 ```
 
 ## 6. Deployment Part Checklist
@@ -511,4 +870,35 @@ If ablated descends early but later rebounds:
     descent.
 [ ] Audit current trainer parity against historical 4-22 PI0.5 before any new
     PICF architecture change.
+```
+
+## 7. Local Code Follow-Through Checks
+
+Executed locally on 2026-06-05:
+
+```bash
+uv run pytest -q scripts/picf_core_train_test.py \
+  -k 'calvin_bucket_sampling_weights or bucket_sequence_without_replacement or bucket_sequence_round_robin or logical_batch_loss_scales'
+
+result:
+  6 passed, 147 deselected
+
+uv run pytest -q scripts/picf_core_train_test.py \
+  -k 'dynamic_bucket_sampling_weights or gradient_surgery_params or pcgrad or cagrad'
+
+result:
+  6 passed, 147 deselected
+```
+
+Code follow-through conclusion:
+
+```text
+The VLA Foundry / ABot-M0 / PiKE-style infrastructure is not just documented:
+the local code paths for bucket weights, without-replacement logical bucket
+sequence, DDP-aware logical-batch loss scaling, dynamic mixing, and scoped
+gradient surgery are covered by passing tests.
+
+Therefore the current action-descent failure should not be diagnosed as
+"these methods were not wired."  They are wired and historically tested; they
+are necessary controls but not sufficient to recover old 4-22 action descent.
 ```

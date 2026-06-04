@@ -1855,3 +1855,69 @@ branch must not repeat sampler-only, PCGrad/CAGrad, Huber/L1, dynamic-mixing,
 or old-action-shell toggles.  The live evidence now points to the interaction
 between the balanced K4 objective and the action representation/readout itself.
 ```
+
+G28/G29 parity closeout, 2026-06-05:
+
+```text
+G26 = current shell + K4 task-balanced logical batch
+G27 = old shell     + K4 task-balanced logical batch
+G28 = old shell     + old online-stream shape
+G29 = current shell + old online-stream shape
+```
+
+Critical action-default values:
+
+```text
+G26 current-shell K4:
+  step50  = 0.1291981190
+  step100 = 0.0770749152
+  step200 ~= 0.064-0.076 band
+  step300 = 0.0640842691
+
+G27 old-shell K4:
+  step50  = 0.1529971361
+  step100 = 0.1471613646
+  decision: rejected
+
+G28 old-shell oldstream:
+  step50  = 0.1581168175
+  step100 = 0.1537972242
+  decision: rejected
+
+G29 current-shell oldstream:
+  step50  = 0.1035719067
+  step100 = 0.0706284866
+  step150 = 0.0693937242
+  step200 = 0.0672983676
+  progress-row means:
+    steps 001-050 = 0.108502
+    steps 051-100 = 0.069720
+    steps 101-150 = 0.066614
+    steps 151-200 = 0.069016
+  decision: rejected as stable root fix
+```
+
+Final parity interpretation:
+
+```text
+The old action shell is not the missing ingredient.  Old shell is worse under
+both K4 and old-stream controls.
+
+Removing K4 and returning to old online-stream shape improves the current
+shell early, but only to the same 0.06-0.07 band.  It produces intermittent
+local rows near 0.02-0.03, but not stable 4-22-style descent.
+
+Therefore the current evidence rejects these root-fix hypotheses:
+  1. sampler-only repair;
+  2. old-shell parity;
+  3. old-stream parity;
+  4. K4 removal alone;
+  5. old shell + old stream together.
+
+The remaining root-cause branch is action-path capacity/parity under the
+current trainer: why the native PI0.5-style action path cannot maintain the
+historical low-loss behavior across windows after the current code changes.
+Further experiments should not repeat VLA Foundry / ABot-M0 / PiKE-style
+mixing alone, because those mechanisms are implemented, tested, and recorded
+as necessary but insufficient.
+```
