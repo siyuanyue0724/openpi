@@ -7,6 +7,15 @@ action/control contract rewrite, the frozen-perception bring-up, the
 VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
 AQR-MAPG direct-final graph replacement.
 
+2026-06-05 G26-B step500 action-platform contrast: use
+[`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
+section `11. Step500 Action-Platform Contrast Gate, 2026-06-05`.  Contrast A
+(`semantic_trainable_scope=model_only`, `lr=5e-5`) is excluded on 2xA100-40GB by
+OOM before the first optimizer step.  Contrast B is active from the G26-B
+step500 checkpoint with the current `action_head_and_adapter` boundary and
+raised action/adapter LR (`lr=min_lr=5e-5`).  The decisive rows are step550/600
+using `loss_action_default_equiv`, not the progress-bar scalar loss.
+
 2026-06-04 G26-B checkpoint cleanup/archive: use
 [`docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md)
 for the remote ckpt-retention manifest, current G26-B long-run paths, and the

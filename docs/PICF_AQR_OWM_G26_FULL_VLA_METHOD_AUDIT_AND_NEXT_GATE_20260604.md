@@ -1094,3 +1094,101 @@ step500 > 0.070:
   stop and treat G26-B fresh as not reproducing the old PICF action-compression
   speed.
 ```
+
+## 11. Step500 Action-Platform Contrast Gate, 2026-06-05
+
+Why this gate exists:
+
+The fresh G26-B long run reached the first checkpoint, but its
+`loss_action_default_equiv` did not clearly enter the old best PICF action band.
+Active/context overlap remained bounded, so this gate does not retest raw
+same-role overlap.  It tests whether the action platform is caused by the
+training boundary or action-side LR.
+
+Baseline checkpoint:
+
+```text
+/mnt/checkpoints/picf_core/picf_core/
+picf_g26b_tokenaux_long30k_k4_fresh_20260604/500
+```
+
+Baseline log:
+
+```text
+/mnt/picf_run_logs/picf_g26b_tokenaux_long30k_k4_fresh_20260604.log
+```
+
+Contrast A: widen semantic scope.
+
+```text
+run:
+  picf_cmpA_pgmodel_lr5e5_from500_20260605
+
+changed:
+  semantic_trainable_scope=model_only
+  lr=5e-5
+  semantic_lr_scale=1.0
+
+result:
+  failed before first optimizer step on 2xA100-40GB.
+
+failure:
+  CUDA OOM in pipeline._projective_attention_bias / projective_bias_head.
+  GPU0 used about 38.5GB and then needed another 1.17GB.
+
+decision:
+  This is a capacity exclusion, not a model-quality result.  Full restored
+  semantic-stack training is not a valid 2x40GB quick contrast under the
+  current visual/point/PICF configuration.
+```
+
+Contrast B: keep trainable boundary, raise action/adapter LR.
+
+```text
+run:
+  picf_cmpB_adapter_lr5e5_from500_20260605
+
+changed:
+  semantic_trainable_scope=action_head_and_adapter
+  lr=5e-5
+  min_lr=5e-5
+  semantic_lr_scale=1.0
+
+unchanged:
+  task_uniform logical batch K=4
+  accum_steps=2
+  sidecar/proposal/tracklet path
+  prefix/context action-boundary repair
+
+status:
+  running on px-cloud2:28373 from step500.
+  reached step507 at about 29s/step.
+
+tail:
+  tail -f /mnt/picf_run_logs/picf_cmpB_adapter_lr5e5_from500_20260605.log
+```
+
+Acceptance rule:
+
+```text
+If B step550/600 loss_action_default_equiv clearly beats the source long-run
+step550/600 window without structure-term explosion, the platform is primarily
+LR-limited inside the current action_head_and_adapter trainable boundary.
+
+If B does not beat the source window, do not keep raising LR blindly.  The next
+non-duplicate contrast should isolate sampler distribution: old-style
+trajectory/random sampling versus task_uniform K=4, while keeping the same
+scope and LR.
+```
+
+Comparison rule:
+
+```text
+Use only:
+  loss_action_default_equiv
+  loss_action_active7
+  per-bucket loss_action_default_equiv
+
+Do not compare the progress-bar scalar loss or raw current loss_action with
+the older 4-22 raw loss_action.
+```
