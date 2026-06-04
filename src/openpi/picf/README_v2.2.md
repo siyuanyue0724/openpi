@@ -11,9 +11,10 @@ AQR-MAPG direct-final graph replacement.
 [`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
 as the current strict method checklist before spending more GPU.  It maps every
 requested 2025-2026 VLA method family to math, code dataflow, history, and a
-runtime decision.  Current rule: finish G25 deployed-flow residual first; if it
-does not close native action convergence, the next real branch is PICF-side
-FAST/action-token representation supervision, not another sampler-only,
+runtime decision.  Current rule: G25 deployed-flow residual finished with
+positive context-flow gain but insufficient canonical action descent; the active
+non-duplicate branch is G26-B PICF-local FAST-style action-token representation
+supervision, not another sampler-only,
 optimizer-only, PCGrad/CAGrad-only, raw-overlap-only, SAM, sidecar-only, or
 auxiliary-readout-only run.
 

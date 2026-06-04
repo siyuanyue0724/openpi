@@ -451,6 +451,42 @@ def test_pi0_action_context_readout_aux_reports_loss_and_metrics() -> None:
     assert torch.isfinite(metrics["picf_action_context_readout_attention_entropy_mean"])
 
 
+def test_pi0_action_context_token_aux_reports_ce_and_accuracy() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.model_action_dim = 7
+    encoder.action_context_token_aux_weight = 0.125
+    encoder.action_context_token_aux_bins = 16
+    encoder.action_context_token_aux_clip = 1.0
+    encoder.action_context_readout_query = torch.nn.Parameter(torch.empty(3, 4))
+    encoder.action_context_readout_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_out_proj = torch.nn.Linear(4, 7)
+    encoder.action_context_token_readout_out_proj = torch.nn.Linear(4, 7 * 16)
+    _Pi0PaliGemmaSemanticEncoder._reset_action_context_readout_parameters(encoder)
+
+    context = torch.randn((2, 5, 4), dtype=torch.float32)
+    target = torch.randn((2, 3, 7), dtype=torch.float32).clamp(min=-1.0, max=1.0)
+    weighted, metrics = _Pi0PaliGemmaSemanticEncoder._compute_action_context_token_aux(
+        encoder,
+        context,
+        target,
+    )
+
+    assert weighted.requires_grad
+    assert torch.isfinite(weighted)
+    assert metrics["picf_action_context_token_aux_enabled"].item() == pytest.approx(1.0)
+    assert metrics["picf_action_context_token_aux_weight"].item() == pytest.approx(0.125)
+    assert metrics["picf_action_context_token_aux_bins"].item() == pytest.approx(16.0)
+    assert metrics["picf_action_context_token_aux_clip"].item() == pytest.approx(1.0)
+    assert metrics["picf_action_context_token_aux_token_count"].item() == pytest.approx(5.0)
+    assert torch.isfinite(metrics["picf_action_context_token_aux_loss"])
+    assert torch.isfinite(metrics["picf_action_context_token_aux_accuracy"])
+    assert 0.0 <= metrics["picf_action_context_token_aux_accuracy"].item() <= 1.0
+    assert torch.isfinite(metrics["picf_action_context_token_aux_attention_entropy_mean"])
+
+
 def test_pi0_action_context_flow_residual_changes_deployed_velocity_and_reports_metrics() -> None:
     encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
     torch.nn.Module.__init__(encoder)

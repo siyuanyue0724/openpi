@@ -38,6 +38,9 @@ class PaliGemmaSemanticConfig:
     action_context_readout_aux_weight: float = 0.0
     action_context_readout_aux_loss: str = "smooth_l1"
     action_context_readout_aux_huber_delta: float = 1.0
+    action_context_token_aux_weight: float = 0.0
+    action_context_token_aux_bins: int = 256
+    action_context_token_aux_clip: float = 1.0
     action_context_flow_residual_enabled: bool = False
     action_context_flow_residual_gate_init: float = -2.0
     action_context_flow_residual_time_floor: float = 0.05

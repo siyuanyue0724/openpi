@@ -341,34 +341,128 @@ Action:
   prediction, rather than adding another sampler or optimizer wrapper.
 ```
 
-### G26-B: direct FAST/action-token CE restoration
+### G26-B: PICF-local FAST-style action-token CE
 
 Purpose:
 
 ```text
-Test the Knowledge-Insulation action-representation branch that is still absent
-from PICF.  This is the only major requested method not yet deployed.
+Test the Knowledge-Insulation / FAST-style action-representation branch that
+was still absent from PICF.  This is the only major requested method not yet
+deployed after G10-G25.
 ```
 
-Required before GPU:
+Native FAST follow-through:
 
 ```text
-[ ] inspect native OpenPI FAST tokenization and PI0_FAST loss path
-[ ] decide whether PICF can restore LM/action-token heads without reintroducing
-    dead FSDP parameters
-[ ] add live loss metrics:
-    loss_fast_action_token
-    loss_fast_action_token_weighted
-    fast_action_token_accuracy or token_nll
-[ ] ensure continuous flow action remains canonical for action comparison
-[ ] py_compile and targeted unit tests
+OpenPI native FAST path:
+  src/openpi/models/tokenizer.py::FASTTokenizer
+  src/openpi/transforms/_base.py::TokenizeFASTInputs
+  src/openpi/models/pi0_fast.py::Pi0FAST.compute_loss
+
+PICF PyTorch path:
+  src/openpi/picf/paligemma/wrapper.py::_drop_unused_generation_heads
+
+Current constraint:
+  PICF deliberately drops PaliGemma/GemmaExpert LM heads because its live
+  action path is hidden-state + continuous PI0.5 flow.  Reintroducing native
+  FAST LM CE would be a larger generation-head restoration and FSDP contract
+  change, not a safe 2-hour gate.
+
+G26-B deployed equivalent:
+  Add a PICF-local action-token CE on the same bounded context readout state
+  used by G22 continuous readout and G25 deployed flow residual.
+```
+
+Mathematical contract:
+
+```text
+Given PICF action context C, horizon h, action dimension d:
+
+  r_h = Attn(q_h, C)
+  z_{h,d} = Quantize(clip(a_{h,d}, -c, c), K)
+  p(z_{h,d} | C) = softmax(W_token r_h)_{d}
+
+  L_token = CE(z, p)
+  L_train = L_flow + lambda_token L_token
+
+Canonical comparison remains:
+
+  loss_action_default_equiv = MSE(u_t, v_t)
+
+Therefore the new loss tests whether PICF context contains action-token
+information without hiding historical action MSE.
+```
+
+Implemented code:
+
+```text
+src/openpi/picf/paligemma/config.py
+  action_context_token_aux_weight
+  action_context_token_aux_bins
+  action_context_token_aux_clip
+
+src/openpi/picf/paligemma/wrapper.py
+  action_context_token_readout_out_proj
+  _action_context_readout_state
+  _compute_action_context_token_aux
+  compute_action_flow_loss adds token weighted loss into training_total
+
+src/openpi/picf/policy.py
+  picf_action_context_token_aux_* -> pi_context_token_aux_* metrics
+
+scripts/picf_core_train.py
+  --semantic-action-context-token-aux-weight
+  --semantic-action-context-token-aux-bins
+  --semantic-action-context-token-aux-clip
+  metric logging and config validation
+```
+
+Local validation:
+
+```text
+[x] python -m py_compile scripts/picf_core_train.py
+[x] python -m py_compile src/openpi/picf/paligemma/config.py
+[x] python -m py_compile src/openpi/picf/paligemma/wrapper.py
+[x] python -m py_compile src/openpi/picf/policy.py
+[x] uv run pytest -q src/openpi/picf/paligemma/wrapper_test.py \
+    -k 'action_context_token_aux or action_context_readout_aux or action_context_flow_residual or trainable_scope'
+    -> 12 passed
+```
+
+Remote G26-B gate:
+
+```text
+Resume point:
+  same 11000 checkpoint family as G25-C2 for direct comparison.
+
+Initial gate:
+  300 optimizer steps on 2xA100.
+
+Required metrics:
+  pi_context_token_aux_loss
+  pi_context_token_aux_accuracy
+  pi_context_token_aux_weighted_total
+  pi_context_flow_gain_mse_delta
+  loss_action_default_equiv
+
+Pass:
+  token aux loss descends or token accuracy rises,
+  flow gain remains non-negative on average,
+  loss_action_default_equiv does not degrade beyond G25 final window and
+  preferably moves below the G25 last-window mean.
+
+Fail:
+  token aux does not learn, or token aux learns while flow/action MSE remains
+  flat or worse.  The latter means the remaining issue is not representation
+  availability but deployed action-expert consumption.
 ```
 
 Non-goal:
 
 ```text
-Do not replace the whole VLM, whole action expert, or all PICF slots.  The
-missing piece is representation supervision at the action boundary.
+Do not call this "native FAST CE".  It is a PICF-local FAST-style action-token
+objective designed to test the same action-boundary representation hypothesis
+without reintroducing the dropped LM heads.
 ```
 
 ### G26-C: full action-expert MoE

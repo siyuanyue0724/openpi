@@ -667,6 +667,18 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             float(getattr(config, "action_context_readout_aux_huber_delta", 1.0)),
             1.0e-6,
         )
+        self.action_context_token_aux_weight = max(
+            float(getattr(config, "action_context_token_aux_weight", 0.0)),
+            0.0,
+        )
+        self.action_context_token_aux_bins = max(
+            int(getattr(config, "action_context_token_aux_bins", 256)),
+            2,
+        )
+        self.action_context_token_aux_clip = max(
+            float(getattr(config, "action_context_token_aux_clip", 1.0)),
+            1.0e-6,
+        )
         self.action_context_flow_residual_enabled = bool(
             getattr(config, "action_context_flow_residual_enabled", False)
         )
@@ -715,6 +727,10 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         self.action_context_readout_k_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
         self.action_context_readout_v_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
         self.action_context_readout_out_proj = nn.Linear(action_expert_config.width, self.model_action_dim)
+        self.action_context_token_readout_out_proj = nn.Linear(
+            action_expert_config.width,
+            self.model_action_dim * self.action_context_token_aux_bins,
+        )
         self.action_context_flow_residual_gate_logit = nn.Parameter(
             torch.tensor(
                 [float(getattr(config, "action_context_flow_residual_gate_init", -2.0))],
@@ -792,6 +808,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             getattr(self, "action_context_readout_k_proj", None),
             getattr(self, "action_context_readout_v_proj", None),
             getattr(self, "action_context_readout_out_proj", None),
+            getattr(self, "action_context_token_readout_out_proj", None),
         )
         return tuple(module for module in modules if isinstance(module, nn.Module))
 
@@ -839,6 +856,11 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         nn.init.xavier_uniform_(self.action_context_readout_out_proj.weight)
         if self.action_context_readout_out_proj.bias is not None:
             nn.init.zeros_(self.action_context_readout_out_proj.bias)
+        token_head = getattr(self, "action_context_token_readout_out_proj", None)
+        if isinstance(token_head, nn.Linear):
+            nn.init.xavier_uniform_(token_head.weight)
+            if token_head.bias is not None:
+                nn.init.zeros_(token_head.bias)
 
     def _reset_action_expert_router_parameters(self) -> None:
         """Initialize action-expert routing as an identity-preserving adapter.
@@ -1658,22 +1680,21 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             )
         return context
 
-    def _predict_action_chunk_from_context(
+    def _action_context_readout_state(
         self,
         context_tokens: torch.Tensor,
         *,
         batch: int,
         horizon: int,
-        action_dim: int,
         device: torch.device,
         dtype: torch.dtype,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Read a dense PICF context into an action-chunk target estimate.
+        """Read bounded PICF context into horizon-indexed action states.
 
-        This is shared by the G22 diagnostic readout and the G25 deployed flow
-        residual.  Keeping one readout contract avoids a false positive where a
-        side auxiliary learns one vocabulary while the deployed action path sees
-        another.
+        The continuous readout, deployed flow residual, and action-token
+        auxiliary share this state.  Keeping one readout contract avoids a
+        false positive where a side objective learns one PICF context
+        vocabulary while the deployed action path consumes another.
         """
 
         width = int(self.action_context_readout_query.shape[-1])
@@ -1695,10 +1716,31 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         logits = logits * (float(width) ** -0.5)
         attn = torch.softmax(logits, dim=-1).to(device=device, dtype=dtype)
         readout = torch.matmul(attn, v)
-        pred = self.action_context_readout_out_proj(readout).to(dtype=torch.float32)[..., :action_dim]
         entropy = -(attn.to(dtype=torch.float32) * torch.log(torch.clamp(attn.to(dtype=torch.float32), min=1.0e-12))).sum(
             dim=-1
         )
+        return readout, context, entropy
+
+    def _predict_action_chunk_from_context(
+        self,
+        context_tokens: torch.Tensor,
+        *,
+        batch: int,
+        horizon: int,
+        action_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Read a dense PICF context into an action-chunk target estimate."""
+
+        readout, context, entropy = self._action_context_readout_state(
+            context_tokens,
+            batch=batch,
+            horizon=horizon,
+            device=device,
+            dtype=dtype,
+        )
+        pred = self.action_context_readout_out_proj(readout).to(dtype=torch.float32)[..., :action_dim]
         return pred, context, entropy
 
     def _compute_action_context_readout_aux(
@@ -1755,6 +1797,83 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             "picf_action_context_readout_weight": zero + weight,
             "picf_action_context_readout_token_count": zero + float(context.shape[1]),
             "picf_action_context_readout_attention_entropy_mean": entropy.detach().mean().to(device=device, dtype=dtype),
+        }
+        return weighted, metrics
+
+    def _compute_action_context_token_aux(
+        self,
+        context_tokens: torch.Tensor | None,
+        target: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """FAST-style action-token objective for PICF context.
+
+        Native OpenPI FAST supervision is a next-token CE over tokenized
+        actions.  PICF's current PyTorch wrapper drops LM heads and trains the
+        PI0.5 continuous flow path, so this auxiliary implements the equivalent
+        representation pressure locally: bounded PICF context must classify a
+        discretized action chunk.  It uses the same readout state as the
+        deployed flow residual to keep the objective tied to `dA/dC_picf`.
+        """
+
+        zero = target.reshape(-1)[0] * 0.0
+        weight = float(getattr(self, "action_context_token_aux_weight", 0.0))
+        bins = max(int(getattr(self, "action_context_token_aux_bins", 256)), 2)
+        clip = max(float(getattr(self, "action_context_token_aux_clip", 1.0)), 1.0e-6)
+        if weight <= 0.0:
+            return zero, {}
+        if context_tokens is None or not isinstance(context_tokens, torch.Tensor) or context_tokens.numel() == 0:
+            return zero, {
+                "picf_action_context_token_aux_enabled": zero + 0.0,
+                "picf_action_context_token_aux_loss": zero,
+                "picf_action_context_token_aux_accuracy": zero,
+                "picf_action_context_token_aux_weighted_total": zero,
+                "picf_action_context_token_aux_weight": zero + weight,
+                "picf_action_context_token_aux_bins": zero + float(bins),
+                "picf_action_context_token_aux_clip": zero + clip,
+                "picf_action_context_token_aux_token_count": zero,
+                "picf_action_context_token_aux_attention_entropy_mean": zero,
+            }
+        if target.ndim != 3:
+            raise ValueError(f"Expected action token target [B,H,A], got {tuple(target.shape)}")
+
+        batch, horizon, action_dim = target.shape
+        dtype = target.dtype
+        device = target.device
+        readout, context, entropy = self._action_context_readout_state(
+            context_tokens,
+            batch=batch,
+            horizon=horizon,
+            device=device,
+            dtype=dtype,
+        )
+        logits = self.action_context_token_readout_out_proj(readout).to(dtype=torch.float32)
+        logits = logits.reshape(batch, horizon, self.model_action_dim, bins)[..., :action_dim, :]
+
+        target_float = target.to(dtype=torch.float32).clamp(min=-clip, max=clip)
+        labels = torch.round(((target_float + clip) / (2.0 * clip)) * float(bins - 1)).to(dtype=torch.long)
+        labels = labels.clamp(min=0, max=bins - 1)
+
+        loss = torch.nn.functional.cross_entropy(
+            logits.reshape(-1, bins),
+            labels.reshape(-1),
+            reduction="mean",
+        )
+        pred = torch.argmax(logits.detach(), dim=-1)
+        accuracy = (pred == labels).to(dtype=torch.float32).mean()
+        weighted = loss * weight
+        metrics = {
+            "picf_action_context_token_aux_enabled": zero + 1.0,
+            "picf_action_context_token_aux_loss": loss.detach().to(device=device, dtype=dtype),
+            "picf_action_context_token_aux_accuracy": accuracy.detach().to(device=device, dtype=dtype),
+            "picf_action_context_token_aux_weighted_total": weighted.detach().to(device=device, dtype=dtype),
+            "picf_action_context_token_aux_weight": zero + weight,
+            "picf_action_context_token_aux_bins": zero + float(bins),
+            "picf_action_context_token_aux_clip": zero + clip,
+            "picf_action_context_token_aux_token_count": zero + float(context.shape[1]),
+            "picf_action_context_token_aux_attention_entropy_mean": entropy.detach().mean().to(
+                device=device,
+                dtype=dtype,
+            ),
         }
         return weighted, metrics
 
@@ -2075,6 +2194,13 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         if readout_metrics:
             training_total = training_total + readout_weighted
             adapter_metrics.update(readout_metrics)
+        token_weighted, token_metrics = self._compute_action_context_token_aux(
+            extra_action_context_tokens,
+            target,
+        )
+        if token_metrics:
+            training_total = training_total + token_weighted
+            adapter_metrics.update(token_metrics)
         if flow_context_metrics:
             adapter_metrics.update(
                 {

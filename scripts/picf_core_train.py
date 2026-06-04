@@ -2571,6 +2571,12 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError("semantic_action_context_readout_aux_weight must be >= 0.")
     if float(getattr(args, "semantic_action_context_readout_aux_huber_delta", 1.0)) <= 0.0:
         raise ValueError("semantic_action_context_readout_aux_huber_delta must be > 0.")
+    if float(getattr(args, "semantic_action_context_token_aux_weight", 0.0)) < 0.0:
+        raise ValueError("semantic_action_context_token_aux_weight must be >= 0.")
+    if int(getattr(args, "semantic_action_context_token_aux_bins", 256)) < 2:
+        raise ValueError("semantic_action_context_token_aux_bins must be >= 2.")
+    if float(getattr(args, "semantic_action_context_token_aux_clip", 1.0)) <= 0.0:
+        raise ValueError("semantic_action_context_token_aux_clip must be > 0.")
     if float(getattr(args, "semantic_action_context_flow_residual_time_floor", 0.05)) <= 0.0:
         raise ValueError("semantic_action_context_flow_residual_time_floor must be > 0.")
     if int(getattr(args, "semantic_action_expert_router_experts", 4)) < 1:
@@ -5323,6 +5329,15 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "pi_context_readout_weight",
     "pi_context_readout_token_count",
     "pi_context_readout_attention_entropy_mean",
+    "pi_context_token_aux_enabled",
+    "pi_context_token_aux_loss",
+    "pi_context_token_aux_accuracy",
+    "pi_context_token_aux_weighted_total",
+    "pi_context_token_aux_weight",
+    "pi_context_token_aux_bins",
+    "pi_context_token_aux_clip",
+    "pi_context_token_aux_token_count",
+    "pi_context_token_aux_attention_entropy_mean",
     "pi_context_flow_residual_enabled",
     "pi_context_flow_residual_gate",
     "pi_context_flow_residual_token_count",
@@ -8813,6 +8828,15 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 action_context_readout_aux_huber_delta=float(
                     getattr(args, "semantic_action_context_readout_aux_huber_delta", 1.0)
                 ),
+                action_context_token_aux_weight=float(
+                    getattr(args, "semantic_action_context_token_aux_weight", 0.0)
+                ),
+                action_context_token_aux_bins=int(
+                    getattr(args, "semantic_action_context_token_aux_bins", 256)
+                ),
+                action_context_token_aux_clip=float(
+                    getattr(args, "semantic_action_context_token_aux_clip", 1.0)
+                ),
                 action_context_flow_residual_enabled=bool(
                     getattr(args, "semantic_action_context_flow_residual_enabled", False)
                 ),
@@ -10635,6 +10659,14 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "semantic_action_context_readout_aux_weight", 0.0)),
                 str(getattr(args, "semantic_action_context_readout_aux_loss", "smooth_l1")),
                 float(getattr(args, "semantic_action_context_readout_aux_huber_delta", 1.0)),
+            )
+            logging.info(
+                "Action-context token auxiliary contract: weight=%s bins=%s clip=%s. "
+                "This is a PICF-local FAST-style action-token CE over discretized action chunks; "
+                "it shares the context readout state and keeps loss_action_default_equiv canonical.",
+                float(getattr(args, "semantic_action_context_token_aux_weight", 0.0)),
+                int(getattr(args, "semantic_action_context_token_aux_bins", 256)),
+                float(getattr(args, "semantic_action_context_token_aux_clip", 1.0)),
             )
             logging.info(
                 "Action-context deployed flow residual contract: enabled=%s gate_init=%s time_floor=%s "
@@ -12552,6 +12584,28 @@ def main() -> None:
         type=float,
         default=1.0,
         help="Delta/beta for huber or smooth_l1 context-readout auxiliary.",
+    )
+    parser.add_argument(
+        "--semantic-action-context-token-aux-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for the G26 FAST-style PICF action-token auxiliary. "
+            "PICF context readout states classify discretized action chunks; "
+            "loss_action_default_equiv remains the canonical PI0.5 flow MSE."
+        ),
+    )
+    parser.add_argument(
+        "--semantic-action-context-token-aux-bins",
+        type=int,
+        default=256,
+        help="Number of uniform bins per action dimension for the G26 action-token auxiliary.",
+    )
+    parser.add_argument(
+        "--semantic-action-context-token-aux-clip",
+        type=float,
+        default=1.0,
+        help="Symmetric action value clip used before quantization by the G26 action-token auxiliary.",
     )
     parser.add_argument(
         "--semantic-action-context-flow-residual-enabled",
