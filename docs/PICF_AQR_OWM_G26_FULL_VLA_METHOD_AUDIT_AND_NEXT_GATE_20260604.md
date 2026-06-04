@@ -1832,3 +1832,26 @@ Active parity run:
 ```text
 picf_g27_oldargs_k4_pi05ablated_300_20260605
 ```
+
+G27 result:
+
+```text
+step50  action_default = 0.1529971361
+step100 action_default = 0.1471613646
+```
+
+Decision:
+
+```text
+Stopped at step100.  G27 is much worse than the G26 current-shell PI0.5-like
+ablation at the same step:
+
+  G26 current-shell K4 step100 = 0.077075
+  G27 old-args K4 step100      = 0.147161
+
+This rejects the simple hypothesis that restoring old 4-22 action-shell fields
+under current K4 task-balanced sampling is sufficient.  The next root-cause
+branch must not repeat sampler-only, PCGrad/CAGrad, Huber/L1, dynamic-mixing,
+or old-action-shell toggles.  The live evidence now points to the interaction
+between the balanced K4 objective and the action representation/readout itself.
+```

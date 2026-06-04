@@ -386,6 +386,76 @@ logical_batch_bucket_normalization = true
 calvin_buckets = block_lift, block_other, block_push, drawer, other, slider, switch_button_light
 ```
 
+Step50:
+
+```text
+loss_action_default_equiv = 0.1529971361
+loss_action_active7 = 0.5082107782
+loss_total_minus_action = 0.0
+logical_batch_distinct_bucket_count = 4
+lr = 1.6666666667e-05
+
+action components:
+  pos     0.4047880769
+  rot     0.5090084076
+  gripper 0.8160861731
+```
+
+Step50 reading:
+
+```text
+This is worse than the current-shell G26 PI0.5-like ablation at step50
+(0.129198).  The old action shell did not produce the expected immediate early
+drop.  Because step50 is still inside low-LR warmup, continue only to step100
+as the final parity gate.  If step100 remains above the current-shell step100
+(0.077075), stop this branch: the plateau is not fixed by restoring old
+semantic_lr_scale/trainable-scope/clip defaults under K4 balanced sampling.
+```
+
+Step100:
+
+```text
+loss_action_default_equiv = 0.1471613646
+loss_action_active7 = 0.4896215200
+loss_total_minus_action = 0.0
+lr = 3.3333333333e-05
+
+progress-bar recent single-window values near step100:
+  step97  0.3729
+  step98  0.1508
+  step99  0.0731
+  step100 0.1399
+```
+
+Step100 decision:
+
+```text
+Stop G27 immediately.  It is clearly worse than the current-shell G26
+PI0.5-like ablation at the same step:
+
+  G26 current-shell K4 step100: 0.077075
+  G27 old-args K4 step100:     0.147161
+
+Therefore the action plateau is not solved by restoring old semantic_lr_scale,
+old grad clip, or old action_head_and_adapter trainable scope under the current
+balanced K4 sampler.  The root is not simply "G26 action shell differs from
+4-22".
+
+Current causal status:
+  1. Full G26-B PICF/context slows action relative to clean ablated action.
+  2. Clean current-shell ablated action improves early but plateaus around
+     0.064 by step300.
+  3. Old-args action shell under K4 is worse than the clean current-shell
+     ablation and is rejected at step100.
+
+Next non-repeated direction:
+  keep the current-shell ablated action path as the better control;
+  do not restore old action_head_and_adapter as default;
+  investigate whether balanced K4 objective is intrinsically harder than the
+  old online train stream, and whether the action model needs a stronger native
+  action-representation objective rather than more sampler/optimizer repair.
+```
+
 ## 4. Next Decision Tree
 
 At step100/200/300 of the live ablation:
@@ -424,8 +494,8 @@ If ablated descends early but later rebounds:
 [x] Record step300 and compare against G26-B step300 = 0.0654.
 [x] Stop decisively if the branch is clearly worse after step200/300.
 [x] Start old 4-22 args + current K4 sampler parity control.
-[ ] Record G27 step50/100/200/300 and decide whether action-shell parity fixes
-    the plateau.
+[x] Record G27 step50/100 and decide whether action-shell parity fixes the
+    plateau: no, rejected at step100.
 ```
 
 ## 6. Deployment Part Checklist
