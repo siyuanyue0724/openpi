@@ -449,6 +449,49 @@ descent, the next experiment must target the missing action-representation
 supervision branch, not another sampler/LR/optimizer-only branch.
 ```
 
+Final G25-C2 gate at step 11300:
+
+```text
+loss_action_default_equiv:
+  first row    11010 = 0.046894
+  final row    11300 = 0.051510
+  min observed        = 0.037384
+  max observed        = 0.054716
+  last5 mean          ~= 0.045976
+  last10 mean         ~= 0.045739
+  last20 mean         ~= 0.044115
+  last30 mean         ~= 0.045467
+
+pi_context_flow_gain_mse_delta:
+  last5 mean          ~= +0.006331
+  last10 mean         ~= +0.006120
+  last20 mean         ~= +0.005056
+  last30 mean         ~= +0.003439
+
+last rows:
+  11280 action=0.044501 gain=+0.005920
+  11290 action=0.051004 gain=+0.007298
+  11300 action=0.051510 gain=+0.006036
+```
+
+Conclusion:
+
+```text
+G25-C2 is a positive deployed-bridge result but a negative convergence result.
+
+It proves:
+  PICF context can reduce native PI0.5 flow MSE when injected as a bounded
+  residual.
+
+It does not prove:
+  The canonical action loss can sustain descent from this bridge alone.
+
+Therefore:
+  G25 should not be extended as a 30K final recipe.  The next non-duplicate
+  branch is PICF-side FAST/action-token representation supervision or an
+  equivalent direct action-representation target.
+```
+
 ## 6. Anti-Repeat Rules
 
 Do not spend another 1-2 hour gate on these unless the code has materially

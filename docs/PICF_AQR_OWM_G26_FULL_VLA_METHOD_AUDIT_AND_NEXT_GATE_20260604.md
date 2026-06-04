@@ -214,22 +214,24 @@ session: picf_g25_flowresidual_c2_300_20260604
 log: /mnt/picf_run_logs/picf_g25_flowresidual_c2_300_20260604.log
 ```
 
-Current structured trace through step 11230:
+Final structured trace through step 11300:
 
 ```text
 loss_action_default_equiv:
   11010 = 0.046894
-  11230 = 0.043449
+  11300 = 0.051510
   min   = 0.037384
   max   = 0.054716
-  last5 mean  ~= 0.043813
-  last10 mean ~= 0.043246
-  last20 mean ~= 0.045080
+  last5 mean  ~= 0.045976
+  last10 mean ~= 0.045739
+  last20 mean ~= 0.044115
+  last30 mean ~= 0.045467
 
 pi_context_flow_gain_mse_delta:
-  last5 mean  ~= +0.005586
-  last10 mean ~= +0.004840
-  last20 mean ~= +0.003621
+  last5 mean  ~= +0.006331
+  last10 mean ~= +0.006120
+  last20 mean ~= +0.005056
+  last30 mean ~= +0.003439
 
 structure:
   logical_batch_distinct_bucket_count = 4
@@ -255,8 +257,8 @@ Latest stricter judgment:
   disallowed as low-value repeats.
 
 Decision boundary:
-  If G25-C2 finishes with positive deployed-flow gain but without sustained
-  canonical action descent, do not rerun sampler/optimizer-only branches.
+  G25-C2 finished with positive deployed-flow gain but without sustained
+  canonical action descent.  Do not rerun sampler/optimizer-only branches.
   Move to direct PICF-side FAST/action-token representation supervision or an
   equivalent deployed action-representation target.
 ```
@@ -291,9 +293,9 @@ Checklist:
 [x] code follow-through complete
 [x] local unit tests passed in G25
 [x] remote run active
-[ ] reach step 11300
-[ ] compute final action/gain trend
-[ ] archive final result into this document and G25
+[x] reach step 11300
+[x] compute final action/gain trend
+[x] archive final result into this document and G25
 ```
 
 Pass:
@@ -318,6 +320,25 @@ If pass:
 If fail or inconclusive:
   start G26-B, direct FAST/action-token representation supervision audit and
   implementation plan.  Do not spend more GPU on old sampler/optimizer branches.
+```
+
+Final G26-A result:
+
+```text
+G26-A is inconclusive/insufficient as a convergence fix.
+
+Positive:
+  pi_context_flow_gain_mse_delta stayed positive and grew stronger in the
+  final window.
+
+Negative:
+  loss_action_default_equiv ended at 0.051510 and the final two rows were
+  0.051004 / 0.051510.  This is not sustained action descent.
+
+Action:
+  proceed to G26-B.  The next experiment must add a direct action
+  representation target that makes PICF context causally useful for action
+  prediction, rather than adding another sampler or optimizer wrapper.
 ```
 
 ### G26-B: direct FAST/action-token CE restoration
