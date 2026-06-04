@@ -420,6 +420,20 @@ scripts/picf_core_train.py
   metric logging and config validation
 ```
 
+Strict diagnostic addendum:
+
+```text
+Token classification accuracy alone can be misleading if action labels are
+concentrated in a center/no-op bin.  The implementation therefore also logs:
+
+  pi_context_token_aux_label_entropy
+  pi_context_token_aux_label_majority_fraction
+  pi_context_token_aux_accuracy_over_majority
+
+These metrics do not change the training loss.  They only prevent a false
+positive where a token head appears accurate by predicting the majority bin.
+```
+
 Local validation:
 
 ```text

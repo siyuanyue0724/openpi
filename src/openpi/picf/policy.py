@@ -747,6 +747,15 @@ class PicfPi05Policy:
                             "picf_action_context_token_aux_attention_entropy_mean",
                             "pi_context_token_aux_attention_entropy_mean",
                         ),
+                        ("picf_action_context_token_aux_label_entropy", "pi_context_token_aux_label_entropy"),
+                        (
+                            "picf_action_context_token_aux_label_majority_fraction",
+                            "pi_context_token_aux_label_majority_fraction",
+                        ),
+                        (
+                            "picf_action_context_token_aux_accuracy_over_majority",
+                            "pi_context_token_aux_accuracy_over_majority",
+                        ),
                         ("picf_action_context_flow_context_target_mse", "pi_context_flow_context_target_mse"),
                         ("picf_action_context_flow_residual_time_floor", "pi_context_flow_residual_time_floor"),
                         ("picf_action_context_flow_base_mse", "pi_context_flow_base_mse"),
@@ -852,6 +861,15 @@ class PicfPi05Policy:
                 (
                     "picf_action_context_token_aux_attention_entropy_mean",
                     "pi_context_token_aux_attention_entropy_mean",
+                ),
+                ("picf_action_context_token_aux_label_entropy", "pi_context_token_aux_label_entropy"),
+                (
+                    "picf_action_context_token_aux_label_majority_fraction",
+                    "pi_context_token_aux_label_majority_fraction",
+                ),
+                (
+                    "picf_action_context_token_aux_accuracy_over_majority",
+                    "pi_context_token_aux_accuracy_over_majority",
                 ),
                 ("picf_action_context_probe_mode_id", "pi_context_probe_mode_id"),
                 ("picf_action_context_probe_delta_rms_mean", "pi_context_probe_delta_rms_mean"),

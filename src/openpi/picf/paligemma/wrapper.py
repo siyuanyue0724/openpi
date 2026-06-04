@@ -1876,10 +1876,15 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         target_float = target.to(dtype=torch.float32).clamp(min=-clip, max=clip)
         labels = torch.round(((target_float + clip) / (2.0 * clip)) * float(bins - 1)).to(dtype=torch.long)
         labels = labels.clamp(min=0, max=bins - 1)
+        flat_labels = labels.reshape(-1)
+        label_counts = torch.bincount(flat_labels, minlength=bins).to(dtype=torch.float32)
+        label_probs = label_counts / torch.clamp(label_counts.sum(), min=1.0)
+        label_entropy = -(label_probs * torch.log(torch.clamp(label_probs, min=1.0e-12))).sum()
+        majority_fraction = torch.max(label_probs)
 
         loss = torch.nn.functional.cross_entropy(
             logits.reshape(-1, bins),
-            labels.reshape(-1),
+            flat_labels,
             reduction="mean",
         )
         pred = torch.argmax(logits.detach(), dim=-1)
@@ -1898,6 +1903,14 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 device=device,
                 dtype=dtype,
             ),
+            "picf_action_context_token_aux_label_entropy": label_entropy.detach().to(device=device, dtype=dtype),
+            "picf_action_context_token_aux_label_majority_fraction": majority_fraction.detach().to(
+                device=device,
+                dtype=dtype,
+            ),
+            "picf_action_context_token_aux_accuracy_over_majority": (accuracy - majority_fraction)
+            .detach()
+            .to(device=device, dtype=dtype),
         }
         return weighted, metrics
 
