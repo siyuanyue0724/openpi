@@ -224,7 +224,7 @@ Machine    : px-cloud1:26120, 2xA100
 Repo       : /root/openpi_g25_20260604
 Sync path  : GitHub mirror https://gh-proxy.com/https://github.com/siyuanyue0724/openpi.git
 Branch     : Posterior_VLA
-Commit     : 4687f6a
+Commit     : 7485a56
 ```
 
 Remote validation:
@@ -277,7 +277,36 @@ Run     : picf_g25_flowresidual_c2_from11000_to11300_20260604
 Session : picf_g25_flowresidual_c2_300_20260604
 Log     : /mnt/picf_run_logs/picf_g25_flowresidual_c2_300_20260604.log
 Mode    : 2-card DDP, logical_batch_task_count=4, accum_steps=2
-Status  : running; verified compatibility migration and first step progress
+Status  : running; verified compatibility migration and first 60 optimizer
+          steps after resume
+```
+
+C2 deployed-flow metric trace:
+
+```text
+step   total     action_def  base_mse  adapt_mse  gain_delta
+11010  0.10449   0.04689     0.04143   0.04689   -0.00546
+11020  0.10304   0.04674     0.04394   0.04674   -0.00280
+11030  0.09895   0.04486     0.04484   0.04486   -0.00002
+11040  0.10943   0.04985     0.05004   0.04985    0.00019
+11050  0.11354   0.05110     0.05177   0.05110    0.00067
+11060  0.10627   0.04758     0.04964   0.04758    0.00206
+```
+
+Interpretation at step 11060:
+
+```text
+The residual starts harmful because the new gate/readout parameters are missing
+from the source checkpoint and initialize cold.  By 11030 it is nearly neutral,
+and by 11040-11060 it becomes positive on the deployed action objective:
+
+  adapted_mse < base_mse
+  gain_delta > 0
+
+This is the first direct evidence that PICF context can improve the native
+PI0.5 flow path rather than only a side readout.  It is not a 30K convergence
+claim yet; the remaining gate is to verify the positive delta persists through
+the full 300-step C2 run and then in a longer run.
 ```
 
 ## 6. Anti-Repeat Rules
