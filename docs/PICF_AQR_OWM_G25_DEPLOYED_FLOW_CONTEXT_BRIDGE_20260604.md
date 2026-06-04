@@ -184,7 +184,103 @@ next real architecture branch is direct PI0.5 action-token/FAST-style
 representation supervision or a full action expert replacement, because G22
 already proved side motor-readability without native action improvement.
 
-## 5. Anti-Repeat Rules
+## 5. Deployment / Validation Log
+
+Code commits:
+
+```text
+ceb9c0d Add deployed PICF context flow residual
+4687f6a Allow flow residual gate in checkpoint migration
+```
+
+Local validation:
+
+```text
+python -m py_compile:
+  src/openpi/picf/paligemma/config.py
+  src/openpi/picf/paligemma/wrapper.py
+  src/openpi/picf/policy.py
+  scripts/picf_core_train.py
+  scripts/picf_core_train_test.py
+  scripts/picf_resume_from_args_json.py
+
+uv run pytest -q src/openpi/picf/paligemma/wrapper_test.py \
+  -k 'action_context_flow_residual or trainable_scope'
+  -> 10 passed
+
+uv run pytest -q src/openpi/picf/policy_test.py \
+  -k 'route_context_to_action_side_adapter'
+  -> 1 passed
+
+uv run pytest -q scripts/picf_core_train_test.py \
+  -k 'load_state_dict_picf_compat_allows_new_action_context_flow_and_router_only or load_state_dict_picf_compat_skips_shape_mismatches'
+  -> 2 passed
+```
+
+Remote sync:
+
+```text
+Machine    : px-cloud1:26120, 2xA100
+Repo       : /root/openpi_g25_20260604
+Sync path  : GitHub mirror https://gh-proxy.com/https://github.com/siyuanyue0724/openpi.git
+Branch     : Posterior_VLA
+Commit     : 4687f6a
+```
+
+Remote validation:
+
+```text
+py_compile scripts/picf_core_train.py scripts/picf_core_train_test.py
+  -> PASS
+
+pytest scripts/picf_core_train_test.py compatibility selector
+  -> 2 passed
+```
+
+Checkpoint migration note:
+
+```text
+The 11000-step source checkpoint predates:
+  action_context_readout_*
+  action_expert_router_*
+  action_context_flow_residual_gate_logit
+
+The compatibility loader intentionally allows only these narrow new semantic
+action-context/router keys to initialize from the current model.  Any unrelated
+missing key still fails.
+```
+
+Sanity gate:
+
+```text
+Run   : picf_g25_flowresidual_sanity_k2_2step_20260604
+Mode  : single-card, logical_batch_task_count=2, accum_steps=2
+Status: PASS, reached optimizer steps 11001-11002
+
+Initial residual diagnostic at step 11002:
+  pi_context_flow_residual_enabled = 1
+  pi_context_flow_residual_gate ~= 0.119
+  pi_context_flow_base_mse ~= 0.0415
+  pi_context_flow_adapted_mse ~= 0.0539
+  pi_context_flow_gain_mse_delta ~= -0.0124
+
+Interpretation:
+  Startup and deployed-path metrics are working.  The randomly initialized
+  residual gate is initially harmful on this tiny sanity sample, so the C2
+  300-step run must verify whether it learns a positive contribution.
+```
+
+Active remote diagnostic:
+
+```text
+Run     : picf_g25_flowresidual_c2_from11000_to11300_20260604
+Session : picf_g25_flowresidual_c2_300_20260604
+Log     : /mnt/picf_run_logs/picf_g25_flowresidual_c2_300_20260604.log
+Mode    : 2-card DDP, logical_batch_task_count=4, accum_steps=2
+Status  : running; verified compatibility migration and first step progress
+```
+
+## 6. Anti-Repeat Rules
 
 Do not spend another 1-2 hour gate on these unless the code has materially
 changed:
