@@ -246,6 +246,146 @@ Continue to step300; use step300 to decide whether this is an early plateau or
 a temporary warmup/bucket-composition pause.
 ```
 
+Step250:
+
+```text
+loss_action_default_equiv = 0.0656914562
+loss_action_active7 = 0.2976432741
+loss_total_minus_action = 0.0
+logical_batch_distinct_bucket_count = 4
+lr = 8.3333333333e-05
+
+action components:
+  pos     0.2287622839
+  rot     0.3194335699
+  gripper 0.4389153123
+```
+
+Step300:
+
+```text
+loss_action_default_equiv = 0.0640842691
+loss_action_active7 = 0.2884802520
+loss_total_minus_action = 0.0
+logical_batch_distinct_bucket_count = 4
+lr = 1.0e-04
+
+action components:
+  pos     0.2238104343
+  rot     0.3115257025
+  gripper 0.4133533239
+```
+
+Step300 reading:
+
+```text
+This is not a clean failure, but it is not the requested action-collapse fix.
+The current-shell PI0.5-like ablation improves sharply from step50 to step150,
+then stays in the 0.064-0.066 band through step300.  It proves that enabled
+PICF/context was action-negative relative to a clean ablated path, but it does
+not prove that K4 task-balanced sampling plus current G26 action shell recovers
+the old 4-22/PI0.5 0.02-0.03 action band.
+
+Decision: stop this branch at step300 and run a stricter parity experiment:
+old 4-22 args/action shell + current K4 task-uniform logical batch.  This is
+the non-repeated missing test.  If old args + K4 descends faster, the root is
+the G26 action shell / optimizer / trainable-boundary delta.  If it also
+plateaus, then the old train-stream metric and current balanced objective are
+not directly comparable, or current code has a deeper parity regression.
+```
+
+## 3.5 Parity Control E: Old 4-22 Args + Current K4 Sampler
+
+Run:
+
+```text
+picf_g27_oldargs_k4_pi05ablated_300_20260605
+```
+
+Purpose:
+
+```text
+Hold the new task-uniform logical-batch sampler, but return the action shell to
+the archived 4-22 ablated PI0.5 args as much as the current code allows.
+
+This specifically checks the remaining uncontrolled deltas from the G26
+PI0.5-like ablation:
+  semantic_lr_scale: old 0.25 vs G26 current 1.0
+  grad_clip_norm: old 1.0 vs G26 current 5.0-percentile shell
+  semantic_trainable_scope: old action_head_and_adapter vs G26 backbone_only
+  historical action/prompt/state defaults in the 4-22 args file
+  explicit semantic_action_context_flow_residual_enabled=False
+
+This is not a repeat of task-uniform, temperature sampling, ratio mixing,
+dynamic PiKE-style mixing, PCGrad/CAGrad, Huber/L1, context-only readout, SAM,
+or raw-overlap repair.  Those are already recorded as implemented/tested or
+diagnostic-only in the method audit.  This is a trainer/action-shell parity
+test.
+```
+
+Implementation note:
+
+```text
+The old 4-22 args file predates several current trainer fields.  To avoid
+false failures from missing Namespace attributes, the remote run builds a
+complete args file by taking the G26-B args as a current-code default template,
+then overlaying the archived 4-22 args and finally applying the K4/sampler
+control overrides.  This preserves old values where they exist while filling
+new fields with current defaults.
+
+Effective critical values:
+  semantic_lr_scale = 0.25
+  grad_clip_norm = 1.0
+  grad_clip_mode = percentile
+  semantic_trainable_scope = action_head_and_adapter
+  lr = 2e-4
+  warmup_steps = 600
+  burnin_steps = 0
+  effective_unroll_steps = 3
+  accum_steps = 2
+  picf_mode = ablated
+  calvin_bucket_sampling_mode = task_uniform
+  logical_batch_task_count = 4
+  logical_batch_bucket_normalization = true
+```
+
+The archived 4-22 args contained a nonzero burn-in setting.  Current code
+correctly rejects `burnin_steps > 0` with `picf_mode=ablated`, because the clean
+PI0.5 ablation has no PICF recurrent carry to burn in.  For the parity control,
+`burnin_steps=0` is therefore a contract fix, not a tuning choice.
+
+Tail:
+
+```bash
+ssh -i /tmp/picf_g22_key -p 26120 root@px-cloud1.matpool.com 'tail -f /mnt/picf_run_logs/picf_g27_oldargs_k4_pi05ablated_300_20260605.log'
+```
+
+Startup verification:
+
+```text
+04:47:18 remote log entered PICF Training.
+
+world_size = 2
+training_strategy = fsdp_full_shard
+picf_mode = ablated
+trainable_numel = 13,751,362
+total_numel = 3,744,957,843
+accum_steps = 2
+effective_global_batch = 4
+num_steps = 300
+lr = 2e-4
+min_lr = 2e-5
+warmup = 600
+unroll_steps = 2
+burnin_steps = 0
+effective_window_steps = 2
+calvin_balanced_bucket_sampler = true
+calvin_bucket_sampling_mode = task_uniform
+logical_batch_task_count = 4
+logical_batch_bucket_normalization = true
+calvin_buckets = block_lift, block_other, block_push, drawer, other, slider, switch_button_light
+```
+
 ## 4. Next Decision Tree
 
 At step100/200/300 of the live ablation:
@@ -281,9 +421,11 @@ If ablated descends early but later rebounds:
 [x] Record step100 and compare against G26-B step100 = 0.1165.
 [x] Record step150 and compare against G26-B step300 ~= 0.0654.
 [x] Record step200 and compare against G26-B step200 = 0.0766.
-[ ] Record step300 and compare against G26-B step300 = 0.0654.
-[ ] Stop decisively if the branch is clearly worse after step200/300.
-[ ] If it works, preserve command/log/checkpoint and write exact next deploy.
+[x] Record step300 and compare against G26-B step300 = 0.0654.
+[x] Stop decisively if the branch is clearly worse after step200/300.
+[x] Start old 4-22 args + current K4 sampler parity control.
+[ ] Record G27 step50/100/200/300 and decide whether action-shell parity fixes
+    the plateau.
 ```
 
 ## 6. Deployment Part Checklist
@@ -294,9 +436,9 @@ If ablated descends early but later rebounds:
 [x] Keep PCGrad/CAGrad as explicit diagnostics, not defaults.
 [x] Keep SAM default off and archived.
 [x] Keep action-context bridge guarded and measured by canonical action MSE.
-[ ] Decide whether PI0.5-like ablation proves PICF/context is action-negative.
-[ ] If yes, deploy stricter action-boundary isolation before any new full PICF
-    long run.
-[ ] If no, audit current trainer parity against historical 4-22 PI0.5 before
-    any new PICF architecture change.
+[x] Decide whether PI0.5-like ablation proves PICF/context is action-negative:
+    yes, relative to G26-B fresh, but not sufficient to recover old action
+    descent.
+[ ] Audit current trainer parity against historical 4-22 PI0.5 before any new
+    PICF architecture change.
 ```

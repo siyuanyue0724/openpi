@@ -1791,3 +1791,44 @@ At step300:
   equal, next work should shift from PICF structure to action objective /
   semantic path / data mixture parity with the historical 4-22 baseline.
 ```
+
+Step250/300 update, 2026-06-05:
+
+```text
+step250 action_default = 0.0656914562
+step300 action_default = 0.0640842691
+
+step300 action components:
+  pos     = 0.2238104343
+  rot     = 0.3115257025
+  gripper = 0.4133533239
+
+logical_batch_distinct_bucket_count = 4
+loss_total_minus_action             = 0.0
+```
+
+Interpretation:
+
+```text
+The current-shell PI0.5-like ablation clearly improves over full G26-B, but it
+plateaus around the G26-B step300 region rather than entering the old 4-22
+0.02-0.03 band.  Therefore the live evidence is:
+
+  PICF/context integration is action-negative under G26-B;
+  but PICF/context is not the only missing variable.
+
+The next non-repeated experiment is trainer/action-shell parity:
+  old 4-22 ablated PI0.5 args overlaid onto current-code defaults
+  + current task_uniform K4 logical batch
+  + explicit semantic_action_context_flow_residual_enabled=false.
+
+This is deliberately not another sampler-only, PCGrad/CAGrad, Huber/L1,
+dynamic-mixing, SAM, raw-overlap, or context-only experiment; those are already
+recorded as tested/diagnostic in the action descent checklist.
+```
+
+Active parity run:
+
+```text
+picf_g27_oldargs_k4_pi05ablated_300_20260605
+```
