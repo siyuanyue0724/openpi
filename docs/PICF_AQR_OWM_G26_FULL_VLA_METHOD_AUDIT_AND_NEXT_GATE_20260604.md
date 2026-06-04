@@ -135,7 +135,7 @@ AdaMoE-VLA / FedVLA, 2025:
 | Context-only action readout | `_compute_action_context_readout_aux` | G22 proved motor-readability | Diagnostic; not deployed-action fix. |
 | Deployed flow residual | `_apply_action_context_flow_residual` | G25 active | Current only non-duplicate deployed-path test. |
 | Action expert router/MoE proxy | `_apply_action_expert_router` | G16 tested | Keep off; full MoE deferred. |
-| Direct FAST/action-token CE | native OpenPI FAST exists; PICF drops LM heads | not implemented in PICF | Next real branch if G25 fails. |
+| Direct FAST/action-token CE | PICF-local discretized action-token auxiliary in `wrapper.py::_compute_action_context_token_aux` | G26-B 300-step no-resume gate passed; imbalance diagnostics added after the run | Keep as the current action-boundary repair; rerun short sanity with label-entropy/majority metrics before longer training. |
 | Embodiment adapters/heads | mostly future hook | CALVIN single embodiment | Defer to heterogeneous robot data. |
 | System2/System1 subtask split | no reliable labels in current stream | theory only | Defer; not 2-hour root fix. |
 
@@ -666,6 +666,32 @@ step 200:
   active_same_role_overlap_max     = 0.009379
   context_same_role_overlap_max    = 0.029280
   logical_distinct_bucket_count    = 4
+
+step 300:
+  loss_action_default_equiv        = 0.065424
+  loss_action_active7              = 0.293769
+  pi_context_token_aux_loss        = 0.708323
+  pi_context_token_aux_accuracy    = 0.814380
+  pi_context_token_aux_weighted    = 0.035416
+  pi_context_flow_gain_mse_delta   = +0.011346
+  pi_context_flow_base_mse         = 0.076770
+  pi_context_flow_adapted_mse      = 0.065424
+  active_same_role_overlap_max     = 0.002360
+  context_same_role_overlap_max    = 0.018357
+  raw_same_role_overlap_max        = 0.456951
+  posterior_identity_switch_rate   = 0.111111
+  logical_distinct_bucket_count    = 4
+
+last 10 logged rows, steps 210-300:
+  loss_action_default_equiv mean   = 0.077507
+  loss_action_default_equiv min    = 0.065424
+  loss_action_default_equiv max    = 0.096068
+  loss_action_active7 mean         = 0.344696
+  pi_context_token_aux_loss mean   = 0.721478
+  pi_context_token_aux_accuracy    = 0.810073 mean
+  pi_context_flow_gain_delta mean  = +0.013089
+  active_same_role_overlap mean    = 0.005556
+  context_same_role_overlap mean   = 0.020844
 ```
 
 Interpretation:
@@ -700,9 +726,47 @@ Interpretation:
    action MSE reaches 0.076665 and remains far below the 0.15 starting band.
    Token CE has not collapsed upward; flow gain stays positive.  Continue to
    step 300 for the final no-resume gate result.
+
+8. The 300-step gate passes:
+   the run ends at the best logged action MSE, 0.065424, with positive flow
+   gain and low active/context overlap.  This is the first G26-family gate that
+   simultaneously shows direct action-representation learning and canonical
+   action MSE descent under the task-uniform K4 logical-batch recipe.
 ```
 
-### 8.3 Exhaustive method status for the user's requested list
+### 8.3 Final decision after the 300-step gate
+
+```text
+Accepted:
+  G26-B is a real mechanism repair, not a sampler-only or optimizer-only
+  repeat.  It targets the previously measured action-boundary failure by
+  making PICF context predict discretized action chunks while keeping canonical
+  action MSE visible.
+
+Not yet accepted:
+  1. A direct resume from the 11000-step G25 checkpoint family.  Previous
+     G26-B resume attempts stalled in `_load_checkpoint_sequential_across_ranks`.
+     This is a checkpoint-loading engineering issue that must be fixed before
+     claiming this branch works as a continuation path.
+
+  2. Token-accuracy purity.  The current remote run predates the label-entropy
+     and majority-bin diagnostics added locally after the run started.  The
+     action MSE and flow-gain trends are already strong, but the next run should
+     include:
+
+       pi_context_token_aux_label_entropy
+       pi_context_token_aux_label_majority_fraction
+       pi_context_token_aux_accuracy_over_majority
+
+Next deployment rule:
+  Do not spend more time on sampler-only, optimizer-only, PCGrad/CAGrad-only,
+  SAM, or sidecar-only branches.  The next meaningful branch is:
+
+    latest code sync -> short 100/200-step G26-B sanity with imbalance metrics
+    -> if still positive, launch longer training gate.
+```
+
+### 8.4 Exhaustive method status for the user's requested list
 
 ```text
 Already implemented and historically tested:
@@ -723,7 +787,7 @@ Already implemented and historically tested:
   deployed flow residual
   action-router proxy
 
-Currently under runtime gate:
+Accepted by the 300-step no-resume runtime gate:
   PICF-local FAST-style action-token CE, G26-B.
 
 Rejected as current default:

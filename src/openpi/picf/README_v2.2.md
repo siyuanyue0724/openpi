@@ -11,12 +11,17 @@ AQR-MAPG direct-final graph replacement.
 [`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
 as the current strict method checklist before spending more GPU.  It maps every
 requested 2025-2026 VLA method family to math, code dataflow, history, and a
-runtime decision.  Current rule: G25 deployed-flow residual finished with
-positive context-flow gain but insufficient canonical action descent; the active
-non-duplicate branch is G26-B PICF-local FAST-style action-token representation
-supervision, not another sampler-only,
+runtime decision.  Current rule: G26-B PICF-local FAST-style action-token
+representation supervision completed a no-resume 300-step 2xA100 K4 gate with
+canonical action MSE descent, positive deployed-flow gain, and low
+active/context support overlap.  Do not run another sampler-only,
 optimizer-only, PCGrad/CAGrad-only, raw-overlap-only, SAM, sidecar-only, or
-auxiliary-readout-only run.
+auxiliary-readout-only branch as the next root fix.  The next valid step is:
+sync the latest label-imbalance diagnostics, run a short 100/200-step G26-B
+sanity gate, then launch a longer gate only if token accuracy beats the
+majority-label baseline.  Direct resume from the 11000-step G25 checkpoint
+family remains blocked by a sequential checkpoint-loader barrier and is not yet
+accepted.
 
 2026-06-04 G25 deployed flow context bridge: use
 [`docs/PICF_AQR_OWM_G25_DEPLOYED_FLOW_CONTEXT_BRIDGE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G25_DEPLOYED_FLOW_CONTEXT_BRIDGE_20260604.md)
