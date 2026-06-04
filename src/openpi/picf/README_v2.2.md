@@ -18,6 +18,20 @@ clearly fail.  The next non-duplicate spare-machine gates are: rerun Contrast D
 after the full FSDP mutable-output-tree fix, and run a same-code PI0.5-like
 ablation under the same data/sampler/logging contract.
 
+2026-06-05 same-code PI0.5-like K4 ablation is now running on px-cloud1:26120;
+use
+[`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
+section `13. PI0.5-Like K4 Ablation Control, 2026-06-05`.  This is not exact
+4-22 or official PI0.5 parity; it is a current-code/current-sampler control
+with `picf_mode=ablated`, K4 task-uniform logical batch, and native PI0.5
+semantic action path.  Step50 verifies real K4 coverage but is not yet positive
+action evidence because LR is still early in 600-step warmup.  Judge at
+step100/200/300 against G26-B fresh step100/200/300 action-default metrics.
+The active action-descent checklist is
+[`docs/PICF_AQR_OWM_ACTION_DESCENT_CHECKLIST_20260605.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_DESCENT_CHECKLIST_20260605.md);
+it lists which VLA-method branches are implemented/tested/rejected and what
+must be checked before another action-loss experiment is launched.
+
 2026-06-05 G26-B step500 action-platform contrast: use
 [`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
 section `11. Step500 Action-Platform Contrast Gate, 2026-06-05`.  Contrast A

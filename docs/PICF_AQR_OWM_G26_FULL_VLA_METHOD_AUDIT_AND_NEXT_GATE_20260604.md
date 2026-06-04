@@ -1535,3 +1535,171 @@ The FSDP dataclass fix was committed and pushed:
   5d9af6b Make PaliGemma semantic features FSDP-safe
   cca5a59 Make PaliGemma view metadata FSDP-safe
 ```
+
+## 13. PI0.5-Like K4 Ablation Control, 2026-06-05
+
+Purpose:
+
+```text
+Test the current repository/trainer/data/logical-batch shell with PICF recurrent
+semantics disabled.  This isolates whether the current G26-B action platform is
+PICF/context-specific or also appears in the native PI0.5 semantic action path
+under the same current CALVIN bucket sampler and logging contract.
+```
+
+Run:
+
+```text
+machine:
+  px-cloud1:26120
+
+tmux:
+  picf_g26pi05like_k4_ablation_30k_20260605
+
+repo:
+  /root/openpi_g25_20260604
+  commit f61887a
+
+log:
+  /mnt/picf_run_logs/picf_g26pi05like_k4_ablation_30k_20260605.log
+
+command:
+  /mnt/picf_run_logs/picf_g26pi05like_k4_ablation_30k_20260605.cmd
+```
+
+Key contract:
+
+```text
+picf_mode=ablated
+MAPG/AQR/VL router disabled
+native PI0.5 semantic action path
+extra_prefix_tokens=None
+training_strategy=fsdp_full_shard
+world_size=2
+accum_steps=2
+effective_global_batch=4
+calvin_bucket_sampling_mode=task_uniform
+logical_batch_task_count=4
+logical_batch_bucket_normalization=True
+calvin_bucket_sample_without_replacement=True
+lr=2e-4
+min_lr=2e-5
+warmup_steps=600
+```
+
+Trainable-boundary note:
+
+```text
+semantic_trainable_scope=backbone_only trains the PaliGemma/Gemma expert model
+stack (`self.model.parameters()` in `wrapper.py::_apply_trainable_scope`) and
+freezes only wrapper-local flow/time calibration heads.  This is the maintained
+historical full-cotrain boundary in the current wrapper tests.  It is therefore
+not a frozen-action-head probe, but it is also not exact 4-22 parity.
+```
+
+Important non-equivalence:
+
+```text
+This is not exact 2026-04-22 PI0.5 parity.
+
+It uses the current PICF trainer shell, current task-uniform K4 logical batch,
+current quantile action/prompt-state normalization, FSDP, semantic length 256,
+and current CALVIN transition source.  It also disables the live PICF point /
+visual / tactile branches.  Therefore it answers a narrower but critical
+question:
+
+  "Under the same current data/sampler/logging contract, does removing PICF
+   semantics make action descend materially faster?"
+
+It must not be used as a claim about official PI0.5 or historical 4-22 parity.
+```
+
+Step50 result:
+
+```text
+step                          = 50
+loss_total                    = 0.1291981190
+loss_action_default_equiv     = 0.1291981190
+loss_action_active7           = 0.4800469577
+loss_action                   = 0.1291981190
+loss_total_minus_action       = 0.0
+grad_norm                     = 1.6998214722
+lr                            = 1.6666666667e-05
+logical_batch_distinct_bucket = 4
+speed                         = 0.0520 steps/sec
+```
+
+Reading:
+
+```text
+Step50 is not positive evidence yet.
+
+It verifies that the K4 task coverage is real and that the ablation has no PICF
+structure-loss contamination, because loss_total equals action.  However, action
+is still worse than G26-B fresh step100 (0.1165), while the LR is still very low
+inside the 600-step warmup.  Do not stop or accept the branch from step50 alone.
+```
+
+Step100 result:
+
+```text
+step                          = 100
+loss_total                    = 0.0770749152
+loss_action_default_equiv     = 0.0770749152
+loss_action_active7           = 0.3494936228
+loss_action                   = 0.0770749152
+loss_total_minus_action       = 0.0
+grad_norm                     = 0.8037739396
+lr                            = 3.3333333333e-05
+logical_batch_distinct_bucket = 4
+speed                         = 0.0511 steps/sec
+```
+
+Per-bucket action-default:
+
+```text
+block_lift          0.09356
+block_other         0.08351
+block_push          0.06008
+drawer              0.09716
+other               0.07079
+slider              0.04984
+switch_button_light 0.09115
+```
+
+Step100 reading:
+
+```text
+Positive but not final.
+
+The ablated PI0.5-like path is materially better than G26-B fresh step100
+(0.1165) and is already near G26-B fresh step200 (0.0766), while K4 coverage is
+confirmed and all PICF structure losses are zero.  This supports the hypothesis
+that current PICF/context integration is action-negative or at least action
+slowing under the G26-B setup.
+
+It does not yet prove the branch will enter the old 0.02-0.03 band.  The LR is
+still in warmup, and the hardest buckets (`drawer`, `switch_button_light`,
+`block_lift`) remain above 0.09.  Continue to step200 before deciding whether to
+stop or pivot.
+```
+
+Decision rule:
+
+```text
+At step100:
+  If action_default is already much lower than G26-B step100 (0.1165), PICF
+  semantics/context are likely action-negative in the current integration.
+
+  If action_default is similar or worse, keep to step200 because warmup is still
+  early, but treat "remove PICF alone" as unproven.
+
+At step200:
+  Compare against G26-B step200 (0.0766).  If ablation cannot beat it, the
+  action platform is not explained by PICF structure alone.
+
+At step300:
+  Compare against G26-B step300 (0.0654).  If ablation remains worse or only
+  equal, next work should shift from PICF structure to action objective /
+  semantic path / data mixture parity with the historical 4-22 baseline.
+```
