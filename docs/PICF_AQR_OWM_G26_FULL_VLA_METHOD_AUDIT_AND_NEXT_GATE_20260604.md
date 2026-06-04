@@ -1684,6 +1684,94 @@ still in warmup, and the hardest buckets (`drawer`, `switch_button_light`,
 stop or pivot.
 ```
 
+Step150 result:
+
+```text
+step                          = 150
+loss_total                    = 0.0646321550
+loss_action_default_equiv     = 0.0646321550
+loss_action_active7           = 0.2944722176
+loss_action                   = 0.0646321550
+loss_total_minus_action       = 0.0
+grad_norm                     = 0.6035906076
+lr                            = 5.0e-05
+logical_batch_distinct_bucket = 4
+```
+
+Per-bucket action-default:
+
+```text
+block_lift          0.06804
+block_other         0.06786
+block_push          0.04960
+drawer              0.06414
+other               0.06641
+slider              0.05041
+switch_button_light 0.08815
+```
+
+Step150 reading:
+
+```text
+The ablated PI0.5-like path reaches the G26-B fresh step300 region by step150.
+This is a stronger positive control than step100: under the same current trainer
+shell and K4 logical-batch sampler, disabling PICF structure/context restores a
+much faster native action descent.
+
+This still does not prove 4-22 parity or old 0.02-0.03 convergence.  The
+hardest bucket remains switch/button/light, and the run is still in warmup.
+Continue to step200/300; do not start another sampler-only experiment while this
+causal control is unresolved.
+```
+
+Step200 result:
+
+```text
+step                          = 200
+loss_total                    = 0.0641728789
+loss_action_default_equiv     = 0.0641728789
+loss_action_active7           = 0.2913683653
+loss_action                   = 0.0641728789
+loss_action_pos               = 0.2413374484
+loss_action_rot               = 0.2888981402
+loss_action_gripper           = 0.4488718212
+loss_total_minus_action       = 0.0
+grad_norm                     = 0.4555698037
+lr                            = 6.6666666667e-05
+logical_batch_distinct_bucket = 4
+```
+
+Per-bucket action-default:
+
+```text
+block_lift          0.05804
+block_other         0.07339
+block_push          0.05623
+drawer              0.06972
+other               0.05717
+slider              0.05109
+switch_button_light 0.08940
+```
+
+Step200 reading:
+
+```text
+The control remains positive relative to G26-B step200 (0.0766) and is still
+slightly better than G26-B step300 (0.0654).  But step150 -> step200 is almost
+flat: 0.06463 -> 0.06417.  The run has not reproduced the historical fast
+0.02-0.03 convergence band.
+
+This refines the causal interpretation:
+  - disabling PICF/context is beneficial for early action descent;
+  - disabling PICF/context alone is not yet sufficient to prove 4-22 parity;
+  - switch/button/light and gripper remain the visible bottlenecks at step200.
+
+Continue to step300.  If step300 remains around 0.064, the next branch should
+not repeat sampler-only methods; it should audit current trainer/action path
+parity against the historical 4-22/pi0.5 definition, and separately design a
+PICF bridge that has measured positive action gain before re-enabling PICF.
+```
+
 Decision rule:
 
 ```text

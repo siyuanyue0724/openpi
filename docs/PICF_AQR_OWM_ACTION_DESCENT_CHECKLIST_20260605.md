@@ -180,6 +180,72 @@ Still unresolved: whether this branch keeps descending toward the old
 to step200 before stopping.
 ```
 
+Step150:
+
+```text
+loss_action_default_equiv = 0.0646321550
+loss_action_active7 = 0.2944722176
+loss_total_minus_action = 0.0
+logical_batch_distinct_bucket_count = 4
+lr = 5.0e-05
+
+bucket action_default_equiv:
+  block_lift          0.0680387956
+  block_other         0.0678645276
+  block_push          0.0495955158
+  drawer              0.0641414492
+  other               0.0664097131
+  slider              0.0504070998
+  switch_button_light 0.0881502455
+```
+
+Step150 reading:
+
+```text
+The PI0.5-like ablation has already reached the G26-B fresh step300 region
+(G26-B step300 action_default ~= 0.0654) by step150.  This strengthens the
+causal interpretation that the enabled PICF/context path is action-negative or
+action-slowing under the current integration.  The remaining question is
+whether this clean action path keeps descending toward the old 0.02-0.03 band
+or stalls in the 0.05-0.06 band.
+```
+
+Step200:
+
+```text
+loss_action_default_equiv = 0.0641728789
+loss_action_active7 = 0.2913683653
+loss_total_minus_action = 0.0
+logical_batch_distinct_bucket_count = 4
+lr = 6.6666666667e-05
+
+action components:
+  pos     0.2413374484
+  rot     0.2888981402
+  gripper 0.4488718212
+
+bucket action_default_equiv:
+  block_lift          0.0580355006
+  block_other         0.0733913263
+  block_push          0.0562251920
+  drawer              0.0697186454
+  other               0.0571673639
+  slider              0.0510929807
+  switch_button_light 0.0893955454
+```
+
+Step200 reading:
+
+```text
+The branch remains action-positive relative to G26-B step200 (0.0766) and still
+slightly beats G26-B step300 (0.0654).  However, step150 -> step200 is nearly
+flat: 0.06463 -> 0.06417.  The hard bucket is still switch/button/light, and
+the gripper component rebounded.  This rules out immediate failure, but it also
+rules out "PICF removal alone instantly restores old 0.02-0.03 convergence".
+Continue to step300; use step300 to decide whether this is an early plateau or
+a temporary warmup/bucket-composition pause.
+```
+
 ## 4. Next Decision Tree
 
 At step100/200/300 of the live ablation:
@@ -213,7 +279,8 @@ If ablated descends early but later rebounds:
 [x] Verify current run has no PICF structure losses in loss_total.
 [x] Record step50.
 [x] Record step100 and compare against G26-B step100 = 0.1165.
-[ ] Record step200 and compare against G26-B step200 = 0.0766.
+[x] Record step150 and compare against G26-B step300 ~= 0.0654.
+[x] Record step200 and compare against G26-B step200 = 0.0766.
 [ ] Record step300 and compare against G26-B step300 = 0.0654.
 [ ] Stop decisively if the branch is clearly worse after step200/300.
 [ ] If it works, preserve command/log/checkpoint and write exact next deploy.
