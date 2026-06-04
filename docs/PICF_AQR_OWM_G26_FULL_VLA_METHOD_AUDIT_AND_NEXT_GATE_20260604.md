@@ -958,3 +958,92 @@ Next valid GPU use:
   optimizer-only, PCGrad/CAGrad-only, SAM, sidecar-only, or raw-overlap-only
   branches without a new falsifiable hypothesis.
 ```
+
+## 9. 30000-Step Fresh Long Gate
+
+Launch time: 2026-06-04 19:17 China time.
+
+Remote:
+
+```text
+host: px-cloud1.matpool.com:26120
+repo: /root/openpi_g25_20260604
+commit: c0be1d9
+tmux: picf_g26b_tokenaux_long30k_k4_fresh_20260604
+log: /mnt/picf_run_logs/picf_g26b_tokenaux_long30k_k4_fresh_20260604.log
+cmd: /mnt/picf_run_logs/picf_g26b_tokenaux_long30k_k4_fresh_20260604.cmd
+ckpt: /mnt/checkpoints/picf_core/picf_core/picf_g26b_tokenaux_long30k_k4_fresh_20260604
+```
+
+Decision: fresh run, not resume.
+
+Reason:
+
+```text
+1. G26-B 200/300-step checkpoints are sanity gates, not mature training states.
+   Resuming them saves little and adds checkpoint-loader risk.
+
+2. G25/G24 mature checkpoints were produced before the final G26-B token-aux
+   deployment and are not a clean test of this mechanism.
+
+3. Direct resume from the 11000-step G25 family previously stalled in the
+   sequential checkpoint-loader barrier.  That remains a separate engineering
+   problem and must not be mixed into the 30000-step mechanism gate.
+```
+
+Long-run contract:
+
+```text
+num_train_steps=30000
+resume=false
+save_interval=500
+keep_last_checkpoints=3
+progress_bar=true
+semantic_trainable=true
+semantic_trainable_scope=action_head_and_adapter
+action_context_integration=suffix_cross_attention
+action_context_tokens=24
+action_context_stopgrad=true
+semantic_action_context_readout_aux_weight=0.0
+semantic_action_context_token_aux_weight=0.05
+semantic_action_context_token_aux_bins=64
+semantic_action_context_token_aux_clip=1.0
+semantic_action_context_flow_residual_enabled=true
+semantic_action_context_flow_residual_gate_init=-2.0
+semantic_action_context_flow_residual_time_floor=0.05
+semantic_action_context_flow_residual_rms_cap=true
+calvin_bucket_sampling_mode=task_uniform
+logical_batch_task_count=4
+logical_batch_bucket_normalization=true
+calvin_bucket_sample_without_replacement=true
+```
+
+Initial runtime audit:
+
+```text
+DDP world size: 2
+bucket names:
+  block_lift, block_other, block_push, drawer, other, slider, switch_button_light
+bucket target weights:
+  all seven buckets are task-uniform at 1/7
+```
+
+Expected evidence:
+
+```text
+Early 0-500 steps:
+  action loss should compress faster than the pre-G26 platform runs.
+  token CE should fall below the majority-only baseline after warmup.
+  pi_context_flow_gain_mse_delta should stay positive on logged windows.
+  active/context same-role overlap should remain low.
+
+500-3000 steps:
+  the important signal is not only low action loss, but whether action loss can
+  keep improving without slot-JEPA explosion, deployed-flow gain inversion, or
+  active posterior collapse.
+
+Long gate:
+  this run can validate G26-B as the maintained long-training recipe only if
+  it shows sustained action compression and stable structure health beyond the
+  short gate.  It is not a proof before those logs exist.
+```

@@ -16,6 +16,12 @@ representation supervision completed both the no-resume 300-step 2xA100 K4
 gate and the follow-up 200-step label-imbalance sanity gate.  Canonical action
 MSE descends, deployed-flow gain stays positive, active/context support overlap
 stays low, and token accuracy exceeds the majority-bin baseline after warmup.
+The current 30000-step long gate is
+`picf_g26b_tokenaux_long30k_k4_fresh_20260604`; it is intentionally a fresh
+run, not a resume from older G25/G24 checkpoints, because the mature-checkpoint
+resume barrier is a separate engineering issue and would confound this
+mechanism test.  See section `9. 30000-Step Fresh Long Gate` in the G26 audit
+document for the exact tmux/log/checkpoint paths and launch contract.
 Do not run another sampler-only, optimizer-only, PCGrad/CAGrad-only,
 raw-overlap-only, SAM, sidecar-only, or auxiliary-readout-only branch as the
 next root fix.  The remaining engineering blocker is direct resume from the
