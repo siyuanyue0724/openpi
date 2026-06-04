@@ -277,7 +277,7 @@ Run     : picf_g25_flowresidual_c2_from11000_to11300_20260604
 Session : picf_g25_flowresidual_c2_300_20260604
 Log     : /mnt/picf_run_logs/picf_g25_flowresidual_c2_300_20260604.log
 Mode    : 2-card DDP, logical_batch_task_count=4, accum_steps=2
-Status  : running; verified compatibility migration and first 60 optimizer
+Status  : running; verified compatibility migration and first 100 optimizer
           steps after resume
 ```
 
@@ -291,14 +291,18 @@ step   total     action_def  base_mse  adapt_mse  gain_delta
 11040  0.10943   0.04985     0.05004   0.04985    0.00019
 11050  0.11354   0.05110     0.05177   0.05110    0.00067
 11060  0.10627   0.04758     0.04964   0.04758    0.00206
+11070  0.09079   0.04048     0.04252   0.04048    0.00204
+11080  0.11495   0.05133     0.05384   0.05133    0.00251
+11090  0.10579   0.04816     0.04995   0.04816    0.00178
+11100  0.11939   0.05472     0.05581   0.05472    0.00109
 ```
 
-Interpretation at step 11060:
+Interpretation at step 11100:
 
 ```text
 The residual starts harmful because the new gate/readout parameters are missing
 from the source checkpoint and initialize cold.  By 11030 it is nearly neutral,
-and by 11040-11060 it becomes positive on the deployed action objective:
+and by 11040-11100 it stays positive on the deployed action objective:
 
   adapted_mse < base_mse
   gain_delta > 0
@@ -306,7 +310,9 @@ and by 11040-11060 it becomes positive on the deployed action objective:
 This is the first direct evidence that PICF context can improve the native
 PI0.5 flow path rather than only a side readout.  It is not a 30K convergence
 claim yet; the remaining gate is to verify the positive delta persists through
-the full 300-step C2 run and then in a longer run.
+the full 300-step C2 run and then in a longer run.  At 11100 the C2 short
+criterion is met: the residual has delivered seven consecutive positive
+structured-log points after the initial cold-start phase.
 ```
 
 ## 6. Anti-Repeat Rules
