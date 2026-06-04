@@ -214,21 +214,22 @@ session: picf_g25_flowresidual_c2_300_20260604
 log: /mnt/picf_run_logs/picf_g25_flowresidual_c2_300_20260604.log
 ```
 
-Current structured trace through step 11170:
+Current structured trace through step 11230:
 
 ```text
 loss_action_default_equiv:
   11010 = 0.046894
-  11170 = 0.041966
-  min   = 0.039342
+  11230 = 0.043449
+  min   = 0.037384
   max   = 0.054716
-  last5 mean  ~= 0.042642
-  last10 mean ~= 0.045540
+  last5 mean  ~= 0.043813
+  last10 mean ~= 0.043246
+  last20 mean ~= 0.045080
 
 pi_context_flow_gain_mse_delta:
-  positive in 14/17 logged points
-  last5 mean  ~= +0.003792
-  last10 mean ~= +0.002916
+  last5 mean  ~= +0.005586
+  last10 mean ~= +0.004840
+  last20 mean ~= +0.003621
 
 structure:
   logical_batch_distinct_bucket_count = 4
@@ -245,6 +246,19 @@ Resolved:
 Not resolved:
   The canonical action scalar remains noisy.  This is not yet a 30K convergence
   proof, and not enough to claim all action convergence problems are solved.
+
+Latest stricter judgment:
+  G25 demonstrates that the deployed residual bridge is locally useful: the
+  adapted flow MSE is lower than the native base flow MSE in the latest window.
+  It does not yet demonstrate a stable canonical action descent.  Therefore
+  sampler-only, LR-only, optimizer-only, or PCGrad/CAGrad-only reruns are still
+  disallowed as low-value repeats.
+
+Decision boundary:
+  If G25-C2 finishes with positive deployed-flow gain but without sustained
+  canonical action descent, do not rerun sampler/optimizer-only branches.
+  Move to direct PICF-side FAST/action-token representation supervision or an
+  equivalent deployed action-representation target.
 ```
 
 ## 5. What Must Not Be Repeated

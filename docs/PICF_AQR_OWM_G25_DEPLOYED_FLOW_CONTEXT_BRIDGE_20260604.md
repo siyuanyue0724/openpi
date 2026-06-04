@@ -379,6 +379,76 @@ residual is consistently reducing `adapted_mse` relative to `base_mse` in the
 latest window.  The remaining question is whether that positive local gain can
 produce a sustained action-loss descent over a longer run.
 
+Update at step 11210:
+
+```text
+loss_action_default_equiv:
+  first row    11010 = 0.046894
+  latest row   11210 = 0.042887
+  min observed        = 0.037384
+  max observed        = 0.054716
+  last5 mean          ~= 0.041714
+  last10 mean         ~= 0.042845
+  last20 mean         ~= 0.045131
+
+pi_context_flow_gain_mse_delta:
+  positive in 18/20 latest logged points
+  last5 mean          ~= +0.005160
+  last10 mean         ~= +0.004300
+  last20 mean         ~= +0.002655
+```
+
+Interpretation:
+
+```text
+The current G25-C2 branch is no longer in the "no descent" category:
+  - latest action is lower than the first logged row;
+  - the minimum action row is 0.037384;
+  - the deployed residual consistently improves adapted flow MSE over base MSE.
+
+It is still not a final 30K training proof:
+  - canonical action remains high-variance across buckets;
+  - PICF core is nearly frozen, so structural losses should not be interpreted
+    as full-anchor optimization evidence in this gate;
+  - if the run finishes without a clearer sustained descent, the next
+    non-duplicate branch remains PICF-side FAST/action-token representation
+    supervision or an equivalent deployed action-representation target.
+```
+
+Update at step 11230:
+
+```text
+loss_action_default_equiv:
+  first row    11010 = 0.046894
+  latest row   11230 = 0.043449
+  min observed        = 0.037384
+  max observed        = 0.054716
+  last5 mean          ~= 0.043813
+  last10 mean         ~= 0.043246
+  last20 mean         ~= 0.045080
+
+pi_context_flow_gain_mse_delta:
+  last5 mean          ~= +0.005586
+  last10 mean         ~= +0.004840
+  last20 mean         ~= +0.003621
+```
+
+Interpretation:
+
+```text
+The deployed residual remains locally useful: adapted flow MSE is consistently
+lower than native base flow MSE in the latest window.
+
+The canonical action metric is still high variance:
+  - the latest row is below the first row, but not monotonically descending;
+  - the 11220 row returned to 0.052437 before recovering to 0.043449;
+  - therefore this is not enough to declare the convergence problem solved.
+
+If the 11300-step gate keeps positive residual gain but lacks sustained action
+descent, the next experiment must target the missing action-representation
+supervision branch, not another sampler/LR/optimizer-only branch.
+```
+
 ## 6. Anti-Repeat Rules
 
 Do not spend another 1-2 hour gate on these unless the code has materially
