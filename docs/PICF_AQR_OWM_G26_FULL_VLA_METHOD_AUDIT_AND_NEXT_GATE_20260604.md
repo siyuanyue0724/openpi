@@ -533,3 +533,149 @@ This is the working rule for the next 2-3 hours:
 Finish G25.  If it is not enough, implement/audit FAST/action-token CE.  Do not
 repeat already rejected data-mixing or optimizer-only tests.
 ```
+
+## 8. Live G26-B Remote Gate, 2026-06-04
+
+Remote:
+
+```text
+host: px-cloud1.matpool.com:26120
+repo: /root/openpi_g25_20260604
+session: picf_g26b_tokenaux_fresh_k4_300_20260604
+log: /mnt/picf_run_logs/picf_g26b_tokenaux_fresh_k4_300_20260604.log
+```
+
+User tail:
+
+```bash
+ssh -i /tmp/picf_g22_key -p 26120 root@px-cloud1.matpool.com \
+  'tail -f /mnt/picf_run_logs/picf_g26b_tokenaux_fresh_k4_300_20260604.log'
+```
+
+### 8.1 Checkpoint-resume correction
+
+Earlier G26-B attempts from the `11000` checkpoint did not produce steps.  The
+failure signature was not the token auxiliary loss itself:
+
+```text
+rank1 stack:
+  torch.distributed.distributed_c10d.py barrier
+  scripts/picf_core_train.py::_distributed_barrier
+  scripts/picf_core_train.py::_load_checkpoint_sequential_across_ranks
+```
+
+Therefore the current accepted runtime gate is a no-resume 300-step mechanism
+test.  It can validate that the G26-B branch is mathematically and DDP-runnable,
+but it must not be used as a direct loss comparison against the 11000-step G25
+checkpoint family.
+
+### 8.2 Step-10 and step-20 evidence
+
+Current command family:
+
+```text
+resume=false
+semantic_trainable_scope=action_head_and_adapter
+action_context_integration=suffix_cross_attention
+action_context_tokens=24
+action_context_stopgrad=true
+semantic_action_context_readout_aux_weight=0
+semantic_action_context_token_aux_weight=0.05
+semantic_action_context_token_aux_bins=64
+semantic_action_context_flow_residual_enabled=true
+calvin_bucket_sampling_mode=task_uniform
+logical_batch_task_count=4
+logical_batch_bucket_normalization=true
+calvin_bucket_sample_without_replacement=true
+```
+
+Structured rows:
+
+```text
+step 10:
+  loss_action_default_equiv        = 0.151121
+  pi_context_token_aux_loss        = 4.164968
+  pi_context_token_aux_accuracy    = 0.017944
+  pi_context_flow_gain_mse_delta   = +0.004390
+  pi_context_flow_base_mse         = 0.155510
+  pi_context_flow_adapted_mse      = 0.151121
+  active_same_role_overlap_max     = 0.011236
+  context_same_role_overlap_max    = 0.014972
+  raw_same_role_overlap_max        = 0.459663
+  logical_distinct_bucket_count    = 4
+
+step 20:
+  loss_action_default_equiv        = 0.150090
+  pi_context_token_aux_loss        = 4.094457
+  pi_context_token_aux_accuracy    = 0.051147
+  pi_context_flow_gain_mse_delta   = +0.009362
+  pi_context_flow_base_mse         = 0.159452
+  pi_context_flow_adapted_mse      = 0.150090
+  active_same_role_overlap_max     = 0.005279
+  context_same_role_overlap_max    = 0.024044
+  raw_same_role_overlap_max        = 0.475391
+  logical_distinct_bucket_count    = 4
+```
+
+Interpretation:
+
+```text
+1. Token aux is live:
+   CE starts near random log(64)=4.159 and already moves to 4.094 by step 20.
+   Accuracy rises from about random 1/64 to 0.051.
+
+2. Deployed flow residual is live:
+   adapted MSE is below base MSE at both step 10 and step 20.
+
+3. Logical batch is live:
+   each logged optimizer step reports 4 distinct task buckets.
+
+4. No convergence claim yet:
+   this is fresh no-resume, so action MSE cannot be compared to the 11000-step
+   checkpoint-family action numbers.  The pass/fail point remains step 100/200/300.
+```
+
+### 8.3 Exhaustive method status for the user's requested list
+
+```text
+Already implemented and historically tested:
+  task-uniform logical batch
+  trajectory/temperature/ratio sampling
+  without-replacement logical updates
+  per-bucket logical loss normalization
+  per-bucket action EMA scale
+  PiKE-style bounded dynamic mixing
+  scoped PCGrad
+  scoped CAGrad
+  continuous PI0.5 action chunks
+  L1/Huber action objective option
+  modality-specific PICF projectors/adapters
+  suffix action-context bridge
+  context perturbation audit
+  context-only action readout auxiliary
+  deployed flow residual
+  action-router proxy
+
+Currently under runtime gate:
+  PICF-local FAST-style action-token CE, G26-B.
+
+Rejected as current default:
+  sampler-only reruns
+  optimizer-reset-only reruns
+  whole-model PCGrad/CAGrad
+  SAM proposal supervision
+  sidecar-only mask pull
+  router-proxy-only
+
+Deferred for scaling/data reasons:
+  embodiment-specific heads/adapters: required for future heterogeneous robots,
+  not a CALVIN single-embodiment root cause.
+
+  System2/System1 subtask supervision: architecturally compatible, but current
+  CALVIN stream lacks reliable subtask labels for a 2-hour root-cause gate.
+
+Evidence-triggered only:
+  full action-expert MoE.  Deploy only if G26-B proves context is action-readable
+  but a fresh gradient-cosine audit still shows persistent task-family conflict
+  inside the action expert.
+```
