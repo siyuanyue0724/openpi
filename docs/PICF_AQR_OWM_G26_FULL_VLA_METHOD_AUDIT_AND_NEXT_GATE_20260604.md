@@ -642,6 +642,20 @@ step 50:
   context_same_role_overlap_max    = 0.027558
   raw_same_role_overlap_max        = 0.465212
   logical_distinct_bucket_count    = 4
+
+step 100:
+  loss_action_default_equiv        = 0.116515
+  loss_action_active7              = 0.433831
+  pi_context_token_aux_loss        = 1.033541
+  pi_context_token_aux_accuracy    = 0.809961
+  pi_context_token_aux_weighted    = 0.051677
+  pi_context_flow_gain_mse_delta   = +0.009866
+  pi_context_flow_base_mse         = 0.126381
+  pi_context_flow_adapted_mse      = 0.116515
+  active_same_role_overlap_max     = 0.004939
+  context_same_role_overlap_max    = 0.022963
+  raw_same_role_overlap_max        = 0.454424
+  logical_distinct_bucket_count    = 4
 ```
 
 Interpretation:
@@ -665,6 +679,12 @@ Interpretation:
    action MSE decreases, token CE decreases, token accuracy rises far above
    random, flow gain remains positive, and active/context overlap stays low.
    Continue to step 100 before accepting the mechanism for a longer run.
+
+6. The 100-step gate passes:
+   action MSE remains below the initial 0.15 band, token CE descends by more
+   than 3.1 nats, token accuracy stabilizes near 0.81, flow gain stays positive,
+   and active/context overlap remains low.  Continue to step 200/300 before
+   launching any 30K branch.
 ```
 
 ### 8.3 Exhaustive method status for the user's requested list
