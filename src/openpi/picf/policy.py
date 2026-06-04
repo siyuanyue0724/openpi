@@ -727,6 +727,19 @@ class PicfPi05Policy:
                         ("picf_action_expert_router_entropy_mean", "pi_action_expert_router_entropy_mean"),
                         ("picf_action_expert_router_top_weight_mean", "pi_action_expert_router_top_weight_mean"),
                         ("picf_action_expert_router_residual_rms_mean", "pi_action_expert_router_residual_rms_mean"),
+                        ("picf_action_context_flow_residual_enabled", "pi_context_flow_residual_enabled"),
+                        ("picf_action_context_flow_residual_gate", "pi_context_flow_residual_gate"),
+                        ("picf_action_context_flow_residual_token_count", "pi_context_flow_residual_token_count"),
+                        ("picf_action_context_flow_residual_rms_mean", "pi_context_flow_residual_rms_mean"),
+                        (
+                            "picf_action_context_flow_context_velocity_rms_mean",
+                            "pi_context_flow_context_velocity_rms_mean",
+                        ),
+                        ("picf_action_context_flow_context_target_mse", "pi_context_flow_context_target_mse"),
+                        ("picf_action_context_flow_residual_time_floor", "pi_context_flow_residual_time_floor"),
+                        ("picf_action_context_flow_base_mse", "pi_context_flow_base_mse"),
+                        ("picf_action_context_flow_adapted_mse", "pi_context_flow_adapted_mse"),
+                        ("picf_action_context_flow_gain_mse_delta", "pi_context_flow_gain_mse_delta"),
                     ):
                         value = flow_override.get(source_key)
                         if isinstance(value, torch.Tensor) and value.numel() > 0:
@@ -806,6 +819,16 @@ class PicfPi05Policy:
                 ("picf_action_context_adapter_gate", "pi_context_adapter_gate"),
                 ("picf_action_context_adapter_attention_entropy_mean", "pi_context_adapter_attention_entropy_mean"),
                 ("picf_action_context_adapter_residual_rms_mean", "pi_context_adapter_residual_rms_mean"),
+                ("picf_action_context_readout_enabled", "pi_context_readout_enabled"),
+                ("picf_action_context_readout_loss", "pi_context_readout_loss"),
+                ("picf_action_context_readout_mse", "pi_context_readout_mse"),
+                ("picf_action_context_readout_weighted_total", "pi_context_readout_weighted_total"),
+                ("picf_action_context_readout_weight", "pi_context_readout_weight"),
+                ("picf_action_context_readout_token_count", "pi_context_readout_token_count"),
+                (
+                    "picf_action_context_readout_attention_entropy_mean",
+                    "pi_context_readout_attention_entropy_mean",
+                ),
                 ("picf_action_context_probe_mode_id", "pi_context_probe_mode_id"),
                 ("picf_action_context_probe_delta_rms_mean", "pi_context_probe_delta_rms_mean"),
                 ("picf_action_context_probe_post_rms_mean", "pi_context_probe_post_rms_mean"),
@@ -820,6 +843,19 @@ class PicfPi05Policy:
                 ("picf_action_expert_router_entropy_mean", "pi_action_expert_router_entropy_mean"),
                 ("picf_action_expert_router_top_weight_mean", "pi_action_expert_router_top_weight_mean"),
                 ("picf_action_expert_router_residual_rms_mean", "pi_action_expert_router_residual_rms_mean"),
+                ("picf_action_context_flow_residual_enabled", "pi_context_flow_residual_enabled"),
+                ("picf_action_context_flow_residual_gate", "pi_context_flow_residual_gate"),
+                ("picf_action_context_flow_residual_token_count", "pi_context_flow_residual_token_count"),
+                ("picf_action_context_flow_residual_rms_mean", "pi_context_flow_residual_rms_mean"),
+                (
+                    "picf_action_context_flow_context_velocity_rms_mean",
+                    "pi_context_flow_context_velocity_rms_mean",
+                ),
+                ("picf_action_context_flow_context_target_mse", "pi_context_flow_context_target_mse"),
+                ("picf_action_context_flow_residual_time_floor", "pi_context_flow_residual_time_floor"),
+                ("picf_action_context_flow_base_mse", "pi_context_flow_base_mse"),
+                ("picf_action_context_flow_adapted_mse", "pi_context_flow_adapted_mse"),
+                ("picf_action_context_flow_gain_mse_delta", "pi_context_flow_gain_mse_delta"),
             ):
                 value = flow_override.get(source_key)
                 if isinstance(value, torch.Tensor) and value.numel() > 0:

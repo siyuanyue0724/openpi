@@ -2,6 +2,17 @@
 
 Date: 2026-06-03
 
+Update 2026-06-04:
+
+```text
+docs/PICF_AQR_OWM_ONE_HOUR_E21_DIAGNOSTIC_20260604.md
+```
+
+The June-04 one-hour diagnostic is the current discriminator for the E21
+question.  It probes the same current K12 checkpoint on old exact windows, old
+balanced stratified windows, and current K12-trace windows.  Use that result
+before adding another optimizer or architecture experiment.
+
 This document is the execution contract for the user's full requested method
 set: task-balanced logical batches, task/dataset mixing, gradient
 accumulation, per-task/per-modality normalization, action/VLM gradient

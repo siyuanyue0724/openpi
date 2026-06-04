@@ -171,6 +171,7 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "semantic_encoder.encoder.action_context_v_proj.*",
     "semantic_encoder.encoder.action_context_out_proj.*",
     "semantic_encoder.encoder.action_context_gate_logit",
+    "semantic_encoder.encoder.action_context_readout_*",
     "semantic_encoder.encoder.action_expert_router_*",
     "policy.semantic_encoder.encoder.action_context_in_proj.*",
     "policy.semantic_encoder.encoder.action_context_q_proj.*",
@@ -178,6 +179,7 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "policy.semantic_encoder.encoder.action_context_v_proj.*",
     "policy.semantic_encoder.encoder.action_context_out_proj.*",
     "policy.semantic_encoder.encoder.action_context_gate_logit",
+    "policy.semantic_encoder.encoder.action_context_readout_*",
     "policy.semantic_encoder.encoder.action_expert_router_*",
     "encoder.action_context_in_proj.*",
     "encoder.action_context_q_proj.*",
@@ -185,6 +187,7 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "encoder.action_context_v_proj.*",
     "encoder.action_context_out_proj.*",
     "encoder.action_context_gate_logit",
+    "encoder.action_context_readout_*",
     "encoder.action_expert_router_*",
     "action_context_in_proj.*",
     "action_context_q_proj.*",
@@ -192,6 +195,7 @@ _COMPAT_ALLOWED_MISSING_KEYS = (
     "action_context_v_proj.*",
     "action_context_out_proj.*",
     "action_context_gate_logit",
+    "action_context_readout_*",
     "action_expert_router_*",
     "semantic_prefix_proj.*",
     "posterior_to_control_proj.*",
@@ -2551,6 +2555,20 @@ def _validate_train_args(args: argparse.Namespace) -> None:
         raise ValueError("semantic_action_flow_time_alpha must be > 0.")
     if float(getattr(args, "semantic_action_flow_time_beta", 1.0)) <= 0.0:
         raise ValueError("semantic_action_flow_time_beta must be > 0.")
+    readout_loss = (
+        str(getattr(args, "semantic_action_context_readout_aux_loss", "smooth_l1")).strip().lower().replace("-", "_")
+    )
+    if readout_loss not in {"mse", "l2", "l1", "mae", "huber", "smooth_l1", "smoothl1"}:
+        raise ValueError(
+            "semantic_action_context_readout_aux_loss must be one of {'mse', 'l1', 'huber', 'smooth_l1'}, "
+            f"got {getattr(args, 'semantic_action_context_readout_aux_loss', None)!r}."
+        )
+    if float(getattr(args, "semantic_action_context_readout_aux_weight", 0.0)) < 0.0:
+        raise ValueError("semantic_action_context_readout_aux_weight must be >= 0.")
+    if float(getattr(args, "semantic_action_context_readout_aux_huber_delta", 1.0)) <= 0.0:
+        raise ValueError("semantic_action_context_readout_aux_huber_delta must be > 0.")
+    if float(getattr(args, "semantic_action_context_flow_residual_time_floor", 0.05)) <= 0.0:
+        raise ValueError("semantic_action_context_flow_residual_time_floor must be > 0.")
     if int(getattr(args, "semantic_action_expert_router_experts", 4)) < 1:
         raise ValueError("semantic_action_expert_router_experts must be >= 1.")
     if int(getattr(args, "semantic_action_expert_router_rank", 64)) < 1:
@@ -5294,6 +5312,23 @@ OWM_DEBUG_METRIC_KEYS: tuple[str, ...] = (
     "pi_context_adapter_gate",
     "pi_context_adapter_attention_entropy_mean",
     "pi_context_adapter_residual_rms_mean",
+    "pi_context_readout_enabled",
+    "pi_context_readout_loss",
+    "pi_context_readout_mse",
+    "pi_context_readout_weighted_total",
+    "pi_context_readout_weight",
+    "pi_context_readout_token_count",
+    "pi_context_readout_attention_entropy_mean",
+    "pi_context_flow_residual_enabled",
+    "pi_context_flow_residual_gate",
+    "pi_context_flow_residual_token_count",
+    "pi_context_flow_residual_rms_mean",
+    "pi_context_flow_context_velocity_rms_mean",
+    "pi_context_flow_context_target_mse",
+    "pi_context_flow_residual_time_floor",
+    "pi_context_flow_base_mse",
+    "pi_context_flow_adapted_mse",
+    "pi_context_flow_gain_mse_delta",
     "pi_action_flow_objective_mode_id",
     "pi_action_flow_time_mean",
     "pi_action_expert_router_enabled",
@@ -8765,6 +8800,27 @@ def _build_model(args: argparse.Namespace, *, device: torch.device) -> tuple[Pic
                 action_flow_huber_delta=float(getattr(args, "semantic_action_flow_huber_delta", 1.0)),
                 action_flow_time_alpha=float(getattr(args, "semantic_action_flow_time_alpha", 1.5)),
                 action_flow_time_beta=float(getattr(args, "semantic_action_flow_time_beta", 1.0)),
+                action_context_readout_aux_weight=float(
+                    getattr(args, "semantic_action_context_readout_aux_weight", 0.0)
+                ),
+                action_context_readout_aux_loss=str(
+                    getattr(args, "semantic_action_context_readout_aux_loss", "smooth_l1")
+                ),
+                action_context_readout_aux_huber_delta=float(
+                    getattr(args, "semantic_action_context_readout_aux_huber_delta", 1.0)
+                ),
+                action_context_flow_residual_enabled=bool(
+                    getattr(args, "semantic_action_context_flow_residual_enabled", False)
+                ),
+                action_context_flow_residual_gate_init=float(
+                    getattr(args, "semantic_action_context_flow_residual_gate_init", -2.0)
+                ),
+                action_context_flow_residual_time_floor=float(
+                    getattr(args, "semantic_action_context_flow_residual_time_floor", 0.05)
+                ),
+                action_context_flow_residual_rms_cap=bool(
+                    getattr(args, "semantic_action_context_flow_residual_rms_cap", True)
+                ),
                 action_expert_router_enabled=bool(
                     getattr(args, "semantic_action_expert_router_enabled", False)
                 ),
@@ -10568,6 +10624,21 @@ def train(args: argparse.Namespace) -> None:
                 float(getattr(args, "semantic_action_flow_huber_delta", 1.0)),
                 float(getattr(args, "semantic_action_flow_time_alpha", 1.5)),
                 float(getattr(args, "semantic_action_flow_time_beta", 1.0)),
+            )
+            logging.info(
+                "Action-context readout auxiliary contract: weight=%s loss=%s huber_delta=%s. "
+                "This trains PICF context motor-readability and leaves loss_action_default_equiv as canonical flow MSE.",
+                float(getattr(args, "semantic_action_context_readout_aux_weight", 0.0)),
+                str(getattr(args, "semantic_action_context_readout_aux_loss", "smooth_l1")),
+                float(getattr(args, "semantic_action_context_readout_aux_huber_delta", 1.0)),
+            )
+            logging.info(
+                "Action-context deployed flow residual contract: enabled=%s gate_init=%s time_floor=%s "
+                "rms_cap=%s. This changes the native PI0.5 flow velocity in train and sampling.",
+                bool(getattr(args, "semantic_action_context_flow_residual_enabled", False)),
+                float(getattr(args, "semantic_action_context_flow_residual_gate_init", -2.0)),
+                float(getattr(args, "semantic_action_context_flow_residual_time_floor", 0.05)),
+                bool(getattr(args, "semantic_action_context_flow_residual_rms_cap", True)),
             )
             logging.info(
                 "Action-expert router contract: enabled=%s experts=%s rank=%s gate_init=%s temperature=%s "
@@ -12455,6 +12526,56 @@ def main() -> None:
         type=float,
         default=1.0,
         help="Beta distribution beta for PI0.5 action-flow training time sampling.",
+    )
+    parser.add_argument(
+        "--semantic-action-context-readout-aux-weight",
+        type=float,
+        default=0.0,
+        help=(
+            "Weight for the G22 context-only action readout auxiliary. "
+            "The auxiliary asks PICF action-context tokens alone to predict the action chunk; "
+            "loss_action_default_equiv remains the canonical PI0.5 flow MSE."
+        ),
+    )
+    parser.add_argument(
+        "--semantic-action-context-readout-aux-loss",
+        choices=["mse", "l1", "huber", "smooth_l1"],
+        default="smooth_l1",
+        help="Objective used by the context-only action readout auxiliary.",
+    )
+    parser.add_argument(
+        "--semantic-action-context-readout-aux-huber-delta",
+        type=float,
+        default=1.0,
+        help="Delta/beta for huber or smooth_l1 context-readout auxiliary.",
+    )
+    parser.add_argument(
+        "--semantic-action-context-flow-residual-enabled",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help=(
+            "Enable the G25 deployed-path PICF context residual for PI0.5 flow. "
+            "The context readout predicts an action chunk target and converts it to a bounded "
+            "flow velocity residual used by both training and sampling."
+        ),
+    )
+    parser.add_argument(
+        "--semantic-action-context-flow-residual-gate-init",
+        type=float,
+        default=-2.0,
+        help="Initial logit for the deployed context-flow residual gate; sigmoid(-2) ~= 0.12.",
+    )
+    parser.add_argument(
+        "--semantic-action-context-flow-residual-time-floor",
+        type=float,
+        default=0.05,
+        help="Minimum flow time used when converting context target readout to velocity.",
+    )
+    parser.add_argument(
+        "--semantic-action-context-flow-residual-rms-cap",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Cap deployed context-flow residual RMS to the native PI0.5 velocity RMS.",
     )
     parser.add_argument(
         "--semantic-action-expert-router-enabled",

@@ -650,6 +650,33 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         self.action_flow_huber_delta = max(float(getattr(config, "action_flow_huber_delta", 1.0)), 1.0e-6)
         self.action_flow_time_alpha = max(float(getattr(config, "action_flow_time_alpha", 1.5)), 1.0e-6)
         self.action_flow_time_beta = max(float(getattr(config, "action_flow_time_beta", 1.0)), 1.0e-6)
+        self.action_context_readout_aux_weight = max(
+            float(getattr(config, "action_context_readout_aux_weight", 0.0)),
+            0.0,
+        )
+        self.action_context_readout_aux_loss = (
+            str(getattr(config, "action_context_readout_aux_loss", "smooth_l1")).strip().lower().replace("-", "_")
+        )
+        if self.action_context_readout_aux_loss not in {"mse", "l2", "l1", "mae", "huber", "smooth_l1", "smoothl1"}:
+            raise ValueError(
+                "PaliGemmaSemanticConfig.action_context_readout_aux_loss must be one of "
+                "{'mse', 'l1', 'huber', 'smooth_l1'}, got "
+                f"{getattr(config, 'action_context_readout_aux_loss', None)!r}."
+            )
+        self.action_context_readout_aux_huber_delta = max(
+            float(getattr(config, "action_context_readout_aux_huber_delta", 1.0)),
+            1.0e-6,
+        )
+        self.action_context_flow_residual_enabled = bool(
+            getattr(config, "action_context_flow_residual_enabled", False)
+        )
+        self.action_context_flow_residual_time_floor = max(
+            float(getattr(config, "action_context_flow_residual_time_floor", 0.05)),
+            1.0e-6,
+        )
+        self.action_context_flow_residual_rms_cap = bool(
+            getattr(config, "action_context_flow_residual_rms_cap", True)
+        )
         self.action_expert_router_enabled = bool(getattr(config, "action_expert_router_enabled", False))
         self.action_expert_router_experts = max(int(getattr(config, "action_expert_router_experts", 4)), 1)
         self.action_expert_router_rank = max(int(getattr(config, "action_expert_router_rank", 64)), 1)
@@ -681,6 +708,19 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             torch.tensor([float(getattr(config, "action_context_adapter_gate_init", -2.0))], dtype=torch.float32)
         )
         self.action_context_adapter_rms_cap = bool(getattr(config, "action_context_adapter_rms_cap", True))
+        self.action_context_readout_query = nn.Parameter(
+            torch.empty(self.action_horizon, action_expert_config.width, dtype=torch.float32)
+        )
+        self.action_context_readout_q_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
+        self.action_context_readout_k_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
+        self.action_context_readout_v_proj = nn.Linear(action_expert_config.width, action_expert_config.width, bias=False)
+        self.action_context_readout_out_proj = nn.Linear(action_expert_config.width, self.model_action_dim)
+        self.action_context_flow_residual_gate_logit = nn.Parameter(
+            torch.tensor(
+                [float(getattr(config, "action_context_flow_residual_gate_init", -2.0))],
+                dtype=torch.float32,
+            )
+        )
         self.action_expert_router_summary_proj = nn.Linear(paligemma_config.width, action_expert_config.width, bias=False)
         self.action_expert_router_summary_pair_proj = nn.Linear(
             paligemma_config.width * 2,
@@ -701,6 +741,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             torch.tensor([float(getattr(config, "action_expert_router_gate_init", -2.5))], dtype=torch.float32)
         )
         self._reset_action_context_adapter_parameters()
+        self._reset_action_context_readout_parameters()
         self._reset_action_expert_router_parameters()
         self._load_full_pi0_weights(checkpoint)
         self._drop_unused_generation_heads()
@@ -745,6 +786,15 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         )
         return tuple(module for module in modules if isinstance(module, nn.Module))
 
+    def _action_context_readout_modules(self) -> tuple[nn.Module, ...]:
+        modules = (
+            getattr(self, "action_context_readout_q_proj", None),
+            getattr(self, "action_context_readout_k_proj", None),
+            getattr(self, "action_context_readout_v_proj", None),
+            getattr(self, "action_context_readout_out_proj", None),
+        )
+        return tuple(module for module in modules if isinstance(module, nn.Module))
+
     def _action_expert_router_modules(self) -> tuple[nn.Module, ...]:
         modules = (
             getattr(self, "action_expert_router_summary_proj", None),
@@ -771,6 +821,24 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         nn.init.xavier_uniform_(self.action_context_k_proj.weight)
         nn.init.eye_(self.action_context_v_proj.weight)
         nn.init.eye_(self.action_context_out_proj.weight)
+
+    def _reset_action_context_readout_parameters(self) -> None:
+        """Initialize context-only action readout as a conservative auxiliary.
+
+        The readout is not part of inference.  It is a training probe/objective
+        that asks whether bounded PICF context alone contains motor-readable
+        information.  It therefore must not reuse noisy action suffix tokens,
+        otherwise the auxiliary could be solved without repairing `dA/dC`.
+        """
+
+        if isinstance(getattr(self, "action_context_readout_query", None), nn.Parameter):
+            nn.init.normal_(self.action_context_readout_query, mean=0.0, std=0.02)
+        nn.init.xavier_uniform_(self.action_context_readout_q_proj.weight)
+        nn.init.xavier_uniform_(self.action_context_readout_k_proj.weight)
+        nn.init.xavier_uniform_(self.action_context_readout_v_proj.weight)
+        nn.init.xavier_uniform_(self.action_context_readout_out_proj.weight)
+        if self.action_context_readout_out_proj.bias is not None:
+            nn.init.zeros_(self.action_context_readout_out_proj.bias)
 
     def _reset_action_expert_router_parameters(self) -> None:
         """Initialize action-expert routing as an identity-preserving adapter.
@@ -818,8 +886,16 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 module.train()
                 for parameter in module.parameters():
                     parameter.requires_grad_(True)
+            for module in self._action_context_readout_modules():
+                module.train()
+                for parameter in module.parameters():
+                    parameter.requires_grad_(True)
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_readout_query", None), nn.Parameter):
+                self.action_context_readout_query.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_flow_residual_gate_logit", None), nn.Parameter):
+                self.action_context_flow_residual_gate_logit.requires_grad_(True)
             if bool(getattr(self, "action_expert_router_enabled", False)):
                 for module in self._action_expert_router_modules():
                     module.train()
@@ -839,8 +915,16 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 module.train()
                 for parameter in module.parameters():
                     parameter.requires_grad_(True)
+            for module in self._action_context_readout_modules():
+                module.train()
+                for parameter in module.parameters():
+                    parameter.requires_grad_(True)
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_readout_query", None), nn.Parameter):
+                self.action_context_readout_query.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_flow_residual_gate_logit", None), nn.Parameter):
+                self.action_context_flow_residual_gate_logit.requires_grad_(True)
             if bool(getattr(self, "action_expert_router_enabled", False)):
                 for module in self._action_expert_router_modules():
                     module.train()
@@ -856,6 +940,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 self.time_mlp_in,
                 self.time_mlp_out,
                 *self._action_context_adapter_modules(),
+                *self._action_context_readout_modules(),
                 *(self._action_expert_router_modules() if bool(getattr(self, "action_expert_router_enabled", False)) else ()),
             ):
                 module.train()
@@ -863,6 +948,10 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                     parameter.requires_grad_(True)
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_readout_query", None), nn.Parameter):
+                self.action_context_readout_query.requires_grad_(True)
+            if isinstance(getattr(self, "action_context_flow_residual_gate_logit", None), nn.Parameter):
+                self.action_context_flow_residual_gate_logit.requires_grad_(True)
             if bool(getattr(self, "action_expert_router_enabled", False)) and isinstance(
                 getattr(self, "action_expert_router_gate_logit", None),
                 nn.Parameter,
@@ -1523,6 +1612,234 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         }
         return adapted, metrics
 
+    def _project_action_context_to_action_width(
+        self,
+        context_tokens: torch.Tensor,
+        *,
+        batch: int,
+        width: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> torch.Tensor:
+        """Normalize PICF action context to `[B, T, action_width]`.
+
+        PICF context is produced in the PaliGemma prefix width, while the PI0.5
+        action expert uses the action-expert width.  Both the suffix adapter and
+        the readout auxiliary must use the same projection contract; otherwise a
+        readout success would not prove that the deployed action bridge can see
+        the same representation.
+        """
+
+        context = context_tokens
+        if context.ndim == 2:
+            context = context[None, :, :]
+        if context.ndim != 3:
+            raise ValueError(f"Expected action context [T,D] or [B,T,D], got {tuple(context.shape)}")
+        if context.shape[0] == 1 and batch != 1:
+            context = context.expand(batch, -1, -1)
+        if context.shape[0] != batch:
+            raise ValueError(
+                "Action context batch mismatch: "
+                f"context={tuple(context.shape)} batch={batch}"
+            )
+        context = context.to(device=device, dtype=dtype)
+        if context.shape[-1] != width:
+            in_proj = getattr(self, "action_context_in_proj", None)
+            if not isinstance(in_proj, nn.Module):
+                raise ValueError(
+                    "Action context width mismatch without input projection: "
+                    f"context={tuple(context.shape)} width={width}"
+                )
+            context = in_proj(context)
+        if context.shape[-1] != width:
+            raise ValueError(
+                "Action context projection returned wrong width: "
+                f"context={tuple(context.shape)} width={width}"
+            )
+        return context
+
+    def _predict_action_chunk_from_context(
+        self,
+        context_tokens: torch.Tensor,
+        *,
+        batch: int,
+        horizon: int,
+        action_dim: int,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Read a dense PICF context into an action-chunk target estimate.
+
+        This is shared by the G22 diagnostic readout and the G25 deployed flow
+        residual.  Keeping one readout contract avoids a false positive where a
+        side auxiliary learns one vocabulary while the deployed action path sees
+        another.
+        """
+
+        width = int(self.action_context_readout_query.shape[-1])
+        context = self._project_action_context_to_action_width(
+            context_tokens,
+            batch=batch,
+            width=width,
+            device=device,
+            dtype=dtype,
+        )
+        query = self.action_context_readout_query[:horizon].to(device=device, dtype=dtype)
+        query = query[None, :, :].expand(batch, -1, -1)
+        query_norm = torch.nn.functional.layer_norm(query, (query.shape[-1],))
+        context_norm = torch.nn.functional.layer_norm(context, (context.shape[-1],))
+        q = self.action_context_readout_q_proj(query_norm)
+        k = self.action_context_readout_k_proj(context_norm)
+        v = self.action_context_readout_v_proj(context)
+        logits = torch.matmul(q.to(dtype=torch.float32), k.to(dtype=torch.float32).transpose(-1, -2))
+        logits = logits * (float(width) ** -0.5)
+        attn = torch.softmax(logits, dim=-1).to(device=device, dtype=dtype)
+        readout = torch.matmul(attn, v)
+        pred = self.action_context_readout_out_proj(readout).to(dtype=torch.float32)[..., :action_dim]
+        entropy = -(attn.to(dtype=torch.float32) * torch.log(torch.clamp(attn.to(dtype=torch.float32), min=1.0e-12))).sum(
+            dim=-1
+        )
+        return pred, context, entropy
+
+    def _compute_action_context_readout_aux(
+        self,
+        context_tokens: torch.Tensor | None,
+        target: torch.Tensor,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Predict the action chunk from PICF context alone.
+
+        This is the G22 fast gate for the G20 causal failure.  It intentionally
+        does not read noisy action suffix embeddings, so a decreasing loss means
+        the PICF belief context itself carries motor-readable information.
+        """
+
+        zero = target.reshape(-1)[0] * 0.0
+        weight = float(getattr(self, "action_context_readout_aux_weight", 0.0))
+        if weight <= 0.0:
+            return zero, {}
+        if context_tokens is None or not isinstance(context_tokens, torch.Tensor) or context_tokens.numel() == 0:
+            return zero, {
+                "picf_action_context_readout_enabled": zero + 0.0,
+                "picf_action_context_readout_loss": zero,
+                "picf_action_context_readout_mse": zero,
+                "picf_action_context_readout_weighted_total": zero,
+                "picf_action_context_readout_weight": zero + weight,
+                "picf_action_context_readout_token_count": zero,
+                "picf_action_context_readout_attention_entropy_mean": zero,
+            }
+        if target.ndim != 3:
+            raise ValueError(f"Expected action readout target [B,H,A], got {tuple(target.shape)}")
+
+        batch, horizon, action_dim = target.shape
+        dtype = target.dtype
+        device = target.device
+        pred, context, entropy = self._predict_action_chunk_from_context(
+            context_tokens,
+            batch=batch,
+            horizon=horizon,
+            action_dim=action_dim,
+            device=device,
+            dtype=dtype,
+        )
+        target_float = target.to(dtype=torch.float32)
+        mse = torch.nn.functional.mse_loss(pred, target_float)
+        mode = str(getattr(self, "action_context_readout_aux_loss", "smooth_l1"))
+        huber_delta = float(getattr(self, "action_context_readout_aux_huber_delta", 1.0))
+        loss = _action_flow_objective_loss(target_float, pred, mode=mode, huber_delta=huber_delta)
+        weighted = loss * weight
+        metrics = {
+            "picf_action_context_readout_enabled": zero + 1.0,
+            "picf_action_context_readout_loss": loss.detach().to(device=device, dtype=dtype),
+            "picf_action_context_readout_mse": mse.detach().to(device=device, dtype=dtype),
+            "picf_action_context_readout_weighted_total": weighted.detach().to(device=device, dtype=dtype),
+            "picf_action_context_readout_weight": zero + weight,
+            "picf_action_context_readout_token_count": zero + float(context.shape[1]),
+            "picf_action_context_readout_attention_entropy_mean": entropy.detach().mean().to(device=device, dtype=dtype),
+        }
+        return weighted, metrics
+
+    def _apply_action_context_flow_residual(
+        self,
+        v_t: torch.Tensor,
+        x_t: torch.Tensor,
+        time_expanded: torch.Tensor,
+        context_tokens: torch.Tensor | None,
+        *,
+        target: torch.Tensor | None = None,
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+        """Inject PICF context into the deployed PI0.5 flow velocity.
+
+        PI0.5 flow training uses `x_t = t * noise + (1-t) * y` and target
+        velocity `u_t = noise - y`.  A context readout that predicts `y_c`
+        therefore implies a compatible velocity
+
+            u_c = (x_t - y_c) / max(t, eps).
+
+        The deployed velocity is a bounded residual blend between native
+        `v_t` and `u_c`.  This makes the context readout causal for both
+        training and sampling instead of remaining a side auxiliary.
+        """
+
+        zero = v_t.reshape(-1)[0].detach() * 0.0
+        if not bool(getattr(self, "action_context_flow_residual_enabled", False)):
+            return v_t, {}
+        if context_tokens is None or not isinstance(context_tokens, torch.Tensor) or context_tokens.numel() == 0:
+            return v_t, {
+                "picf_action_context_flow_residual_enabled": zero + 1.0,
+                "picf_action_context_flow_residual_gate": zero,
+                "picf_action_context_flow_residual_token_count": zero,
+                "picf_action_context_flow_residual_rms_mean": zero,
+                "picf_action_context_flow_context_velocity_rms_mean": zero,
+                "picf_action_context_flow_context_target_mse": zero,
+                "picf_action_context_flow_residual_time_floor": zero
+                + float(getattr(self, "action_context_flow_residual_time_floor", 0.05)),
+            }
+
+        batch, horizon, action_dim = v_t.shape
+        pred_target, context, _entropy = self._predict_action_chunk_from_context(
+            context_tokens,
+            batch=batch,
+            horizon=horizon,
+            action_dim=action_dim,
+            device=v_t.device,
+            dtype=v_t.dtype,
+        )
+        pred_target = pred_target.to(device=v_t.device, dtype=v_t.dtype)
+        time_floor = float(getattr(self, "action_context_flow_residual_time_floor", 0.05))
+        time_safe = torch.clamp(time_expanded.to(device=v_t.device, dtype=v_t.dtype), min=time_floor)
+        context_velocity = (x_t.to(device=v_t.device, dtype=v_t.dtype) - pred_target) / time_safe
+        residual = context_velocity - v_t
+        if bool(getattr(self, "action_context_flow_residual_rms_cap", True)):
+            eps = 1.0e-6
+            residual_rms = torch.sqrt(torch.mean(residual.to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps)
+            base_rms = torch.sqrt(torch.mean(v_t.to(dtype=torch.float32).square(), dim=-1, keepdim=True) + eps)
+            scale = torch.clamp(base_rms / torch.clamp(residual_rms, min=eps), max=1.0)
+            residual = residual * scale.to(device=residual.device, dtype=residual.dtype)
+        gate = torch.sigmoid(self.action_context_flow_residual_gate_logit.to(device=v_t.device, dtype=v_t.dtype))
+        adapted = v_t + gate.view(1, 1, 1) * residual
+
+        residual_rms_mean = torch.sqrt(torch.mean(residual.to(dtype=torch.float32).square(), dim=-1)).mean()
+        context_velocity_rms_mean = torch.sqrt(torch.mean(context_velocity.to(dtype=torch.float32).square(), dim=-1)).mean()
+        target_mse = zero
+        if target is not None:
+            target_mse = torch.nn.functional.mse_loss(
+                pred_target.to(dtype=torch.float32),
+                target.to(device=v_t.device, dtype=torch.float32)[..., :action_dim],
+            ).detach().to(device=v_t.device, dtype=v_t.dtype)
+        metrics = {
+            "picf_action_context_flow_residual_enabled": zero + 1.0,
+            "picf_action_context_flow_residual_gate": gate.detach().reshape(-1)[0].to(device=v_t.device, dtype=v_t.dtype),
+            "picf_action_context_flow_residual_token_count": zero + float(context.shape[1]),
+            "picf_action_context_flow_residual_rms_mean": residual_rms_mean.detach().to(device=v_t.device, dtype=v_t.dtype),
+            "picf_action_context_flow_context_velocity_rms_mean": context_velocity_rms_mean.detach().to(
+                device=v_t.device,
+                dtype=v_t.dtype,
+            ),
+            "picf_action_context_flow_context_target_mse": target_mse,
+            "picf_action_context_flow_residual_time_floor": zero + time_floor,
+        }
+        return adapted, metrics
+
     def _apply_action_expert_router(
         self,
         suffix_embs: torch.Tensor,
@@ -1730,6 +2047,17 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             return self.action_out_proj(out)
 
         v_t = self._apply_checkpoint(_project, suffix_out)
+        base_v_t = v_t
+        v_t, flow_context_metrics = self._apply_action_context_flow_residual(
+            v_t,
+            x_t,
+            time_expanded,
+            extra_action_context_tokens,
+            target=target,
+        )
+        if flow_context_metrics:
+            adapter_metrics.update(flow_context_metrics)
+        base_mse_total = torch.nn.functional.mse_loss(u_t, base_v_t)
         mse_total = torch.nn.functional.mse_loss(u_t, v_t)
         mse_pos = torch.nn.functional.mse_loss(u_t[..., :3], v_t[..., :3])
         mse_rot = torch.nn.functional.mse_loss(u_t[..., 3:6], v_t[..., 3:6])
@@ -1740,6 +2068,30 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         training_pos = _action_flow_objective_loss(u_t[..., :3], v_t[..., :3], mode=mode, huber_delta=huber_delta)
         training_rot = _action_flow_objective_loss(u_t[..., 3:6], v_t[..., 3:6], mode=mode, huber_delta=huber_delta)
         training_grip = _action_flow_objective_loss(u_t[..., 6:7], v_t[..., 6:7], mode=mode, huber_delta=huber_delta)
+        readout_weighted, readout_metrics = self._compute_action_context_readout_aux(
+            extra_action_context_tokens,
+            target,
+        )
+        if readout_metrics:
+            training_total = training_total + readout_weighted
+            adapter_metrics.update(readout_metrics)
+        if flow_context_metrics:
+            adapter_metrics.update(
+                {
+                    "picf_action_context_flow_base_mse": base_mse_total.detach().to(
+                        device=mse_total.device,
+                        dtype=mse_total.dtype,
+                    ),
+                    "picf_action_context_flow_adapted_mse": mse_total.detach().to(
+                        device=mse_total.device,
+                        dtype=mse_total.dtype,
+                    ),
+                    "picf_action_context_flow_gain_mse_delta": (base_mse_total - mse_total).detach().to(
+                        device=mse_total.device,
+                        dtype=mse_total.dtype,
+                    ),
+                }
+            )
         predicted_chunk = _recover_flow_target(x_t, v_t, time_expanded).detach()
         predicted = predicted_chunk[:, 0, :7]
         zero = mse_total.detach() * 0.0
@@ -1851,6 +2203,13 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             )
             suffix_out = outputs_embeds[1][:, -self.action_horizon :].to(dtype=torch.float32)
             v_t = self.action_out_proj(suffix_out)
+            v_t, _flow_context_metrics = self._apply_action_context_flow_residual(
+                v_t,
+                x_t,
+                timestep[:, None, None],
+                extra_action_context_tokens,
+                target=None,
+            )
             x_t = x_t + dt * v_t
             time += dt
             _timing_record(timing, "sample_denoise_last_step", step_start, False)

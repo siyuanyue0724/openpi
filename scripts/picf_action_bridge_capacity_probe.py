@@ -38,6 +38,7 @@ from scripts.picf_core_train import _seed_everything
 from scripts.picf_fixed_window_action_probe import _aggregate
 from scripts.picf_fixed_window_action_probe import DEFAULT_SUMMARY_KEYS
 from scripts.picf_fixed_window_action_probe import FIXED_WINDOW_SCOPE_WARNING
+from scripts.picf_fixed_window_action_probe import _install_action_context_probe_mode
 from scripts.picf_fixed_window_action_probe import _load_window_records
 from scripts.picf_fixed_window_action_probe import _numeric_snapshot
 from scripts.picf_fixed_window_action_probe import _write_jsonl
@@ -398,6 +399,16 @@ def main() -> None:
     parser.add_argument("--no-action-context-stopgrad", dest="action_context_stopgrad", action="store_false")
     parser.set_defaults(action_context_stopgrad=True)
     parser.add_argument(
+        "--action-context-probe-mode",
+        choices=("none", "zero", "token_roll", "shuffle", "sign_flip", "rms_noise"),
+        default="none",
+        help=(
+            "Causal perturbation of PICF action-context tokens before they reach "
+            "the PI action path. 'shuffle' is accepted as an alias for token_roll. "
+            "This is diagnostic-only and leaves the native PI input/action target unchanged."
+        ),
+    )
+    parser.add_argument(
         "--disable-picf-action-condition",
         action="store_true",
         help=(
@@ -576,11 +587,16 @@ def main() -> None:
             model=trainer,
             optimizer=dummy_optimizer,
             device=device,
+            optimizer_checkpoint_mode="model_only",
         )
         if requested_picf_mode == "ablated":
             trainer.picf_mode = "ablated"
             trainer.policy.picf_enabled = False
             _set_override(train_args, "picf_mode", "ablated")
+        action_context_probe_mode = str(args.action_context_probe_mode).strip().lower().replace("-", "_")
+        if action_context_probe_mode == "shuffle":
+            action_context_probe_mode = "token_roll"
+        _install_action_context_probe_mode(trainer, mode=action_context_probe_mode)
         # The probe deliberately starts with fresh Adam moments so it measures
         # local bridge capacity, not optimizer-state continuity.
         optimizer, optimizer_groups = _build_optimizer(trainer, args=train_args)
@@ -625,6 +641,7 @@ def main() -> None:
                     "action_context_integration": str(args.action_context_integration),
                     "action_context_tokens": int(args.action_context_tokens),
                     "action_context_stopgrad": bool(args.action_context_stopgrad),
+                    "action_context_probe_mode": str(action_context_probe_mode),
                     "picf_mode": str(getattr(train_args, "picf_mode", "enabled")),
                     "picf_trainable_scope": str(args.picf_trainable_scope),
                     "semantic_trainable_scope": str(args.semantic_trainable_scope),
@@ -799,6 +816,7 @@ def main() -> None:
             "action_loss_key": str(args.action_loss_key),
             "action_context_integration": str(args.action_context_integration),
             "action_context_tokens": int(args.action_context_tokens),
+            "action_context_probe_mode": str(action_context_probe_mode),
             "picf_trainable_scope": str(args.picf_trainable_scope),
             "picf_mode": str(getattr(train_args, "picf_mode", "enabled")),
             "semantic_trainable_scope": str(args.semantic_trainable_scope),

@@ -35,6 +35,13 @@ class PaliGemmaSemanticConfig:
     action_flow_huber_delta: float = 1.0
     action_flow_time_alpha: float = 1.5
     action_flow_time_beta: float = 1.0
+    action_context_readout_aux_weight: float = 0.0
+    action_context_readout_aux_loss: str = "smooth_l1"
+    action_context_readout_aux_huber_delta: float = 1.0
+    action_context_flow_residual_enabled: bool = False
+    action_context_flow_residual_gate_init: float = -2.0
+    action_context_flow_residual_time_floor: float = 0.05
+    action_context_flow_residual_rms_cap: bool = True
     action_expert_router_enabled: bool = False
     action_expert_router_experts: int = 4
     action_expert_router_rank: int = 64

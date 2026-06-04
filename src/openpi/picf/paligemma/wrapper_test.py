@@ -269,6 +269,12 @@ def test_pi0_trainable_scope_action_adapter_only_trains_only_context_adapter() -
     encoder.action_context_v_proj = torch.nn.Linear(3, 3, bias=False)
     encoder.action_context_out_proj = torch.nn.Linear(3, 3, bias=False)
     encoder.action_context_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
+    encoder.action_context_readout_query = torch.nn.Parameter(torch.randn(2, 3))
+    encoder.action_context_readout_q_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_readout_k_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_readout_v_proj = torch.nn.Linear(3, 3, bias=False)
+    encoder.action_context_readout_out_proj = torch.nn.Linear(3, 7)
+    encoder.action_context_flow_residual_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
 
     _Pi0PaliGemmaSemanticEncoder._apply_trainable_scope(encoder)
 
@@ -285,6 +291,12 @@ def test_pi0_trainable_scope_action_adapter_only_trains_only_context_adapter() -
     assert "action_context_v_proj.weight" in trainable
     assert "action_context_out_proj.weight" in trainable
     assert "action_context_gate_logit" in trainable
+    assert "action_context_readout_query" in trainable
+    assert "action_context_readout_q_proj.weight" in trainable
+    assert "action_context_readout_k_proj.weight" in trainable
+    assert "action_context_readout_v_proj.weight" in trainable
+    assert "action_context_readout_out_proj.weight" in trainable
+    assert "action_context_flow_residual_gate_logit" in trainable
 
 
 def test_pi0_trainable_scope_action_adapter_only_trains_router_when_enabled() -> None:
@@ -304,6 +316,12 @@ def test_pi0_trainable_scope_action_adapter_only_trains_router_when_enabled() ->
     encoder.action_context_v_proj = torch.nn.Linear(4, 4, bias=False)
     encoder.action_context_out_proj = torch.nn.Linear(4, 4, bias=False)
     encoder.action_context_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
+    encoder.action_context_readout_query = torch.nn.Parameter(torch.randn(2, 4))
+    encoder.action_context_readout_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_out_proj = torch.nn.Linear(4, 7)
+    encoder.action_context_flow_residual_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
     encoder.action_expert_router_summary_proj = torch.nn.Linear(6, 4, bias=False)
     encoder.action_expert_router_summary_pair_proj = torch.nn.Linear(12, 4, bias=False)
     encoder.action_expert_router_norm = torch.nn.LayerNorm(4)
@@ -321,6 +339,9 @@ def test_pi0_trainable_scope_action_adapter_only_trains_router_when_enabled() ->
     trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
     assert "action_in_proj.weight" not in trainable
     assert "action_context_q_proj.weight" in trainable
+    assert "action_context_readout_query" in trainable
+    assert "action_context_readout_out_proj.weight" in trainable
+    assert "action_context_flow_residual_gate_logit" in trainable
     assert "action_expert_router_summary_proj.weight" in trainable
     assert "action_expert_router_summary_pair_proj.weight" in trainable
     assert "action_expert_router_logits.weight" in trainable
@@ -397,6 +418,88 @@ def test_pi0_action_context_adapter_accepts_wrapped_input_projection() -> None:
 
     assert adapted.shape == suffix.shape
     assert metrics["picf_action_context_adapter_token_count"].item() == pytest.approx(5.0)
+
+
+def test_pi0_action_context_readout_aux_reports_loss_and_metrics() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.action_context_readout_aux_weight = 0.25
+    encoder.action_context_readout_aux_loss = "smooth_l1"
+    encoder.action_context_readout_aux_huber_delta = 1.0
+    encoder.action_context_readout_query = torch.nn.Parameter(torch.empty(3, 4))
+    encoder.action_context_readout_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_out_proj = torch.nn.Linear(4, 7)
+    _Pi0PaliGemmaSemanticEncoder._reset_action_context_readout_parameters(encoder)
+
+    context = torch.randn((2, 5, 4), dtype=torch.float32)
+    target = torch.randn((2, 3, 7), dtype=torch.float32)
+    weighted, metrics = _Pi0PaliGemmaSemanticEncoder._compute_action_context_readout_aux(
+        encoder,
+        context,
+        target,
+    )
+
+    assert weighted.requires_grad
+    assert torch.isfinite(weighted)
+    assert metrics["picf_action_context_readout_enabled"].item() == pytest.approx(1.0)
+    assert metrics["picf_action_context_readout_weight"].item() == pytest.approx(0.25)
+    assert metrics["picf_action_context_readout_token_count"].item() == pytest.approx(5.0)
+    assert torch.isfinite(metrics["picf_action_context_readout_loss"])
+    assert torch.isfinite(metrics["picf_action_context_readout_mse"])
+    assert torch.isfinite(metrics["picf_action_context_readout_attention_entropy_mean"])
+
+
+def test_pi0_action_context_flow_residual_changes_deployed_velocity_and_reports_metrics() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.action_context_flow_residual_enabled = False
+    encoder.action_context_flow_residual_time_floor = 0.05
+    encoder.action_context_flow_residual_rms_cap = True
+    encoder.action_context_flow_residual_gate_logit = torch.nn.Parameter(torch.tensor([0.0]))
+    encoder.action_context_readout_query = torch.nn.Parameter(torch.empty(3, 4))
+    encoder.action_context_readout_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_out_proj = torch.nn.Linear(4, 7)
+    _Pi0PaliGemmaSemanticEncoder._reset_action_context_readout_parameters(encoder)
+
+    v_t = torch.randn((2, 3, 7), dtype=torch.float32)
+    x_t = torch.randn((2, 3, 7), dtype=torch.float32)
+    time = torch.full((2, 1, 1), 0.5, dtype=torch.float32)
+    context = torch.randn((2, 5, 4), dtype=torch.float32)
+    target = torch.randn((2, 3, 7), dtype=torch.float32)
+
+    disabled, disabled_metrics = _Pi0PaliGemmaSemanticEncoder._apply_action_context_flow_residual(
+        encoder,
+        v_t,
+        x_t,
+        time,
+        context,
+        target=target,
+    )
+    torch.testing.assert_close(disabled, v_t)
+    assert disabled_metrics == {}
+
+    encoder.action_context_flow_residual_enabled = True
+    adapted, metrics = _Pi0PaliGemmaSemanticEncoder._apply_action_context_flow_residual(
+        encoder,
+        v_t,
+        x_t,
+        time,
+        context,
+        target=target,
+    )
+
+    assert adapted.shape == v_t.shape
+    assert not torch.allclose(adapted, v_t)
+    assert metrics["picf_action_context_flow_residual_enabled"].item() == pytest.approx(1.0)
+    assert metrics["picf_action_context_flow_residual_gate"].item() == pytest.approx(0.5)
+    assert metrics["picf_action_context_flow_residual_token_count"].item() == pytest.approx(5.0)
+    assert torch.isfinite(metrics["picf_action_context_flow_residual_rms_mean"])
+    assert torch.isfinite(metrics["picf_action_context_flow_context_velocity_rms_mean"])
+    assert torch.isfinite(metrics["picf_action_context_flow_context_target_mse"])
 
 
 def test_pi0_action_expert_router_starts_as_noop_and_reports_metrics() -> None:

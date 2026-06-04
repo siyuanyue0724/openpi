@@ -7,6 +7,128 @@ action/control contract rewrite, the frozen-perception bring-up, the
 VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
 AQR-MAPG direct-final graph replacement.
 
+2026-06-04 G25 deployed flow context bridge: use
+[`docs/PICF_AQR_OWM_G25_DEPLOYED_FLOW_CONTEXT_BRIDGE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G25_DEPLOYED_FLOW_CONTEXT_BRIDGE_20260604.md)
+as the current active execution entry.  It keeps the G24 all-method conclusion
+that task/dataset mixing, logical-batch accumulation, ratio/temperature/dynamic
+mixing, per-bucket normalization, PCGrad/CAGrad, action-router, and
+context-readout are real but insufficient as standalone fixes.  The active
+non-duplicate branch is G25-C2: turn PICF context readout into a deployed
+PI0.5 flow residual used in both training and sampling, with explicit
+`pi_context_flow_*` metrics.  Do not repeat sampler-only, optimizer-only,
+raw-overlap-only, SAM, sidecar-only, or auxiliary-readout-only runs as the next
+root fix.
+
+2026-06-04 G24 all-method execution ledger: use
+[`docs/PICF_AQR_OWM_G24_ALL_METHOD_EXECUTION_LEDGER_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G24_ALL_METHOD_EXECUTION_LEDGER_20260604.md)
+as the current strict entry for the full requested 2025-2026 VLA method family.
+It audits task/dataset mixing, logical-batch accumulation, per-bucket loss
+scaling, dynamic PiKE-style mixing, PCGrad/CAGrad, action-head/adapter
+boundaries, context-readout, FAST/action-token CE, action-expert MoE,
+embodiment adapters, and System2/System1.  Current hard rule: do not repeat
+sampler-only, optimizer-only, gradient-surgery-only, router-only, raw-overlap,
+or SAM branches as standalone fixes.  G20/G22 show the remaining non-duplicate
+branch is canonical action/context causality: PICF context is motor-readable
+under direct readout, but native PI0.5 action flow still does not reliably
+consume it.
+G24-C1 supersedes the older G20/G21 shorthand "context-invariant" reading:
+the native action path has a small measurable dependence on PICF context, but
+the dependence is weak/low-gain and not beneficial on the completed
+exact-window audit.  On the 11000 checkpoint, zero/noise/disable PICF context
+do not worsen canonical action loss and `disable_picf_action_condition` is
+slightly best.  Therefore the remaining required branch is a deployed-path
+action/context bridge (`FAST/action-token CE` restoration or an equivalent
+native-flow context-gain objective), not another sampler-only, optimizer-only,
+raw-overlap-only, or bridge-strength-only run.
+
+2026-06-04 G23 final VLA-method matrix: use
+[`docs/PICF_AQR_OWM_G23_VLA_METHODS_FINAL_TEST_MATRIX_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G23_VLA_METHODS_FINAL_TEST_MATRIX_20260604.md)
+as the current top-level checklist for the full requested 2025-2026 VLA method
+family.  It separates data mixing, logical-batch normalization, dynamic mixing,
+gradient surgery, action/PICF boundary, context-readout, FAST CE, MoE,
+embodiment adapters, and System2/System1.  The active remote gate is G22-K4:
+task-uniform logical batch with context-only action-readout auxiliary.  Do not
+start another sampler-only or optimizer-only run unless G23 names a new
+unexcluded hypothesis.
+
+2026-06-04 G22 action-readout auxiliary gate: use
+[`docs/PICF_AQR_OWM_G22_ACTION_READOUT_AUX_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G22_ACTION_READOUT_AUX_GATE_20260604.md)
+as the current implementation and remote-validation entry.  G22 does not fake
+FAST CE: PICF's PI0.5 wrapper drops generation heads, so the fast deployable
+branch is a context-only action-readout auxiliary
+`R_eta(PICF_context)->action_chunk`.  It preserves
+`loss_action_default_equiv` as canonical PI0.5 flow MSE and logs
+`pi_context_readout_*` separately.  Sampler-only, optimizer-only,
+raw-overlap-only, bridge-strength-only, and action-weight-only reruns remain
+blocked unless G22 fails with new evidence.
+
+2026-06-04 G21 action-readout representation theory: use
+[`docs/PICF_AQR_OWM_G21_ACTION_READOUT_REPRESENTATION_THEORY_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G21_ACTION_READOUT_REPRESENTATION_THEORY_20260604.md)
+as the current root-cause and next-implementation entry.  G20 proved that
+`none`, `zero`, `token_roll`, and `sign_flip` PICF action-context modes have
+effectively identical action loss on fixed windows.  Therefore the remaining
+failure is not another sampler/optimizer/bridge-strength issue; it is an
+action-readout representation issue.  The next valid branch is PICF-side
+FAST/action-token representation supervision with explicit context-gain
+metrics (`loss_action_fast_ce`, `fast_context_gain_*`,
+`flow_context_gain_*`).  Do not launch another sampler-only, raw-overlap-only,
+or action-weight-only repair unless G21 is superseded by new causal evidence.
+
+2026-06-04 G20 2xA100 action-readout experiment gate: use
+[`docs/PICF_AQR_OWM_G20_2XA100_ACTION_READOUT_EXPERIMENT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G20_2XA100_ACTION_READOUT_EXPERIMENT_GATE_20260604.md)
+for the current remote-execution checklist and completed perturbation result.
+It divides the requested methods into already-tested infrastructure, completed
+exact-window/action-context causality checks, and code-required future branches.
+The G20 result is strict: `none`, `zero`, `token_roll`, and `sign_flip` action
+context modes have effectively identical action loss on the same checkpoint and
+windows, so the current bounded suffix PICF context is not causally useful to
+the action head.  Do not rerun sampler-only, optimizer-only, or bridge-strength
+experiments as the next fix; the next non-duplicate branch is PICF-side
+FAST/action-token representation supervision or an equivalent action-readout
+objective.
+
+2026-06-04 G19 deep action-convergence theory audit: use
+[`docs/PICF_AQR_OWM_G19_ACTION_CONVERGENCE_DEEP_THEORY_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G19_ACTION_CONVERGENCE_DEEP_THEORY_20260604.md)
+as the current root-cause entry before launching more action-plateau repairs.
+It records the strict code/paper/math follow-through: task-balanced logical
+batch, ratio/temperature/dynamic mixing, per-bucket normalization, scoped
+PCGrad/CAGrad, action bridge/router, and continuous action chunks are already
+implemented/tested and are necessary infrastructure, but they are insufficient
+as the sole action fix.  The next non-duplicate branch is exact action-context
+causal sensitivity plus PICF-side FAST/action-token representation supervision;
+do not rerun sampler-only, raw-overlap, blind-SAM, or action-weight-only
+experiments unless G19 names a new falsifiable reason.
+
+2026-06-04 stricter all-method follow-through: use
+[`docs/PICF_AQR_OWM_G18_ALL_VLA_METHODS_FOLLOWTHROUGH_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G18_ALL_VLA_METHODS_FOLLOWTHROUGH_20260604.md)
+as the current top checklist for the requested VLA-method family.  It does the
+full method accounting requested on 2026-06-04: task/dataset mixing,
+logical-batch gradient accumulation, explicit ratios, temperature sampling,
+dynamic PiKE-style mixing, per-bucket normalization, scoped PCGrad/CAGrad,
+action/PICF boundary, suffix action bridge, action-router/MoE, continuous
+action chunks, and the native OpenPI FAST path.  The strict conclusion is that
+the sampler/mixing/normalization/gradient-surgery family is implemented and
+tested but insufficient as the sole action-convergence fix; the non-duplicate
+future branch is PICF-side FAST/action-token representation supervision or a
+deliberate action-expert capacity/boundary redesign.
+
+2026-06-04 complete VLA-method gate: use
+[`docs/PICF_AQR_OWM_G17_COMPLETE_VLA_METHOD_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G17_COMPLETE_VLA_METHOD_GATE_20260604.md)
+as the current checklist before launching more convergence experiments.  It
+records which requested VLA methods are already implemented/tested
+(`task_uniform`, temperature/ratio mixing, logical-batch accumulation,
+per-bucket normalization, dynamic PiKE-style mixing, scoped PCGrad/CAGrad,
+action-context bridge/router, continuous action chunks) and isolates the
+remaining non-duplicate checks: exact-window action-context bridge causality,
+new-machine logical-batch smoke, and the missing PICF-side action-token/FAST
+representation auxiliary audit.  Do not rerun old sampler-only or raw-overlap
+repairs unless this G17 checklist names a new causal reason.
+G17 final note: the exact-window normal-vs-noPICF action-bridge probe completed
+on 2026-06-04 and found no measurable positive action-loss benefit from the
+current bounded suffix PICF action context.  The next non-duplicate branch is
+PICF-side FAST/action-token representation supervision or action-expert
+capacity/boundary redesign, not another sampler-only or raw-overlap rerun.
+
 2026-06-02 action-readout preservation update: the current maintained action
 diagnostic ledger is
 [`docs/PICF_AQR_OWM_ACTION_READOUT_CAUSAL_AUDIT_20260601_TEMP.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_ACTION_READOUT_CAUSAL_AUDIT_20260601_TEMP.md).

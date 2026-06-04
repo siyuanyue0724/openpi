@@ -444,6 +444,9 @@ def test_policy_forward_train_transition_can_route_context_to_action_side_adapte
                 "picf_action_context_adapter_gate": zero + 0.125,
                 "picf_action_context_adapter_attention_entropy_mean": zero + 0.5,
                 "picf_action_context_adapter_residual_rms_mean": zero + 0.25,
+                "picf_action_context_flow_residual_enabled": zero + 1.0,
+                "picf_action_context_flow_residual_gate": zero + 0.125,
+                "picf_action_context_flow_gain_mse_delta": zero + 0.01,
             }
 
     core = _DummyCore()
@@ -461,6 +464,9 @@ def test_policy_forward_train_transition_can_route_context_to_action_side_adapte
     assert result.output.debug["pi_action_condition_token_count"] == pytest.approx(4.0)
     assert result.output.debug["pi_context_adapter_token_count"] == pytest.approx(4.0)
     assert result.output.debug["pi_context_adapter_gate"] == pytest.approx(0.125)
+    assert result.output.debug["pi_context_flow_residual_enabled"] == pytest.approx(1.0)
+    assert result.output.debug["pi_context_flow_residual_gate"] == pytest.approx(0.125)
+    assert result.output.debug["pi_context_flow_gain_mse_delta"] == pytest.approx(0.01)
 
 
 def test_policy_action_prefix_ema_teacher_stabilizes_train_prefix() -> None:
