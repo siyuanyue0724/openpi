@@ -1275,6 +1275,92 @@ tail:
   tail -f /mnt/picf_run_logs/picf_cmpC_trajectory_lr5e5_from500_20260605.log
 ```
 
+Interim step550 comparison:
+
+```text
+source G26-B fresh step550:
+  loss_action_default_equiv = 0.0735315
+  loss_action_active7       = 0.329647
+  loss_anchor_pv            = 0.684810
+  loss_mapg_routing         = 0.377704
+  loss_slot_jepa            = 0.242171
+
+contrast B step550:
+  loss_action_default_equiv = 0.0728891
+  loss_action_active7       = 0.326792
+  loss_anchor_pv            = 0.682659
+  loss_mapg_routing         = 0.370668
+  loss_slot_jepa            = 0.242047
+
+contrast C step550:
+  loss_action_default_equiv = 0.0688465
+  loss_action_active7       = 0.307578
+  loss_total_minus_action   = 0.187323
+  loss_anchor_pv            = 0.688112
+  loss_mapg_routing         = 0.379840
+  loss_slot_jepa            = 0.242743
+  active/context support ov = 0.000516 / 0.013524
+  context-flow gain         = 0.010745
+
+reading:
+  C is the first step500 contrast that improves action by more than noise at
+  step550 while keeping active/context overlap low.  The improvement is still
+  modest, so continue to step600 before deciding whether trajectory-proportional
+  sampling is a major part of the action-platform root cause.
+```
+
+Final step600 comparison:
+
+```text
+source G26-B fresh step600:
+  loss_action_default_equiv = 0.0723489
+  loss_action_active7       = 0.325999
+  loss_total_minus_action   = 0.167558
+  loss_anchor_pv            = 0.684632
+  loss_mapg_routing         = 0.385702
+  loss_slot_jepa            = 0.241136
+  active/context support ov = 0.007902 / 0.017207
+  context-flow gain         = 0.014663
+
+contrast B step600:
+  loss_action_default_equiv = 0.0713287
+  loss_action_active7       = 0.319141
+  loss_total_minus_action   = 0.190204
+  loss_anchor_pv            = 0.685939
+  loss_mapg_routing         = 0.386191
+  loss_slot_jepa            = 0.240471
+  active/context support ov = 0.010277 / 0.019966
+  context-flow gain         = 0.012872
+
+contrast C step600:
+  loss_action_default_equiv = 0.0768337
+  loss_action_active7       = 0.339137
+  loss_total_minus_action   = 0.195179
+  loss_anchor_pv            = 0.688552
+  loss_mapg_routing         = 0.386720
+  loss_slot_jepa            = 0.239811
+  active/context support ov = 0.003204 / 0.015557
+  context-flow gain         = 0.014795
+
+reading:
+  C's step550 action improvement did not persist.  By step600 it is worse than
+  both the source G26-B window and contrast B on the canonical action metric,
+  while structure metrics remain healthy.  Therefore the action platform is not
+  solved by trajectory-proportional sampler distribution alone under the current
+  action_head_and_adapter trainable boundary.
+
+decision:
+  Stop contrast C after step600.  Do not repeat sampler-only task_uniform /
+  trajectory / temperature experiments as the next step unless a new
+  gradient-cosine or per-bucket-loss audit identifies a specific bucket-mixing
+  failure.  The remaining non-duplicate hypotheses are:
+
+  1. the trainable action/semantic boundary is too narrow;
+  2. the action signal needs a memory-safe wider bridge or action-expert path;
+  3. the logical batch must change how task losses are combined, not just which
+     buckets are sampled.
+```
+
 Comparison rule:
 
 ```text

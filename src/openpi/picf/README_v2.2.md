@@ -14,10 +14,15 @@ section `11. Step500 Action-Platform Contrast Gate, 2026-06-05`.  Contrast A
 OOM before the first optimizer step.  Contrast B
 (`action_head_and_adapter`, `lr=min_lr=5e-5`) reached step600 and showed only a
 small action improvement, so LR-only is not the action-platform root fix.
-Contrast C is the active non-duplicate test: same checkpoint/boundary/LR as B,
-but `calvin_bucket_sampling_mode=trajectory` instead of task-uniform K4.  The
-decisive rows are step550/600 using `loss_action_default_equiv`, not the
-progress-bar scalar loss.
+Contrast C used the same checkpoint/boundary/LR as B but switched
+`calvin_bucket_sampling_mode=trajectory` instead of task-uniform K4.  Its
+step550 action improvement did not persist; by step600 it was worse than both
+source and B on `loss_action_default_equiv` while structure metrics stayed
+healthy.  Conclusion: LR-only and sampler-only are both excluded as root fixes
+inside the current narrow action_head_and_adapter trainable boundary.  The next
+non-duplicate gate must test trainable-boundary/action-expert capacity or a
+different logical-batch loss-composition mechanism, not another bare sampler
+rerun.
 
 2026-06-04 G26-B checkpoint cleanup/archive: use
 [`docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md)
