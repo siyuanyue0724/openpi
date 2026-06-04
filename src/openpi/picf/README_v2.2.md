@@ -7,6 +7,17 @@ action/control contract rewrite, the frozen-perception bring-up, the
 VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
 AQR-MAPG direct-final graph replacement.
 
+2026-06-05 old-machine continuation and next-gate plan: use
+[`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
+section `12. Post-New-Machine Shutdown Plan, 2026-06-05`.  The old-machine
+G26-B run is alive past step1100 with healthy active/context overlap and stable
+slot-JEPA, but `loss_action_default_equiv` remains in the `0.058-0.079` band
+instead of the old best `0.02-0.03` action band.  Keep it running as a
+continuous trace until at least step1500 unless action/non-action losses
+clearly fail.  The next non-duplicate spare-machine gates are: rerun Contrast D
+after the full FSDP mutable-output-tree fix, and run a same-code PI0.5-like
+ablation under the same data/sampler/logging contract.
+
 2026-06-05 G26-B step500 action-platform contrast: use
 [`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
 section `11. Step500 Action-Platform Contrast Gate, 2026-06-05`.  Contrast A

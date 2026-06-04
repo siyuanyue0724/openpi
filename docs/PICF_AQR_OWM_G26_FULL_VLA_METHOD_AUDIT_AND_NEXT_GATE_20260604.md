@@ -1421,3 +1421,117 @@ decision:
   before making any conclusion about whether model_only semantic capacity
   breaks the action platform.
 ```
+
+## 12. Post-New-Machine Shutdown Plan, 2026-06-05
+
+Current live old-machine run:
+
+```text
+host:
+  px-cloud1:26120
+
+tmux:
+  picf_g26b_tokenaux_long30k_k4_fresh_20260604
+
+checkpoint dir:
+  /mnt/checkpoints/picf_core/picf_core/picf_g26b_tokenaux_long30k_k4_fresh_20260604
+
+available checkpoints:
+  500
+  1000
+```
+
+Latest status at step1110:
+
+```text
+loss_action_default_equiv last-20 mean = 0.06820
+loss_action_default_equiv last-20 min  = 0.05801
+loss_action_default_equiv last-20 max  = 0.07859
+
+loss_anchor_pv last-20 mean            = 0.67956
+loss_mapg_routing last-20 mean         = 0.39075
+loss_slot_jepa last-20 mean            = 0.24100
+
+active same-role support overlap mean  = 0.00678
+context same-role support overlap mean = 0.02159
+posterior recycle rate near step1110   = 0.05403
+```
+
+Reading:
+
+```text
+The run is alive and structurally healthy.  It is not collapsing through active
+support overlap, context overlap, slot-JEPA explosion, or recycle saturation.
+However, it also has not broken the action platform: the canonical action
+metric is still oscillating in roughly the 0.058-0.079 band instead of entering
+the old best 0.02-0.03 action band.
+```
+
+Do not repeat:
+
+```text
+LR-only inside action_head_and_adapter:
+  excluded by Contrast B.
+
+sampler-only task_uniform/trajectory:
+  excluded by Contrast C.
+
+raw-overlap-only:
+  not the current blocker; active/context overlap is already low.
+
+fixed-window-only comparisons:
+  not representative enough for production acceptance.
+```
+
+Next experiments, in priority order:
+
+```text
+1. Keep the old-machine G26-B run alive until at least step1500 unless action
+   mean worsens above 0.085, non-action losses explode, or a nonfinite event
+   appears.  It is useful as a continuous-platform trace, but not yet a
+   candidate success.
+
+2. When a spare machine is available, rerun Contrast D after the full FSDP
+   mutable-output-tree fix:
+
+     training_strategy=fsdp_full_shard
+     semantic_trainable_scope=model_only
+     lr=min_lr=5e-5
+     resume_checkpoint=G26-B step500
+
+   Acceptance: by step600, action_default must clearly beat source/B/C while
+   preserving bounded active/context overlap.  This tests whether the current
+   narrow trainable boundary is the real platform cause.
+
+3. In parallel or immediately after D, run a same-code PI0.5-like ablation:
+
+     same data split
+     same logical batch K4
+     same action normalization and logging
+     PICF branches disabled or picf_mode=ablated
+
+   Acceptance: if ablated PI0.5-like action falls faster than full PICF under
+   the same data/sampler/logging contract, PICF/context integration is still
+   action-negative.  If it also plateaus, the root is not PICF-specific and
+   points back to data/action-objective or action-head capacity.
+
+4. Only after 2 and 3 decide whether to redesign the action boundary:
+
+   - if D works: keep PICF structure, use memory-safe wider semantic/action
+     bridge;
+   - if PI0.5-like works but D does not: isolate PICF-to-action injection and
+     action expert capacity;
+   - if neither works: investigate action objective/data distribution rather
+     than adding more PICF losses.
+```
+
+Operational note:
+
+```text
+px-cloud2:28373 was shut down after backing up Contrast D log/cmd locally under:
+  tmp/remote_backups/px-cloud2_28373_20260605/
+
+The FSDP dataclass fix was committed and pushed:
+  5d9af6b Make PaliGemma semantic features FSDP-safe
+  cca5a59 Make PaliGemma view metadata FSDP-safe
+```
