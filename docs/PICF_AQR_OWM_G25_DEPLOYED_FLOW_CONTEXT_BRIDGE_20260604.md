@@ -295,6 +295,8 @@ step   total     action_def  base_mse  adapt_mse  gain_delta
 11080  0.11495   0.05133     0.05384   0.05133    0.00251
 11090  0.10579   0.04816     0.04995   0.04816    0.00178
 11100  0.11939   0.05472     0.05581   0.05472    0.00109
+11110  0.08868   0.03934     0.04193   0.03934    0.00259
+11120  0.10696   0.04863     0.05086   0.04863    0.00223
 ```
 
 Interpretation at step 11100:
@@ -310,9 +312,24 @@ and by 11040-11100 it stays positive on the deployed action objective:
 This is the first direct evidence that PICF context can improve the native
 PI0.5 flow path rather than only a side readout.  It is not a 30K convergence
 claim yet; the remaining gate is to verify the positive delta persists through
-the full 300-step C2 run and then in a longer run.  At 11100 the C2 short
+the full 300-step C2 run and then in a longer run.  At 11120 the C2 short
 criterion is met: the residual has delivered seven consecutive positive
 structured-log points after the initial cold-start phase.
+
+The canonical action value itself is still noisy:
+
+```text
+11010 action_default = 0.04689
+11120 action_default = 0.04863
+min in trace         = 0.03934 at 11110
+```
+
+Therefore G25 should be read as:
+
+```text
+resolved: PICF context now has positive deployed-flow gain;
+unresolved: this positive gain has not yet proven monotonic action convergence.
+```
 ```
 
 ## 6. Anti-Repeat Rules
