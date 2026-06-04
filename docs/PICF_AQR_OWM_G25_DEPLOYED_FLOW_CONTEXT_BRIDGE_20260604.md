@@ -297,6 +297,9 @@ step   total     action_def  base_mse  adapt_mse  gain_delta
 11100  0.11939   0.05472     0.05581   0.05472    0.00109
 11110  0.08868   0.03934     0.04193   0.03934    0.00259
 11120  0.10696   0.04863     0.05086   0.04863    0.00223
+11130  0.09652   0.04325     0.04694   0.04325    0.00370
+11140  0.10283   0.04577     0.04941   0.04577    0.00364
+11150  0.08863   0.03965     0.04350   0.03965    0.00384
 ```
 
 Interpretation at step 11100:
@@ -315,6 +318,7 @@ claim yet; the remaining gate is to verify the positive delta persists through
 the full 300-step C2 run and then in a longer run.  At 11120 the C2 short
 criterion is met: the residual has delivered seven consecutive positive
 structured-log points after the initial cold-start phase.
+```
 
 The canonical action value itself is still noisy:
 
@@ -330,7 +334,50 @@ Therefore G25 should be read as:
 resolved: PICF context now has positive deployed-flow gain;
 unresolved: this positive gain has not yet proven monotonic action convergence.
 ```
+
+Update at step 11150:
+
+```text
+loss_action_default_equiv:
+  first row    11010 = 0.04689
+  latest row   11150 = 0.03965
+  min observed        = 0.03934
+  max observed        = 0.05472
+  last5 mean          ~= 0.04333
+
+pi_context_flow_gain_mse_delta:
+  last10 all positive
+  last5 mean          ~= +0.00320
 ```
+
+This strengthens the deployed-flow claim because the residual is now
+consistently improving `adapted_mse` relative to `base_mse`.  It still does not
+close the full convergence claim because the canonical action scalar remains
+high-variance across task buckets instead of cleanly descending every logged
+row.
+
+Update at step 11170:
+
+```text
+loss_action_default_equiv:
+  first row    11010 = 0.046894
+  latest row   11170 = 0.041966
+  min observed        = 0.039342
+  max observed        = 0.054716
+  last5 mean          ~= 0.042642
+  last10 mean         ~= 0.045540
+
+pi_context_flow_gain_mse_delta:
+  positive in 14/17 logged structured rows
+  last5 mean          ~= +0.003792
+  last10 mean         ~= +0.002916
+```
+
+This is still not a final convergence proof, but it rules out the earlier
+startup interpretation that the residual is merely harmful.  The deployed-flow
+residual is consistently reducing `adapted_mse` relative to `base_mse` in the
+latest window.  The remaining question is whether that positive local gain can
+produce a sustained action-loss descent over a longer run.
 
 ## 6. Anti-Repeat Rules
 

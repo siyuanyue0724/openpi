@@ -7,6 +7,16 @@ action/control contract rewrite, the frozen-perception bring-up, the
 VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
 AQR-MAPG direct-final graph replacement.
 
+2026-06-04 G26 full VLA-method audit: use
+[`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
+as the current strict method checklist before spending more GPU.  It maps every
+requested 2025-2026 VLA method family to math, code dataflow, history, and a
+runtime decision.  Current rule: finish G25 deployed-flow residual first; if it
+does not close native action convergence, the next real branch is PICF-side
+FAST/action-token representation supervision, not another sampler-only,
+optimizer-only, PCGrad/CAGrad-only, raw-overlap-only, SAM, sidecar-only, or
+auxiliary-readout-only run.
+
 2026-06-04 G25 deployed flow context bridge: use
 [`docs/PICF_AQR_OWM_G25_DEPLOYED_FLOW_CONTEXT_BRIDGE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G25_DEPLOYED_FLOW_CONTEXT_BRIDGE_20260604.md)
 as the current active execution entry.  It keeps the G24 all-method conclusion
