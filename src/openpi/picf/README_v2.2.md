@@ -11,10 +11,13 @@ AQR-MAPG direct-final graph replacement.
 [`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
 section `11. Step500 Action-Platform Contrast Gate, 2026-06-05`.  Contrast A
 (`semantic_trainable_scope=model_only`, `lr=5e-5`) is excluded on 2xA100-40GB by
-OOM before the first optimizer step.  Contrast B is active from the G26-B
-step500 checkpoint with the current `action_head_and_adapter` boundary and
-raised action/adapter LR (`lr=min_lr=5e-5`).  The decisive rows are step550/600
-using `loss_action_default_equiv`, not the progress-bar scalar loss.
+OOM before the first optimizer step.  Contrast B
+(`action_head_and_adapter`, `lr=min_lr=5e-5`) reached step600 and showed only a
+small action improvement, so LR-only is not the action-platform root fix.
+Contrast C is the active non-duplicate test: same checkpoint/boundary/LR as B,
+but `calvin_bucket_sampling_mode=trajectory` instead of task-uniform K4.  The
+decisive rows are step550/600 using `loss_action_default_equiv`, not the
+progress-bar scalar loss.
 
 2026-06-04 G26-B checkpoint cleanup/archive: use
 [`docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md)

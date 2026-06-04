@@ -1163,9 +1163,70 @@ unchanged:
 status:
   running on px-cloud2:28373 from step500.
   reached step507 at about 29s/step.
+  reached step550 with loss_action_default_equiv=0.072889.
 
 tail:
   tail -f /mnt/picf_run_logs/picf_cmpB_adapter_lr5e5_from500_20260605.log
+```
+
+Interim step550 comparison:
+
+```text
+source G26-B fresh step550:
+  loss_action_default_equiv = 0.0735315
+  loss_action_active7       = 0.329647
+  loss_anchor_pv            = 0.684810
+  loss_mapg_routing         = 0.377704
+  loss_slot_jepa            = 0.242171
+
+contrast B step550:
+  loss_action_default_equiv = 0.0728891
+  loss_action_active7       = 0.326792
+  loss_anchor_pv            = 0.682659
+  loss_mapg_routing         = 0.370668
+  loss_slot_jepa            = 0.242047
+
+reading:
+  B is marginally better at step550, but the delta is too small to call a
+  platform fix.  Structure terms remain healthy.  Continue to step600 before
+  finalizing the LR-only contrast.
+```
+
+Final step600 comparison:
+
+```text
+source G26-B fresh step600:
+  loss_action_default_equiv = 0.0723489
+  loss_action_active7       = 0.325999
+  loss_total_minus_action   = 0.167558
+  loss_anchor_pv            = 0.684632
+  loss_mapg_routing         = 0.385702
+  loss_slot_jepa            = 0.241136
+  active/context support ov = 0.007902 / 0.017207
+  context-flow gain         = 0.014663
+
+contrast B step600:
+  loss_action_default_equiv = 0.0713287
+  loss_action_active7       = 0.319141
+  loss_total_minus_action   = 0.190204
+  loss_anchor_pv            = 0.685939
+  loss_mapg_routing         = 0.386191
+  loss_slot_jepa            = 0.240471
+  active/context support ov = 0.010277 / 0.019966
+  context-flow gain         = 0.012872
+
+reading:
+  Raising the current action_head_and_adapter LR to 5e-5 gives only a small
+  action improvement at step600 and slightly worse non-action total.  The
+  structure terms are not damaged, but this is not a platform-breaker.  The
+  action platform is therefore not primarily an LR-only problem inside the
+  current narrow trainable boundary.
+
+decision:
+  Stop contrast B after step600.  Do not continue raising LR blindly.  The
+  next non-duplicate contrast must isolate task-distribution/sampler effects:
+  trajectory-proportional or temperature sampling versus the current
+  task-uniform K4 logical batch, with the same model boundary and action LR.
 ```
 
 Acceptance rule:
@@ -1179,6 +1240,39 @@ If B does not beat the source window, do not keep raising LR blindly.  The next
 non-duplicate contrast should isolate sampler distribution: old-style
 trajectory/random sampling versus task_uniform K=4, while keeping the same
 scope and LR.
+```
+
+Contrast C: keep B boundary/LR, change only sampler distribution.
+
+```text
+run:
+  picf_cmpC_trajectory_lr5e5_from500_20260605
+
+changed versus B:
+  calvin_bucket_sampling_mode=trajectory
+
+unchanged versus B:
+  resume checkpoint = G26-B step500
+  optimizer_checkpoint_mode=model_only
+  semantic_trainable_scope=action_head_and_adapter
+  lr=min_lr=5e-5
+  semantic_lr_scale=1.0
+  logical_batch_task_count = world_size * accum_steps = 4
+
+purpose:
+  Test whether the action platform is caused by task-uniform K4 changing the
+  effective data distribution away from the trajectory-proportional action
+  objective.  This is a direct VLA-Foundry/ABot-M0-style data-mixing contrast,
+  not another optimizer-only rerun.
+
+acceptance:
+  If C clearly beats B/source on loss_action_default_equiv by step600 while
+  preserving bounded active/context overlap, sampler distribution is a major
+  root cause.  If C tracks B, the platform is not fixed by LR or target bucket
+  distribution under the current narrow trainable boundary.
+
+tail:
+  tail -f /mnt/picf_run_logs/picf_cmpC_trajectory_lr5e5_from500_20260605.log
 ```
 
 Comparison rule:
