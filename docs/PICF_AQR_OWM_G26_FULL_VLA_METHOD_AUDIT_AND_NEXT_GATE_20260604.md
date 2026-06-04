@@ -810,3 +810,151 @@ Evidence-triggered only:
   but a fresh gradient-cosine audit still shows persistent task-family conflict
   inside the action expert.
 ```
+
+### 8.5 Label-imbalance sanity gate, 2026-06-04
+
+Remote:
+
+```text
+host: px-cloud1.matpool.com:26120
+repo: /root/openpi_g25_20260604
+commit: 92f9197
+session: picf_g26b_tokenaux_imbalance_k4_200_20260604
+log: /mnt/picf_run_logs/picf_g26b_tokenaux_imbalance_k4_200_20260604.log
+ckpt: /mnt/checkpoints/picf_core/picf_core/picf_g26b_tokenaux_imbalance_k4_200_20260604/200
+```
+
+Purpose:
+
+```text
+Verify that the high G26-B token accuracy is not a trivial majority-bin
+classifier caused by quantized action labels being imbalanced.
+```
+
+Command family:
+
+```text
+resume=false
+semantic_trainable_scope=action_head_and_adapter
+semantic_action_context_token_aux_weight=0.05
+semantic_action_context_token_aux_bins=64
+semantic_action_context_flow_residual_enabled=true
+calvin_bucket_sampling_mode=task_uniform
+logical_batch_task_count=4
+logical_batch_bucket_normalization=true
+calvin_bucket_sample_without_replacement=true
+```
+
+Structured result:
+
+```text
+step 10:
+  loss_action_default_equiv                 = 0.151121
+  pi_context_token_aux_loss                 = 4.164968
+  pi_context_token_aux_accuracy             = 0.017944
+  pi_context_token_aux_label_majority       = 0.790698
+  pi_context_token_aux_accuracy_over_majority = -0.772754
+  pi_context_flow_gain_mse_delta            = +0.004387
+
+step 50:
+  loss_action_default_equiv                 = 0.114115
+  pi_context_token_aux_loss                 = 3.258627
+  pi_context_token_aux_accuracy             = 0.784839
+  pi_context_token_aux_label_majority       = 0.792456
+  pi_context_token_aux_accuracy_over_majority = -0.007617
+  pi_context_flow_gain_mse_delta            = +0.018173
+
+step 100:
+  loss_action_default_equiv                 = 0.116507
+  loss_action_active7                       = 0.433792
+  pi_context_token_aux_loss                 = 1.033446
+  pi_context_token_aux_accuracy             = 0.809961
+  pi_context_token_aux_label_entropy        = 1.188019
+  pi_context_token_aux_label_majority       = 0.790210
+  pi_context_token_aux_accuracy_over_majority = +0.019751
+  pi_context_flow_gain_mse_delta            = +0.009871
+  active_same_role_overlap_max              = 0.004939
+  context_same_role_overlap_max             = 0.022963
+
+step 200:
+  loss_action_default_equiv                 = 0.076705
+  loss_action_active7                       = 0.339352
+  pi_context_token_aux_loss                 = 0.730741
+  pi_context_token_aux_accuracy             = 0.811304
+  pi_context_token_aux_label_entropy        = 1.175448
+  pi_context_token_aux_label_majority       = 0.791846
+  pi_context_token_aux_accuracy_over_majority = +0.019458
+  pi_context_flow_gain_mse_delta            = +0.016044
+  active_same_role_overlap_max              = 0.009690
+  context_same_role_overlap_max             = 0.028148
+  raw_same_role_overlap_max                 = 0.461224
+  posterior_identity_switch_rate            = 0.151389
+  logical_distinct_bucket_count             = 4
+
+last 5 logged rows:
+  loss_action_default_equiv mean            = 0.083481
+  loss_action_active7 mean                  = 0.364616
+  pi_context_token_aux_loss mean            = 0.735669
+  pi_context_token_aux_accuracy_over_majority mean = +0.019766
+  pi_context_flow_gain_mse_delta mean       = +0.012943
+  active_same_role_overlap_max mean         = 0.004157
+  context_same_role_overlap_max mean        = 0.021504
+
+last 10 logged rows:
+  loss_action_default_equiv mean            = 0.089562
+  loss_action_active7 mean                  = 0.372151
+  pi_context_token_aux_loss mean            = 0.768338
+  pi_context_token_aux_accuracy_over_majority mean = +0.019888
+  pi_context_flow_gain_mse_delta mean       = +0.013036
+  active_same_role_overlap_max mean         = 0.004327
+  context_same_role_overlap_max mean        = 0.022076
+```
+
+Interpretation:
+
+```text
+1. The label distribution is indeed imbalanced:
+   majority fraction is about 0.79.  Therefore raw token accuracy alone is not
+   a valid success metric.
+
+2. The token auxiliary still passes after correcting for imbalance:
+   accuracy_over_majority becomes positive at step 60 and stays positive through
+   step 200.  The final value is +0.019458 and the last-10 mean is +0.019888.
+
+3. The direct representation objective is not a majority-class artifact:
+   CE falls from about random log(64)=4.159 to 0.730741 while
+   accuracy_over_majority is positive.
+
+4. The deployed PI0.5 flow path remains positively affected:
+   `pi_context_flow_gain_mse_delta` is positive through the final row, with
+   final +0.016044 and last-10 mean +0.013036.
+
+5. The structure health remains acceptable for this branch:
+   active/context support overlap is low.  Raw same-role overlap remains around
+   0.46, but this is reserve/inactive overlap and is not the active downstream
+   collapse mode that blocked older runs.
+```
+
+Updated gate decision:
+
+```text
+Accepted:
+  G26-B is not a sampler-only, optimizer-only, sidecar-only, or auxiliary-only
+  repeat.  It is the first branch that passes:
+
+    task-balanced logical batch
+    per-bucket normalization
+    deployed flow residual
+    PICF-local FAST-style action-token representation pressure
+    majority-baseline token diagnostic
+
+Still not accepted:
+  direct resume from the 11000-step G25 checkpoint.  That remains a separate
+  checkpoint-loading/barrier engineering problem.
+
+Next valid GPU use:
+  Either fix the resume-loader barrier and run G26-B from a mature checkpoint,
+  or launch a longer fresh/clean G26-B gate.  Do not rerun data-mixing-only,
+  optimizer-only, PCGrad/CAGrad-only, SAM, sidecar-only, or raw-overlap-only
+  branches without a new falsifiable hypothesis.
+```
