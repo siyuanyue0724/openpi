@@ -3675,12 +3675,13 @@ def test_load_state_dict_picf_compat_skips_shape_mismatches_and_keeps_matching_w
     torch.testing.assert_close(new.core.proj.weight, torch.zeros_like(new.core.proj.weight))
 
 
-def test_load_state_dict_picf_compat_allows_new_action_expert_router_only() -> None:
+def test_load_state_dict_picf_compat_allows_new_action_context_flow_and_router_only() -> None:
     class _Encoder(torch.nn.Module):
         def __init__(self, *, include_router: bool) -> None:
             super().__init__()
             self.base = torch.nn.Linear(3, 3, bias=False)
             if include_router:
+                self.action_context_flow_residual_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
                 self.action_expert_router_gate_logit = torch.nn.Parameter(torch.tensor([-2.5]))
                 self.action_expert_router_summary_proj = torch.nn.Linear(3, 4, bias=False)
                 self.action_expert_router_summary_pair_proj = torch.nn.Linear(6, 4, bias=False)
@@ -3710,6 +3711,7 @@ def test_load_state_dict_picf_compat_allows_new_action_expert_router_only() -> N
 
     assert unexpected == []
     assert shape_mismatches == []
+    assert "semantic_encoder.encoder.action_context_flow_residual_gate_logit" in missing
     assert "semantic_encoder.encoder.action_expert_router_summary_proj.weight" in missing
     torch.testing.assert_close(new.semantic_encoder.encoder.base.weight, old.semantic_encoder.encoder.base.weight)
     torch.testing.assert_close(
