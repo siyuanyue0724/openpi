@@ -1404,11 +1404,20 @@ root cause:
   container is therefore incompatible with this FSDP path.
 
 fix:
-  Make only PaliGemmaSemanticFeatures mutable.  Keep PaliGemmaViewTransform
-  frozen because it is view metadata and carries no trainable tensors.
+  Make the semantic output dataclass tree mutable.  The first local fix made
+  PaliGemmaSemanticFeatures mutable, but the px-cloud2 rerun then failed on the
+  nested view-transform metadata:
+
+    dataclasses.FrozenInstanceError: cannot assign to field 'original_hw'
+
+  This proves FSDP recurses through tuple-contained dataclass metadata while
+  registering hooks.  Therefore both PaliGemmaSemanticFeatures and
+  PaliGemmaViewTransform must be mutable on this FSDP path.
 
 decision:
   The first D attempt is a framework-contract failure, not a training result.
-  Relaunch D after the mutable-output fix before making any conclusion about
-  whether model_only semantic capacity breaks the action platform.
+  The second D attempt is the same framework-contract class on nested metadata,
+  not a training result.  Relaunch D only after the full mutable-output-tree fix
+  before making any conclusion about whether model_only semantic capacity
+  breaks the action platform.
 ```

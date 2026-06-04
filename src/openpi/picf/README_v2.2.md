@@ -26,9 +26,12 @@ rerun.  Contrast D is the memory-safe version of Contrast A:
 `training_strategy=fsdp_full_shard`, `semantic_trainable_scope=model_only`,
 `lr=min_lr=5e-5`.  Its first attempt failed before the first loss row because
 FSDP cannot attach backward hooks through a frozen tensor-output dataclass
-(`PaliGemmaSemanticFeatures.tokens`).  The maintained fix is to keep
-`PaliGemmaSemanticFeatures` mutable while leaving tensor-free view metadata
-frozen; rerun D after this fix before judging the wider semantic boundary.
+(`PaliGemmaSemanticFeatures.tokens`).  The immediate rerun then failed on nested
+view metadata (`PaliGemmaViewTransform.original_hw`), proving FSDP recurses
+through the full structured output tree.  The maintained fix is to keep both
+`PaliGemmaSemanticFeatures` and `PaliGemmaViewTransform` mutable on this path;
+rerun D after this full output-tree fix before judging the wider semantic
+boundary.
 
 2026-06-04 G26-B checkpoint cleanup/archive: use
 [`docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md)

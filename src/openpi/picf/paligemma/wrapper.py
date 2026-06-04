@@ -38,8 +38,8 @@ from openpi.shared import image_tools
 @dataclasses.dataclass
 class PaliGemmaSemanticFeatures:
     # FSDP registers backward hooks by replacing tensor fields inside structured
-    # outputs. Keep this tensor container mutable; immutable view metadata below
-    # can remain frozen because it does not carry trainable tensors.
+    # outputs, and it recurses through nested dataclass metadata. Keep this
+    # output tree mutable even for tensor-free view transforms.
     tokens: torch.Tensor
     summary: torch.Tensor
     prefix_embeddings: torch.Tensor | None = None
@@ -53,7 +53,7 @@ class PaliGemmaSemanticFeatures:
     image_view_transforms: tuple["PaliGemmaViewTransform", ...] = ()
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass
 class PaliGemmaViewTransform:
     original_hw: tuple[int, int]
     target_hw: tuple[int, int]
