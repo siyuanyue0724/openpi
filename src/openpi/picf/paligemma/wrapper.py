@@ -808,9 +808,23 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
             getattr(self, "action_context_readout_k_proj", None),
             getattr(self, "action_context_readout_v_proj", None),
             getattr(self, "action_context_readout_out_proj", None),
-            getattr(self, "action_context_token_readout_out_proj", None),
         )
         return tuple(module for module in modules if isinstance(module, nn.Module))
+
+    def _action_context_token_aux_modules(self) -> tuple[nn.Module, ...]:
+        modules = (getattr(self, "action_context_token_readout_out_proj", None),)
+        return tuple(module for module in modules if isinstance(module, nn.Module))
+
+    def _action_context_token_aux_enabled(self) -> bool:
+        return float(getattr(self, "action_context_token_aux_weight", 0.0)) > 0.0
+
+    def _train_action_context_token_aux_modules_if_enabled(self) -> None:
+        if not self._action_context_token_aux_enabled():
+            return
+        for module in self._action_context_token_aux_modules():
+            module.train()
+            for parameter in module.parameters():
+                parameter.requires_grad_(True)
 
     def _action_expert_router_modules(self) -> tuple[nn.Module, ...]:
         modules = (
@@ -912,6 +926,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 module.train()
                 for parameter in module.parameters():
                     parameter.requires_grad_(True)
+            self._train_action_context_token_aux_modules_if_enabled()
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
             if isinstance(getattr(self, "action_context_readout_query", None), nn.Parameter):
@@ -941,6 +956,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 module.train()
                 for parameter in module.parameters():
                     parameter.requires_grad_(True)
+            self._train_action_context_token_aux_modules_if_enabled()
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
             if isinstance(getattr(self, "action_context_readout_query", None), nn.Parameter):
@@ -968,6 +984,7 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
                 module.train()
                 for parameter in module.parameters():
                     parameter.requires_grad_(True)
+            self._train_action_context_token_aux_modules_if_enabled()
             if isinstance(getattr(self, "action_context_gate_logit", None), nn.Parameter):
                 self.action_context_gate_logit.requires_grad_(True)
             if isinstance(getattr(self, "action_context_readout_query", None), nn.Parameter):
@@ -1822,11 +1839,18 @@ class _Pi0PaliGemmaSemanticEncoder(nn.Module):
         if weight <= 0.0:
             return zero, {}
         if context_tokens is None or not isinstance(context_tokens, torch.Tensor) or context_tokens.numel() == 0:
-            return zero, {
+            # Keep the enabled token head graph-connected even when a rank sees
+            # an empty PICF context.  Without this DDP can hang because another
+            # rank may exercise the token head on the same optimizer step.
+            graph_zero = zero
+            for module in self._action_context_token_aux_modules():
+                for parameter in module.parameters():
+                    graph_zero = graph_zero + parameter.reshape(-1)[0].to(device=zero.device, dtype=zero.dtype) * 0.0
+            return graph_zero, {
                 "picf_action_context_token_aux_enabled": zero + 0.0,
                 "picf_action_context_token_aux_loss": zero,
                 "picf_action_context_token_aux_accuracy": zero,
-                "picf_action_context_token_aux_weighted_total": zero,
+                "picf_action_context_token_aux_weighted_total": graph_zero.detach().to(device=zero.device, dtype=zero.dtype),
                 "picf_action_context_token_aux_weight": zero + weight,
                 "picf_action_context_token_aux_bins": zero + float(bins),
                 "picf_action_context_token_aux_clip": zero + clip,

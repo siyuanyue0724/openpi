@@ -406,6 +406,9 @@ src/openpi/picf/paligemma/wrapper.py
   _action_context_readout_state
   _compute_action_context_token_aux
   compute_action_flow_loss adds token weighted loss into training_total
+  DDP safety: token head is trainable only when token aux is enabled, and the
+  empty-context branch returns a graph-connected zero so enabled token-head
+  parameters are marked used even if one rank has no PICF context on a step.
 
 src/openpi/picf/policy.py
   picf_action_context_token_aux_* -> pi_context_token_aux_* metrics
@@ -426,7 +429,29 @@ Local validation:
 [x] python -m py_compile src/openpi/picf/policy.py
 [x] uv run pytest -q src/openpi/picf/paligemma/wrapper_test.py \
     -k 'action_context_token_aux or action_context_readout_aux or action_context_flow_residual or trainable_scope'
-    -> 12 passed
+    -> 14 passed after the DDP-safety regression tests were added
+[x] uv run pytest -q scripts/picf_core_train_test.py \
+    -k 'action_context or load_state_dict_picf_compat or trainable_scope'
+    -> 9 passed
+```
+
+Runtime correction after first remote attempt:
+
+```text
+Symptom:
+  first G26-B 2xA100 K4 launch reached logical-batch setup, then emitted no
+  training step while GPU1 was saturated and GPU0 was idle.
+
+Root cause class:
+  token aux added a new trainable readout head to the generic action-context
+  readout scope.  Under DDP this is unsafe when the branch is disabled or when
+  context availability differs by rank, because trainable parameters may be
+  unused on one rank.
+
+Fix:
+  split token aux into its own trainable scope and make the empty-context path
+  graph-connect a zero loss to the token head.  This is a training-contract
+  fix, not a loss-weight tweak.
 ```
 
 Remote G26-B gate:

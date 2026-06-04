@@ -350,6 +350,42 @@ def test_pi0_trainable_scope_action_adapter_only_trains_router_when_enabled() ->
     assert "action_expert_router_gate_logit" in trainable
 
 
+def test_pi0_trainable_scope_trains_token_aux_head_only_when_enabled() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.trainable = True
+    encoder.trainable_scope = "action_head_and_adapter"
+    encoder.action_expert_router_enabled = False
+    encoder.action_context_token_aux_weight = 0.0
+    encoder.action_in_proj = torch.nn.Linear(7, 4)
+    encoder.action_out_proj = torch.nn.Linear(4, 7)
+    encoder.time_mlp_in = torch.nn.Linear(4, 4)
+    encoder.time_mlp_out = torch.nn.Linear(4, 4)
+    encoder.action_context_in_proj = torch.nn.Linear(6, 4, bias=False)
+    encoder.action_context_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_out_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
+    encoder.action_context_readout_query = torch.nn.Parameter(torch.randn(2, 4))
+    encoder.action_context_readout_q_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_k_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_v_proj = torch.nn.Linear(4, 4, bias=False)
+    encoder.action_context_readout_out_proj = torch.nn.Linear(4, 7)
+    encoder.action_context_token_readout_out_proj = torch.nn.Linear(4, 7 * 16)
+    encoder.action_context_flow_residual_gate_logit = torch.nn.Parameter(torch.tensor([-2.0]))
+
+    _Pi0PaliGemmaSemanticEncoder._apply_trainable_scope(encoder)
+    trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
+    assert "action_context_readout_out_proj.weight" in trainable
+    assert "action_context_token_readout_out_proj.weight" not in trainable
+
+    encoder.action_context_token_aux_weight = 0.05
+    _Pi0PaliGemmaSemanticEncoder._apply_trainable_scope(encoder)
+    trainable = {name for name, param in encoder.named_parameters() if param.requires_grad}
+    assert "action_context_token_readout_out_proj.weight" in trainable
+
+
 def test_pi0_action_context_adapter_keeps_suffix_shape_and_reports_metrics() -> None:
     encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
     torch.nn.Module.__init__(encoder)
@@ -485,6 +521,28 @@ def test_pi0_action_context_token_aux_reports_ce_and_accuracy() -> None:
     assert torch.isfinite(metrics["picf_action_context_token_aux_accuracy"])
     assert 0.0 <= metrics["picf_action_context_token_aux_accuracy"].item() <= 1.0
     assert torch.isfinite(metrics["picf_action_context_token_aux_attention_entropy_mean"])
+
+
+def test_pi0_action_context_token_aux_missing_context_keeps_head_graph_connected() -> None:
+    encoder = object.__new__(_Pi0PaliGemmaSemanticEncoder)
+    torch.nn.Module.__init__(encoder)
+    encoder.action_context_token_aux_weight = 0.125
+    encoder.action_context_token_aux_bins = 16
+    encoder.action_context_token_aux_clip = 1.0
+    encoder.action_context_token_readout_out_proj = torch.nn.Linear(4, 7 * 16)
+
+    target = torch.randn((2, 3, 7), dtype=torch.float32)
+    weighted, metrics = _Pi0PaliGemmaSemanticEncoder._compute_action_context_token_aux(
+        encoder,
+        None,
+        target,
+    )
+    assert weighted.requires_grad
+    assert weighted.item() == pytest.approx(0.0)
+    assert metrics["picf_action_context_token_aux_enabled"].item() == pytest.approx(0.0)
+    weighted.backward()
+    assert encoder.action_context_token_readout_out_proj.weight.grad is not None
+    assert torch.count_nonzero(encoder.action_context_token_readout_out_proj.weight.grad).item() == 0
 
 
 def test_pi0_action_context_flow_residual_changes_deployed_velocity_and_reports_metrics() -> None:
