@@ -656,6 +656,16 @@ step 100:
   context_same_role_overlap_max    = 0.022963
   raw_same_role_overlap_max        = 0.454424
   logical_distinct_bucket_count    = 4
+
+step 200:
+  loss_action_default_equiv        = 0.076665
+  loss_action_active7              = 0.339230
+  pi_context_token_aux_loss        = 0.730703
+  pi_context_token_aux_accuracy    = 0.811206
+  pi_context_flow_gain_mse_delta   = +0.016048
+  active_same_role_overlap_max     = 0.009379
+  context_same_role_overlap_max    = 0.029280
+  logical_distinct_bucket_count    = 4
 ```
 
 Interpretation:
@@ -685,6 +695,11 @@ Interpretation:
    than 3.1 nats, token accuracy stabilizes near 0.81, flow gain stays positive,
    and active/context overlap remains low.  Continue to step 200/300 before
    launching any 30K branch.
+
+7. The 200-step gate passes:
+   action MSE reaches 0.076665 and remains far below the 0.15 starting band.
+   Token CE has not collapsed upward; flow gain stays positive.  Continue to
+   step 300 for the final no-resume gate result.
 ```
 
 ### 8.3 Exhaustive method status for the user's requested list
