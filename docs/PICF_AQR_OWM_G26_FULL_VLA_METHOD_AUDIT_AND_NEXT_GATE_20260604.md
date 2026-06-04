@@ -615,6 +615,19 @@ step 20:
   context_same_role_overlap_max    = 0.024044
   raw_same_role_overlap_max        = 0.475391
   logical_distinct_bucket_count    = 4
+
+step 50:
+  loss_action_default_equiv        = 0.114194
+  pi_context_token_aux_loss        = 3.258192
+  pi_context_token_aux_accuracy    = 0.784790
+  pi_context_token_aux_weighted    = 0.162910
+  pi_context_flow_gain_mse_delta   = +0.018128
+  pi_context_flow_base_mse         = 0.132322
+  pi_context_flow_adapted_mse      = 0.114194
+  active_same_role_overlap_max     = 0.009878
+  context_same_role_overlap_max    = 0.027558
+  raw_same_role_overlap_max        = 0.465212
+  logical_distinct_bucket_count    = 4
 ```
 
 Interpretation:
@@ -633,6 +646,11 @@ Interpretation:
 4. No convergence claim yet:
    this is fresh no-resume, so action MSE cannot be compared to the 11000-step
    checkpoint-family action numbers.  The pass/fail point remains step 100/200/300.
+
+5. The 50-step gate passes:
+   action MSE decreases, token CE decreases, token accuracy rises far above
+   random, flow gain remains positive, and active/context overlap stays low.
+   Continue to step 100 before accepting the mechanism for a longer run.
 ```
 
 ### 8.3 Exhaustive method status for the user's requested list
