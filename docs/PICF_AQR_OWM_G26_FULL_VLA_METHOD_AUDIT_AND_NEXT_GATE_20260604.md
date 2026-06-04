@@ -1372,3 +1372,43 @@ Use only:
 Do not compare the progress-bar scalar loss or raw current loss_action with
 the older 4-22 raw loss_action.
 ```
+
+Contrast D: widen trainable boundary through FSDP, not direct DDP.
+
+```text
+run:
+  picf_cmpD_fsdp_model_lr5e5_from500_20260605
+
+changed versus B/C:
+  training_strategy=fsdp_full_shard
+  window_activation_checkpointing=True
+  semantic_trainable_scope=model_only
+  lr=min_lr=5e-5
+
+purpose:
+  Retest Contrast A's "trainable boundary too narrow" hypothesis without the
+  direct-DDP 2x40GB OOM.  This is the next non-duplicate contrast after
+  excluding LR-only and sampler-only fixes.
+
+first attempt result:
+  failed before the first JSON loss row, but not from model divergence or OOM.
+
+failure:
+  dataclasses.FrozenInstanceError: cannot assign to field 'tokens'
+  inside torch.distributed.fsdp._runtime_utils._register_pre_backward_hooks.
+
+root cause:
+  PaliGemmaSemanticFeatures was a frozen dataclass returned from the semantic
+  encoder.  FSDP registers backward hooks on structured output tensors by
+  replacing the corresponding dataclass fields.  A frozen tensor-output
+  container is therefore incompatible with this FSDP path.
+
+fix:
+  Make only PaliGemmaSemanticFeatures mutable.  Keep PaliGemmaViewTransform
+  frozen because it is view metadata and carries no trainable tensors.
+
+decision:
+  The first D attempt is a framework-contract failure, not a training result.
+  Relaunch D after the mutable-output fix before making any conclusion about
+  whether model_only semantic capacity breaks the action platform.
+```

@@ -22,7 +22,13 @@ healthy.  Conclusion: LR-only and sampler-only are both excluded as root fixes
 inside the current narrow action_head_and_adapter trainable boundary.  The next
 non-duplicate gate must test trainable-boundary/action-expert capacity or a
 different logical-batch loss-composition mechanism, not another bare sampler
-rerun.
+rerun.  Contrast D is the memory-safe version of Contrast A:
+`training_strategy=fsdp_full_shard`, `semantic_trainable_scope=model_only`,
+`lr=min_lr=5e-5`.  Its first attempt failed before the first loss row because
+FSDP cannot attach backward hooks through a frozen tensor-output dataclass
+(`PaliGemmaSemanticFeatures.tokens`).  The maintained fix is to keep
+`PaliGemmaSemanticFeatures` mutable while leaving tensor-free view metadata
+frozen; rerun D after this fix before judging the wider semantic boundary.
 
 2026-06-04 G26-B checkpoint cleanup/archive: use
 [`docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md)

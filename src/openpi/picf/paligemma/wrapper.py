@@ -35,8 +35,11 @@ from openpi.picf.paligemma.config import PaliGemmaSemanticConfig
 from openpi.shared import image_tools
 
 
-@dataclasses.dataclass(frozen=True)
+@dataclasses.dataclass
 class PaliGemmaSemanticFeatures:
+    # FSDP registers backward hooks by replacing tensor fields inside structured
+    # outputs. Keep this tensor container mutable; immutable view metadata below
+    # can remain frozen because it does not carry trainable tensors.
     tokens: torch.Tensor
     summary: torch.Tensor
     prefix_embeddings: torch.Tensor | None = None
