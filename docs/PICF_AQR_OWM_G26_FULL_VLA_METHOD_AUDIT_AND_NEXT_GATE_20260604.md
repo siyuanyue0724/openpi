@@ -1047,3 +1047,50 @@ Long gate:
   it shows sustained action compression and stable structure health beyond the
   short gate.  It is not a proof before those logs exist.
 ```
+
+## 10. Checkpoint Cleanup and Fresh-Run Watch Line
+
+The June-04 remote checkpoint cleanup is archived in:
+
+```text
+docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md
+remote manifest: /mnt/picf_run_logs/ckpt_cleanup_20260604_manifest.txt
+```
+
+Cleanup result:
+
+```text
+deleted checkpoint directories: 97
+kept checkpoint directories:    18
+```
+
+The cleanup removed old short-test/sanity/diagnostic ckpt directories only.
+It preserved April baselines, known 7000/8000/10000/11000 anchors,
+G22/G24/G25/G26 key gates, and the active G26-B long-run directory.  Logs and
+local docs remain the source of truth for deleted short-test weights.
+
+Fresh-run action trend through the first checked window:
+
+```text
+step100: loss_action_default_equiv ~= 0.1165
+step200: loss_action_default_equiv ~= 0.0766
+step300: loss_action_default_equiv ~= 0.0654
+step330: loss_action_default_equiv ~= 0.0785
+```
+
+This is slower than the older best short-window/resume PICF traces that entered
+the `0.03-0.05` band around 500-1000 steps.  Because the current run is a fresh
+task-uniform G26-B mechanism test, not a mature-checkpoint resume, the early
+gap is not a failure by itself.  It does require a strict watch line:
+
+```text
+step500 <= 0.060:
+  continue as healthy.
+
+step500 in 0.060..0.070:
+  continue to step700 and decide from trend.
+
+step500 > 0.070:
+  stop and treat G26-B fresh as not reproducing the old PICF action-compression
+  speed.
+```

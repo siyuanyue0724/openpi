@@ -7,6 +7,15 @@ action/control contract rewrite, the frozen-perception bring-up, the
 VL-router supervised grounding rollout, the MAPG-v0 evidence pass, and the
 AQR-MAPG direct-final graph replacement.
 
+2026-06-04 G26-B checkpoint cleanup/archive: use
+[`docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26B_CKPT_CLEANUP_AND_ARCHIVE_20260604.md)
+for the remote ckpt-retention manifest, current G26-B long-run paths, and the
+fresh-run action-compression acceptance line.  Remote cleanup deleted 97 old
+short-test/sanity/diagnostic ckpt directories while preserving April baselines,
+the 7000/8000/10000/11000 anchors, G22/G24/G25/G26 key gates, and the current
+`picf_g26b_tokenaux_long30k_k4_fresh_20260604` run.  Logs and local experiment
+documents remain the source of truth for deleted short-test weights.
+
 2026-06-04 G26 full VLA-method audit: use
 [`docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md`](/home/siyuanyue/Documents/openpi/docs/PICF_AQR_OWM_G26_FULL_VLA_METHOD_AUDIT_AND_NEXT_GATE_20260604.md)
 as the current strict method checklist before spending more GPU.  It maps every
