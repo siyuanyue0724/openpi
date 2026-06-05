@@ -4539,6 +4539,51 @@ No runtime error signatures observed:
   NaN/nan = 0
 ```
 
+Step50 gate:
+
+```text
+step = 50
+loss_total = 0.2496266067
+loss_action_default_equiv = 0.1248133034
+loss_action_active7 = 0.4569933414
+lr = 1.6666666667e-05
+pi_context_gate = 0.1000000015
+logical_batch_global_micro_count = 4
+
+No runtime error signatures:
+  Traceback = 0
+  CUDA out of memory = 0
+  Non-finite = 0
+  RuntimeError = 0
+  ModuleNotFoundError = 0
+  NaN/nan = 0
+```
+
+Interpretation:
+
+```text
+G45b step50 is not directly equal to G45a step50 because the logging interval
+changed:
+
+  G45a log_interval = 25
+  G45b log_interval = 50
+
+Therefore:
+  G45a step25 averages steps 1-25:
+    loss_action_default_equiv = 0.1456323117
+
+  G45a step50 averages steps 26-50:
+    loss_action_default_equiv = 0.1041438282
+
+  G45b step50 averages steps 1-50:
+    loss_action_default_equiv = 0.1248133034
+
+The G45b value lies between the two corresponding G45a windows.  This is
+consistent with the wider averaging window and is not evidence of a regression.
+The next hard discriminator is G45b step100, which will average steps 51-100.
+That should be compared against the G45a step75/100 band.
+```
+
 Local verification before archiving:
 
 ```text
