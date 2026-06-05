@@ -4713,3 +4713,70 @@ It is a speed-correct version of the same action-boundary recipe.
 The major cost reduction comes from not training the full PaliGemma backbone
 and from using DDP instead of FSDP full-shard.
 ```
+
+Correction:
+
+```text
+G45c was too restrictive for the intended main training boundary:
+  trainable_scope = policy_only
+  trainable_numel = 11,652,162
+
+This trained the PI0.5/PaliGemma action-side adapter but did not train the
+PICF core.  It is therefore retained only as a speed/control reference, not as
+the desired PICF training run.
+```
+
+## 2026-06-05 G45d Correct PICF-Trainable Fast Run
+
+The intended main run freezes only the expensive pretrained perception
+backbones while training the PICF belief router and action-side adapter:
+
+```text
+Run:
+  picf_g45d_picfcore_adapter_ddp_long30k_20260605
+
+Frozen:
+  V-JEPA visual encoder
+  Sonata point encoder
+  AnyTouch tactile encoder
+  full PaliGemma language/vision backbone except action head/adapter scope
+
+Trainable:
+  PICF core / AQR / OWM / posterior router parameters
+  PaliGemma / PI0.5 action head and adapter parameters
+  action-context bridge parameters
+
+Distributed/training:
+  training_strategy = ddp
+  picf_trainable_scope = all
+  semantic_trainable_scope = action_head_and_adapter
+  semantic_gradient_checkpointing = false
+  window_activation_checkpointing = false
+  accum_steps = 2
+  effective_global_batch = 4
+  save_interval = 1000
+  keep_last_checkpoints = 5
+
+Verified startup:
+  trainable_numel = 464,026,409
+  semantic_backbone optimizer group:
+    lr = 2.0e-4
+    num_params = 11,652,162
+  picf_core optimizer group:
+    lr = 2.0e-7
+    num_params = 452,374,247
+
+Initial speed:
+  about 17.1 s/step
+```
+
+Interpretation:
+
+```text
+G45d is the current correct speed/effectiveness tradeoff:
+  it trains PICF core;
+  it does not train the full PaliGemma backbone;
+  it preserves the G45 action-boundary fixes;
+  it remains faster than G26b because burnin was removed and the old context
+  token auxiliary/deployed residual path is disabled.
+```
