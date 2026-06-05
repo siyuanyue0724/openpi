@@ -2923,7 +2923,12 @@ def compute_transition_loss(
     )
 
     if action_loss_override is not None:
-        action_loss_source = action_loss_override.detach() if bool(cfg.detach_action_loss_from_picf) else action_loss_override
+        # `action_loss_override` is produced by the native PI0.5 action expert.
+        # Detaching this scalar would cut gradients to the entire action policy,
+        # not just to PICF.  PICF/action isolation is enforced at the prefix and
+        # context-token boundary (`action_prefix_stopgrad`,
+        # `action_context_stopgrad`), so the override loss must stay live.
+        action_loss_source = action_loss_override
         action_pos = action_pos_override if action_pos_override is not None else action_loss_source
         action_rot = action_rot_override if action_rot_override is not None else action_loss_source
         action_gripper = action_gripper_override if action_gripper_override is not None else action_loss_source

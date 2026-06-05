@@ -4399,6 +4399,65 @@ def _collect_nonfinite_parameter_diagnostics(
     }
 
 
+def _collect_nonfinite_output_diagnostics(
+    outputs: Mapping[str, Any],
+    *,
+    max_items: int = 32,
+) -> dict[str, Any]:
+    count = 0
+    samples: list[dict[str, Any]] = []
+
+    def visit(path: str, value: Any) -> None:
+        nonlocal count
+        if len(samples) >= max_items and count > max_items:
+            return
+        if torch.is_tensor(value):
+            if not value.is_floating_point():
+                return
+            detached = value.detach()
+            finite = torch.isfinite(detached)
+            if bool(finite.all().item()):
+                return
+            count += 1
+            if len(samples) >= max_items:
+                return
+            finite_values = detached[finite]
+            sample: dict[str, Any] = {
+                "name": str(path),
+                "shape": tuple(int(dim) for dim in detached.shape),
+                "dtype": str(detached.dtype),
+                "has_nan": bool(torch.isnan(detached).any().item()),
+                "has_inf": bool(torch.isinf(detached).any().item()),
+                "finite_count": int(finite.sum().item()),
+                "numel": int(detached.numel()),
+            }
+            if finite_values.numel() > 0:
+                finite_float = finite_values.to(dtype=torch.float32)
+                sample["finite_min"] = float(finite_float.min().item())
+                sample["finite_max"] = float(finite_float.max().item())
+                sample["finite_mean"] = float(finite_float.mean().item())
+            samples.append(sample)
+            return
+        if isinstance(value, Mapping):
+            for key, item in value.items():
+                visit(f"{path}.{key}", item)
+            return
+        if isinstance(value, Sequence) and not isinstance(value, (str, bytes, bytearray)):
+            for index, item in enumerate(value):
+                visit(f"{path}[{index}]", item)
+            return
+        if isinstance(value, float) and not math.isfinite(value):
+            count += 1
+            if len(samples) < max_items:
+                samples.append({"name": str(path), "value": float(value)})
+
+    visit("outputs", outputs)
+    return {
+        "nonfinite_output_count": int(count),
+        "samples": samples,
+    }
+
+
 @dataclasses.dataclass(frozen=True)
 class _TransitionWindow:
     segment_id: int
@@ -10009,6 +10068,12 @@ def train(args: argparse.Namespace) -> None:
         debug_cuda_sync = os.environ.get("OPENPI_DEBUG_CUDA_SYNC", "").strip() not in {"", "0", "false", "False"}
         debug_autograd_anomaly = os.environ.get("OPENPI_DEBUG_AUTOGRAD_ANOMALY", "").strip() not in {"", "0", "false", "False"}
         debug_tensor_index_guards = os.environ.get("OPENPI_DEBUG_TENSOR_INDEX_GUARDS", "").strip() not in {"", "0", "false", "False"}
+        debug_nonfinite_outputs = os.environ.get("OPENPI_DEBUG_NONFINITE_OUTPUTS", "").strip() not in {
+            "",
+            "0",
+            "false",
+            "False",
+        }
         debug_phase_limit = int(os.environ.get("OPENPI_DEBUG_PHASE_LIMIT", "0") or "0")
         verbose_startup_logs = os.environ.get("OPENPI_VERBOSE_STARTUP_LOGS", "").strip() not in {"", "0", "false", "False"}
         if debug_autograd_anomaly:
@@ -10784,6 +10849,7 @@ def train(args: argparse.Namespace) -> None:
                 logging.info("CUDA debug sync: enabled=%s", bool(debug_cuda_sync))
                 logging.info("Autograd anomaly detection: enabled=%s", bool(debug_autograd_anomaly))
                 logging.info("Tensor index guards: enabled=%s", bool(debug_tensor_index_guards))
+                logging.info("Non-finite output diagnostics: enabled=%s", bool(debug_nonfinite_outputs))
                 logging.info("Phase timing debug: phase_limit=%s", debug_phase_limit)
                 logging.info("Fault dump handler (SIGUSR1): enabled=%s", bool(fault_dump_registered))
                 if fault_dump_path is not None:
@@ -11115,7 +11181,28 @@ def train(args: argparse.Namespace) -> None:
                         if debug_cuda_sync and device.type == "cuda":
                             torch.cuda.synchronize(device=device)
                         backward_start = time.perf_counter()
+                        if debug_nonfinite_outputs:
+                            output_issue = _collect_nonfinite_output_diagnostics(outputs, max_items=32)
+                            if int(output_issue["nonfinite_output_count"]) > 0:
+                                logging.error("Non-finite model outputs before backward: %s", output_issue)
+                                logging.error("Recent window history before non-finite outputs: %s", list(recent_windows))
+                                if _DEBUG_INDEX_TRACE:
+                                    logging.error(
+                                        "Recent tensor index trace before non-finite outputs: %s",
+                                        _dump_debug_index_trace(),
+                                    )
+                                raise RuntimeError("Non-finite model outputs before backward.")
                         loss_for_backward = outputs["loss_total"]
+                        if not bool(torch.isfinite(loss_for_backward.detach()).all().item()):
+                            output_issue = _collect_nonfinite_output_diagnostics(outputs, max_items=32)
+                            logging.error("Non-finite loss_total before backward: %s", output_issue)
+                            logging.error("Recent window history before non-finite loss_total: %s", list(recent_windows))
+                            if _DEBUG_INDEX_TRACE:
+                                logging.error(
+                                    "Recent tensor index trace before non-finite loss_total: %s",
+                                    _dump_debug_index_trace(),
+                                )
+                            raise RuntimeError("Non-finite loss_total before backward.")
                         action_bucket_scale = 1.0
                         if (
                             logical_action_bucket_ema_normalization

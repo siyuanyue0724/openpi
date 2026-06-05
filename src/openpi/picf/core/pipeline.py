@@ -4301,7 +4301,10 @@ class PicfFullCore(nn.Module):
         scale = torch.clamp(prior_diag[:, None, :] + obs_diag[None, :, :] + (self.config.bind_sigma_m**2), min=self.config.epsilon_s)
         maha = torch.sum((delta**2) / scale, dim=-1)
         nearest = torch.min(maha, dim=-1).values
-        return torch.sqrt(torch.clamp(nearest, min=0.0))
+        # `sqrt(0)` has a singular derivative.  Exact prior/measurement matches
+        # are common during posterior recycling, so keep the forward distance
+        # near zero while making the backward path finite.
+        return torch.sqrt(torch.clamp(nearest, min=self.config.epsilon_s))
 
     def _physical_query_addresses(
         self,

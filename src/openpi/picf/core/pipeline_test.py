@@ -784,6 +784,35 @@ def test_posterior_owner_active_binding_bias_masks_reserve_rows(tmp_path: Path) 
     assert torch.all(bias[:, 2:] <= -1234.0)
 
 
+def test_measurement_innovation_norm_exact_match_has_finite_backward(tmp_path: Path) -> None:
+    core, _ = _make_core(tmp_path)
+    dtype = core.dtype
+    device = core.device
+    prior_x = torch.zeros((2, 3), dtype=dtype, device=device, requires_grad=True)
+    prior_s = torch.eye(3, dtype=dtype, device=device)[None, :, :].expand(2, -1, -1).clone()
+    obs = PicfObservationAnchorState(
+        seed_indices=torch.arange(2, dtype=torch.long, device=device),
+        tokens=torch.zeros((2, core.config.hidden_dim), dtype=dtype, device=device),
+        point_weights=torch.zeros((2, 0), dtype=dtype, device=device),
+        routing_mass_point=torch.zeros((2, 0), dtype=dtype, device=device),
+        routing_mass_visual=torch.zeros((2, 0), dtype=dtype, device=device),
+        routing_support_point=torch.zeros((0,), dtype=dtype, device=device),
+        routing_support_visual=torch.zeros((0,), dtype=dtype, device=device),
+        routing_gate_point=torch.zeros((0,), dtype=dtype, device=device),
+        routing_gate_visual=torch.zeros((0,), dtype=dtype, device=device),
+        x=torch.zeros((2, 3), dtype=dtype, device=device),
+        S=torch.eye(3, dtype=dtype, device=device)[None, :, :].expand(2, -1, -1),
+        a=torch.full((2, 3), 0.05, dtype=dtype, device=device),
+    )
+
+    norm = core._measurement_innovation_norm(prior_x, prior_s, obs)
+    assert torch.isfinite(norm).all()
+    norm.sum().backward()
+
+    assert prior_x.grad is not None
+    assert torch.isfinite(prior_x.grad).all()
+
+
 def _visual_override(value: float) -> np.ndarray:
     return np.full((4, 4, 8), value, dtype=np.float32)
 

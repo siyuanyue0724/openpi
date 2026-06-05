@@ -429,6 +429,37 @@ def test_transition_loss_action_override_preserves_default_parity(tmp_path: Path
     torch.testing.assert_close(losses.action, override_total)
 
 
+def test_transition_loss_action_override_detach_picf_keeps_override_gradient(tmp_path: Path) -> None:
+    core, replay = _make_core(tmp_path)
+    frames = list(replay)[:2]
+    first = core.step(
+        frames[0],
+        point_features_override=_point_override(core, frames[0]),
+        visual_map_override=_visual_override(1.0),
+        semantic_override=np.ones((core.config.semantic_dim,), dtype=np.float32),
+        action_future=frames[0].action,
+    )
+    override_total = torch.tensor(0.5, dtype=core.dtype, requires_grad=True)
+    losses = compute_transition_loss(
+        core,
+        first,
+        frames[1],
+        action_target=frames[0].action,
+        next_visual_map_override=_visual_override(2.0),
+        config=PicfTransitionLossConfig(detach_action_loss_from_picf=True),
+        action_loss_override=override_total,
+        action_pos_override=torch.tensor(0.4, dtype=core.dtype),
+        action_rot_override=torch.tensor(0.2, dtype=core.dtype),
+        action_gripper_override=torch.tensor(0.1, dtype=core.dtype),
+    )
+
+    assert losses.action.requires_grad
+    losses.action.backward()
+    assert override_total.grad is not None
+    assert torch.isfinite(override_total.grad)
+    assert override_total.grad.item() > 0.0
+
+
 def test_transition_loss_computes_guarded_owm_objectives_when_weighted(tmp_path: Path) -> None:
     core, replay = _make_core(tmp_path)
     frames = list(replay)[:2]
