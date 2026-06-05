@@ -4630,3 +4630,86 @@ Kept:
   G26b long30k base used as args source;
   G43b/G44/G45a/G45b action-boundary evidence.
 ```
+
+## 2026-06-05 G45c Fast-Correct Switch
+
+G45b was intentionally heavy:
+
+```text
+Run:
+  picf_g45b_context_gate010_policyonly_long30k_20260605
+
+Stopped at:
+  step = 100
+  loss_action_default_equiv = 0.0781718194
+  loss_total = 0.1563436389
+
+Observed speed:
+  about 56 s / optimizer step
+
+Root cause of slowdown:
+  trainable_numel = 3.36B
+  semantic_trainable_scope = backbone_only
+  training_strategy = fsdp_full_shard
+```
+
+This proved that the G45 action-boundary configuration can descend, but it is
+not the intended cost envelope for a 30k run.
+
+G45c is the speed-correct long-run variant.  It keeps the action-boundary and
+logical-batch fixes but reverts only the training boundary and distributed
+strategy:
+
+```text
+Run:
+  picf_g45c_fastcorrect_adapter_ddp_long30k_20260605
+
+Preserved:
+  picf_action_condition_enabled = true
+  action_prefix_stopgrad = true
+  action_prefix_output_gate = 0.0
+  action_context_tokens = 4
+  action_context_integration = suffix_cross_attention
+  action_context_stopgrad = true
+  action_context_output_gate = 0.10
+  detach_action_loss_from_picf = true
+  all PICF auxiliary/object losses = 0
+  calvin_bucket_sampling_mode = task_uniform
+  logical_batch_task_count = 4
+  logical_batch_bucket_normalization = true
+  accum_steps = 2
+  effective_global_batch = 4
+
+Changed for speed:
+  semantic_trainable_scope = action_head_and_adapter
+  training_strategy = ddp
+  semantic_gradient_checkpointing = false
+  window_activation_checkpointing = false
+
+Startup verification:
+  trainable_numel = 11,652,162
+  semantic=paligemma(trainable=True scope=action_head_and_adapter)
+  optimizer group semantic_backbone num_params = 11,652,162
+```
+
+Initial G45c progress:
+
+```text
+step 1:
+  loss = 0.3401
+  speed ~= 17.67 s/step
+
+step 2:
+  loss = 0.1759
+  speed ~= 17.85 s/step
+```
+
+Interpretation:
+
+```text
+G45c is not a rollback of the G45 action-boundary repair.
+It is a speed-correct version of the same action-boundary recipe.
+
+The major cost reduction comes from not training the full PaliGemma backbone
+and from using DDP instead of FSDP full-shard.
+```
