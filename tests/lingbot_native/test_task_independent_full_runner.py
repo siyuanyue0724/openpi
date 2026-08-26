@@ -1112,12 +1112,14 @@ def test_adr225_launcher_changes_only_the_pretrained_object_memory_boundary() ->
     freeze = Path("adr225/freeze_source.sh").read_text(encoding="utf-8")
 
     required = (
-        "source-freezes/pretrained-object-memory-v1",
         "source-freeze.receipt.json",
         "status --porcelain=v1 --untracked-files=all",
+        "source-freezes/pretrained-object-memory-v2",
         "PICF_ARCHITECTURE_PROFILE=adr225_pretrained_native_object_memory_v1",
+        "lingbot-vla-v2-adr224-wla-native-muon-vlm-class-offload-v1",
         "PICF_VIDEOMT_STAGE_PQ_MODE=trainable-adapted-native-query-causal-c5",
         "PICF_VIDEOMT_FSDP2_PLACEMENT:-cpu-offload",
+        "PICF_FSDP2_PLACEMENT:-selective-embedding-trainable-vision-offload",
         "PICF_TRAINABLE_SCOPE=full-host",
         "PICF_DENSE_TOKEN_BRIDGE=exact_tokens_v1",
         "PICF_CAPACITY=200",

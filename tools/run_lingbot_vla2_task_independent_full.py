@@ -4624,12 +4624,18 @@ def main() -> None:
             }
         )
     elif _videomt_stage_pq_active(args):
-        if _adr221_full_source_wsa_active(args) or _wla_complete_active(args):
+        if (
+            _adr221_full_source_wsa_active(args)
+            or _wla_complete_active(args)
+            or _adr225_pretrained_object_memory_active(args)
+        ):
             if (
                 args.fsdp2_placement
                 == FSDP2_SELECTIVE_EMBEDDING_TRAINABLE_VISION_OFFLOAD
             ):
-                if _wla_complete_active(args):
+                if _wla_complete_active(args) or _adr225_pretrained_object_memory_active(
+                    args
+                ):
                     patch_report = verify_selective_trainable_vision_with_vlm_selective_class_cpu_offload(
                         root=root,
                         checkout=args.source_checkout,
@@ -4719,6 +4725,7 @@ def main() -> None:
                                 )
                             }
                             if _wla_complete_active(args)
+                            or _adr225_pretrained_object_memory_active(args)
                             else {}
                         ),
                     }
@@ -4750,7 +4757,7 @@ def main() -> None:
                 )
             else:
                 raise ValueError(
-                    "full-source WSA/WLA requires selective embedding or "
+                    "full-source WSA/WLA or ADR-225 requires selective embedding or "
                     "trainable-vision plus selective-class CPU offload"
                 )
         elif (
@@ -6366,6 +6373,11 @@ def main() -> None:
                         and selective_class_offload_active
                         else ()
                     ),
+                    *(
+                        (WLA_HOST_TEXT_BLOCK_CLASS,)
+                        if adr225_object_memory and selective_class_offload_active
+                        else ()
+                    ),
                 )
             )
         )
@@ -6386,6 +6398,11 @@ def main() -> None:
                         )
                         if _wla_complete_active(args)
                         and selective_class_offload_active
+                        else ()
+                    ),
+                    *(
+                        (WLA_HOST_TEXT_FSDP_PARAMETER_PREFIX,)
+                        if adr225_object_memory and selective_class_offload_active
                         else ()
                     ),
                 )

@@ -388,3 +388,36 @@ LingBot object-memory tokens while preserving the released LingBot action ABI.
 Therefore those systems remain architectural evidence, not copied code falsely
 attributed to ADR-225. The only transplanted object-memory primitive in this ADR
 is the authenticated UniPixel implementation listed in the source receipt.
+
+## 13. Four-A100 execution ledger
+
+### `adr225-a4b8b15-4gpu-30k-v2`
+
+The first authorized four-A100 launch passed the exact native-source replay,
+loaded all six LingBot shards, formed the 36-text/24-vision-block FSDP2 topology,
+completed the fixed step-zero held-out evaluation, and committed one complete
+forward/backward/AdamW update. Step 1 took `75.78 s`; rank-zero official action
+loss was `0.63671875`. Step 2 failed in the unchanged FlexAttention backward:
+rank 3 needed another `1.03 GiB` with only `755.56 MiB` free after AdamW state
+materialization. This is an execution-placement failure, not action or anchor
+evidence, and the run was stopped immediately.
+
+The step-zero visual audit establishes a precise boundary. The complete 200-query
+bank already contains oracle-matched masks with approximately `0.736--0.942` IoU
+for most inspected table parts and `0.899` for the red block, while the blue-block
+oracle is only `0.169`. The untrained model-ranked Top-10 does not select those
+high-IoU rows. Thus pretrained geometric candidates exist, but learned ranking
+and multimodal/action binding remain unproved.
+
+### Accepted execution-only repair
+
+ADR-225 now reuses ADR-224's exact eight-overlay PyTorch FSDP2 placement, including
+the VLM explicit-dispatch patch with SHA-256
+`7634367ee5dbfe08161c405a25a4e44014d2fdf3a9bc6ecb6cef5331840a93c9`.
+ADR-224 `v17` already completed two full four-A100 updates after optimizer-state
+materialization and reduced the step-two reservation from the rejected
+`39.49 GiB` peak to `33.404 GiB`. For ADR-225 the same policy offloads the exact
+Qwen3-VL text block class and trainable vision blocks. It does not change module
+functions, tensors, query count, modalities, data order, losses, learning rates,
+trainability or optimizer equations. This is a copied, previously demonstrated
+execution mechanism; it carries no scientific credit by itself.

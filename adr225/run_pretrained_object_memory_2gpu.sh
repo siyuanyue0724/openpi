@@ -37,7 +37,7 @@ else
   }
 fi
 
-EXPECTED_REPO=${PICF_ADR225_REPO:-/mnt/picf-next/adr225/source-freezes/pretrained-object-memory-v1}
+EXPECTED_REPO=${PICF_ADR225_REPO:-/mnt/picf-next/adr225/source-freezes/pretrained-object-memory-v2}
 [[ -d "$EXPECTED_REPO" && ! -L "$EXPECTED_REPO" ]] || {
   echo "ADR-225 immutable source freeze is absent: $EXPECTED_REPO" >&2
   exit 1
@@ -54,7 +54,7 @@ EXPECTED_REPO=${PICF_ADR225_REPO:-/mnt/picf-next/adr225/source-freezes/pretraine
 
 export PICF_REPO=$EXPECTED_REPO
 export PICF_WORLD_SIZE=$WORLD_SIZE
-export PICF_LINGBOT_NATIVE_SOURCE=${PICF_LINGBOT_NATIVE_SOURCE:-/mnt/picf-next/source-checkouts/lingbot-vla-v2-adr207-native-muon}
+export PICF_LINGBOT_NATIVE_SOURCE=${PICF_LINGBOT_NATIVE_SOURCE:-/mnt/picf-next/source-checkouts/lingbot-vla-v2-adr224-wla-native-muon-vlm-class-offload-v1}
 
 # Reuse ADR-207's exact stream/evaluation split and dense evidence so the action
 # curves are paired. Only the declared host integration differs.
@@ -107,7 +107,10 @@ export PICF_ATTENTION_IMPLEMENTATION=flex_cached
 # hooks; torch.compile is fail-closed until a hook-preservation probe passes.
 export PICF_LINGBOT_COMPILE_MODE=disabled
 export PICF_TRAINABLE_SCOPE=full-host
-export PICF_FSDP2_PLACEMENT=selective-embedding-offload
+# Reuse ADR-224's exact eight-overlay FSDP2 execution path. It changes only
+# parameter/gradient/optimizer storage placement; model topology and objectives
+# remain byte-identical to the ADR-225 scientific arm.
+export PICF_FSDP2_PLACEMENT=${PICF_FSDP2_PLACEMENT:-selective-embedding-trainable-vision-offload}
 export PICF_FSDP2_BACKWARD_PREFETCH=${PICF_FSDP2_BACKWARD_PREFETCH:-disabled}
 export PICF_SEQUENTIAL_FACTUAL_GRADIENT_STORAGE=gpu
 export PICF_CUDA_ALLOCATOR=${PICF_CUDA_ALLOCATOR:-expandable-segments}
