@@ -13,6 +13,7 @@ from picf_next.lingbot_native.dense_modalities import (
 from picf_next.lingbot_native.graph import NativeRole, NativeTokenLayout
 from picf_next.lingbot_native.host import (
     LAYERWISE_TASK_INDEPENDENT_ENTITY_POSTERIOR,
+    NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
     NATIVE_VIDEOMT_QUERY_COUNT,
     NATIVE_VIDEOMT_QUERY_POSTERIOR,
     LingBotNativeContext,
@@ -21,17 +22,17 @@ from picf_next.lingbot_native.host import (
     ObjectReadActionIntervention,
     install_lingbot_native_graph,
 )
-from picf_next.lingbot_native.physical_relations import NativeObjectQueryPosteriorOutput
 from picf_next.lingbot_native.modalities import (
-    NativeObjectQuerySpatialRelation,
-    NativeObjectQuerySpatialSpec,
     NativeModalityBatch,
     NativeModalityOmissionPlan,
     NativeModalitySpec,
     NativeModalityStream,
+    NativeObjectQuerySpatialRelation,
+    NativeObjectQuerySpatialSpec,
     NativeRelationSurfaceSpec,
     sample_native_modality_omission,
 )
+from picf_next.lingbot_native.physical_relations import NativeObjectQueryPosteriorOutput
 from picf_next.lingbot_native.prediction import (
     NativePredictionRequest,
     PredictionEvidence,
@@ -92,6 +93,7 @@ __all__ = [
     "LAYERWISE_TASK_INDEPENDENT_ENTITY_POSTERIOR",
     "NATIVE_VIDEOMT_QUERY_COUNT",
     "NATIVE_VIDEOMT_QUERY_POSTERIOR",
+    "NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR",
     "ObjectReadActionIntervention",
     "NativeLaneConfig",
     "NativeLocalBPTTResult",

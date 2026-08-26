@@ -18,6 +18,7 @@ from picf_next.lingbot_native.future_latent_alignment import (
     future_latent_objective_contribution,
 )
 from picf_next.lingbot_native.host import (
+    NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
     NATIVE_VIDEOMT_QUERY_POSTERIOR,
     LingBotNativeContext,
     LingBotNativeGraph,
@@ -64,6 +65,10 @@ from picf_next.videomt_exact.runtime import (
 )
 
 WLA_HOST_EVIDENCE_ARMS = ("picf_full", "wla_lbot_masked")
+NATIVE_VIDEOMT_PAIRED_ARCHITECTURES = (
+    NATIVE_VIDEOMT_QUERY_POSTERIOR,
+    NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
+)
 
 
 def _validate_wla_host_evidence_arm(value: str) -> str:
@@ -119,6 +124,7 @@ class CompleteNativeVidEoMTLingBotStep:
     policy: NativePolicyForwardResult
     next_state: NativeVidEoMTPairedPosteriorState
     total: torch.Tensor
+    architecture_identity: str
 
     def __post_init__(self) -> None:
         if self.total.ndim != 0 or not self.total.is_floating_point():
@@ -129,7 +135,9 @@ class CompleteNativeVidEoMTLingBotStep:
             raise ValueError("joint total and official LingBot loss must share one device")
         if not isinstance(self.prior_trace, NativeLayerwisePriorTrace):
             raise TypeError("joint VidEoMT/LingBot prior trace uses an invalid schema")
-        if self.next_state.architecture_identity != NATIVE_VIDEOMT_QUERY_POSTERIOR:
+        if self.architecture_identity not in NATIVE_VIDEOMT_PAIRED_ARCHITECTURES:
+            raise ValueError("joint state declares an unsupported paired architecture")
+        if self.next_state.architecture_identity != self.architecture_identity:
             raise ValueError("joint state uses the wrong native-query architecture identity")
         if self.next_state.source_queries is not self.source.current_propagated_queries:
             raise ValueError("joint state did not commit the post-current source boundary")
@@ -380,7 +388,10 @@ def run_causal_warm_native_videomt_lingbot_evaluation(
     frame_indices = tuple(batch.routing.frame_indices[0] for batch in batches)
     if len(set(episode_keys)) != 1:
         raise ValueError("causal-warm history crosses an episode reset")
-    if any(right != left + 1 for left, right in zip(frame_indices, frame_indices[1:])):
+    if any(
+        right != left + 1
+        for left, right in zip(frame_indices, frame_indices[1:], strict=False)
+    ):
         raise ValueError("causal-warm history is not consecutive")
     for name in ("lang_tokens", "lang_masks"):
         if any(
@@ -459,7 +470,7 @@ def run_causal_warm_native_videomt_lingbot_evaluation(
         next_state = NativeVidEoMTPairedPosteriorState(
             layer_rows=current_host.layer_rows,
             source_queries=source_sequence.propagated_queries_by_frame[-1],
-            architecture_identity=NATIVE_VIDEOMT_QUERY_POSTERIOR,
+            architecture_identity=graph.config.architecture_identity,
         )
         return CausalWarmNativeVidEoMTLingBotEvaluation(
             source_sequence=source_sequence,
@@ -559,6 +570,7 @@ def run_complete_native_videomt_lingbot_step(
     future_latent_target: FutureLatentTargetBatch | None = None,
     future_latent_objective_scale: float = 1.0,
     wla_host_evidence_arm: str = "picf_full",
+    architecture_identity: str = NATIVE_VIDEOMT_QUERY_POSTERIOR,
 ) -> CompleteNativeVidEoMTLingBotStep:
     """Train both complete models while preserving the causal decision boundary.
 
@@ -573,8 +585,10 @@ def run_complete_native_videomt_lingbot_step(
         raise TypeError("native-query joint training requires the complete source objective")
     if host_dtype not in (torch.float16, torch.bfloat16, torch.float32):
         raise ValueError("native-query host dtype must be a supported floating dtype")
+    if architecture_identity not in NATIVE_VIDEOMT_PAIRED_ARCHITECTURES:
+        raise ValueError("native-query joint training received an unsupported architecture")
     if previous_state is not None and (
-        previous_state.architecture_identity != NATIVE_VIDEOMT_QUERY_POSTERIOR
+        previous_state.architecture_identity != architecture_identity
     ):
         raise ValueError("previous paired state belongs to another architecture")
     evidence_arm = _validate_wla_host_evidence_arm(wla_host_evidence_arm)
@@ -647,7 +661,7 @@ def run_complete_native_videomt_lingbot_step(
     next_state = NativeVidEoMTPairedPosteriorState(
         layer_rows=host_state.layer_rows,
         source_queries=source.current_propagated_queries,
-        architecture_identity=NATIVE_VIDEOMT_QUERY_POSTERIOR,
+        architecture_identity=architecture_identity,
     )
     host_total = policy_result.official_total_loss
     if policy_result.future_latent_alignment is not None:
@@ -666,4 +680,5 @@ def run_complete_native_videomt_lingbot_step(
         policy=policy_result,
         next_state=next_state,
         total=total,
+        architecture_identity=architecture_identity,
     )

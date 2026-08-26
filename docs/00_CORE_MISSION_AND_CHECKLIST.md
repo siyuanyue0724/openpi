@@ -3495,3 +3495,41 @@ model.
 Current claim: v21 established stable training and cold evaluation but produced
 no warm model evidence.  v22 repairs a finite evaluation-input contract; it
 does not change the PICF model or make the unproved action claim easier.
+
+## 15. ADR-225 Pretrained Native Object Memory
+
+The active post-ADR-224 repair authority is
+`docs/225_PRETRAINED_NATIVE_OBJECT_MEMORY_20260826.md`. The WLA hybrid remains
+rejected. The measured root defect is that complete VidEoMT masks were a
+sidecar while posterior content came only from a new query projection; LingBot
+never received mask-conditioned native visual semantics in the paired row.
+
+- [x] Isolate ADR-225 in an independent Git repository; leave ADR-221 intact.
+- [x] Freeze the non-simplification, explicit-adaptation and whole-curve gate.
+- [x] Authenticate UniPixel, Qwen3-VL and SWIM source revisions and critical
+      file hashes.
+- [x] Map the LingBot three-camera prefix, visual merger hook and cached action
+      ABI end to end.
+- [x] Publish the object-memory equations, information-flow argument,
+      context/overlap/no-object policy and claim boundary.
+- [x] Transplant the exact copied native merger MLP and one-shot native visual
+      feature capture into the isolated LingBot graph.
+- [x] Replace the sole random-query posterior content only in the new ADR-225
+      profile; preserve ADR-207 as the exact control.
+- [x] Pass local source-equality, multiview, gradient, leakage, overlap,
+      recurrence, optimizer-ownership and state-dict probes (`323/323` expanded
+      relevant tests).
+- [ ] Pass real released-weight two-rank FSDP update, separate-process DCP
+      restart and LingBot-relative runtime/memory probes.
+- [ ] Execute exact LingBot, ADR-207 and ADR-225 matched curves and causal
+      interventions.
+- [ ] Authorize 30k only after material whole-curve action and closed-loop
+      rollout advantages. No finite mechanics result can waive this gate.
+- [x] Make the ADR-225 launcher fail closed above 2000 steps unless the
+      post-Gate-D `PICF_ADR225_LONG_RUN_AUTHORIZED=1` authority is explicit;
+      the unattended default is a bounded 250-step run, not 30k.
+
+Current claim: the isolated local transplant is source-backed, mechanically
+closed and directly targets the measured semantic disconnect. Real sharded
+execution, action value, cross-modal object binding and rollout value remain
+unproved; no 30k run is authorized.

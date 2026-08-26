@@ -2,11 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 from torch import nn
 
 import picf_next.videomt_exact.lingbot_joint as joint_module
 from picf_next.lingbot_native.host import (
+    NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
     NATIVE_VIDEOMT_QUERY_POSTERIOR,
     LingBotNativeContext,
     LingBotNativeGraph,
@@ -46,7 +48,17 @@ from tests.videomt_exact.test_paired_training import (
 from tests.videomt_exact.test_runtime_contract import _HookCompatibleVidEoMT
 
 
-def test_complete_joint_step_preserves_paired_boundaries(monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "architecture_identity",
+    (
+        NATIVE_VIDEOMT_QUERY_POSTERIOR,
+        NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
+    ),
+)
+def test_complete_joint_step_preserves_paired_boundaries(
+    monkeypatch,
+    architecture_identity: str,
+) -> None:
     runtime = ExactVidEoMTRuntime(object(), _HookCompatibleVidEoMT().train())
     frames = torch.randn(1, 5, 3, 16, 16)
     source_result = run_complete_causal_videomt_training_transaction(
@@ -60,7 +72,7 @@ def test_complete_joint_step_preserves_paired_boundaries(monkeypatch) -> None:
     previous = NativeVidEoMTPairedPosteriorState(
         layer_rows=torch.randn(1, 3, 200, 8),
         source_queries=torch.randn(1, 200, 1024),
-        architecture_identity=NATIVE_VIDEOMT_QUERY_POSTERIOR,
+        architecture_identity=architecture_identity,
     )
     captured: dict[str, object] = {}
 
@@ -132,6 +144,7 @@ def test_complete_joint_step_preserves_paired_boundaries(monkeypatch) -> None:
         host_dtype=torch.float32,
         action_attention_callback=attention_callback,
         wsa_da3_teacher_targets=teacher_targets,
+        architecture_identity=architecture_identity,
     )
 
     assert captured["source_previous"] is previous.source_queries
@@ -142,6 +155,7 @@ def test_complete_joint_step_preserves_paired_boundaries(monkeypatch) -> None:
     assert captured["wsa_da3_teacher_targets"] is teacher_targets
     assert result.next_state.source_queries is source_result.current_propagated_queries
     assert result.next_state.layer_rows is result.policy.context.posterior_memory.layer_rows
+    assert result.next_state.architecture_identity == architecture_identity
     source_stream = next(
         stream
         for stream in result.host_batch.modalities.streams
@@ -173,6 +187,7 @@ def test_complete_joint_step_preserves_paired_boundaries(monkeypatch) -> None:
         previous_state_valid=torch.ones(1, dtype=torch.bool),
         host_dtype=torch.float32,
         wla_host_evidence_arm="wla_lbot_masked",
+        architecture_identity=architecture_identity,
     )
     assert captured["source_previous"] is previous.source_queries
     assert isinstance(captured["host_previous"], NativeLayerwisePosteriorState)
@@ -437,7 +452,9 @@ def test_causal_warm_joint_evaluation_replays_past_only_and_commits_current(
     assert len(result.history) == 4
     assert result.current.host_batch.routing.frame_indices == (7,)
     assert result.next_state.layer_rows is result.current.policy.context.posterior_memory.layer_rows
-    assert result.next_state.source_queries is result.source_sequence.propagated_queries_by_frame[-1]
+    assert result.next_state.source_queries is (
+        result.source_sequence.propagated_queries_by_frame[-1]
+    )
     assert runtime.propagated_queries is None
     assert not result.current.policy.official_action_loss.requires_grad
 

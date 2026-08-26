@@ -35,6 +35,7 @@ from tools.run_lingbot_vla2_task_independent_full import (
     ADR207_MODALITY_INTERVENTION_SCHEMA,
     ADR207_MODALITY_INTERVENTION_STEPS,
     ADR207_MODALITY_INTERVENTIONS,
+    ADR225_ARCHITECTURE_PROFILE,
     CAUSAL_ARM_STOP_STEP,
     CAUSAL_BRANCH_STEP,
     CHECKPOINT_EVERY,
@@ -95,6 +96,7 @@ from tools.run_lingbot_vla2_task_independent_full import (
     _posterior_adoption_route_active,
     _predictive_assets_required,
     _prepare_rank_metric_journal,
+    _pretrained_object_memory_step_report,
     _prune_resume_publications,
     _registered_action_evaluation_steps,
     _resolve_current_grid_cache_coverage,
@@ -739,6 +741,11 @@ def test_anchor_checks_are_registered_per_architecture_profile() -> None:
     contract_args.picf_architecture_profile = ADR178_ARCHITECTURE_PROFILE
     assert _execution_contract(contract_args)["anchor_evaluation_steps"] == []
 
+    args.picf_architecture_profile = ADR225_ARCHITECTURE_PROFILE
+    contract_args.picf_architecture_profile = ADR225_ARCHITECTURE_PROFILE
+    assert _anchor_evaluation_due(args=args, global_step=50)
+    assert _execution_contract(contract_args)["anchor_evaluation_steps"] == [50, 100, 200]
+
 
 def test_adr204_profile_keeps_implicit_anchor_contract_with_final_readout_only() -> None:
     args = argparse.Namespace(
@@ -835,6 +842,96 @@ def test_adr207_profile_is_one_complete_200_query_full_modal_contract() -> None:
     assert contract["native_query_modality_intervention_scope"] == (
         "fixed_source_queries_frozen_training_stream_wiring"
     )
+
+
+def test_adr225_profile_replaces_only_the_random_query_projection() -> None:
+    args = argparse.Namespace(
+        picf_architecture_profile=ADR225_ARCHITECTURE_PROFILE,
+        posterior_architecture="two_pass_v3",
+        dense_evidence_mode="calvin_full_v1",
+        dense_token_bridge="exact_tokens_v1",
+        videomt_stage_pq_mode="trainable-adapted-native-query-causal-c5",
+        videomt_idle_placement=VIDEOMT_IDLE_PLACEMENT_CUDA_RESIDENT,
+        trainable_scope=TRAINABLE_SCOPE_FULL_HOST,
+        capacity=200,
+        task_query_count=0,
+        relation_supervision_layers=(),
+        learning_rate=1e-4,
+        picf_learning_rate_multiplier=1.0,
+        modality_bridge_learning_rate_multiplier=1.0,
+        entity_weight=0.0,
+        predictive_weight=0.0,
+        local_bptt_probability=0.0,
+        overshoot_probability=0.0,
+        source_mask_probability=0.0,
+        lingbot_compile_mode="disabled",
+    )
+
+    _validate_picf_architecture_profile(args)
+    assert full_runner._adr225_pretrained_object_memory_active(args)
+    assert full_runner._objective_profile(args) == (
+        "adr225_pretrained_native_object_memory_joint_action"
+    )
+    assert full_runner._object_action_information_contract(args) == (
+        "videomt_mask_pooled_native_qwen3_object_memory_to_official_action"
+    )
+
+    contract_args = _causal_args("current_frame_branch")
+    contract_args.picf_architecture_profile = ADR225_ARCHITECTURE_PROFILE
+    contract_args.posterior_architecture = "two_pass_v3"
+    contract_args.capacity = 200
+    contract_args.videomt_stage_pq_mode = (
+        full_runner.VIDEOMT_NATIVE_TRAINABLE_ADAPTED_CAUSAL_C5
+    )
+    contract_args.videomt_adapted_checkpoint_sha256 = "a" * 64
+    contract = _execution_contract(contract_args)["videomt_stage_pq"]
+    assert contract["host_boundary"] == (
+        "all_200_source_masks_pool_same_index_pretrained_qwen3_visual_cells_"
+        "through_exact_copied_native_merger_mlp_as_shared_host_posterior_"
+        "rows_with_original_qwen3_prefix_retained_no_selection"
+    )
+    assert contract["posterior_query_integration"] == (
+        "same_index_pretrained_qwen3_object_memory_no_random_source_query_projection"
+    )
+    assert contract["object_memory_source_primitive"] == (
+        "unipixel_cache_native_merger_input_mask_mean_then_native_merger_mlp"
+    )
+    assert contract["object_memory_external_inference_model"] is None
+    assert contract["object_memory_required_ablation"] == (
+        "source_faithful_binary_mask_mean_vs_soft_posterior_mean"
+    )
+
+
+def test_adr225_step_report_fails_closed_and_summarizes_mask_support() -> None:
+    context = argparse.Namespace(
+        object_memory_support_mass=torch.tensor([[0.25, 0.0], [0.50, 0.75]]),
+        object_memory_query_valid=torch.tensor([[True, False], [True, True]]),
+        object_memory_capture_generation=7,
+    )
+
+    report = _pretrained_object_memory_step_report(
+        context,
+        capacity=2,
+        torch_module=torch,
+    )
+
+    assert report["schema"] == "picf-next.pretrained-object-memory-step/v1"
+    assert report["active"] is True
+    assert report["capture_generation"] == 7
+    assert report["query_capacity"] == 2
+    assert report["valid_query_count"] == 3
+    assert report["valid_query_count_by_batch"] == [1, 2]
+    assert report["mean_valid_support_mass"] == pytest.approx(0.5)
+    assert report["maximum_valid_support_mass"] == pytest.approx(0.75)
+    assert report["zero_support_valid_query_count"] == 0
+
+    context.object_memory_capture_generation = 0
+    with pytest.raises(ValueError, match="capture generation"):
+        _pretrained_object_memory_step_report(
+            context,
+            capacity=2,
+            torch_module=torch,
+        )
 
 
 def test_adr193_step250_gate_also_runs_the_matched_action_curve() -> None:
@@ -1006,6 +1103,54 @@ def test_adr207_launcher_freezes_the_complete_native_query_contract() -> None:
     assert 'LOAD_GLOBAL_STEP=${2:-0}' in launcher
     assert "PICF_PHASE=resume" in launcher
     assert "LOAD_GLOBAL_STEP % 2000 == 0" in launcher
+
+
+def test_adr225_launcher_changes_only_the_pretrained_object_memory_boundary() -> None:
+    launcher = Path("adr225/run_pretrained_object_memory_2gpu.sh").read_text(
+        encoding="utf-8"
+    )
+    freeze = Path("adr225/freeze_source.sh").read_text(encoding="utf-8")
+
+    required = (
+        "source-freezes/pretrained-object-memory-v1",
+        "source-freeze.receipt.json",
+        "status --porcelain=v1 --untracked-files=all",
+        "PICF_ARCHITECTURE_PROFILE=adr225_pretrained_native_object_memory_v1",
+        "PICF_VIDEOMT_STAGE_PQ_MODE=trainable-adapted-native-query-causal-c5",
+        "PICF_VIDEOMT_FSDP2_PLACEMENT:-cpu-offload",
+        "PICF_TRAINABLE_SCOPE=full-host",
+        "PICF_DENSE_TOKEN_BRIDGE=exact_tokens_v1",
+        "PICF_CAPACITY=200",
+        "PICF_RELATION_SUPERVISION_LAYERS=",
+        "PICF_PICF_LEARNING_RATE_MULTIPLIER=1.0",
+        "PICF_MODALITY_BRIDGE_LEARNING_RATE_MULTIPLIER=1.0",
+        "PICF_ENTITY_WEIGHT=0.0",
+        "PICF_PREDICTIVE_WEIGHT=0.0",
+        "PICF_SOURCE_MASK_PROBABILITY=0.0",
+        "PICF_STOP_AFTER_STEP:-250",
+        "PICF_ADR225_LONG_RUN_AUTHORIZED:-0",
+        "STOP_AFTER_STEP > 2000",
+        "explicit Gate-D authorization",
+        "PICF_ATTENTION_IMPLEMENTATION=flex_cached",
+        "PICF_LINGBOT_COMPILE_MODE=disabled",
+        "PICF_USE_DENSE_SUPPLEMENT=0",
+        "PICF_USE_CURRENT_GRID_CACHE=0",
+        "/mnt/picf-next/adr207/contracts/native-query-posterior-${WORLD_SIZE}gpu-30k-v1",
+        "/mnt/picf-next/adr207/caches/native-query-posterior-${WORLD_SIZE}gpu-30k-v1",
+        "videomt-calvin-adapted-step250-v1.pt",
+        "4437d8632c4e3877adcf5cfec5bf6e673445ad9d3d2de3a3afdd924651b5bd5d",
+        "videomt-torch280-functorch-v1",
+        "857d364103403df8aafc97674e97e518acf781bc8fc080840ca11c99f25aacd0",
+        'assert torch.__version__ == functorch.__version__ == "2.8.0+cu128"',
+        "adr178/run_direct_action_posterior_full_modal.sh",
+    )
+    for value in required:
+        assert value in launcher
+    assert 'LOAD_GLOBAL_STEP=${2:-0}' in launcher
+    assert "PICF_PHASE=resume" in launcher
+    assert "LOAD_GLOBAL_STEP % 2000 == 0" in launcher
+    assert "status --porcelain=v1 --untracked-files=all" in freeze
+    assert "source must be clean before an immutable freeze" in freeze
 
 
 def test_adr207_restores_released_whole_model_compile_after_fsdp() -> None:

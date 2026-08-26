@@ -61,6 +61,10 @@ from picf_next.lingbot_native.prediction import (
     PredictionSource,
 )
 from picf_next.lingbot_native.predictive_objective import NativePredictiveReadout
+from picf_next.lingbot_native.pretrained_object_memory import (
+    NativeObjectMemoryOutput,
+    PretrainedQwen3ObjectMemory,
+)
 from picf_next.lingbot_native.relations import (
     HOST_NATIVE_MATCH_INTERFACE,
     RelationOutput,
@@ -92,6 +96,9 @@ LAYERWISE_TASK_INDEPENDENT_ENTITY_POSTERIOR = "task_independent_entity_posterior
 UNIFIED_LAYERWISE_PREDICT_CORRECT = "task_independent_predict_correct_v3"
 LINGBOT_TASK_QUERY_OBJECT_VALUE_READ = "lingbot_task_query_object_value_read_v1"
 NATIVE_VIDEOMT_QUERY_POSTERIOR = "native_videomt_query_posterior_v1"
+NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR = (
+    "native_videomt_pretrained_object_memory_posterior_v1"
+)
 NATIVE_VIDEOMT_QUERY_COUNT = 200
 EXACT_NATIVE_MODALITY_BRIDGE = "exact_tokens_v1"
 LINGBOT_TASK_TOKEN_RESAMPLER_BRIDGE = "lingbot_task_token_resampler_v1"
@@ -106,6 +113,7 @@ NATIVE_GRAPH_ARCHITECTURES = (
     UNIFIED_LAYERWISE_PREDICT_CORRECT,
     LINGBOT_TASK_QUERY_OBJECT_VALUE_READ,
     NATIVE_VIDEOMT_QUERY_POSTERIOR,
+    NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
 )
 
 
@@ -238,7 +246,10 @@ class LingBotNativeGraphConfig:
             modality_specs=self.modality_specs,
             resampled_modality_names=self.resampled_modality_names,
         )
-        if self.architecture_identity == NATIVE_VIDEOMT_QUERY_POSTERIOR:
+        if self.architecture_identity in {
+            NATIVE_VIDEOMT_QUERY_POSTERIOR,
+            NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
+        }:
             if self.capacity != NATIVE_VIDEOMT_QUERY_COUNT:
                 raise ValueError("native VidEoMT posterior requires all 200 source queries")
             if self.modality_bridge_identity != EXACT_NATIVE_MODALITY_BRIDGE:
@@ -398,6 +409,9 @@ class LingBotNativeContext:
     expanded_action_cache_visible: torch.Tensor | None = field(init=False, default=None)
     expanded_posterior_indices: torch.Tensor | None = field(init=False, default=None)
     expanded_posterior_valid: torch.Tensor | None = field(init=False, default=None)
+    object_memory_support_mass: torch.Tensor | None = field(init=False, default=None)
+    object_memory_query_valid: torch.Tensor | None = field(init=False, default=None)
+    object_memory_capture_generation: int | None = field(init=False, default=None)
     task_address_attention_layout: TaskAddressAttentionLayout | None = field(
         init=False,
         default=None,
@@ -1408,7 +1422,10 @@ class LingBotNativeGraph(nn.Module):
     ) -> None:
         super().__init__()
         self.config = config
-        if config.architecture_identity == NATIVE_VIDEOMT_QUERY_POSTERIOR and (
+        if config.architecture_identity in {
+            NATIVE_VIDEOMT_QUERY_POSTERIOR,
+            NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
+        } and (
             source_mask_head is not None or source_mask_refiner is not None
         ):
             raise ValueError(
@@ -1497,10 +1514,17 @@ class LingBotNativeGraph(nn.Module):
                 for name, target_width in config.predictive_target_widths
             }
         )
+        excluded_projection_modalities = (
+            {config.object_query_spatial_specs[0].query_modality}
+            if config.architecture_identity
+            == NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR
+            else set()
+        )
         self.modality_projections = nn.ModuleDict(
             {
                 spec.name: nn.Linear(spec.input_width, config.host_width, bias=False, **factory)
                 for spec in config.modality_specs
+                if spec.name not in excluded_projection_modalities
             }
         )
         self.modality_metadata_projections = nn.ModuleDict(
@@ -1521,6 +1545,12 @@ class LingBotNativeGraph(nn.Module):
             )
         else:
             self.register_parameter("modality_embeddings", None)
+        self.pretrained_object_memory = (
+            PretrainedQwen3ObjectMemory(capacity=config.capacity)
+            if config.architecture_identity
+            == NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR
+            else None
+        )
         if config.modality_bridge_identity == EXACT_NATIVE_MODALITY_BRIDGE:
             if modality_bridge_projector is not None or modality_bridge_queries is not None:
                 raise ValueError("exact-token graph received an undeclared modality bridge")
@@ -1569,6 +1599,7 @@ class LingBotNativeGraph(nn.Module):
             UNIFIED_LAYERWISE_PREDICT_CORRECT,
             LINGBOT_TASK_QUERY_OBJECT_VALUE_READ,
             NATIVE_VIDEOMT_QUERY_POSTERIOR,
+            NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
         }
 
     @property
@@ -1578,6 +1609,7 @@ class LingBotNativeGraph(nn.Module):
             UNIFIED_LAYERWISE_PREDICT_CORRECT,
             LINGBOT_TASK_QUERY_OBJECT_VALUE_READ,
             NATIVE_VIDEOMT_QUERY_POSTERIOR,
+            NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
         }
 
     @property
@@ -1586,6 +1618,7 @@ class LingBotNativeGraph(nn.Module):
             UNIFIED_LAYERWISE_PREDICT_CORRECT,
             LINGBOT_TASK_QUERY_OBJECT_VALUE_READ,
             NATIVE_VIDEOMT_QUERY_POSTERIOR,
+            NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
         }
 
     @property
@@ -1594,7 +1627,17 @@ class LingBotNativeGraph(nn.Module):
 
     @property
     def native_videomt_query_posterior(self) -> bool:
-        return self.config.architecture_identity == NATIVE_VIDEOMT_QUERY_POSTERIOR
+        return self.config.architecture_identity in {
+            NATIVE_VIDEOMT_QUERY_POSTERIOR,
+            NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
+        }
+
+    @property
+    def pretrained_object_memory_posterior(self) -> bool:
+        return (
+            self.config.architecture_identity
+            == NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR
+        )
 
     @property
     def object_parameter(self) -> nn.Parameter:
@@ -2111,7 +2154,23 @@ class LingBotNativeGraph(nn.Module):
         ).expand(stream.batch_size, -1)
         if not torch.equal(stream.canonical_token_ids, expected_ids):
             raise ValueError("native posterior source-query indices are not canonical")
-        seed = self.modality_projections[source_name](modality_bridge_input(stream, spec))
+        if self.pretrained_object_memory_posterior:
+            bridge = self.pretrained_object_memory
+            relations = context.modalities.object_query_spatial_relations
+            if bridge is None or len(relations) != 1:
+                raise RuntimeError("pretrained object memory is absent or ambiguously bound")
+            memory: NativeObjectMemoryOutput = bridge.consume(
+                relations[0],
+                batch_size=prefix.shape[0],
+                device=prefix.device,
+                dtype=prefix.dtype,
+            )
+            seed = memory.tokens
+            context.object_memory_support_mass = memory.support_mass
+            context.object_memory_query_valid = memory.query_valid
+            context.object_memory_capture_generation = memory.capture_generation
+        else:
+            seed = self.modality_projections[source_name](modality_bridge_input(stream, spec))
         seed = seed + self.modality_embeddings[index]
         seed = seed * stream.valid.unsqueeze(-1).to(seed.dtype)
         expected = (prefix.shape[0], self.config.capacity, self.config.host_width)
@@ -3727,6 +3786,20 @@ def install_lingbot_native_graph(policy: nn.Module, graph: LingBotNativeGraph) -
     for field_name in ("host_width", "executed_action_dim", "num_layers"):
         if getattr(expected, field_name) != getattr(graph.config, field_name):
             raise ValueError(f"LingBot host differs from graph config field {field_name}")
+    if graph.pretrained_object_memory_posterior:
+        bridge = graph.pretrained_object_memory
+        qwen = getattr(host, "qwenvl", None)
+        visual = getattr(qwen, "visual", None)
+        reference = graph._parameter_reference
+        if bridge is None or visual is None:
+            raise TypeError("ADR-225 requires the exact LingBot Qwen3 visual host")
+        bridge.install_from_qwen3_visual(
+            visual,
+            device=reference.device,
+            dtype=reference.dtype,
+        )
+        if bridge.host_width != graph.config.host_width:
+            raise ValueError("copied Qwen3 object memory differs from LingBot host width")
     setter(graph)
 
 

@@ -1,0 +1,45 @@
+{
+  "schema": "picf-next.adr225-pretrained-object-memory-sources.v1",
+  "decision_date": "2026-08-26",
+  "sources": {
+    "lingbot_vla2": {
+      "repository": "https://github.com/Robbyant/lingbot-vla-v2.git",
+      "commit": "2838c1862bbec1ea47942fb61512130f635eb595",
+      "role": "immutable semantic and action host"
+    },
+    "qwen3_vl_transformers": {
+      "repository": "https://github.com/huggingface/transformers.git",
+      "commit": "47b0e478f324b54f177ea7998a0791870fdd0324",
+      "files": {
+        "src/transformers/models/qwen3_vl/modeling_qwen3_vl.py": "685b10cbc48556343df4e159199c5884d02db9ad227640f0f4fbe75ddf0b2a99"
+      },
+      "role": "exact native Qwen3-VL vision patch-merger topology"
+    },
+    "unipixel": {
+      "repository": "https://github.com/yezhengli-Mr9/UniPixel.git",
+      "commit": "bb15fce5e4197484157b0bcee12cf44ea18e2deb",
+      "files": {
+        "unipixel/model/qwen2_5_vl.py": "d78d57e7793379d018f4ef235f80926ce2f9ec7e596d23468d8a96836572c2d1",
+        "unipixel/train/train.py": "4058e4ead42d2c99c30bc6876a9cc7b23a7b09f36cdaae60b4c62ec951f1f6ce",
+        "scripts/launch_7b.sh": "c7905874d4e1810d09ecf72e19e0864317f3956cb06b3b9d1609f447359dd70e"
+      },
+      "copied_primitive": "cache native merger-MLP input, mean-pool pixels selected by an object mask, and apply an exact copied native merger MLP to form language-width memory tokens",
+      "excluded_components": [
+        "SAM2 output decoder",
+        "reference prompt encoder",
+        "private segmentation head",
+        "UniPixel task and dataset stack"
+      ]
+    },
+    "swim": {
+      "repository": "https://github.com/ZikangZhou/Spatial-VLM.git",
+      "commit": "1b97d22fbb84097a2117feb1f1f10353dfe252c2",
+      "files": {
+        "transformers/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py": "e05377d29fc663f5f3208a0c9a7530140bb9f3339d204801a0e1df0138637a20",
+        "Q-R1/src/open-r1-multimodal/src/open_r1/sft_videorefer_qwen25vl.py": "7b7f21aaef1d26fdda2dc4f77d4e8420b6a78406794bc2bce42a655623474cb5",
+        "README.md": "a7b7b11fe9b596308f2ee7f66451684cfbb1b552809bd3d5f9752c59ec3e2209"
+      },
+      "role": "second-stage large-host language-to-mask attention supervision; not part of the first ADR-225 causal arm"
+    }
+  }
+}

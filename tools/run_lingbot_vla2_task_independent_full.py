@@ -76,6 +76,7 @@ from picf_next.lingbot_native.host import (
     EXACT_NATIVE_MODALITY_BRIDGE,
     LINGBOT_TASK_TOKEN_RESAMPLER_BRIDGE,
     NATIVE_MODALITY_BRIDGES,
+    NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR,
     NATIVE_VIDEOMT_QUERY_POSTERIOR,
 )
 from picf_next.lingbot_native.modalities import (
@@ -386,6 +387,7 @@ PICF_ARCHITECTURE_PROFILES = (
     "adr209_native_videomt_flare_v1",
     "adr221_native_videomt_wsa_full_modal_v1",
     "adr222_native_videomt_world_token_wsa_v1",
+    "adr225_pretrained_native_object_memory_v1",
 )
 ADR177_ARCHITECTURE_PROFILE = PICF_ARCHITECTURE_PROFILES[1]
 ADR178_ARCHITECTURE_PROFILE = PICF_ARCHITECTURE_PROFILES[2]
@@ -397,6 +399,7 @@ ADR209_CONTROL_ARCHITECTURE_PROFILE = PICF_ARCHITECTURE_PROFILES[7]
 ADR209_FLARE_ARCHITECTURE_PROFILE = PICF_ARCHITECTURE_PROFILES[8]
 ADR221_ARCHITECTURE_PROFILE = PICF_ARCHITECTURE_PROFILES[9]
 ADR222_ARCHITECTURE_PROFILE = PICF_ARCHITECTURE_PROFILES[10]
+ADR225_ARCHITECTURE_PROFILE = PICF_ARCHITECTURE_PROFILES[11]
 ADR177_TASK_QUERY_COUNT = 4
 ADR177_RELATION_SUPERVISION_LAYERS = (8, 17, 26)
 ADR177_PICF_LEARNING_RATE_MULTIPLIER = 2.0
@@ -567,6 +570,10 @@ _AUXILIARY_CACHE_ARGUMENTS = (
     _PREDICTIVE_CACHE_ARGUMENTS + _CURRENT_CACHE_ARGUMENTS + _CURRENT_CACHE_OPTIONAL_ARGUMENTS
 )
 IMPLEMENTATION_FILES = (
+    "adr225/freeze_source.sh",
+    "adr225/run_pretrained_object_memory_2gpu.sh",
+    "docs/225_PRETRAINED_NATIVE_OBJECT_MEMORY_20260826.md",
+    "references/adr225_pretrained_object_memory_sources.json",
     "adr209/build_dense_cache_4gpu_contract.sh",
     "adr209/build_flare_cache_4gpu_contract.sh",
     "adr209/launch_gate_cache_builds_4gpu.sh",
@@ -674,6 +681,7 @@ IMPLEMENTATION_FILES = (
     "src/picf_next/lingbot_native/official_config.py",
     "src/picf_next/lingbot_native/physical_relations.py",
     "src/picf_next/lingbot_native/physical_sequence.py",
+    "src/picf_next/lingbot_native/pretrained_object_memory.py",
     "src/picf_next/lingbot_native/prediction.py",
     "src/picf_next/lingbot_native/predictive_cache.py",
     "src/picf_next/lingbot_native/predictive_objective.py",
@@ -976,6 +984,8 @@ def _objective_profile(args: argparse.Namespace) -> str:
     architecture = getattr(args, "posterior_architecture", "legacy_v1")
     if architecture == "two_pass_v3":
         if _adr207_native_videomt_query_posterior_active(args):
+            if _adr225_pretrained_object_memory_active(args):
+                return "adr225_pretrained_native_object_memory_joint_action"
             if _adr209_flare_active(args):
                 return "adr209_complete_source_native_query_flare_joint_action"
             if _adr209_native_videomt_active(args):
@@ -996,6 +1006,8 @@ def _objective_profile(args: argparse.Namespace) -> str:
 
 
 def _object_action_information_contract(args: argparse.Namespace) -> str:
+    if _adr225_pretrained_object_memory_active(args):
+        return "videomt_mask_pooled_native_qwen3_object_memory_to_official_action"
     if _adr207_native_videomt_query_posterior_active(args):
         return "native_source_query_i_as_shared_host_posterior_row_i_to_official_action"
     if _adr177_task_addressed_full_modal_active(args):
@@ -1298,6 +1310,71 @@ def _adr207_native_videomt_query_posterior_active(args: argparse.Namespace) -> b
         ADR209_FLARE_ARCHITECTURE_PROFILE,
         ADR221_ARCHITECTURE_PROFILE,
         ADR222_ARCHITECTURE_PROFILE,
+        ADR225_ARCHITECTURE_PROFILE,
+    }
+
+
+def _adr225_pretrained_object_memory_active(args: argparse.Namespace) -> bool:
+    profile = getattr(args, "picf_architecture_profile", "legacy")
+    if profile not in PICF_ARCHITECTURE_PROFILES:
+        raise ValueError("unknown PICF architecture profile")
+    return profile == ADR225_ARCHITECTURE_PROFILE
+
+
+def _pretrained_object_memory_step_report(
+    context: Any,
+    *,
+    capacity: int,
+    torch_module: Any,
+) -> dict[str, Any]:
+    """Fail closed and summarize the action-visible ADR-225 memory path."""
+
+    support = getattr(context, "object_memory_support_mass", None)
+    valid = getattr(context, "object_memory_query_valid", None)
+    generation = getattr(context, "object_memory_capture_generation", None)
+    if not isinstance(support, torch_module.Tensor) or not isinstance(
+        valid,
+        torch_module.Tensor,
+    ):
+        raise RuntimeError("ADR-225 action context omitted object-memory diagnostics")
+    if (
+        support.ndim != 2
+        or support.shape != valid.shape
+        or support.shape[1] != capacity
+        or not support.is_floating_point()
+        or valid.dtype != torch_module.bool
+        or support.device != valid.device
+    ):
+        raise ValueError("ADR-225 object-memory diagnostic tensors changed ABI")
+    if (
+        not torch_module.isfinite(support).all()
+        or (support < 0).any()
+        or (support > 1).any()
+    ):
+        raise ValueError("ADR-225 object-memory support mass is not a probability")
+    if isinstance(generation, bool) or not isinstance(generation, int) or generation <= 0:
+        raise ValueError("ADR-225 object-memory capture generation is invalid")
+
+    valid_support = support.masked_select(valid).detach().float()
+    valid_count = int(valid.sum().item())
+    return {
+        "schema": "picf-next.pretrained-object-memory-step/v1",
+        "active": True,
+        "capture_generation": generation,
+        "query_capacity": capacity,
+        "valid_query_count": valid_count,
+        "valid_query_count_by_batch": [
+            int(value) for value in valid.sum(dim=1).detach().cpu().tolist()
+        ],
+        "mean_valid_support_mass": (
+            0.0 if valid_count == 0 else float(valid_support.mean().item())
+        ),
+        "maximum_valid_support_mass": (
+            0.0 if valid_count == 0 else float(valid_support.max().item())
+        ),
+        "zero_support_valid_query_count": int(
+            ((support <= 0) & valid).sum().detach().cpu().item()
+        ),
     }
 
 
@@ -1441,6 +1518,7 @@ def _validate_picf_architecture_profile(args: argparse.Namespace) -> None:
     adr207_active = _adr207_native_videomt_query_posterior_active(args)
     if adr207_active:
         wla_complete = _wla_complete_active(args)
+        adr225_active = _adr225_pretrained_object_memory_active(args)
         expected = {
             "posterior_architecture": "two_pass_v3",
             "dense_evidence_mode": "calvin_full_v1",
@@ -1461,7 +1539,7 @@ def _validate_picf_architecture_profile(args: argparse.Namespace) -> None:
             "source_mask_probability": 0.0,
             "lingbot_compile_mode": (
                 LINGBOT_COMPILE_DISABLED
-                if wla_complete
+                if wla_complete or adr225_active
                 else LINGBOT_COMPILE_UPSTREAM_DEFAULT
             ),
         }
@@ -2874,10 +2952,16 @@ def _execution_contract(args: argparse.Namespace) -> dict[str, object]:
             ),
             "host_boundary": (
                 (
-                    "all_200_native_source_queries_and_source_masks_same_index_as_"
+                    "all_200_source_masks_pool_same_index_pretrained_qwen3_visual_cells_"
+                    "through_exact_copied_native_merger_mlp_as_shared_host_posterior_"
+                    "rows_with_original_qwen3_prefix_retained_no_selection"
+                    if _adr225_pretrained_object_memory_active(args)
+                    else "all_200_native_source_queries_and_source_masks_same_index_as_"
                     "shared_host_posterior_rows_no_assignment_or_reverse_projection"
-                    if _videomt_native_trainable_active(args)
-                    else (
+                )
+                if _videomt_native_trainable_active(args)
+                else (
+                    (
                         "latest_source_query_bank_with_first_16_rows_replaced_by_released_"
                         "query_propagation_plus_prefixes_patches_rope_and_complete_frozen_"
                         "blocks20_23_prediction_stack"
@@ -2940,10 +3024,17 @@ def _execution_contract(args: argparse.Namespace) -> dict[str, object]:
                     "mask_grid": [120, 120],
                     "pixel_row_composition": (
                         (
-                            "source_mask(query_i,pixel);posterior_row_i=same_native_query_"
+                            "bilinear_resize(source_mask_logit_i,to_qwen3_merged_grid);"
+                            "weight_i=sigmoid(logit_i)*pixel_valid;cell_i=normalized_weighted_"
+                            "mean(exact_native_post_norm_pre_mlp_qwen3_cells);posterior_row_i="
+                            "exact_copied_qwen3_merger_mlp(cell_i)"
+                            if _adr225_pretrained_object_memory_active(args)
+                            else "source_mask(query_i,pixel);posterior_row_i=same_native_query_"
                             "address;no_host_to_source_mask_decode"
-                            if _videomt_native_trainable_active(args)
-                            else (
+                        )
+                        if _videomt_native_trainable_active(args)
+                        else (
+                            (
                                 "conditioned_row=source_query_prior+source_query_updater("
                                 "tied_projected_posterior_row);replace_first_16_source_queries;"
                                 "run_frozen_released_blocks20_23_with_rope;row_mask_logit=dot("
@@ -2956,12 +3047,7 @@ def _execution_contract(args: argparse.Namespace) -> dict[str, object]:
                                 "released_mask_head(refined_row),released_upscale(refined_patches));"
                                 "ownership=softmax(rows_plus_context)"
                             )
-                        )
-                        if _videomt_stage_pqrf_active(args)
-                        else (
-                            "source_mask(query_i,pixel);posterior_row_i=same_native_query_"
-                            "address;no_host_to_source_mask_decode"
-                            if _videomt_native_trainable_active(args)
+                            if _videomt_stage_pqrf_active(args)
                             else (
                                 "row_mask_logit=dot(released_mask_head("
                                 "transpose(semantic_query_projection)(full_host_posterior_row)),"
@@ -2979,13 +3065,44 @@ def _execution_contract(args: argparse.Namespace) -> dict[str, object]:
                     ),
                     "local_object_selector_decoder_or_lifecycle_head": False,
                     "posterior_query_integration": (
-                        "same_index_source_to_host_width_projection"
-                        if _videomt_native_trainable_active(args)
+                        "same_index_pretrained_qwen3_object_memory_no_random_source_query_"
+                        "projection"
+                        if _adr225_pretrained_object_memory_active(args)
                         else (
-                            "replace_with_released_propagation"
-                            if _adr205_released_query_propagation_active(args)
-                            else "prepend_projected_rows"
+                            "same_index_source_to_host_width_projection"
+                            if _videomt_native_trainable_active(args)
+                            else (
+                                "replace_with_released_propagation"
+                                if _adr205_released_query_propagation_active(args)
+                                else "prepend_projected_rows"
+                            )
                         )
+                    ),
+                    **(
+                        {
+                            "object_memory_source_primitive": (
+                                "unipixel_cache_native_merger_input_mask_mean_then_native_"
+                                "merger_mlp"
+                            ),
+                            "object_memory_source_exact_parts": [
+                                "native_qwen3_post_norm_pre_mlp_visual_cells",
+                                "deep_copied_linear_fc1_gelu_linear_fc2",
+                                "mask_conditioned_cell_mean",
+                                "language_width_memory_token_in_shared_vlm",
+                            ],
+                            "object_memory_picf_adaptations": [
+                                "videomt_posterior_mask_logits",
+                                "bilinear_logit_resize_before_sigmoid",
+                                "soft_normalized_posterior_mean",
+                                "all_200_same_index_queries_without_winner_selection",
+                            ],
+                            "object_memory_required_ablation": (
+                                "source_faithful_binary_mask_mean_vs_soft_posterior_mean"
+                            ),
+                            "object_memory_external_inference_model": None,
+                        }
+                        if _adr225_pretrained_object_memory_active(args)
+                        else {}
                     ),
                 }
                 if _videomt_stage_pqm_active(args)
@@ -6032,6 +6149,7 @@ def main() -> None:
         adr177_task_addressed = _adr177_task_addressed_full_modal_active(args)
         adr178_direct_action_posterior = _adr178_direct_action_posterior_active(args)
         adr207_native_query = _adr207_native_videomt_query_posterior_active(args)
+        adr225_object_memory = _adr225_pretrained_object_memory_active(args)
         adr221_wsa_edge_diagnostic = _adr221_wsa_edge_diagnostic_active(args)
         graph_config = LingBotNativeGraphConfig.from_policy(
             policy,
@@ -6063,18 +6181,22 @@ def main() -> None:
             object_query_spatial_specs=object_query_spatial_specs,
             relation_supervision_layers=args.relation_supervision_layers,
             architecture_identity=(
-                NATIVE_VIDEOMT_QUERY_POSTERIOR
-                if adr207_native_query
+                NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR
+                if adr225_object_memory
                 else (
-                    LINGBOT_TASK_QUERY_OBJECT_VALUE_READ
-                    if adr177_task_addressed
+                    NATIVE_VIDEOMT_QUERY_POSTERIOR
+                    if adr207_native_query
                     else (
-                        UNIFIED_LAYERWISE_PREDICT_CORRECT
-                        if _two_pass_filter_active(args)
+                        LINGBOT_TASK_QUERY_OBJECT_VALUE_READ
+                        if adr177_task_addressed
                         else (
-                            LAYERWISE_TASK_INDEPENDENT_ENTITY_POSTERIOR
-                            if args.posterior_architecture == "layerwise_v2"
-                            else TASK_INDEPENDENT_ENTITY_POSTERIOR
+                            UNIFIED_LAYERWISE_PREDICT_CORRECT
+                            if _two_pass_filter_active(args)
+                            else (
+                                LAYERWISE_TASK_INDEPENDENT_ENTITY_POSTERIOR
+                                if args.posterior_architecture == "layerwise_v2"
+                                else TASK_INDEPENDENT_ENTITY_POSTERIOR
+                            )
                         )
                     )
                 )
@@ -6121,6 +6243,18 @@ def main() -> None:
             source_mask_refiner,
         )
         install_lingbot_native_graph(policy, graph)
+        object_memory_installation: dict[str, Any] = {
+            "schema": "picf-next.pretrained-qwen3-object-memory-installation.v1",
+            "active": False,
+        }
+        if adr225_object_memory:
+            bridge = graph.pretrained_object_memory
+            if bridge is None:
+                raise RuntimeError("ADR-225 graph omitted its pretrained object memory")
+            object_memory_installation = {
+                "active": True,
+                **bridge.installation_receipt(),
+            }
         wla_installation: dict[str, Any] = {
             "schema": "picf-next.adr224-lingbot-wla-installation.v1",
             "active": False,
@@ -6206,6 +6340,7 @@ def main() -> None:
                 "adr221_wsa_da3_assets": adr221_asset_receipt,
                 "adr221_wsa_installation": wsa_installation,
                 "adr224_wla_installation": wla_installation,
+                "adr225_object_memory_installation": object_memory_installation,
             }
         )
         selective_class_offload_active = args.fsdp2_placement in {
@@ -6583,20 +6718,35 @@ def main() -> None:
                     else None
                 ),
                 "host_injected_output": (
-                    VIDEOMT_STAGE_PQRF_HOST_OUTPUT
-                    if _videomt_stage_pqrf_active(args)
+                    "qwen3_native_merger_mask_pooled_object_memory.latest_all_200"
+                    if adr225_object_memory
                     else (
-                        VIDEOMT_STAGE_PQMR_HOST_OUTPUT
-                        if _videomt_stage_pqmr_active(args)
+                        VIDEOMT_STAGE_PQRF_HOST_OUTPUT
+                        if _videomt_stage_pqrf_active(args)
                         else (
-                            VIDEOMT_STAGE_PQM_HOST_OUTPUT
-                            if _videomt_stage_pqm_active(args)
-                            else "query_embeddings.latest_all_200"
+                            VIDEOMT_STAGE_PQMR_HOST_OUTPUT
+                            if _videomt_stage_pqmr_active(args)
+                            else (
+                                VIDEOMT_STAGE_PQM_HOST_OUTPUT
+                                if _videomt_stage_pqm_active(args)
+                                else "query_embeddings.latest_all_200"
+                            )
                         )
                     )
                 ),
                 "host_dtype": "torch.bfloat16",
-                "host_selection_pooling_resampling_or_second_norm": False,
+                "host_selection_pooling_resampling_or_second_norm": (
+                    adr225_object_memory
+                ),
+                "host_selection": False,
+                "host_pooling": (
+                    "unipixel_native_merger_input_mask_mean"
+                    if adr225_object_memory
+                    else None
+                ),
+                "host_resampling": False,
+                "host_second_norm": False,
+                "pretrained_object_memory": object_memory_installation,
                 "execution_device": str(device),
                 "initial_device": str(videomt_initial_device),
                 "idle_placement": args.videomt_idle_placement,
@@ -6644,7 +6794,7 @@ def main() -> None:
             episode_address_codebook_sha256=addressed_codebook_sha256,
             paired_source_width=(1024 if adr207_native_query else None),
             paired_architecture_identity=(
-                NATIVE_VIDEOMT_QUERY_POSTERIOR if adr207_native_query else None
+                graph_config.architecture_identity if adr207_native_query else None
             ),
             paired_source_dtype=(torch.bfloat16 if adr207_native_query else torch.float32),
             device=str(device),
@@ -10138,6 +10288,7 @@ def main() -> None:
                         else []
                     ),
                 },
+                "pretrained_object_memory": object_memory_installation,
                 "auxiliary_caches_enabled": {
                     "future": _predictive_assets_required(args),
                     "current_filter_target": _current_correction_assets_required(args),
@@ -10717,6 +10868,7 @@ def main() -> None:
                             ),
                             wsa_da3_teacher_targets=wsa_da3_teacher_targets,
                             wla_host_evidence_arm=args.wla_host_evidence_arm,
+                            architecture_identity=graph.config.architecture_identity,
                         )
                         videomt_transaction = native_joint_result.source
                         primary_batch = native_joint_result.host_batch
@@ -11358,6 +11510,15 @@ def main() -> None:
                 if result is None:
                     raise RuntimeError("legacy optimizer completed without an objective result")
                 primary_policy = result.primary
+            object_memory_report = (
+                _pretrained_object_memory_step_report(
+                    primary_policy.context,
+                    capacity=args.capacity,
+                    torch_module=torch,
+                )
+                if adr225_object_memory
+                else None
+            )
             if dcp_acceptance and global_step == 2:
                 if not dcp_step_action_outputs:
                     raise RuntimeError("DCP continuation captured no released action output")
@@ -11642,6 +11803,7 @@ def main() -> None:
                 ),
                 "direct_action_posterior": direct_action_posterior_summary,
                 "direct_action_posterior_target_audit": list(direct_action_posterior_target_audit),
+                "pretrained_object_memory": object_memory_report,
                 "videomt_source_objective": report_videomt_source_objective,
                 "future_latent_alignment": future_alignment_report,
                 "wla_action_world": wla_report,
