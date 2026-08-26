@@ -61,6 +61,7 @@ def test_complete_joint_step_preserves_paired_boundaries(
 ) -> None:
     runtime = ExactVidEoMTRuntime(object(), _HookCompatibleVidEoMT().train())
     frames = torch.randn(1, 5, 3, 16, 16)
+    host_current = torch.randn(1, 1, 3, 16, 16)
     source_result = run_complete_causal_videomt_training_transaction(
         runtime,
         _CompleteObjectiveStub(),
@@ -79,6 +80,7 @@ def test_complete_joint_step_preserves_paired_boundaries(
     def source_forward(*args, **kwargs):
         captured["source_previous"] = kwargs["previous_queries"]
         captured["reset"] = kwargs["reset"]
+        captured["host_aligned_current_rgb"] = kwargs["host_aligned_current_rgb"]
         return source_result
 
     def policy_forward(
@@ -132,6 +134,7 @@ def test_complete_joint_step_preserves_paired_boundaries(
         CompleteCalvinVidEoMTObjective(),
         batch=batch,
         normalized_padded_rgb=frames,
+        host_aligned_current_rgb=host_current,
         clip_targets=_targets(1),
         relation_spec=joint_module.NativeObjectQuerySpatialSpec(
             name=VIDEOMT_MASK_RELATION,
@@ -148,6 +151,10 @@ def test_complete_joint_step_preserves_paired_boundaries(
     )
 
     assert captured["source_previous"] is previous.source_queries
+    if architecture_identity == NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR:
+        assert captured["host_aligned_current_rgb"] is host_current
+    else:
+        assert captured["host_aligned_current_rgb"] is None
     assert isinstance(captured["host_previous"], NativeLayerwisePosteriorState)
     assert not isinstance(captured["host_previous"], NativeVidEoMTPairedPosteriorState)
     assert captured["host_previous"].layer_rows is previous.layer_rows
@@ -176,6 +183,7 @@ def test_complete_joint_step_preserves_paired_boundaries(
         CompleteCalvinVidEoMTObjective(),
         batch=batch,
         normalized_padded_rgb=frames,
+        host_aligned_current_rgb=host_current,
         clip_targets=_targets(1),
         relation_spec=joint_module.NativeObjectQuerySpatialSpec(
             name=VIDEOMT_MASK_RELATION,
@@ -196,9 +204,7 @@ def test_complete_joint_step_preserves_paired_boundaries(
         torch.zeros_like(previous.layer_rows),
     )
     assert masked.host_batch.model_inputs is batch.model_inputs
-    stream_by_name = {
-        stream.name: stream for stream in masked.host_batch.modalities.streams
-    }
+    stream_by_name = {stream.name: stream for stream in masked.host_batch.modalities.streams}
     source_stream = stream_by_name[VIDEOMT_QUERY_MODALITY]
     assert source_stream.valid.all()
     assert not source_stream.tokens.count_nonzero()
@@ -280,9 +286,7 @@ def test_cold_joint_evaluation_is_current_only_target_free_and_graphless(
             posterior_rows=torch.randn(1, 200, 8),
             relation=relation,
         )
-        context.posterior_memory = NativeLayerwisePosteriorState(
-            torch.randn(1, 3, 200, 8)
-        )
+        context.posterior_memory = NativeLayerwisePosteriorState(torch.randn(1, 3, 200, 8))
         action = torch.tensor(0.25)
         return NativePolicyForwardResult(
             official_outputs=(action,) * 11,
@@ -308,9 +312,7 @@ def test_cold_joint_evaluation_is_current_only_target_free_and_graphless(
         relation_spec=relation_spec,
         host_dtype=torch.float32,
         prior_host_steps=1,
-        wsa_attention_intervention=(
-            WSALingBotAttentionIntervention.BLOCK_FUTURE_TO_ACTION
-        ),
+        wsa_attention_intervention=(WSALingBotAttentionIntervention.BLOCK_FUTURE_TO_ACTION),
     )
 
     assert result.source_output.class_logits.shape[:3] == (1, 1, 200)
@@ -320,9 +322,7 @@ def test_cold_joint_evaluation_is_current_only_target_free_and_graphless(
         "graph": graph,
         "control_chunks": result.host_batch.effective_prior_control_chunks,
         "require_grad": False,
-        "wsa_attention_intervention": (
-            WSALingBotAttentionIntervention.BLOCK_FUTURE_TO_ACTION
-        ),
+        "wsa_attention_intervention": (WSALingBotAttentionIntervention.BLOCK_FUTURE_TO_ACTION),
     }
     assert not result.policy.official_total_loss.requires_grad
 
@@ -337,9 +337,7 @@ def test_cold_joint_evaluation_is_current_only_target_free_and_graphless(
         prior_host_steps=1,
         wla_host_evidence_arm="wla_lbot_masked",
     )
-    stream_by_name = {
-        stream.name: stream for stream in masked.host_batch.modalities.streams
-    }
+    stream_by_name = {stream.name: stream for stream in masked.host_batch.modalities.streams}
     assert stream_by_name[VIDEOMT_QUERY_MODALITY].valid.all()
     assert not stream_by_name[VIDEOMT_QUERY_MODALITY].tokens.count_nonzero()
     for name, stream in stream_by_name.items():
@@ -401,9 +399,7 @@ def test_causal_warm_joint_evaluation_replays_past_only_and_commits_current(
             posterior_rows=torch.full((1, 200, 8), 5.0),
             relation=relation,
         )
-        context.posterior_memory = NativeLayerwisePosteriorState(
-            torch.full((1, 3, 200, 8), 5.0)
-        )
+        context.posterior_memory = NativeLayerwisePosteriorState(torch.full((1, 3, 200, 8), 5.0))
         action = torch.tensor(0.125)
         return NativePolicyForwardResult(
             official_outputs=(action,) * 11,
@@ -452,8 +448,8 @@ def test_causal_warm_joint_evaluation_replays_past_only_and_commits_current(
     assert len(result.history) == 4
     assert result.current.host_batch.routing.frame_indices == (7,)
     assert result.next_state.layer_rows is result.current.policy.context.posterior_memory.layer_rows
-    assert result.next_state.source_queries is (
-        result.source_sequence.propagated_queries_by_frame[-1]
+    assert (
+        result.next_state.source_queries is (result.source_sequence.propagated_queries_by_frame[-1])
     )
     assert runtime.propagated_queries is None
     assert not result.current.policy.official_action_loss.requires_grad

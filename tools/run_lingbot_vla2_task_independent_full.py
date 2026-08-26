@@ -10860,6 +10860,9 @@ def main() -> None:
                             normalized_padded_rgb=(
                                 videomt_source_batch.normalized_padded_rgb
                             ),
+                            host_aligned_current_rgb=(
+                                videomt_source_batch.host_aligned_current_rgb
+                            ),
                             clip_targets=videomt_source_batch.clip_targets,
                             relation_spec=object_query_spatial_specs[0],
                             previous_state=objective_previous_state,

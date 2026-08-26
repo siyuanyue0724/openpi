@@ -101,9 +101,7 @@ def mask_wla_lbot_host_evidence(
                 name=stream.name,
                 tokens=torch.zeros_like(stream.tokens),
                 valid=valid,
-                metadata=(
-                    None if stream.metadata is None else torch.zeros_like(stream.metadata)
-                ),
+                metadata=(None if stream.metadata is None else torch.zeros_like(stream.metadata)),
                 canonical_token_ids=canonical_ids,
             )
         )
@@ -223,8 +221,9 @@ class CausalWarmNativeVidEoMTLingBotEvaluation:
             raise TypeError("causal-warm current action omitted layerwise posterior state")
         if self.next_state.layer_rows is not host_state.layer_rows:
             raise ValueError("causal-warm evaluation committed another host boundary")
-        if self.next_state.source_queries is not (
-            self.source_sequence.propagated_queries_by_frame[-1]
+        if (
+            self.next_state.source_queries
+            is not (self.source_sequence.propagated_queries_by_frame[-1])
         ):
             raise ValueError("causal-warm evaluation committed another source boundary")
 
@@ -371,8 +370,7 @@ def run_causal_warm_native_videomt_lingbot_evaluation(
     if not history_values:
         raise ValueError("causal-warm evaluation requires a non-empty history")
     if len(host_steps) != len(batches) or any(
-        isinstance(value, bool) or not isinstance(value, int) or value <= 0
-        for value in host_steps
+        isinstance(value, bool) or not isinstance(value, int) or value <= 0 for value in host_steps
     ):
         raise ValueError("causal-warm host schedules must align with every frame")
     if normalized_rgb_sequence.ndim != 4 or normalized_rgb_sequence.shape[1] != 3:
@@ -389,8 +387,7 @@ def run_causal_warm_native_videomt_lingbot_evaluation(
     if len(set(episode_keys)) != 1:
         raise ValueError("causal-warm history crosses an episode reset")
     if any(
-        right != left + 1
-        for left, right in zip(frame_indices, frame_indices[1:], strict=False)
+        right != left + 1 for left, right in zip(frame_indices, frame_indices[1:], strict=False)
     ):
         raise ValueError("causal-warm history is not consecutive")
     for name in ("lang_tokens", "lang_masks"):
@@ -556,6 +553,7 @@ def run_complete_native_videomt_lingbot_step(
     *,
     batch: CollatedNativeCALVINBatch,
     normalized_padded_rgb: torch.Tensor,
+    host_aligned_current_rgb: torch.Tensor | None = None,
     clip_targets: Sequence[Mapping[str, torch.Tensor]],
     relation_spec: NativeObjectQuerySpatialSpec,
     previous_state: NativeVidEoMTPairedPosteriorState | None,
@@ -591,6 +589,13 @@ def run_complete_native_videomt_lingbot_step(
         previous_state.architecture_identity != architecture_identity
     ):
         raise ValueError("previous paired state belongs to another architecture")
+    if (
+        architecture_identity == NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR
+        and host_aligned_current_rgb is None
+    ):
+        raise ValueError(
+            "pretrained object memory requires a host-aligned deterministic current source view"
+        )
     evidence_arm = _validate_wla_host_evidence_arm(wla_host_evidence_arm)
 
     reset = torch.tensor(
@@ -599,9 +604,7 @@ def run_complete_native_videomt_lingbot_step(
         device=batch.controls.values.device,
     )
     if previous_state_valid is None:
-        previous_state_valid = (
-            torch.zeros_like(reset) if previous_state is None else ~reset
-        )
+        previous_state_valid = torch.zeros_like(reset) if previous_state is None else ~reset
     if (
         previous_state_valid.shape != reset.shape
         or previous_state_valid.dtype != torch.bool
@@ -619,6 +622,11 @@ def run_complete_native_videomt_lingbot_step(
         clip_targets=clip_targets,
         previous_queries=(None if previous_state is None else previous_state.source_queries),
         reset=reset.to(device=normalized_padded_rgb.device),
+        host_aligned_current_rgb=(
+            host_aligned_current_rgb
+            if architecture_identity == NATIVE_VIDEOMT_PRETRAINED_OBJECT_MEMORY_POSTERIOR
+            else None
+        ),
     )
     source_modalities = VidEoMTQueryObservation.from_exact_output(
         source.current_output

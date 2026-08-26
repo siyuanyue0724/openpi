@@ -17,6 +17,13 @@ from picf_next.videomt_exact.runtime import (
     ExactVidEoMTRuntime,
 )
 
+SOURCE_TRAINING_CURRENT_BOUNDARY = "source_training_current"
+HOST_ALIGNED_CURRENT_BOUNDARY = "host_aligned_current"
+_CURRENT_BOUNDARIES = (
+    SOURCE_TRAINING_CURRENT_BOUNDARY,
+    HOST_ALIGNED_CURRENT_BOUNDARY,
+)
+
 
 @dataclass(frozen=True, slots=True)
 class CompleteCausalVidEoMTTrainingTransaction:
@@ -26,15 +33,36 @@ class CompleteCausalVidEoMTTrainingTransaction:
     source_objective: CompleteVidEoMTSourceObjective
     current_output: ExactVidEoMTOutput
     current_propagated_queries: torch.Tensor
+    current_boundary: str = SOURCE_TRAINING_CURRENT_BOUNDARY
 
     def __post_init__(self) -> None:
         if self.sequence.merged.class_logits.shape[1] != 5:
             raise ValueError("complete causal source transaction requires five frames")
-        if self.current_output is not self.sequence.per_frame[0]:
-            raise ValueError("host-visible source output must be the first causal frame")
-        expected = self.sequence.propagated_queries_by_frame[0]
-        if self.current_propagated_queries is not expected:
-            raise ValueError("committed source state must be the current-frame boundary")
+        if self.current_boundary not in _CURRENT_BOUNDARIES:
+            raise ValueError("host-visible source output uses an unknown geometry boundary")
+        if (
+            self.current_boundary == SOURCE_TRAINING_CURRENT_BOUNDARY
+            and self.current_output is not self.sequence.per_frame[0]
+        ):
+            raise ValueError("source-view host output must be the first causal training frame")
+        if (
+            self.current_boundary == HOST_ALIGNED_CURRENT_BOUNDARY
+            and self.current_output is self.sequence.per_frame[0]
+        ):
+            raise ValueError("host-aligned output must come from the deterministic online view")
+        if self.current_boundary == SOURCE_TRAINING_CURRENT_BOUNDARY:
+            expected = self.sequence.propagated_queries_by_frame[0]
+            if self.current_propagated_queries is not expected:
+                raise ValueError("committed source state must be the source-view boundary")
+        else:
+            expected = self.current_output.propagated_queries
+            if (
+                self.current_propagated_queries.shape != expected.shape
+                or self.current_propagated_queries.device != expected.device
+                or self.current_propagated_queries.dtype != expected.dtype
+                or not torch.equal(self.current_propagated_queries, expected)
+            ):
+                raise ValueError("committed source state must be the host-aligned boundary")
         if self.current_output.class_logits.shape[1] != 1:
             raise ValueError("host-visible source output must contain exactly one frame")
         if self.current_propagated_queries.shape != self.sequence.merged.propagated_queries.shape:
@@ -49,6 +77,7 @@ def run_complete_causal_videomt_training_transaction(
     clip_targets: Sequence[Mapping[str, torch.Tensor]],
     previous_queries: torch.Tensor | None,
     reset: torch.Tensor,
+    host_aligned_current_rgb: torch.Tensor | None = None,
 ) -> CompleteCausalVidEoMTTrainingTransaction:
     """Run the complete source objective without exposing future frames to host.
 
@@ -75,15 +104,39 @@ def run_complete_causal_videomt_training_transaction(
         raise ValueError("paired source reset mask must be boolean [batch]")
     if len(clip_targets) != batch:
         raise ValueError("paired source targets must contain one clip per batch sample")
+    if host_aligned_current_rgb is not None and (
+        host_aligned_current_rgb.ndim != 5
+        or host_aligned_current_rgb.shape[:3] != (batch, 1, 3)
+        or not host_aligned_current_rgb.is_floating_point()
+        or not torch.isfinite(host_aligned_current_rgb).all()
+        or host_aligned_current_rgb.device != normalized_padded_rgb.device
+    ):
+        raise ValueError(
+            "host-aligned source RGB must be finite [batch,1,3,height,width] on the source device"
+        )
 
     try:
-        runtime.bind_mixed_propagated_queries(previous_queries, reset=reset)
-        sequence = runtime.forward_causal_sequence(normalized_padded_rgb, resume=True)
+        if host_aligned_current_rgb is None:
+            runtime.bind_mixed_propagated_queries(previous_queries, reset=reset)
+            sequence = runtime.forward_causal_sequence(normalized_padded_rgb, resume=True)
+            current_output = sequence.per_frame[0]
+            current_state = sequence.propagated_queries_by_frame[0]
+            current_boundary = SOURCE_TRAINING_CURRENT_BOUNDARY
+        else:
+            # The released five-frame source objective remains an independent,
+            # clip-consistent augmented training transaction. Online query state
+            # is carried only through the deterministic current observation that
+            # shares geometry with the LingBot host image.
+            runtime.bind_mixed_propagated_queries(None, reset=torch.ones_like(reset))
+            sequence = runtime.forward_causal_sequence(normalized_padded_rgb, resume=True)
+            runtime.bind_mixed_propagated_queries(previous_queries, reset=reset)
+            aligned = runtime.forward_causal_sequence(host_aligned_current_rgb, resume=True)
+            current_output = aligned.per_frame[0]
+            current_state = aligned.propagated_queries_by_frame[0]
+            current_boundary = HOST_ALIGNED_CURRENT_BOUNDARY
         objective = source_objective(sequence.merged, clip_targets)
         if not isinstance(objective, CompleteVidEoMTSourceObjective):
             raise TypeError("complete source objective returned an incompatible result")
-        current_output = sequence.per_frame[0]
-        current_state = sequence.propagated_queries_by_frame[0]
         runtime.restore_propagated_queries(current_state)
     except BaseException:
         runtime.reset_state()
@@ -93,4 +146,5 @@ def run_complete_causal_videomt_training_transaction(
         source_objective=objective,
         current_output=current_output,
         current_propagated_queries=current_state,
+        current_boundary=current_boundary,
     )

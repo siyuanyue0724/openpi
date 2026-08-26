@@ -39,9 +39,7 @@ class CalvinFutureSourceDataset(Protocol):
     ) -> tuple[int, ...]: ...
 
 
-NATIVE_VIDEOMT_SOURCE_ELIGIBILITY_SCHEMA = (
-    "picf-next.native-videomt-source-eligibility/v1"
-)
+NATIVE_VIDEOMT_SOURCE_ELIGIBILITY_SCHEMA = "picf-next.native-videomt-source-eligibility/v1"
 
 
 @dataclass(frozen=True, slots=True)
@@ -195,16 +193,10 @@ def audit_native_videomt_source_eligibility(
 
     plan_sha256 = getattr(stream_plan, "plan_sha256", None)
     episodes = getattr(stream_plan, "episodes", None)
-    if (
-        not isinstance(plan_sha256, str)
-        or not isinstance(episodes, tuple)
-        or not episodes
-    ):
+    if not isinstance(plan_sha256, str) or not isinstance(episodes, tuple) or not episodes:
         raise TypeError("native VidEoMT eligibility requires a frozen episode stream plan")
     sample_keys = tuple(
-        sample_key
-        for episode in episodes
-        for sample_key in getattr(episode, "sample_keys", ())
+        sample_key for episode in episodes for sample_key in getattr(episode, "sample_keys", ())
     )
     if not sample_keys or len(sample_keys) != len(set(sample_keys)):
         raise ContractError("native VidEoMT stream domain is empty or contains duplicate keys")
@@ -249,6 +241,7 @@ def _pad_target(
 @dataclass(frozen=True, slots=True)
 class PreparedNativeVidEoMTSourceBatch:
     normalized_padded_rgb: torch.Tensor
+    host_aligned_current_rgb: torch.Tensor
     clip_targets: tuple[Mapping[str, torch.Tensor], ...]
     sample_keys: tuple[str, ...]
     global_indices: tuple[tuple[int, ...], ...]
@@ -260,8 +253,9 @@ class PreparedNativeVidEoMTSourceBatch:
         if (
             batch <= 0
             or self.normalized_padded_rgb.ndim != 5
-            or self.normalized_padded_rgb.shape[:3]
-            != (batch, VIDEOMT_YTVIS19_CLIP_LENGTH, 3)
+            or self.normalized_padded_rgb.shape[:3] != (batch, VIDEOMT_YTVIS19_CLIP_LENGTH, 3)
+            or self.host_aligned_current_rgb.ndim != 5
+            or self.host_aligned_current_rgb.shape[:3] != (batch, 1, 3)
             or len(self.clip_targets) != batch
             or len(self.global_indices) != batch
             or len(self.identity_keys) != batch
@@ -271,9 +265,13 @@ class PreparedNativeVidEoMTSourceBatch:
         if (
             not self.normalized_padded_rgb.is_floating_point()
             or not torch.isfinite(self.normalized_padded_rgb).all()
+            or not self.host_aligned_current_rgb.is_floating_point()
+            or not torch.isfinite(self.host_aligned_current_rgb).all()
         ):
             raise ValueError("joint VidEoMT source RGB must be finite floating data")
         device = self.normalized_padded_rgb.device
+        if self.host_aligned_current_rgb.device != device:
+            raise ValueError("source-training and host-aligned RGB must share one device")
         height, width = self.normalized_padded_rgb.shape[-2:]
         for target, indices in zip(self.clip_targets, self.global_indices, strict=True):
             if len(indices) != VIDEOMT_YTVIS19_CLIP_LENGTH or any(
@@ -308,10 +306,12 @@ def prepare_native_videomt_source_batch(
     if not keys or len(keys) != len(seeds):
         raise ValueError("joint source keys and augmentation seeds must have equal positive length")
     prepared_clips: list[PreparedCalvinVidEoMTClip] = []
+    host_aligned_frames: list[PreparedVidEoMTFrames] = []
     windows: list[tuple[int, ...]] = []
     for sample_key, seed in zip(keys, seeds, strict=True):
         indices = current_future_source_indices(dataset, sample_key)
         source = materialize_calvin_videomt_clip(index, sidecar, indices)
+        host_aligned_frames.append(prepare_rgb_frames((source.rgb_static[0],)))
         with _isolated_augmentation_seed(seed):
             prepared = prepare_calvin_videomt_training_clip(
                 source.rgb_static,
@@ -335,8 +335,22 @@ def prepare_native_videomt_source_batch(
             )
         )
         targets.append(_pad_target(clip.target, padded_size=padded_size, device=device))
+    host_height = max(frame.padded_size[0] for frame in host_aligned_frames)
+    host_width = max(frame.padded_size[1] for frame in host_aligned_frames)
+    host_frames = [
+        F.pad(
+            frame.model_input,
+            (0, host_width - frame.padded_size[1], 0, host_height - frame.padded_size[0]),
+            value=0.0,
+        )
+        for frame in host_aligned_frames
+    ]
     return PreparedNativeVidEoMTSourceBatch(
         normalized_padded_rgb=torch.stack(frames, dim=0).to(
+            device=device,
+            dtype=torch.float32,
+        ),
+        host_aligned_current_rgb=torch.stack(host_frames, dim=0).to(
             device=device,
             dtype=torch.float32,
         ),

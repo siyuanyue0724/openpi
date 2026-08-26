@@ -3570,3 +3570,28 @@ object-row basis is tested factorially.
 Current claim: ADR-226 is a source-grounded design, not an implemented result.
 Its visual branch is mature-source-backed; its row-basis projection is an
 explicit PICF hypothesis and must not inherit SWIM's empirical credit.
+
+## 17. ADR-227 Source/Host Geometry Alignment
+
+The active upstream correction is
+`docs/227_SOURCE_HOST_GEOMETRY_ALIGNMENT_20260827.md`. Code audit proved that
+the pre-repair ADR-225 training path pooled unaugmented LingBot visual features
+with VidEoMT masks produced after independent random crop/resize/flip, while
+also carrying source query state across changing random geometries. Its action
+curve is therefore not valid evidence about aligned object memory.
+
+- [x] Stop the invalid step-100 arm immediately after the defect was proved.
+- [x] Preserve the complete released augmented five-frame source objective.
+- [x] Add a shared-weight deterministic current-frame online view aligned with
+      the unaugmented LingBot host image.
+- [x] Commit recurrent source state only from the deterministic online view.
+- [x] Require the aligned view in the pretrained-object-memory profile and keep
+      the older ADR-207 ABI unchanged.
+- [x] Pass focused cloud contracts (`15/15`).
+- [ ] Pass real four-A100 forward/backward/update and record peak memory/time.
+- [ ] Compare fixed action and anchor curves at steps 20/100 against LingBot,
+      ADR-207 and pre-repair ADR-225 before implementing ADR-226 grounding.
+
+Current claim: the repair is necessary and mechanically focused, but no new
+action advantage has yet been measured. Four-GPU released-weight execution is
+active; do not describe it as a successful PICF result before the fixed curve.

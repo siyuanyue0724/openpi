@@ -11,6 +11,7 @@ from picf_next.videomt_exact.joint_training import (
     CompleteVidEoMTSourceObjective,
 )
 from picf_next.videomt_exact.paired_training import (
+    HOST_ALIGNED_CURRENT_BOUNDARY,
     run_complete_causal_videomt_training_transaction,
 )
 from picf_next.videomt_exact.runtime import ExactVidEoMTRuntime
@@ -20,7 +21,9 @@ from tests.videomt_exact.test_runtime_contract import _HookCompatibleVidEoMT
 class _CompleteObjectiveStub(nn.Module):
     def forward(self, output, targets):
         zero = output.class_logits.sum() * 0 + output.mask_logits.sum() * 0
-        raw = {name: zero + index for index, name in enumerate(sorted(COMPLETE_VIDEOMT_RAW_LOSS_NAMES))}
+        raw = {
+            name: zero + index for index, name in enumerate(sorted(COMPLETE_VIDEOMT_RAW_LOSS_NAMES))
+        }
         weighted = {
             name: zero + index
             for index, name in enumerate(sorted(COMPLETE_VIDEOMT_WEIGHTED_LOSS_NAMES))
@@ -96,7 +99,9 @@ def test_future_source_supervision_cannot_change_the_host_visible_current_frame(
         reset=torch.ones(1, dtype=torch.bool),
     )
 
-    torch.testing.assert_close(first.current_output.class_logits, second.current_output.class_logits)
+    torch.testing.assert_close(
+        first.current_output.class_logits, second.current_output.class_logits
+    )
     torch.testing.assert_close(first.current_output.mask_logits, second.current_output.mask_logits)
     torch.testing.assert_close(
         first.current_propagated_queries,
@@ -106,3 +111,43 @@ def test_future_source_supervision_cannot_change_the_host_visible_current_frame(
         first.sequence.propagated_queries_by_frame[-1],
         second.sequence.propagated_queries_by_frame[-1],
     )
+
+
+def test_augmented_source_view_cannot_change_host_aligned_online_boundary() -> None:
+    first_model = _HookCompatibleVidEoMT().train()
+    second_model = deepcopy(first_model).train()
+    first_source = torch.randn(1, 5, 3, 16, 16)
+    second_source = torch.randn_like(first_source) * 100
+    host_current = torch.randn(1, 1, 3, 16, 16)
+    previous = torch.randn(1, 200, 1024)
+
+    first = run_complete_causal_videomt_training_transaction(
+        ExactVidEoMTRuntime(object(), first_model),
+        _CompleteObjectiveStub(),
+        normalized_padded_rgb=first_source,
+        host_aligned_current_rgb=host_current,
+        clip_targets=_targets(1),
+        previous_queries=previous,
+        reset=torch.zeros(1, dtype=torch.bool),
+    )
+    second = run_complete_causal_videomt_training_transaction(
+        ExactVidEoMTRuntime(object(), second_model),
+        _CompleteObjectiveStub(),
+        normalized_padded_rgb=second_source,
+        host_aligned_current_rgb=host_current,
+        clip_targets=_targets(1),
+        previous_queries=previous,
+        reset=torch.zeros(1, dtype=torch.bool),
+    )
+
+    assert first.current_boundary == HOST_ALIGNED_CURRENT_BOUNDARY
+    assert second.current_boundary == HOST_ALIGNED_CURRENT_BOUNDARY
+    torch.testing.assert_close(first.current_output.mask_logits, second.current_output.mask_logits)
+    torch.testing.assert_close(
+        first.current_propagated_queries,
+        second.current_propagated_queries,
+    )
+    assert not torch.equal(first.sequence.merged.mask_logits, second.sequence.merged.mask_logits)
+    (first.source_objective.total + first.current_output.mask_logits.sum()).backward()
+    assert first_model.class_head.weight.grad is not None
+    assert first_model.q.weight.grad is not None

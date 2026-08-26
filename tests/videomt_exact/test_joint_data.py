@@ -142,6 +142,15 @@ def test_prepare_joint_source_batch_pads_without_leaking_rng(monkeypatch) -> Non
         calls.append(tuple(indices))
         return SimpleNamespace(rgb_static=(object(),) * 5, supervision=(object(),) * 5)
 
+    def _prepare_host(_rgb):
+        return PreparedVidEoMTFrames(
+            model_input=torch.full((1, 3, 16, 16), 3.0),
+            resized_rgb=(np.zeros((16, 16, 3), dtype=np.uint8),),
+            original_sizes=((200, 200),),
+            resized_sizes=((16, 16),),
+            padded_size=(16, 16),
+        )
+
     random.seed(9)
     np.random.seed(10)
     torch.manual_seed(11)
@@ -157,6 +166,7 @@ def test_prepare_joint_source_batch_pads_without_leaking_rng(monkeypatch) -> Non
         "prepare_calvin_videomt_training_clip",
         lambda _rgb, _supervision: next(prepared),
     )
+    monkeypatch.setattr(joint_data, "prepare_rgb_frames", _prepare_host)
 
     batch = joint_data.prepare_native_videomt_source_batch(
         _Dataset(),
@@ -169,6 +179,10 @@ def test_prepare_joint_source_batch_pads_without_leaking_rng(monkeypatch) -> Non
 
     assert calls == [(1, 2, 3, 4, 5), (8, 9, 10, 11, 12)]
     assert batch.normalized_padded_rgb.shape == (2, 5, 3, 12, 12)
+    assert batch.host_aligned_current_rgb.shape == (2, 1, 3, 16, 16)
+    assert torch.equal(
+        batch.host_aligned_current_rgb, torch.full_like(batch.host_aligned_current_rgb, 3.0)
+    )
     assert batch.clip_targets[0]["masks"].shape == (1, 5, 12, 12)
     assert not batch.clip_targets[0]["valid_pixels"][:, 8:, :].any()
     assert not batch.clip_targets[1]["valid_pixels"][:, :, 8:].any()
