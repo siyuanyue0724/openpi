@@ -1,6 +1,47 @@
 # PICF-Next Core Mission and Fail-Closed Checklist
 
-Last updated: 2026-08-24 Asia/Shanghai
+Last updated: 2026-08-27 Asia/Shanghai
+
+## 2026-08-27 authoritative target: ADR-228
+
+ADR-227 is closed as a necessary geometry repair and an insufficient action
+repair. ADR-226 is retained only as the authenticated SWIM grounding
+subdesign. The complete next architecture is
+`docs/228_UNIFIED_GROUNDED_RECURRENT_OBJECT_BELIEF_20260827.md`.
+
+The direct evidence boundary is unchanged: the full proposal bank has strong
+oracle geometry, but semantic ranking remains near `0.10--0.11` soft IoU and
+the corrected action curve has no material advantage over historical ADR-207.
+No 30k run is authorized.
+
+- [x] Audit official SWIM, Qwen3-VL, V-JEPA 2.1 and muVLA source contracts and
+      record exact upstream commits.
+- [x] Separate copied source primitives from every PICF composition hypothesis.
+- [x] Specify one large-host semantic owner with no selector, lifecycle network,
+      top-k training path or external SAM authority.
+- [x] Replace forced all-anchor assignment with a soft row-plus-native-context
+      target that preserves overlap and low-confidence evidence.
+- [x] Specify final-row complete-episode recurrence with value-preserving TBPTT
+      instead of sampled `2+2` burn-in or persistent `36 x 200` layerwise state.
+- [x] Specify one-pass typed PRIOR/POSTERIOR correction, language grounding,
+      authenticated multimodal binding and delayed V-JEPA world supervision.
+- [x] Publish source-diff, local-contract, 250-frame-batch, 2k and 30k
+      fail-closed gates with exact LingBot and ADR-227 controls.
+- [ ] Freeze immutable source/file receipts in the implementation worktree.
+- [ ] Implement the final-row recurrent ABI without mutating the ADR-227 control.
+- [ ] Implement exact selected-depth SWIM visual grounding and the separately
+      labelled PICF row-plus-context objective.
+- [ ] Pass zero-scale equivalence, no-leakage, permutation, overlap, long-age,
+      restart, Q/K equality and released-weight memory/throughput probes.
+- [ ] Add authenticated V-JEPA/Sonata/AnyTouch binding only through the same
+      shared-host attention surface; missing evidence contributes no fake token.
+- [ ] Run one bounded matched gate and stop immediately if grounding, action and
+      causal-adoption thresholds do not pass together.
+- [ ] Permit 2k only after the bounded gate and 30k only after complete curves,
+      long-state interventions and source-disjoint closed-loop CALVIN pass.
+
+Current score: theoretical plan `8.0/10`; ADR-228 deployment `0/10`. The score
+cannot be raised by more documentation or mechanics tests alone.
 
 ## 2026-08-24 authoritative execution gate: ADR-210
 

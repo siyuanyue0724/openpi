@@ -2,7 +2,12 @@
 
 Date: 2026-08-27 Asia/Shanghai
 
-Status: **DESIGN FROZEN FOR SOURCE-DIFF REVIEW; NOT YET IMPLEMENTED OR TRAINED**
+Status: **RETAINED GROUNDING SUBDESIGN; SUPERSEDED AS THE COMPLETE TARGET BY ADR-228**
+
+ADR-228 keeps the authenticated SWIM visual-grounding primitive from this ADR
+but replaces the raw-intersection row target, temporal ABI and complete-system
+plan. This document remains authoritative only for the SWIM source receipt and
+the proof that ADR-225 lacked large-host language/object grounding.
 
 ## 0. Decision
 
