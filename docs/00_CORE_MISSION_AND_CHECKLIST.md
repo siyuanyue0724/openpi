@@ -3519,8 +3519,12 @@ never received mask-conditioned native visual semantics in the paired row.
 - [x] Pass local source-equality, multiview, gradient, leakage, overlap,
       recurrence, optimizer-ownership and state-dict probes (`323/323` expanded
       relevant tests).
-- [ ] Pass real released-weight two-rank FSDP update, separate-process DCP
-      restart and LingBot-relative runtime/memory probes.
+- [x] Pass real released-weight four-rank FSDP forward/backward/update after
+      the function-preserving ADR-224 eight-overlay placement repair. The
+      repaired run preserves exact rank-zero step-1 action `0.63671875`, crosses
+      optimizer-state materialization and peaks at about `35.30 GiB`.
+- [ ] Pass separate-process DCP restart and complete the exact
+      LingBot-relative wall-time/memory comparison.
 - [ ] Execute exact LingBot, ADR-207 and ADR-225 matched curves and causal
       interventions.
 - [ ] Authorize 30k only after material whole-curve action and closed-loop
@@ -3529,7 +3533,40 @@ never received mask-conditioned native visual semantics in the paired row.
       post-Gate-D `PICF_ADR225_LONG_RUN_AUTHORIZED=1` authority is explicit;
       the unattended default is a bounded 250-step run, not 30k.
 
-Current claim: the isolated local transplant is source-backed, mechanically
-closed and directly targets the measured semantic disconnect. Real sharded
-execution, action value, cross-modal object binding and rollout value remain
-unproved; no 30k run is authorized.
+Current claim: the isolated transplant is source-backed and real four-A100
+execution is closed. Through step 20 it optimizes normally but remains about
+6% worse than the historical ADR-207 fixed-bank action curve, despite a modest
+training-curve advantage. The profile has no active large-host
+language-to-object grounding or optional-modality-to-row identity objective;
+cross-modal binding, action value and rollout value remain unproved. A bounded
+step-100 gate is active; no 30k run is authorized.
+
+## 16. ADR-226 Large-Host Language-to-Object Grounding
+
+The conditional next authority is
+`docs/226_LARGE_HOST_LANGUAGE_OBJECT_GROUNDING_20260827.md`. It may proceed
+only if ADR-225 fails its step-100 action gate. It preserves LingBot as the
+single semantic/action owner and adds no selector head: the official SWIM
+six-depth large-host attention supervision is transplanted first, then a
+separately named soft projection from labelled support into the complete
+object-row basis is tested factorially.
+
+- [x] Audit the official SWIM implementation, source commit, file hashes,
+      exact six-layer fusion and loss equation.
+- [x] Prove from the active runner/config that ADR-225 supplies all 200
+      semantic object rows but does not execute language/object or
+      action/object grounding supervision.
+- [x] Publish the source/adaptation ledger, soft set-valued row target,
+      information-flow argument, historical non-repeat matrix and hard gates.
+- [ ] Freeze source-diff receipts and the six Qwen3/LingBot depth mappings.
+- [ ] Implement selected-Q/K large-host receipts, exact SWIM visual grounding,
+      and the separately ablated soft object-basis grounding objective.
+- [ ] Pass tokenizer-span, no-leakage, zero-scale equivalence, overlap,
+      permutation, gradient and released-weight memory/time probes.
+- [ ] Run visual-only, row-only and joint bounded arms before any 2k request.
+- [ ] Require matched fixed action, causal adoption and closed-loop rollout
+      advantages before 30k.
+
+Current claim: ADR-226 is a source-grounded design, not an implemented result.
+Its visual branch is mature-source-backed; its row-basis projection is an
+explicit PICF hypothesis and must not inherit SWIM's empirical credit.

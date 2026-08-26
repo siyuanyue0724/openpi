@@ -32,7 +32,7 @@
       ]
     },
     "swim": {
-      "repository": "https://github.com/ZikangZhou/Spatial-VLM.git",
+      "repository": "https://github.com/HumanMLLM/SWIM.git",
       "commit": "1b97d22fbb84097a2117feb1f1f10353dfe252c2",
       "files": {
         "transformers/src/transformers/models/qwen2_5_vl/modeling_qwen2_5_vl.py": "e05377d29fc663f5f3208a0c9a7530140bb9f3339d204801a0e1df0138637a20",

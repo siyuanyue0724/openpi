@@ -293,7 +293,9 @@ an action-performance theorem: optimization can still choose to ignore it.
 - [x] Missing optional modalities remain exact-zero/invalid.
 - [x] Long prior plus zero current evidence preserves a causal prior path.
 - [x] No future frame, target mask or task label reaches observation inputs.
-- [ ] Two-rank FSDP forward/backward/update and DCP restart pass.
+- [x] Four-rank released-weight FSDP forward/backward/update passes after the
+      function-preserving ADR-224 eight-overlay placement transplant.
+- [ ] Separate-process DCP restart passes for the copied object-memory merger.
 - [ ] Added wall time and peak memory are reported against exact LingBot.
 
 The checked items above are local executable contracts, not released-weight or
@@ -421,3 +423,63 @@ Qwen3-VL text block class and trainable vision blocks. It does not change module
 functions, tensors, query count, modalities, data order, losses, learning rates,
 trainability or optimizer equations. This is a copied, previously demonstrated
 execution mechanism; it carries no scientific credit by itself.
+
+## 14. Four-A100 post-repair evidence on 2026-08-27
+
+### `adr225-0af7ef2-4gpu-30k-v3`
+
+The repaired run crossed optimizer-state materialization and completed 20
+updates. Step 1 peaked at `30.746 GiB`, step 2 at `33.756 GiB`, and the measured
+maximum was about `35.30 GiB`; no OOM or numerical failure occurred. Rank-zero
+step-1 action loss remained exactly `0.63671875`, equal to the pre-placement
+execution, so the repair is function-preserving at the registered exact point.
+
+Fixed-bank action improved from step 0 to step 20:
+
+| split | step 0 | step 20 | relative reduction |
+|---|---:|---:|---:|
+| heldout | `0.477826` | `0.408419` | `14.5%` |
+| validation | `0.463436` | `0.386202` | `16.7%` |
+
+This is real optimization, but it is not a promotion result. The historical
+ADR-207 fixed values at step 20 are `0.385412/0.363023`; ADR-225 is about 6%
+worse on both splits. The all-rank training action mean over steps 1--20 is
+`0.445313`, versus ADR-207's `0.467065`, while the last-ten means are
+`0.422314` versus `0.431445`. Training improves, but the fixed-bank curve does
+not yet lead the historical envelope.
+
+The full-bank soft IoU remains strong (`0.789581/0.795125` at step 0), while
+the task-blind foreground-ranked Top-10 changes only from
+`0.107102/0.103772` to `0.109283/0.100154`. Top-10 is a VidEoMT foreground
+ranking diagnostic; it is neither LingBot action attention nor a learned task
+selector. It therefore cannot establish that action cannot see the target.
+
+### Information-flow verdict
+
+ADR-225 closes the measured visual representation disconnect, but this arm
+does not close task grounding or multimodal identity:
+
+- all 200 mask-conditioned rows are visible to the shared LingBot host and
+  action tokens;
+- full RGB and language remain unchanged;
+- AnyTouch, Sonata, proprioception and V-JEPA evidence are present through
+  their typed paths;
+- `task_query_count=0`, `relation_supervision_layers=()`,
+  `entity_weight=0`, and `predictive_weight=0`;
+- the native ADR-207/225 joint path does not execute the historical
+  action-posterior attention loss;
+- optional modality tokens are not yet supervised to the same object-row
+  identity.
+
+Consequently the current objective is source segmentation plus LingBot action.
+It asks action loss alone to discover which of 200 rows is instruction-relevant.
+That is a valid narrow test of the representation repair, not a complete
+realization of PICF's cross-modal posterior philosophy.
+
+### Active bounded gate
+
+`adr225-0af7ef2-4gpu-step100-v4` is authorized only through step 100 to
+distinguish insufficient optimization time from a structural failure. It must
+not silently become a 30k run. If the fixed action curve still lacks material
+advantage at step 100, the next experiment must change the registered
+information path rather than tune a scalar or wait longer.
