@@ -1,0 +1,15 @@
+{
+  "schema": "picf-next.adr204-source-freeze-receipt.v1",
+  "created_at": "2026-08-22T09:17:00+08:00",
+  "source": "/mnt/picf-next/adr204/source-freezes/full-source-row-refinement-v5",
+  "source_tree_schema": "picf-next.artifact-directory-tree.v1",
+  "source_tree_sha256": "850bd92d96c337c3c9b3a9b5be02872f0d726dec53b1b97c7c186232c5d092f0",
+  "parent": "/mnt/picf-next/adr204/source-freezes/full-source-row-refinement-v4",
+  "semantic_delta": "Preserve an explicitly supplied ADR-204 architecture profile through the ADR-193 launcher; the default ADR-193 profile remains unchanged when no override is supplied.",
+  "focused_tests": {
+    "command": "pytest -q tests/videomt_exact tests/lingbot_native/test_object_query_spatial_relation.py tests/lingbot_native/test_task_independent_full_runner.py",
+    "passed": 197,
+    "warnings": 3
+  },
+  "status": "FROZEN_ACTIVE_GATE"
+}

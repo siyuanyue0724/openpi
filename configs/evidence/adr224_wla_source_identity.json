@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "upstream": {
+    "name": "WLA",
+    "repository": "https://github.com/SJTU-DENG-Lab/WLA.git",
+    "commit": "155ac94eaca8b3d1ae0789ae298fc55e37936081",
+    "archive_sha256": "57fb79bc923ab6466940d63e87898d5c8e1d0286cb565491160a29036c8cd5ec",
+    "tree_archive_sha256": "92c2134a236475822a932ce6583d010823b93f00eef65beac7c1b49ac4f3412d",
+    "durable_root": "/mnt/picf-next/adr223/upstreams/WLA-155ac94e"
+  },
+  "critical_files": {
+    "models/model.py": "73f2c65f0b6450aeb5f5a4f5687fe0e0afefd0c0200f3fddeb29869658ac7c2f",
+    "models/action_model/action_model.py": "89c620c9e09d18e09d958eb1dc4fe5877d8290531d1b5a4acaab87465e3ec9d5",
+    "models/action_model/cross_attention_dit.py": "216a94f32172fe30d5bea07309b7402f9ef543fc115e73be82585ae475edbe74",
+    "configs/libero_all_image_action.yaml": "af7623ea09aa3596da6c9c1a07e5fe7c4995830e8342eaf0aa731a614888584f",
+    "train.py": "e5972641ae13dd4efd0faa5643b5afd0afe702eec09025775e90a5d83ab235ed",
+    "models/wla.py": "17dd50632deee8bf6cd037b875b324d61fd0e49a09481090e75e8b36f51f18d8"
+  }
+}

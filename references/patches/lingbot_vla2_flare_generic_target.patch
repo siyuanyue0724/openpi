@@ -1,0 +1,229 @@
+diff --git a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+index 76a67be..93a1899 100644
+--- a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
++++ b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+@@ -346,6 +346,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
+         picf_native_context=None,
+         picf_action_attention_callback=None,
++        picf_future_latent_context=None,
+     ):
+         picf_runtime = None
+         if self.picf_native_graph is not None:
+@@ -510,6 +511,17 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+                     out_emb = self._apply_deepstack(out_emb, layer_idx, visual_pos_masks, deepstack_visual_embeds)
+                 outputs_embeds.append(out_emb)
+                 start = end
++            if picf_future_latent_context is not None:
++                action_hidden = outputs_embeds[1]
++                if action_hidden is None:
++                    raise RuntimeError(
++                        "FLARE future-latent capture requires the action-expert stream"
++                    )
++                picf_future_latent_context.record_action_hidden(
++                    action_hidden=action_hidden,
++                    layer_index=layer_idx,
++                    layer_count=num_layers,
++                )
+             if self.picf_native_graph is not None:
+                 prefix_hidden = outputs_embeds[0]
+                 if prefix_hidden is not None:
+@@ -634,8 +646,43 @@ class FlowMatchingV2(FlowMatchingV1):
+             self.future_video_share_future_depth_query = False
+             self.block_future_depth_to_action = False
+ 
++        self.picf_future_latent_alignment = None
++
+         self.set_requires_grad()
+ 
++    def set_picf_future_latent_alignment(self, alignment: Optional[nn.Module]) -> None:
++        """Register the paper-faithful FLARE token and projection owner."""
++        if alignment is not None and not isinstance(alignment, nn.Module):
++            raise TypeError("FLARE future-latent alignment must be an nn.Module or None")
++        self.picf_future_latent_alignment = alignment
++
++    def _append_picf_future_latent_suffix(
++        self,
++        *,
++        suffix_embs,
++        suffix_pad_masks,
++        suffix_att_masks,
++        context,
++    ):
++        alignment = self.picf_future_latent_alignment
++        if alignment is None:
++            if context is not None:
++                raise ValueError("FLARE context was supplied without an installed alignment module")
++            return suffix_embs, suffix_pad_masks, suffix_att_masks
++        return alignment.append_future_tokens(
++            suffix_embeddings=suffix_embs,
++            suffix_valid=suffix_pad_masks,
++            suffix_blocks=suffix_att_masks,
++            context=context,
++        )
++
++    def _native_action_hidden(self, suffix_out):
++        action_start = 1
++        action_stop = action_start + self.config.n_action_steps
++        if suffix_out.ndim != 3 or suffix_out.shape[1] < action_stop:
++            raise RuntimeError("LingBot suffix does not contain the complete native action span")
++        return suffix_out[:, action_start:action_stop]
++
+     def embed_prefix(
+         self,
+         images,
+@@ -1041,6 +1088,8 @@ class FlowMatchingV2(FlowMatchingV1):
+         time_embs,
+         picf_native_context,
+         picf_action_attention_callback=None,
++        picf_future_latent_context=None,
++        native_action_suffix_count=None,
+     ):
+         """Train action through the same exact-native cache ABI used at inference."""
+         from picf_next.lingbot_native.host import compact_lingbot_action_cache
+@@ -1085,6 +1134,11 @@ class FlowMatchingV2(FlowMatchingV1):
+             native_position_ids=prefix_position_ids,
+             context=picf_native_context,
+             suffix_count=suffix_len if picf_action_attention_callback is not None else None,
++            action_query_count=(
++                native_action_suffix_count
++                if picf_action_attention_callback is not None
++                else None
++            ),
+         )
+         del expanded_past_key_values
+ 
+@@ -1136,6 +1190,7 @@ class FlowMatchingV2(FlowMatchingV1):
+             fill_kv_cache=False,
+             ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
+             picf_action_attention_callback=callback,
++            picf_future_latent_context=picf_future_latent_context,
+         )
+         suffix_out = action_outputs[1]
+         if suffix_out is None:
+@@ -1162,6 +1217,7 @@ class FlowMatchingV2(FlowMatchingV1):
+         picf_native_context=None,
+         compute_alignment_losses=True,
+         picf_action_attention_callback=None,
++        picf_future_latent_context=None,
+     ) -> Tensor:
+         dtype = state.dtype
+         device = state.device
+@@ -1197,6 +1253,15 @@ class FlowMatchingV2(FlowMatchingV1):
+         time_embs, suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(
+             state, x_t, time
+         )
++        native_action_suffix_count = suffix_embs.shape[1]
++        suffix_embs, suffix_pad_masks, suffix_att_masks = (
++            self._append_picf_future_latent_suffix(
++                suffix_embs=suffix_embs,
++                suffix_pad_masks=suffix_pad_masks,
++                suffix_att_masks=suffix_att_masks,
++                context=picf_future_latent_context,
++            )
++        )
+         prefix_len = prefix_pad_masks.shape[1]
+         if picf_native_context is None:
+             if picf_action_attention_callback is not None:
+@@ -1238,6 +1303,7 @@ class FlowMatchingV2(FlowMatchingV1):
+                     visual_pos_masks=visual_pos_masks,
+                     deepstack_visual_embeds=deepstack_visual_embeds,
+                     picf_native_context=None,
++                    picf_future_latent_context=picf_future_latent_context,
+                 )
+             )
+             native_outputs_embeds = outputs_embeds[:, :prefix_len]
+@@ -1256,6 +1322,8 @@ class FlowMatchingV2(FlowMatchingV1):
+                     time_embs=time_embs,
+                     picf_native_context=picf_native_context,
+                     picf_action_attention_callback=picf_action_attention_callback,
++                    picf_future_latent_context=picf_future_latent_context,
++                    native_action_suffix_count=native_action_suffix_count,
+                 )
+             )
+         align_metrics = {}
+@@ -1313,7 +1381,7 @@ class FlowMatchingV2(FlowMatchingV1):
+             future_video_preds = None
+             current_video_preds = None
+ 
+-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
++        suffix_out = self._native_action_hidden(suffix_out)
+         if getattr(self.config, "action_fp32", False):
+             v_t = self._fp32_linear(self.action_out_proj, suffix_out)
+         else:
+@@ -1427,7 +1495,11 @@ class FlowMatchingV2(FlowMatchingV1):
+         time = torch.tensor(1.0, dtype=dtype, device=device)
+         count = 0
+         predict_velocity_fn = self.predict_velocity
+-        if getattr(self, "_use_compile_predict_velocity", False) and picf_native_context is None:
++        if (
++            getattr(self, "_use_compile_predict_velocity", False)
++            and picf_native_context is None
++            and self.picf_future_latent_alignment is None
++        ):
+             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
+             if predict_velocity_fn is None:
+                 predict_velocity_fn = torch.compile(
+@@ -1477,6 +1549,14 @@ class FlowMatchingV2(FlowMatchingV1):
+             x_t,
+             timestep,
+         )
++        suffix_embs, suffix_pad_masks, suffix_att_masks = (
++            self._append_picf_future_latent_suffix(
++                suffix_embs=suffix_embs,
++                suffix_pad_masks=suffix_pad_masks,
++                suffix_att_masks=suffix_att_masks,
++                context=None,
++            )
++        )
+ 
+         suffix_len = suffix_pad_masks.shape[1]
+         batch_size = prefix_pad_masks.shape[0]
+@@ -1526,8 +1606,7 @@ class FlowMatchingV2(FlowMatchingV1):
+             fill_kv_cache=False,
+             ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
+         )
+-        suffix_out = outputs_embeds[1]
+-        suffix_out = suffix_out[:, -self.config.n_action_steps :]
++        suffix_out = self._native_action_hidden(outputs_embeds[1])
+         if getattr(self.config, "action_fp32", False):
+             v_t = self._fp32_linear(self.action_out_proj, suffix_out)
+         else:
+@@ -1693,6 +1772,10 @@ class LingbotVlaV2Policy(PreTrainedModel):
+         self.reset()
+         torch.set_float32_matmul_precision("high")
+ 
++    def set_picf_future_latent_alignment(self, alignment: Optional[nn.Module]) -> None:
++        """Register FLARE before distributed wrapping through the policy root."""
++        self.model.set_picf_future_latent_alignment(alignment)
++
+     def reset(self):
+         return None
+ 
+@@ -1768,6 +1851,7 @@ class LingbotVlaV2Policy(PreTrainedModel):
+         picf_native_context=None,
+         compute_alignment_losses=True,
+         picf_action_attention_callback=None,
++        picf_future_latent_context=None,
+         **kwargs
+     ) -> tuple[Tensor, dict[str, Tensor]]:
+         loss_dict = {}
+@@ -1805,7 +1889,18 @@ class LingbotVlaV2Policy(PreTrainedModel):
+             picf_native_context=picf_native_context,
+             compute_alignment_losses=compute_alignment_losses,
+             picf_action_attention_callback=picf_action_attention_callback,
++            picf_future_latent_context=picf_future_latent_context,
+         )
++        if picf_future_latent_context is not None:
++            alignment = self.model.picf_future_latent_alignment
++            if alignment is None:
++                raise RuntimeError(
++                    "FLARE context was supplied without an installed alignment module"
++                )
++            picf_future_latent_context.finalize(
++                alignment,
++                require_grad=torch.is_grad_enabled(),
++            )
+ 
+         if joint_mask is not None:
+             if "repeat" in self.config.loss_type:

@@ -1,0 +1,61 @@
+{
+  "base_m2_recipe_path": "configs/training/molmoact2_calvin_m2_representation.json",
+  "base_m2_recipe_sha256": "21d94ccab3ced19b24e274e9a308e3241580bd37f9883a0b0ec79ee2ef58d8ed",
+  "external_validation": {
+    "acceptance_policy": "base-m2-applicable-thresholds-without-reselection.v1",
+    "dataset_manifest_path": "evidence/calvin_dataset_audit/validation_source_manifest.json",
+    "dataset_manifest_sha256": "25158c0a368512d1d4b450c1e7c5b5c9dbdb7477fc9c4822e5dd092726999175",
+    "physical_sidecar_manifest_sha256": "333a2d795e848c7a7f2f42f8b5ffe5056fcd012f1be6156b9fc7c32ec5d1466e",
+    "physical_sidecar_name": "calvin_physical_supervision_all_source_validation_v3_depth_consistent",
+    "source_episode": [
+      553567,
+      555242
+    ],
+    "target_probe_path": "evidence/calvin_all_source_v3/validation_target_probe.json",
+    "target_probe_sha256": "8882e5c2eebcd406765262223f276fc8c3cab5406a856eac9b0d66ef79a868ab"
+  },
+  "gate": "M2_representation_source_coverage_root_cause",
+  "historical_comparison_scope": "composite-corrected-data-pipeline-readiness-not-single-variable-ablation.v1",
+  "neutral_task_contract": "official-processor-task-field-absent.v1",
+  "physical_sidecar_manifest_sha256": "feb38e378753cf3e72881e266b28317fc63c3cbbc4026cdde1c51d2699b7e3c4",
+  "physical_sidecar_name": "calvin_physical_supervision_all_source_training_v3_depth_consistent",
+  "schema": "picf-next.molmoact2-m2-source-coverage.v1",
+  "split": {
+    "guard_ranges": [
+      [
+        360282,
+        360372
+      ],
+      [
+        360772,
+        360862
+      ]
+    ],
+    "heldout_ranges": [
+      [
+        360862,
+        361253
+      ]
+    ],
+    "minimum_guard_frames": 90,
+    "source_episode": [
+      358482,
+      361253
+    ],
+    "strategy": "disjoint-contiguous-source-ranges-with-guard.v1",
+    "train_ranges": [
+      [
+        358482,
+        360282
+      ]
+    ],
+    "validation_ranges": [
+      [
+        360372,
+        360772
+      ]
+    ]
+  },
+  "target_probe_path": "evidence/calvin_all_source_v3/target_probe.json",
+  "target_probe_sha256": "3a419e49ff3b05c61f9e0e281ecdc8df37046a43ca59656737847bc5c07bacf8"
+}

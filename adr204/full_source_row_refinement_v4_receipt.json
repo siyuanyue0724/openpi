@@ -1,0 +1,16 @@
+{
+  "schema": "picf-next.adr204-source-freeze-receipt.v1",
+  "created_at": "2026-08-22T09:10:00+08:00",
+  "source": "/mnt/picf-next/adr204/source-freezes/full-source-row-refinement-v4",
+  "source_tree_schema": "picf-next.artifact-directory-tree.v1",
+  "source_tree_sha256": "a67357357dddc509f46135d4b950634aa2e98cba81a4f2c9414c19bbcacd6e3a",
+  "parent": "/mnt/picf-next/adr204/source-freezes/full-source-row-refinement-v3",
+  "semantic_delta": "Execute the complete frozen source query-patch refinement only at the final LingBot host output; retain the full LingBot depth, all modalities, final entity objective, tied projection, complete source stream, blocks 20-23, RoPE, final heads, data, seed, optimizer, and action objective.",
+  "focused_tests": {
+    "command": "pytest -q tests/videomt_exact tests/lingbot_native/test_object_query_spatial_relation.py tests/lingbot_native/test_task_independent_full_runner.py",
+    "passed": 197,
+    "warnings": 3
+  },
+  "preflight_failure": "The ADR-193 wrapper overwrote the explicit ADR-204 profile, so the fail-closed runner rejected empty intermediate supervision layers before model loading.",
+  "status": "FROZEN_REJECTED_PREFLIGHT"
+}

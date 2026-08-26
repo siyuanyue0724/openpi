@@ -1,0 +1,58 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "picf-next.public-native-vl-processor-approval.v1",
+  "additionalProperties": false,
+  "properties": {
+    "authenticity": {
+      "additionalProperties": false,
+      "properties": {
+        "status": {"const": "UNCONFIGURED_FAIL_CLOSED"}
+      },
+      "required": ["status"],
+      "type": "object"
+    },
+    "capture_report": {
+      "additionalProperties": false,
+      "properties": {
+        "artifact_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "file_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"}
+      },
+      "required": ["artifact_sha256", "file_sha256"],
+      "type": "object"
+    },
+    "decision": {"const": "APPROVE"},
+    "dependency_environment": {"type": "object"},
+    "production_evidence": {"type": "object"},
+    "production_evidence_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+    "review": {
+      "additionalProperties": false,
+      "properties": {
+        "rationale_file_sha256": {"pattern": "^[0-9a-f]{64}$", "type": "string"},
+        "rationale_size_bytes": {"minimum": 1, "type": "integer"},
+        "reviewed_at_utc": {"minLength": 1, "type": "string"},
+        "reviewer": {"minLength": 1, "type": "string"}
+      },
+      "required": [
+        "rationale_file_sha256",
+        "rationale_size_bytes",
+        "reviewed_at_utc",
+        "reviewer"
+      ],
+      "type": "object"
+    },
+    "schema": {"const": "picf-next.public-native-vl-processor-approval.v1"},
+    "source_contract": {"type": "object"}
+  },
+  "required": [
+    "authenticity",
+    "capture_report",
+    "decision",
+    "dependency_environment",
+    "production_evidence",
+    "production_evidence_sha256",
+    "review",
+    "schema",
+    "source_contract"
+  ],
+  "type": "object"
+}

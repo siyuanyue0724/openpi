@@ -1,0 +1,1 @@
+"""Vendored VidEoMT utility namespace."""

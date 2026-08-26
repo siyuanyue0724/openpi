@@ -1,0 +1,347 @@
+diff --git a/src/lerobot/policies/molmoact2/modeling_molmoact2.py b/src/lerobot/policies/molmoact2/modeling_molmoact2.py
+index 97bfef57..79039715 100644
+--- a/src/lerobot/policies/molmoact2/modeling_molmoact2.py
++++ b/src/lerobot/policies/molmoact2/modeling_molmoact2.py
+@@ -636,12 +636,28 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         self._rollout_index_for_task = -1
+         self.rtc_processor: RTCProcessor | None = None
+         self.action_tokenizer: Any | None = None
++        self.action_layer_adapter: torch.nn.Module | None = None
+         self._load_hf_model()
+         self._validate_inference_action_mode()
+         if self.config.enable_lora_vlm:
+             self._apply_lora_adapters()
+         self.init_rtc_processor()
+ 
++    def set_action_layer_adapter(self, adapter: torch.nn.Module | None) -> None:
++        """Register an explicit residual adapter on the continuous action stream.
++
++        The adapter is a child module so its parameters are visible to state
++        dicts, optimizers and distributed wrappers. The host stores no runtime
++        context; callers must pass an immutable context on every invocation.
++        """
++
++        if adapter is not None:
++            required = ("apply_training_layer", "forward_with_context")
++            missing = [name for name in required if not callable(getattr(adapter, name, None))]
++            if missing:
++                raise TypeError(f"MolmoAct2 action-layer adapter omits methods: {missing}")
++        self.action_layer_adapter = adapter
++
+     def _load_saved_policy_action_mode(self) -> str | None:
+         pretrained_path = getattr(self.config, "pretrained_path", None)
+         if pretrained_path is None:
+@@ -873,11 +889,14 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         vit_params: list[Tensor] = []
+         connector_params: list[Tensor] = []
+         action_expert_params: list[Tensor] = []
++        action_layer_adapter_params: list[Tensor] = []
+         vlm_params: list[Tensor] = []
+         for name, param in self.named_parameters():
+             if not param.requires_grad:
+                 continue
+-            if "action_expert" in name:
++            if name.startswith("action_layer_adapter."):
++                action_layer_adapter_params.append(param)
++            elif "action_expert" in name:
+                 action_expert_params.append(param)
+             elif any(part in name for part in ("image_pooling_2d", "image_projector")):
+                 connector_params.append(param)
+@@ -901,6 +920,13 @@ class MolmoAct2Policy(PreTrainedPolicy):
+             groups.append({"params": connector_params, "lr": connector_lr})
+         if action_expert_params:
+             groups.append({"params": action_expert_params, "lr": self.config.optimizer_action_expert_lr})
++        if action_layer_adapter_params:
++            groups.append(
++                {
++                    "params": action_layer_adapter_params,
++                    "lr": self.config.optimizer_action_expert_lr,
++                }
++            )
+         return groups
+ 
+     def _model_inputs(self, batch: dict[str, Tensor]) -> dict[str, Tensor]:
+@@ -1013,6 +1039,37 @@ class MolmoAct2Policy(PreTrainedPolicy):
+             end_token_id=getattr(self.model.config, "action_end_token_id", None),
+         )
+
++    @staticmethod
++    def _resolve_action_condition_input_ids(
++        *,
++        model_inputs: dict[str, Tensor],
++        action_condition_input_ids: Tensor | None,
++    ) -> Tensor | None:
++        model_input_ids = model_inputs.get("input_ids")
++        if action_condition_input_ids is None:
++            if model_input_ids is None and model_inputs.get("inputs_embeds") is not None:
++                raise ValueError(
++                    "precomputed MolmoAct2 inputs_embeds require action_condition_input_ids"
++                )
++            return model_input_ids
++
++        if action_condition_input_ids.ndim != 2 or action_condition_input_ids.dtype != torch.long:
++            raise ValueError("action_condition_input_ids must be one int64 batch-by-token tensor")
++        reference = model_input_ids
++        if reference is None:
++            reference = model_inputs.get("inputs_embeds")
++        if reference is None:
++            raise ValueError(
++                "action_condition_input_ids require input_ids or inputs_embeds model inputs"
++            )
++        if tuple(action_condition_input_ids.shape) != tuple(reference.shape[:2]):
++            raise ValueError("action_condition_input_ids must align with the model input sequence")
++        if action_condition_input_ids.device != reference.device:
++            raise ValueError("action_condition_input_ids must share the model input device")
++        if model_input_ids is not None and not torch.equal(action_condition_input_ids, model_input_ids):
++            raise ValueError("action_condition_input_ids conflict with model input_ids")
++        return action_condition_input_ids
++
+     @staticmethod
+     def _drop_trivial_attention_mask(model_inputs: dict[str, Tensor]) -> dict[str, Tensor]:
+         attention_mask = model_inputs.get("attention_mask")
+@@ -1295,6 +1352,8 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         timesteps: Tensor | None = None,
+         noise: Tensor | None = None,
+         reduction: str = "mean",
++        action_layer_context: Any | None = None,
++        action_condition_input_ids: Tensor | None = None,
+     ) -> tuple[Tensor, Tensor]:
+         if reduction not in {"mean", "none"}:
+             raise ValueError(f"Unsupported reduction={reduction!r}. Expected 'mean' or 'none'.")
+@@ -1328,8 +1387,12 @@ class MolmoAct2Policy(PreTrainedPolicy):
+                 f"Backbone batch size {hidden_states.shape[0]} does not match action batch size {batch_size}."
+             )
+
++        resolved_action_condition_input_ids = self._resolve_action_condition_input_ids(
++            model_inputs=model_inputs,
++            action_condition_input_ids=action_condition_input_ids,
++        )
+         encoder_attention_mask = self._encoder_attention_mask_for_action_expert(
+-            input_ids=model_inputs.get("input_ids"),
++            input_ids=resolved_action_condition_input_ids,
+             attention_mask=model_inputs.get("attention_mask"),
+         )
+         action_attention_mask = None
+@@ -1424,16 +1487,34 @@ class MolmoAct2Policy(PreTrainedPolicy):
+                 k_ctx = self._expand_mask(k_ctx, num_flow_timesteps)
+                 v_ctx = self._expand_mask(v_ctx, num_flow_timesteps)
+ 
+-            next_action_hidden = action_block(
+-                layer_action_hidden,
+-                conditioning,
+-                cross_kv=(k_ctx, v_ctx),
+-                self_attn_mask=self_mask,
+-                attn_mask=cross_mask,
+-                is_causal=action_expert.config.causal_attn,
+-                modulation=None,
+-                rope_cache=rope_cache,
+-            )
++            if action_layer_context is None:
++                next_action_hidden = action_block(
++                    layer_action_hidden,
++                    conditioning,
++                    cross_kv=(k_ctx, v_ctx),
++                    self_attn_mask=self_mask,
++                    attn_mask=cross_mask,
++                    is_causal=action_expert.config.causal_attn,
++                    modulation=None,
++                    rope_cache=rope_cache,
++                )
++            else:
++                if self.action_layer_adapter is None:
++                    raise RuntimeError(
++                        "action_layer_context requires a registered MolmoAct2 adapter"
++                    )
++                next_action_hidden = self.action_layer_adapter.apply_training_layer(
++                    layer_action_hidden,
++                    conditioning,
++                    layer_index=layer_idx,
++                    cross_kv=(k_ctx, v_ctx),
++                    self_attn_mask=self_mask,
++                    attn_mask=cross_mask,
++                    is_causal=action_expert.config.causal_attn,
++                    modulation=None,
++                    rope_cache=rope_cache,
++                    context=action_layer_context,
++                )
+             if valid_action is not None:
+                 next_action_hidden = next_action_hidden * valid_action
+             return next_hidden, next_action_hidden
+@@ -1804,9 +1885,15 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         inference_delay: int | None,
+         prev_chunk_left_over: Tensor | None,
+         execution_horizon: int | None,
++        action_layer_context: Any | None = None,
++        action_condition_input_ids: Tensor | None = None,
+     ) -> Tensor:
+         backbone = self._backbone()
+         action_expert = self._action_expert()
++        resolved_action_condition_input_ids = self._resolve_action_condition_input_ids(
++            model_inputs=model_inputs,
++            action_condition_input_ids=action_condition_input_ids,
++        )
+         outputs = backbone(
+             **model_inputs,
+             use_cache=True,
+@@ -1815,11 +1902,11 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         )
+         encoder_kv_states = backbone._extract_kv_states(outputs.past_key_values)
+         encoder_attention_mask = self._encoder_attention_mask_for_action_expert(
+-            input_ids=model_inputs.get("input_ids"),
++            input_ids=resolved_action_condition_input_ids,
+             attention_mask=model_inputs.get("attention_mask"),
+         )
+         depth_gate, depth_mask = backbone._depth_gate_from_condition(
+-            input_ids=model_inputs.get("input_ids"),
++            input_ids=resolved_action_condition_input_ids,
+             encoder_attention_mask=encoder_attention_mask,
+             layer_kv_states=encoder_kv_states,
+         )
+@@ -1835,12 +1922,13 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         source_tensor = encoder_kv_states[0][0]
+         batch_size = int(source_tensor.shape[0])
+         device = source_tensor.device
++        trajectory_dtype = action_expert.action_embed.weight.dtype
+         trajectory = torch.randn(
+             batch_size,
+             self._generation_action_horizon(),
+             int(backbone.config.max_action_dim),
+             device=device,
+-            dtype=torch.float32,
++            dtype=trajectory_dtype,
+             generator=generator,
+         )
+         if self.config.mask_action_dim_padding:
+@@ -1856,7 +1944,7 @@ class MolmoAct2Policy(PreTrainedPolicy):
+             dtype=trajectory.dtype,
+         )
+         flow_timesteps = [
+-            torch.full((batch_size,), idx / steps, device=device, dtype=trajectory.dtype)
++            torch.full((batch_size,), idx / steps, device=device, dtype=torch.float32)
+             for idx in range(steps)
+         ]
+         modulation_cache = action_expert.get_or_prepare_modulation_cache(
+@@ -1870,12 +1958,25 @@ class MolmoAct2Policy(PreTrainedPolicy):
+             modulation = modulation_cache[idx]
+ 
+             def denoise_step(input_trajectory: Tensor, step_modulation=modulation) -> Tensor:
+-                velocity = action_expert.forward_with_context(
+-                    input_trajectory,
+-                    step_modulation.conditioning,
+-                    context=action_context,
+-                    modulation=step_modulation,
+-                )
++                if action_layer_context is None:
++                    velocity = action_expert.forward_with_context(
++                        input_trajectory,
++                        step_modulation.conditioning,
++                        context=action_context,
++                        modulation=step_modulation,
++                    )
++                else:
++                    if self.action_layer_adapter is None:
++                        raise RuntimeError(
++                            "action_layer_context requires a registered MolmoAct2 adapter"
++                        )
++                    velocity = self.action_layer_adapter.forward_with_context(
++                        input_trajectory,
++                        step_modulation.conditioning,
++                        context=action_context,
++                        picf_context=action_layer_context,
++                        modulation=step_modulation,
++                    )
+                 if mask_enabled:
+                     velocity = self._mask_action_dim_tensor(velocity, action_dim_is_pad)
+                 return velocity
+@@ -1912,6 +2013,11 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         self,
+         batch: dict[str, Tensor],
+         reduction: str = "mean",
++        *,
++        action_layer_context: Any | None = None,
++        flow_timesteps: Tensor | None = None,
++        flow_noise: Tensor | None = None,
++        action_condition_input_ids: Tensor | None = None,
+     ) -> tuple[Tensor, dict[str, Any]]:
+         if reduction not in {"mean", "none"}:
+             raise ValueError(f"Unsupported reduction={reduction!r}. Expected 'mean' or 'none'.")
+@@ -1920,6 +2026,12 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         metrics: dict[str, Any] = {}
+
+         if self.config.action_mode == "discrete":
++            if flow_timesteps is not None or flow_noise is not None:
++                raise ValueError("explicit flow randomness requires continuous action training")
++            if action_condition_input_ids is not None:
++                raise ValueError(
++                    "action_condition_input_ids are only defined for continuous action training"
++                )
+             outputs = self._backbone()(
+                 **model_inputs,
+                 use_cache=False,
+@@ -1941,7 +2053,11 @@ class MolmoAct2Policy(PreTrainedPolicy):
+             flow_loss, _ = self._compute_flow_matching_loss_joint_per_layer(
+                 batch=batch,
+                 model_inputs=model_inputs,
++                timesteps=flow_timesteps,
++                noise=flow_noise,
+                 reduction=reduction,
++                action_layer_context=action_layer_context,
++                action_condition_input_ids=action_condition_input_ids,
+             )
+             losses.append(flow_loss)
+             metrics["action_flow_loss"] = flow_loss.detach().float().mean().item()
+@@ -1950,7 +2066,11 @@ class MolmoAct2Policy(PreTrainedPolicy):
+             flow_loss, hidden_states = self._compute_flow_matching_loss_joint_per_layer(
+                 batch=batch,
+                 model_inputs=model_inputs,
++                timesteps=flow_timesteps,
++                noise=flow_noise,
+                 reduction=reduction,
++                action_layer_context=action_layer_context,
++                action_condition_input_ids=action_condition_input_ids,
+             )
+             outputs = types.SimpleNamespace(last_hidden_state=hidden_states)
+             discrete_ce_loss, discrete_z_loss = self._discrete_loss_from_backbone_outputs(
+@@ -1981,6 +2101,8 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         inference_action_mode = self._resolve_inference_action_mode(kwargs.get("inference_action_mode"))
+         num_steps = kwargs.get("num_steps", getattr(self.config, "num_inference_steps", None))
+         generator = kwargs.get("generator")
++        action_layer_context = kwargs.get("action_layer_context")
++        action_condition_input_ids = kwargs.get("action_condition_input_ids")
+         model_dtype = _torch_dtype(self.config.model_dtype)
+         device = next(self.parameters()).device
+         batch_size = int(next(iter(model_inputs.values())).shape[0])
+@@ -1998,13 +2120,23 @@ class MolmoAct2Policy(PreTrainedPolicy):
+         )
+         with autocast_context:
+             if inference_action_mode == "discrete":
++                if action_layer_context is not None or action_condition_input_ids is not None:
++                    raise ValueError(
++                        "PICF action-layer context and condition IDs are only defined for "
++                        "continuous inference"
++                    )
+                 if self._rtc_enabled():
+                     raise ValueError("RTC is only supported for continuous MolmoAct2 inference.")
+                 actions = self._generate_discrete_actions_from_inputs(
+                     model_inputs=model_inputs,
+                     action_dim=action_dim,
+                 )
+-            elif self._rtc_enabled():
++            elif (
++                self._rtc_enabled()
++                or action_layer_context is not None
++                or action_condition_input_ids is not None
++                or "inputs_embeds" in model_inputs
++            ):
+                 actions = self._generate_actions_from_inputs_with_rtc(
+                     model_inputs=model_inputs,
+                     action_dim_is_pad=batch.get("action_dim_is_pad"),
+@@ -2013,6 +2145,8 @@ class MolmoAct2Policy(PreTrainedPolicy):
+                     inference_delay=kwargs.get("inference_delay"),
+                     prev_chunk_left_over=kwargs.get("prev_chunk_left_over"),
+                     execution_horizon=kwargs.get("execution_horizon"),
++                    action_layer_context=action_layer_context,
++                    action_condition_input_ids=action_condition_input_ids,
+                 )
+             else:
+                 actions = self._backbone().generate_actions_from_inputs(

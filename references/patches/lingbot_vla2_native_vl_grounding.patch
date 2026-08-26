@@ -1,0 +1,38 @@
+diff --git a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+index 5fa5957..21091c1 100644
+--- a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
++++ b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+@@ -1466,6 +1466,33 @@ class LingbotVlaV2Policy(PreTrainedModel):
+             picf_native_context=picf_native_context,
+         )
+ 
++    def picf_native_vl_forward(
++        self,
++        *,
++        input_ids,
++        attention_mask,
++        labels,
++        pixel_values,
++        image_grid_thw,
++        position_ids=None,
++    ):
++        """Run Qwen's native supervised vision-language path at the FSDP root."""
++        if not getattr(self.config, "use_lm_head", False):
++            raise RuntimeError("native vision-language loss requires the tied Qwen LM head")
++        output = self.model.qwenvl_with_expert.qwenvl(
++            input_ids=input_ids,
++            attention_mask=attention_mask,
++            position_ids=position_ids,
++            labels=labels,
++            pixel_values=pixel_values,
++            image_grid_thw=image_grid_thw,
++            use_cache=False,
++            return_dict=True,
++        )
++        if output.loss is None:
++            raise RuntimeError("Qwen native vision-language forward returned no loss")
++        return output.loss
++
+     def forward(
+         self,
+         images,

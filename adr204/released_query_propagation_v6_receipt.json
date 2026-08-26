@@ -1,0 +1,61 @@
+{
+  "schema": "picf-next.adr205-source-freeze-receipt.v1",
+  "created_at": "2026-08-22T09:51:00+08:00",
+  "source": "/mnt/picf-next/adr204/source-freezes/released-query-propagation-v6",
+  "source_tree_schema": "picf-next.artifact-directory-tree.v1",
+  "source_tree_sha256": "95ba158854de4ffea7f9ac6d6a9af4df2d1df8522917b14808bb36770c4f9c28",
+  "parent": "/mnt/picf-next/adr204/source-freezes/full-source-row-refinement-v5",
+  "semantic_delta": "Replace the first 16 source queries with frozen released query_updater(tied_projected_posterior_row) plus the corresponding learned source query prior; preserve the released token count, remaining 184 source queries, prefixes, patches, RoPE, blocks 20-23, heads, data, losses, optimizer, and seed.",
+  "focused_tests": {
+    "command": "pytest -q tests/videomt_exact tests/lingbot_native/test_object_query_spatial_relation.py tests/lingbot_native/test_task_independent_full_runner.py",
+    "passed": 201,
+    "warnings": 3
+  },
+  "step20_gate": {
+    "run": "/mnt/picf-next/adr204/runs/released-query-propagation-v6-budget30k-20260822T0950",
+    "maximum_peak_reserved_gib": 38.816,
+    "heldout_action_loss": 0.4006204044117647,
+    "validation_action_loss": 0.3801700367647059,
+    "heldout_support_soft_iou": 0.031077340317825997,
+    "heldout_ownership_soft_iou": 0.020466336248340322,
+    "heldout_ownership_target_recall": 0.05083126703819891,
+    "heldout_object_ownership_target_recall": 0.07117836544399753,
+    "heldout_context_region_probability": 0.5871399601592737,
+    "heldout_pairwise_support_overlap": 0.15083351624480873,
+    "heldout_cardinality_absolute_error_at_0_5": 9.338235294117647,
+    "decision": "CONDITIONAL_PASS_TO_STEP50_ONLY"
+  },
+  "step50_training_visual_gate": {
+    "matched_sample_keys_equal_to_adr193": true,
+    "matched_entity_count": 17,
+    "mean_soft_iou": 0.12764605882352942,
+    "median_soft_iou": 0.1149814,
+    "maximum_soft_iou": 0.2996514,
+    "matched_existence_mean": 0.49772134444444444,
+    "unmatched_existence_mean": 0.39341517857142855,
+    "existence_margin": 0.10430616587301589,
+    "adr193_step50_mean_soft_iou": 0.02573605294117647,
+    "adr193_step50_median_soft_iou": 0.0080159,
+    "decision": "PASS_TO_FIXED_STEP100_ONLY"
+  },
+  "step100_fixed_gate": {
+    "heldout_action_loss": 0.3281465418198529,
+    "validation_action_loss": 0.31746897977941174,
+    "heldout_support_soft_iou": 0.08254818894590323,
+    "heldout_ownership_soft_iou": 0.07985076442317394,
+    "heldout_ownership_target_recall": 0.11207435292514466,
+    "heldout_object_ownership_target_recall": 0.1599535907563918,
+    "heldout_context_region_probability": 0.9348448278272853,
+    "heldout_pairwise_support_overlap": 0.033693945295582624,
+    "heldout_cardinality_absolute_error_at_0_5": 1.338235294117647,
+    "heldout_lt_2_percent_ownership_soft_iou": 0.05532934390627408,
+    "heldout_lt_2_percent_ownership_target_recall": 0.08768647407574964,
+    "same_sample_mean_soft_iou": 0.21670125882352942,
+    "same_sample_median_soft_iou": 0.2094895,
+    "same_sample_existence_margin": 0.7294730384313726,
+    "adr193_step100_mean_soft_iou": 0.0852115294117647,
+    "adr193_step100_median_soft_iou": 0.0222922,
+    "decision": "PASS_TO_FIXED_STEP200_ONLY"
+  },
+  "status": "FROZEN_CONDITIONAL_STEP100"
+}

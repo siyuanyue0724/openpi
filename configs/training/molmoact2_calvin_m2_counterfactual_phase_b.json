@@ -1,0 +1,28 @@
+{
+  "acceptance": {
+    "maximum_natural_count_mae_regression": 0.25,
+    "maximum_natural_replay_loss_regression_fraction": 0.1,
+    "maximum_removed_set_loss_regression_fraction": 0.0,
+    "maximum_removed_unmatched_existence": 0.25,
+    "minimum_distinct_identities": 2,
+    "minimum_factual_target_existence": 0.75,
+    "minimum_factual_target_soft_dice": 0.35,
+    "minimum_pairs": 8
+  },
+  "decision_rule": "occam-complete-set-v1",
+  "foundation_m2_recipe_path": "configs/training/molmoact2_calvin_m2_representation.json",
+  "foundation_m2_recipe_sha256": "21d94ccab3ced19b24e274e9a308e3241580bd37f9883a0b0ec79ee2ef58d8ed",
+  "gate": "M2_counterfactual_measurement",
+  "optimization": {
+    "gradient_clip_norm": 1.0,
+    "learning_rate": 0.0001,
+    "natural_count_per_step": 6,
+    "natural_replay_pool_size": 96,
+    "pair_count_per_step": 2,
+    "seed": 20260720,
+    "steps": 320,
+    "warmup_steps": 10,
+    "weight_decay": 0.0
+  },
+  "schema": "picf-next.molmoact2-m2-counterfactual-measurement.v2"
+}

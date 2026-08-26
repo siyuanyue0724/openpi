@@ -1,0 +1,16 @@
+diff --git a/src/hub/backbones.py b/src/hub/backbones.py
+index 9d98f9f..ac92f62 100644
+--- a/src/hub/backbones.py
++++ b/src/hub/backbones.py
+@@ -4,10 +4,7 @@
+ 
+ import torch
+ 
+-# VJEPA_BASE_URL = "https://dl.fbaipublicfiles.com/vjepa2"
+-
+-# for testing
+-VJEPA_BASE_URL = "http://localhost:8300"
++VJEPA_BASE_URL = "https://dl.fbaipublicfiles.com/vjepa2"
+ 
+ ARCH_NAME_MAP = {
+     # V-JEPA 2

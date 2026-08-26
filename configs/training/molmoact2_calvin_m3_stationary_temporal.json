@@ -1,0 +1,27 @@
+{
+  "schema": "picf-next.stationary-temporal-stage-b.v1",
+  "stage": "M3_stationary_temporal_calibration",
+  "execution_contract": "reset-replay-one-parameter-version.v3",
+  "source_coverage_recipe_path": "configs/training/molmoact2_calvin_m2_source_coverage.json",
+  "source_coverage_recipe_sha256": "940a7a8ff228445074169b2ecdcb5927e2484c9d3d799617635345ee75e298ea",
+  "clip": {
+    "prefix_lengths": [0, 8, 32, 128],
+    "train_length": 2,
+    "seed": 20260719
+  },
+  "optimizer": {
+    "optimizer_steps": 200,
+    "learning_rate": 0.0001,
+    "weight_decay": 0.0,
+    "betas": [0.9, 0.95],
+    "eps": 0.000001,
+    "gradient_clip_norm": 1.0,
+    "warmup_steps": 10,
+    "minimum_learning_rate": 0.000001,
+    "scheduler": "linear-warmup-cosine-decay.v1"
+  },
+  "distributed": {
+    "world_size": 2,
+    "per_rank_batch_size": 1
+  }
+}

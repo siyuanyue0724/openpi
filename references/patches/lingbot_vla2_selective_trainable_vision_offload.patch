@@ -1,0 +1,71 @@
+--- a/lingbotvla/distributed/torch_parallelize.py
++++ b/lingbotvla/distributed/torch_parallelize.py
+@@ -225,8 +225,19 @@
+                 "enable_frozen_vision_offload",
+                 False,
+             )
++            enable_trainable_vision_offload = kwargs.pop(
++                "enable_trainable_vision_offload",
++                False,
++            )
++            if enable_frozen_vision_offload and enable_trainable_vision_offload:
++                raise ValueError(
++                    "frozen and trainable selective vision offload are mutually exclusive"
++                )
++            enable_vision_offload = (
++                enable_frozen_vision_offload or enable_trainable_vision_offload
++            )
+             if enable_fsdp_offload and (
+-                enable_shared_embedding_offload or enable_frozen_vision_offload
++                enable_shared_embedding_offload or enable_vision_offload
+             ):
+                 raise ValueError(
+                     "full-model and selective FSDP2 CPU offload are mutually exclusive"
+@@ -386,8 +397,8 @@
+                         f"FSDP2 sharding Qwen-VL {kind} blocks, n_layers={len(vlm_layers[kind])}"
+                     )
+                     kind_fsdp_kwargs = mp_fsdp_kwargs
+-                    if kind == "vision" and enable_frozen_vision_offload:
+-                        if any(
++                    if kind == "vision" and enable_vision_offload:
++                        if enable_frozen_vision_offload and any(
+                             parameter.requires_grad
+                             for _path, layer in vlm_layers[kind]
+                             for parameter in layer.parameters()
+@@ -411,9 +422,9 @@
+                             )
+                         paths.append(full_path)
+                     topology[kind] = tuple(paths)
+-                    if kind == "vision" and enable_frozen_vision_offload:
++                    if kind == "vision" and enable_vision_offload:
+                         visual_root = vlm.model.visual
+-                        if any(
++                        if enable_frozen_vision_offload and any(
+                             parameter.requires_grad
+                             for parameter in visual_root.parameters()
+                         ):
+@@ -423,8 +434,14 @@
+                         visual_root_path = (
+                             "model.qwenvl_with_expert.qwenvl.model.visual"
+                         )
++                        vision_offload_mode = (
++                            "frozen"
++                            if enable_frozen_vision_offload
++                            else "trainable"
++                        )
+                         logger.info_rank0(
+-                            "Apply parent FSDP2 CPU offload to the complete frozen "
++                            "Apply parent FSDP2 CPU offload to the complete "
++                            f"{vision_offload_mode} "
+                             f"visual root {visual_root_path}."
+                         )
+                         fully_shard(visual_root, **kind_fsdp_kwargs)
+@@ -432,7 +449,7 @@
+                             visual_root, "unshard"
+                         ):
+                             raise RuntimeError(
+-                                "FSDP2 did not augment the complete frozen visual root."
++                                "FSDP2 did not augment the complete visual root."
+                             )
+                         selective_cpu_modules.append(visual_root_path)
+                 model._lingbot_vlm_fsdp2_topology = topology

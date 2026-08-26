@@ -1,0 +1,83 @@
+diff --git a/lingbotvla/distributed/torch_parallelize.py b/lingbotvla/distributed/torch_parallelize.py
+--- a/lingbotvla/distributed/torch_parallelize.py
++++ b/lingbotvla/distributed/torch_parallelize.py
+@@ -221,9 +221,15 @@ def build_parallelize_model(
+                 "enable_shared_embedding_offload",
+                 False,
+             )
+-            if enable_fsdp_offload and enable_shared_embedding_offload:
++            enable_frozen_vision_offload = kwargs.pop(
++                "enable_frozen_vision_offload",
++                False,
++            )
++            if enable_fsdp_offload and (
++                enable_shared_embedding_offload or enable_frozen_vision_offload
++            ):
+                 raise ValueError(
+-                    "full-model and shared-embedding FSDP2 CPU offload are mutually exclusive"
++                    "full-model and selective FSDP2 CPU offload are mutually exclusive"
+                 )
+             if enable_fsdp_offload:
+                 if "offload_policy" in user_fsdp_kwargs:
+@@ -369,6 +375,7 @@ def build_parallelize_model(
+                     logger.debug(f"Sharding layer {i} ({layer.__class__.__name__})")
+                     fully_shard(layer, **module_local_fsdp_kwargs(layer, fsdp_kwargs))
+             
++            selective_cpu_modules = []
+             if vlm_fsdp:
+                 vlm = model.model.qwenvl_with_expert.qwenvl
+                 vlm_layers = _collect_vlm_fsdp_layers(vlm)
+@@ -378,21 +385,36 @@ def build_parallelize_model(
+                     logger.info_rank0(
+                         f"FSDP2 sharding Qwen-VL {kind} blocks, n_layers={len(vlm_layers[kind])}"
+                     )
++                    kind_fsdp_kwargs = mp_fsdp_kwargs
++                    if kind == "vision" and enable_frozen_vision_offload:
++                        if any(
++                            parameter.requires_grad
++                            for _path, layer in vlm_layers[kind]
++                            for parameter in layer.parameters()
++                        ):
++                            raise ValueError(
++                                "selective vision offload requires every vision block to be frozen"
++                            )
++                        kind_fsdp_kwargs = dict(mp_fsdp_kwargs)
++                        kind_fsdp_kwargs["offload_policy"] = CPUOffloadPolicy(
++                            pin_memory=False
++                        )
+                     for path, layer in vlm_layers[kind]:
+                         logger.info_rank0(
+                             f"Apply FSDP2 to {path} ({layer.__class__.__name__})."
+                         )
+                         full_path = f"model.qwenvl_with_expert.qwenvl.{path}"
+-                        fully_shard(layer, **mp_fsdp_kwargs)
++                        fully_shard(layer, **kind_fsdp_kwargs)
+                         if not hasattr(layer, "reshard") or not hasattr(layer, "unshard"):
+                             raise RuntimeError(
+                                 f"FSDP2 did not augment Qwen-VL {kind} block {path}."
+                             )
+                         paths.append(full_path)
+                     topology[kind] = tuple(paths)
++                    if kind == "vision" and enable_frozen_vision_offload:
++                        selective_cpu_modules.extend(paths)
+                 model._lingbot_vlm_fsdp2_topology = topology
+ 
+-            selective_cpu_modules = ()
+             if enable_shared_embedding_offload:
+                 if not vlm_fsdp:
+                     raise ValueError(
+@@ -416,11 +438,11 @@ def build_parallelize_model(
+                     raise RuntimeError(
+                         "FSDP2 did not augment the shared language embedding."
+                     )
+-                selective_cpu_modules = (
++                selective_cpu_modules.append(
+                     "model.qwenvl_with_expert.qwenvl."
+-                    "model.language_model.embed_tokens",
++                    "model.language_model.embed_tokens"
+                 )
+-            model._lingbot_fsdp2_selective_cpu_modules = selective_cpu_modules
++            model._lingbot_fsdp2_selective_cpu_modules = tuple(selective_cpu_modules)
+ 
+             root_fsdp_kwargs = dict(mp_fsdp_kwargs)
+             root_fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(

@@ -1,0 +1,32 @@
+{
+  "acceptance": {
+    "maximum_representation_metric_absolute_drift": 1e-06,
+    "minimum_aligned_control_heldout_spearman_margin": 0.15,
+    "minimum_uncertainty_error_spearman": 0.0
+  },
+  "gate": "M2_frozen_mean_variance_diagnostic",
+  "optimization": {
+    "batch_size": 4,
+    "final_learning_rate_multiplier": 0.1,
+    "gradient_clip_norm": 1.0,
+    "learning_rate": 0.0001,
+    "passes": 1,
+    "seed": 20260716,
+    "validation_interval": 50,
+    "warmup_steps": 10,
+    "weight_decay": 0.0
+  },
+  "protocol": {
+    "checkpoint_selection": "fixed-final-step-no-reselection",
+    "control": "same-inputs-deterministic-deranged-targets",
+    "initialization": "reset-both-variance-heads-to-declared-initial-variance",
+    "mean_and_representation": "frozen-exactly",
+    "training_data_exposure": "one-complete-deterministic-pass",
+    "updated_parameter_prefixes": [
+      "discovery.variance_head."
+    ]
+  },
+  "schema": "picf-next.molmoact2-m2-frozen-mean-variance-probe-config.v1",
+  "source_coverage_config_path": "configs/training/molmoact2_calvin_m2_source_coverage.json",
+  "source_coverage_config_sha256": "16cf6bcc652d172d039e332c8cb413e58beb65871c15f65bf3b2f5c78caaab8b"
+}

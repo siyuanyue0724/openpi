@@ -1,0 +1,321 @@
+{
+  "counts": {
+    "import_root_only": 33,
+    "picf_adapter_or_falsification_harness": 9
+  },
+  "picf_files": [
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "adr208/build_arm_b_source_freeze.sh",
+      "sha256": "1833c2a7b042185798b7b2b7d7602891bdff707731f8029718dadf2973e2d40e"
+    },
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "adr208/fetch_vjepa2_ac_checkpoint.sh",
+      "sha256": "542a248be636911c0714c401c34b09f5819fe4c6098b4b284b5c1cf795c38164"
+    },
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "adr208/restore_arm_b_runtime.sh",
+      "sha256": "53cb855d638ec5374d128036baec39358baa6f9407237d44d7cf3cbdbe2e1e75"
+    },
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "adr208/run_vjepa2_ac_calvin_gate.sh",
+      "sha256": "29c2b93ec0674a43279b0c9ea94b246e2673d32a729f7d18a401e68374524558"
+    },
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "adr208/run_vjepa2_ac_calvin_gate_4gpu.sh",
+      "sha256": "bef2223676db11542f2430c1f6eae450d8375164a044939f14e00a0ab93afa79"
+    },
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "src/picf_next/data/calvin_vjepa2_ac.py",
+      "sha256": "b174e1818a15d56321dd1c6bc41025183835c79972ac1fb8b525b0e0b09f4309"
+    },
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "src/picf_next/encoders/vjepa2_ac.py",
+      "sha256": "115769b56efa218509ce72534c5b28a9d46ae5e831184702c73c36713791af54"
+    },
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "tools/aggregate_vjepa2_ac_shards.py",
+      "sha256": "904d59b3ab9428fe08cb651ca630bb596814eda5b4dfd294aa5d50daa93bc419"
+    },
+    {
+      "classification": "picf_adapter_or_falsification_harness",
+      "path": "tools/probe_calvin_vjepa2_ac.py",
+      "sha256": "820fcbe601e6b1474e61c39eeaa101fc99976390809b6520ce9990752226ebae"
+    }
+  ],
+  "schema": "picf-next.adr208-arm-b-file-classification/v1",
+  "source_commit": "204698b45b3712590f06245fbfba32d3be539812",
+  "transplanted_files": [
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/data_manager.py",
+      "deployed_sha256": "41ddcf0cd628c5ed1084389317087cd2e6573e833b529067bdd615827fa9412e",
+      "semantic_restore_sha256": "6849784a95abaf4d18292460e695a559de514364078d6143c0fee9c4590a7172",
+      "upstream_path": "src/datasets/data_manager.py",
+      "upstream_sha256": "6849784a95abaf4d18292460e695a559de514364078d6143c0fee9c4590a7172"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/imagenet1k.py",
+      "deployed_sha256": "d040f7a7740cfdb7625c2426688b3bf39260395b670d2ddfd29544b9c65cbd80",
+      "semantic_restore_sha256": "d040f7a7740cfdb7625c2426688b3bf39260395b670d2ddfd29544b9c65cbd80",
+      "upstream_path": "src/datasets/imagenet1k.py",
+      "upstream_sha256": "d040f7a7740cfdb7625c2426688b3bf39260395b670d2ddfd29544b9c65cbd80"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/dataloader.py",
+      "deployed_sha256": "69b3880cb0d76d3736040201d9d2a83b332f8d45ec231760838ea0c169c6bb0c",
+      "semantic_restore_sha256": "c1740e7267378192525f212d56774e44cd58fe5df39dc1b86fadac046869358e",
+      "upstream_path": "src/datasets/utils/dataloader.py",
+      "upstream_sha256": "c1740e7267378192525f212d56774e44cd58fe5df39dc1b86fadac046869358e"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/utils.py",
+      "deployed_sha256": "2f29ba42d486267fa3fcad610d670ea2bf6f806fa0d4d2dabf3a5745069358b9",
+      "semantic_restore_sha256": "8f41409489900d7dd9f2342f80d671a7f6f363295f02feaa21c66f06bfe2e0b2",
+      "upstream_path": "src/datasets/utils/utils.py",
+      "upstream_sha256": "8f41409489900d7dd9f2342f80d671a7f6f363295f02feaa21c66f06bfe2e0b2"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/video/functional.py",
+      "deployed_sha256": "b7e7726cb784bc7e2a7614013258d9f90182259c9ba60945b5a3fead14781fad",
+      "semantic_restore_sha256": "b7e7726cb784bc7e2a7614013258d9f90182259c9ba60945b5a3fead14781fad",
+      "upstream_path": "src/datasets/utils/video/functional.py",
+      "upstream_sha256": "b7e7726cb784bc7e2a7614013258d9f90182259c9ba60945b5a3fead14781fad"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/video/randaugment.py",
+      "deployed_sha256": "b0914ae5823aa6ced7b594a3156d2e2ee9a906ebf950b40d24c1a96f5da2acbd",
+      "semantic_restore_sha256": "b0914ae5823aa6ced7b594a3156d2e2ee9a906ebf950b40d24c1a96f5da2acbd",
+      "upstream_path": "src/datasets/utils/video/randaugment.py",
+      "upstream_sha256": "b0914ae5823aa6ced7b594a3156d2e2ee9a906ebf950b40d24c1a96f5da2acbd"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/video/randerase.py",
+      "deployed_sha256": "81be3544ef18564e4c086daad9f596a1b6312bdd8eae15a0157e551eb08f3ab6",
+      "semantic_restore_sha256": "81be3544ef18564e4c086daad9f596a1b6312bdd8eae15a0157e551eb08f3ab6",
+      "upstream_path": "src/datasets/utils/video/randerase.py",
+      "upstream_sha256": "81be3544ef18564e4c086daad9f596a1b6312bdd8eae15a0157e551eb08f3ab6"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/video/transforms.py",
+      "deployed_sha256": "2a05be02a3932b4e843ac2c358e1c049b5de94482723cfa30f63f396f6935c32",
+      "semantic_restore_sha256": "e175b52ce1a23a14b647208435e7524692dd87bbdb5334ee444fd6d1b9a50d64",
+      "upstream_path": "src/datasets/utils/video/transforms.py",
+      "upstream_sha256": "e175b52ce1a23a14b647208435e7524692dd87bbdb5334ee444fd6d1b9a50d64"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/video/transforms_builder.py",
+      "deployed_sha256": "7727457ef1ad299adb7acadd38c161eb35811f322a77a791cf740bc7223cb044",
+      "semantic_restore_sha256": "e73c2f33045ae502a85177819218cfbc1cabf037e15c6dfa5e70be5b9e12c4ba",
+      "upstream_path": "src/datasets/utils/video/transforms_builder.py",
+      "upstream_sha256": "e73c2f33045ae502a85177819218cfbc1cabf037e15c6dfa5e70be5b9e12c4ba"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/video/volume_transforms.py",
+      "deployed_sha256": "2ac8efe2e91ed1d46436e2b0de43e181d7662f0b0d8bf7eebb4d044bdfe5f8c8",
+      "semantic_restore_sha256": "2ac8efe2e91ed1d46436e2b0de43e181d7662f0b0d8bf7eebb4d044bdfe5f8c8",
+      "upstream_path": "src/datasets/utils/video/volume_transforms.py",
+      "upstream_sha256": "2ac8efe2e91ed1d46436e2b0de43e181d7662f0b0d8bf7eebb4d044bdfe5f8c8"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/weighted_sampler.py",
+      "deployed_sha256": "a3ebd39ea3c342dc078fe7b6e1e21d2baf656e41df1d8fa7d0021140edf4aed5",
+      "semantic_restore_sha256": "8e528ed8f1fa431b37982f9d618c7f887592ad8129de98e745222c4c84713abd",
+      "upstream_path": "src/datasets/utils/weighted_sampler.py",
+      "upstream_sha256": "8e528ed8f1fa431b37982f9d618c7f887592ad8129de98e745222c4c84713abd"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/utils/worker_init_fn.py",
+      "deployed_sha256": "d94704c3be71ad3119c92a914f1757b218939f2737be25cb420c95aec5e548dd",
+      "semantic_restore_sha256": "73205faa33d0fa0b8b8e59ac7f1d79a234346ed13b3100ee0df0a550d4d780a2",
+      "upstream_path": "src/datasets/utils/worker_init_fn.py",
+      "upstream_sha256": "73205faa33d0fa0b8b8e59ac7f1d79a234346ed13b3100ee0df0a550d4d780a2"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/datasets/video_dataset.py",
+      "deployed_sha256": "76af9cc9743e78ae1438dfd8f2eeb7f2f43946889097d04df4081c88052da513",
+      "semantic_restore_sha256": "44cee1d4d7a643acb9f26402dcec961f3193240489bb1d2ee89e00515630af4b",
+      "upstream_path": "src/datasets/video_dataset.py",
+      "upstream_sha256": "44cee1d4d7a643acb9f26402dcec961f3193240489bb1d2ee89e00515630af4b"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/hub/__init__.py",
+      "deployed_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "semantic_restore_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "upstream_path": "src/hub/__init__.py",
+      "upstream_sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/hub/backbones.py",
+      "deployed_sha256": "391cdde1e9a1da47cb8094bbea5fbbe8acac0135b27e82f1a6ab19c0b39cc692",
+      "semantic_restore_sha256": "391cdde1e9a1da47cb8094bbea5fbbe8acac0135b27e82f1a6ab19c0b39cc692",
+      "upstream_path": "src/hub/backbones.py",
+      "upstream_sha256": "391cdde1e9a1da47cb8094bbea5fbbe8acac0135b27e82f1a6ab19c0b39cc692"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/masks/default.py",
+      "deployed_sha256": "5329acaf6eb8f72a0b2d285944824bc4d61c24598eb6c996cf3a5a62f3d243f9",
+      "semantic_restore_sha256": "5329acaf6eb8f72a0b2d285944824bc4d61c24598eb6c996cf3a5a62f3d243f9",
+      "upstream_path": "src/masks/default.py",
+      "upstream_sha256": "5329acaf6eb8f72a0b2d285944824bc4d61c24598eb6c996cf3a5a62f3d243f9"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/masks/multiseq_multiblock3d.py",
+      "deployed_sha256": "7ef7cf95b0bee9940ac7654aeb3535278bbafdd6d93b643f4142fd19769456d9",
+      "semantic_restore_sha256": "7ef7cf95b0bee9940ac7654aeb3535278bbafdd6d93b643f4142fd19769456d9",
+      "upstream_path": "src/masks/multiseq_multiblock3d.py",
+      "upstream_sha256": "7ef7cf95b0bee9940ac7654aeb3535278bbafdd6d93b643f4142fd19769456d9"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/masks/utils.py",
+      "deployed_sha256": "833f111a0fa5ffdbd3a6412e2dace2517c3c178f49c14f8bb631d9f6a070dfd0",
+      "semantic_restore_sha256": "833f111a0fa5ffdbd3a6412e2dace2517c3c178f49c14f8bb631d9f6a070dfd0",
+      "upstream_path": "src/masks/utils.py",
+      "upstream_sha256": "833f111a0fa5ffdbd3a6412e2dace2517c3c178f49c14f8bb631d9f6a070dfd0"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/models/ac_predictor.py",
+      "deployed_sha256": "3c6fd3da15ce018b67f60479c8f9941b93f3d0846caab296237a9ed915424f82",
+      "semantic_restore_sha256": "5a520ad92b3f78b231aa153a5bbd9f800f880024974109a04d19aed6a0900643",
+      "upstream_path": "src/models/ac_predictor.py",
+      "upstream_sha256": "5a520ad92b3f78b231aa153a5bbd9f800f880024974109a04d19aed6a0900643"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/models/attentive_pooler.py",
+      "deployed_sha256": "83e60662479b60af3cf620f441a6db4f7d42f65b2de6442eee23f77805cc4211",
+      "semantic_restore_sha256": "9be7047d6bfce50575956a57e36d87a37bf63ae84ec92a9ba8649bf1ab7d5feb",
+      "upstream_path": "src/models/attentive_pooler.py",
+      "upstream_sha256": "9be7047d6bfce50575956a57e36d87a37bf63ae84ec92a9ba8649bf1ab7d5feb"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/models/predictor.py",
+      "deployed_sha256": "7000106be3d110c7d83a8c1f5cfe0aee3c605e554deb1bf0ff7b6b0618d664f2",
+      "semantic_restore_sha256": "3d8481bf2544b85ed92b3feb418e3b6d85ca1f81034c931b8c860f2d3d9aac2b",
+      "upstream_path": "src/models/predictor.py",
+      "upstream_sha256": "3d8481bf2544b85ed92b3feb418e3b6d85ca1f81034c931b8c860f2d3d9aac2b"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/models/utils/modules.py",
+      "deployed_sha256": "b93f6c7e0747deb216419c000c2878f11a9189024a9adeacfd437e172396dff0",
+      "semantic_restore_sha256": "b93f6c7e0747deb216419c000c2878f11a9189024a9adeacfd437e172396dff0",
+      "upstream_path": "src/models/utils/modules.py",
+      "upstream_sha256": "b93f6c7e0747deb216419c000c2878f11a9189024a9adeacfd437e172396dff0"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/models/utils/patch_embed.py",
+      "deployed_sha256": "1823c40b34410e70eb313360e21678e18a0ee5465b5d47de9f3d967c074f5a9d",
+      "semantic_restore_sha256": "1823c40b34410e70eb313360e21678e18a0ee5465b5d47de9f3d967c074f5a9d",
+      "upstream_path": "src/models/utils/patch_embed.py",
+      "upstream_sha256": "1823c40b34410e70eb313360e21678e18a0ee5465b5d47de9f3d967c074f5a9d"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/models/utils/pos_embs.py",
+      "deployed_sha256": "e6d3b3863ade47b3734a3b443f1bcc93eab02e39bf596ea199517f68ccab443e",
+      "semantic_restore_sha256": "e6d3b3863ade47b3734a3b443f1bcc93eab02e39bf596ea199517f68ccab443e",
+      "upstream_path": "src/models/utils/pos_embs.py",
+      "upstream_sha256": "e6d3b3863ade47b3734a3b443f1bcc93eab02e39bf596ea199517f68ccab443e"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/models/vision_transformer.py",
+      "deployed_sha256": "895f3039a04ca5605e873db09bef6399f42d7d8559ade6454e9194a7a1f3c114",
+      "semantic_restore_sha256": "9d4fd4e3603311803c105cc5114e2bc12ff28bc11870637dd3969511d9dead74",
+      "upstream_path": "src/models/vision_transformer.py",
+      "upstream_sha256": "9d4fd4e3603311803c105cc5114e2bc12ff28bc11870637dd3969511d9dead74"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/utils/checkpoint_loader.py",
+      "deployed_sha256": "795019a384d0f21343c769a6bd86b19f65a3582b77fdc22321c4b96303d42a72",
+      "semantic_restore_sha256": "8ae1c92e095dabed897694101e35393ed5b20da2b51c5bebae3dceda427472ce",
+      "upstream_path": "src/utils/checkpoint_loader.py",
+      "upstream_sha256": "8ae1c92e095dabed897694101e35393ed5b20da2b51c5bebae3dceda427472ce"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/utils/distributed.py",
+      "deployed_sha256": "85b6260102513caf979ca18dd3c65c99c76cae5a8f4ce884babb77b93d4a0d27",
+      "semantic_restore_sha256": "52342428ee4eafaf685471afd91912462057bed59267faec42cf7640d8c08861",
+      "upstream_path": "src/utils/distributed.py",
+      "upstream_sha256": "52342428ee4eafaf685471afd91912462057bed59267faec42cf7640d8c08861"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/utils/logging.py",
+      "deployed_sha256": "0bf5298ecce7e59d90fcb3e4cc68eba988e3e8af4d4a08c91e94bdcd29f76b2e",
+      "semantic_restore_sha256": "0bf5298ecce7e59d90fcb3e4cc68eba988e3e8af4d4a08c91e94bdcd29f76b2e",
+      "upstream_path": "src/utils/logging.py",
+      "upstream_sha256": "0bf5298ecce7e59d90fcb3e4cc68eba988e3e8af4d4a08c91e94bdcd29f76b2e"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/utils/monitoring.py",
+      "deployed_sha256": "8fc1feb76396af17ed3753d3f9c4ad0b75d3908122a49b209537d6e3653427c5",
+      "semantic_restore_sha256": "8fc1feb76396af17ed3753d3f9c4ad0b75d3908122a49b209537d6e3653427c5",
+      "upstream_path": "src/utils/monitoring.py",
+      "upstream_sha256": "8fc1feb76396af17ed3753d3f9c4ad0b75d3908122a49b209537d6e3653427c5"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/utils/schedulers.py",
+      "deployed_sha256": "e35b2162c9df04f25ef4dbc51a1e9df41e362dee6d9d2b494321d81e44fe4659",
+      "semantic_restore_sha256": "e35b2162c9df04f25ef4dbc51a1e9df41e362dee6d9d2b494321d81e44fe4659",
+      "upstream_path": "src/utils/schedulers.py",
+      "upstream_sha256": "e35b2162c9df04f25ef4dbc51a1e9df41e362dee6d9d2b494321d81e44fe4659"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/utils/tensors.py",
+      "deployed_sha256": "782b58bd2af456e184750e5318ab773105108383f61b280fe4c7a90f46add2c8",
+      "semantic_restore_sha256": "782b58bd2af456e184750e5318ab773105108383f61b280fe4c7a90f46add2c8",
+      "upstream_path": "src/utils/tensors.py",
+      "upstream_sha256": "782b58bd2af456e184750e5318ab773105108383f61b280fe4c7a90f46add2c8"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac/utils/wrappers.py",
+      "deployed_sha256": "cdba99fcad17b1810bf26bb047046182fe0aad620a5786fbf405d8a71bb1f47a",
+      "semantic_restore_sha256": "cdba99fcad17b1810bf26bb047046182fe0aad620a5786fbf405d8a71bb1f47a",
+      "upstream_path": "src/utils/wrappers.py",
+      "upstream_sha256": "cdba99fcad17b1810bf26bb047046182fe0aad620a5786fbf405d8a71bb1f47a"
+    },
+    {
+      "classification": "import_root_only",
+      "deployed_path": "src/picf_next/_vendor/vjepa2_ac_app/transforms.py",
+      "deployed_sha256": "532ed55caa050450d45233406cb38862521fb0ae17e5cb169c9cf7217dc90349",
+      "semantic_restore_sha256": "777f217aedf2171194dc89f875ec6549fc48dbd5a4e15c617006f5aac35aecf9",
+      "upstream_path": "app/vjepa_droid/transforms.py",
+      "upstream_sha256": "777f217aedf2171194dc89f875ec6549fc48dbd5a4e15c617006f5aac35aecf9"
+    }
+  ]
+}

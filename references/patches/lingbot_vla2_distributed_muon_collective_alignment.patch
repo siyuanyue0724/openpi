@@ -1,0 +1,87 @@
+diff --git a/lingbotvla/optim/muon.py b/lingbotvla/optim/muon.py
+index 7fbc96e..10309ae 100644
+--- a/lingbotvla/optim/muon.py
++++ b/lingbotvla/optim/muon.py
+@@ -342,7 +342,7 @@ class DistributedMuon(Optimizer):
+             # order, so we include ALL params (even grad=None) in the grouping and
+             # skip the actual update for grad=None params inside the batch.
+             fsdp_2d_groups: Dict[tuple, List[Tensor]] = defaultdict(list)
+-            other_params: List[Tuple[Tensor, str]] = []
++            other_params: List[Tuple[Tensor, str, bool]] = []
+ 
+             for p in group["params"]:
+                 kind = _classify_param(p)
+@@ -351,13 +351,19 @@ class DistributedMuon(Optimizer):
+                     key = (global_shape, str(p.dtype))
+                     fsdp_2d_groups[key].append(p)
+                 else:
+-                    if p.grad is None:
++                    has_grad = p.grad is not None
++                    # MOE_GATHER_3D performs a full-tensor collective below.
++                    # Sparse expert routing may leave a local shard without a
++                    # gradient, but every rank must still enter that collective
++                    # in the same parameter order. Mirror the FSDP 2D path by
++                    # contributing zeros and skipping the local update.
++                    if not has_grad and kind != _KIND_MOE_GATHER_3D:
+                         continue
+                     if torch.is_complex(p):
+                         raise RuntimeError("DistributedMuon does not support complex parameters")
+-                    if p.grad.is_sparse:
++                    if has_grad and p.grad.is_sparse:
+                         raise RuntimeError("DistributedMuon does not support sparse gradients")
+-                    other_params.append((p, kind))
++                    other_params.append((p, kind, has_grad))
+ 
+             # --- Mega-batch path for FSDP_GATHER_2D ---
+             # Sort by key to guarantee identical ordering across all ranks.
+@@ -368,20 +374,27 @@ class DistributedMuon(Optimizer):
+             # Operate on local tensors to avoid DTensor dispatch issues
+             # (torch.compile may produce non-DTensor grads that conflict with
+             # DTensor in-place ops).
+-            for p, kind in other_params:
+-                state = self.state[p]
+-                if "momentum_buffer" not in state:
+-                    state["momentum_buffer"] = torch.zeros_like(p, memory_format=torch.preserve_format)
+-                buf = state["momentum_buffer"]
+-
+-                buf_local = buf.to_local() if isinstance(buf, DTensor) else buf
+-                grad_local = p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
+-
+-                buf_local.lerp_(grad_local, 1 - momentum)
+-                if nesterov:
+-                    update_local = grad_local.lerp(buf_local, momentum)
++            for p, kind, has_grad in other_params:
++                if has_grad:
++                    state = self.state[p]
++                    if "momentum_buffer" not in state:
++                        state["momentum_buffer"] = torch.zeros_like(
++                            p, memory_format=torch.preserve_format
++                        )
++                    buf = state["momentum_buffer"]
++
++                    buf_local = buf.to_local() if isinstance(buf, DTensor) else buf
++                    grad_local = p.grad.to_local() if isinstance(p.grad, DTensor) else p.grad
++
++                    buf_local.lerp_(grad_local, 1 - momentum)
++                    if nesterov:
++                        update_local = grad_local.lerp(buf_local, momentum)
++                    else:
++                        update_local = buf_local.clone()
+                 else:
+-                    update_local = buf_local.clone()
++                    assert kind == _KIND_MOE_GATHER_3D
++                    p_local = p.to_local() if isinstance(p, DTensor) else p
++                    update_local = torch.zeros_like(p_local)
+ 
+                 # Compute ortho on local tensors
+                 if kind == _KIND_LOCAL or kind == _KIND_MOE_LOCAL_3D:
+@@ -404,6 +417,9 @@ class DistributedMuon(Optimizer):
+                 else:
+                     ortho_local = batched_newton_schulz(update_local, ns_coefficients, ns_steps, eps)
+ 
++                if not has_grad:
++                    continue
++
+                 lr_shape = p.shape[-2:] if p.ndim >= 2 else p.shape
+                 adjusted_lr = _adjust_lr(lr, adjust_lr_fn, lr_shape)
+ 

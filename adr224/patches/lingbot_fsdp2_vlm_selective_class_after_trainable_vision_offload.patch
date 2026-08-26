@@ -1,0 +1,18 @@
+diff --git a/lingbotvla/distributed/torch_parallelize.py b/lingbotvla/distributed/torch_parallelize.py
+--- a/lingbotvla/distributed/torch_parallelize.py
++++ b/lingbotvla/distributed/torch_parallelize.py
+@@ -437,7 +437,13 @@ def build_parallelize_model(
+                             f"Apply FSDP2 to {path} ({layer.__class__.__name__})."
+                         )
+                         full_path = f"model.qwenvl_with_expert.qwenvl.{path}"
+-                        fully_shard(layer, **kind_fsdp_kwargs)
++                        layer_fsdp_kwargs = kind_fsdp_kwargs
++                        if layer.__class__.__name__ in selective_cpu_module_classes:
++                            layer_fsdp_kwargs = dict(kind_fsdp_kwargs)
++                            layer_fsdp_kwargs["offload_policy"] = (
++                                selective_class_offload_policy
++                            )
++                        fully_shard(layer, **layer_fsdp_kwargs)
+                         if not hasattr(layer, "reshard") or not hasattr(layer, "unshard"):
+                             raise RuntimeError(
+                                 f"FSDP2 did not augment Qwen-VL {kind} block {path}."

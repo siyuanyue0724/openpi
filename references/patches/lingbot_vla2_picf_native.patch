@@ -1,0 +1,1339 @@
+diff --git a/lingbotvla/checkpoint/checkpointer.py b/lingbotvla/checkpoint/checkpointer.py
+index 970181d..8c43957 100644
+--- a/lingbotvla/checkpoint/checkpointer.py
++++ b/lingbotvla/checkpoint/checkpointer.py
+@@ -20,6 +20,9 @@ from typing import Any, Dict
+ import torch
+ import torch.distributed as dist
+ from torch.distributed.checkpoint.default_planner import DefaultLoadPlanner
++from picf_next.lingbot_native.torch_dcp_compat import (
++    prune_synthetic_optimizer_state_from_dcp_template,
++)
+ from ..utils.import_utils import is_torch_version_greater_than
+ from ..utils.logging import get_logger
+ from pathlib import Path
+@@ -31,6 +34,7 @@ if is_torch_version_greater_than("2.4"):
+         FileSystemWriter,
+     )
+     from torch.distributed.checkpoint.state_dict import (
++        StateDictOptions,
+         get_model_state_dict,
+         get_optimizer_state_dict,
+         set_model_state_dict,
+@@ -118,9 +122,10 @@ class OptimizerState(Stateful):
+         optimizer (Optimizer): optimizer to wrap.
+     """
+ 
+-    def __init__(self, model, optimizer):
++    def __init__(self, model, optimizer, checkpoint_metadata_keys=None):
+         self.model = model
+         self.optimizer = optimizer
++        self.checkpoint_metadata_keys = checkpoint_metadata_keys
+         self._fqn2spec_info = getattr(model, '_fqn2spec_info', None)
+         self._parallel_state = None
+         self._should_ep_aware = False
+@@ -142,11 +147,21 @@ class OptimizerState(Stateful):
+ 
+     def load_state_dict(self, state_dict):
+         optim_state_dict = state_dict["optim"]
++        if self.checkpoint_metadata_keys is not None:
++            prune_synthetic_optimizer_state_from_dcp_template(
++                optim_state_dict,
++                checkpoint_metadata_keys=self.checkpoint_metadata_keys,
++            )
+         if self._should_ep_aware:
+             logger.info_rank0("OptimizerState: dropping EP dim for DCP load")
+             optim_state_dict = self._preprocess_ep_dim(optim_state_dict, action='drop')
+         optimizers = getattr(self.optimizer, "optimizers", self.optimizer)
+-        set_optimizer_state_dict(model=self.model, optimizers=optimizers, optim_state_dict=optim_state_dict)
++        set_optimizer_state_dict(
++            model=self.model,
++            optimizers=optimizers,
++            optim_state_dict=optim_state_dict,
++            options=StateDictOptions(strict=False),
++        )
+ 
+     def _preprocess_ep_dim(self, state_dict, action):
+         """Process EP dimension for optimizer state save/load."""
+@@ -434,15 +449,20 @@ class DistributedCheckpointer(CheckpointerBase):
+             )
+ 
+             optimizer_dir = os.path.join(checkpoint_dir, _OPTIMIZER_DIR)
+-            try:
+-                dcp.load(
+-                    state_dict={"state": OptimizerState(model=state["model"], optimizer=state["optimizer"])}, # 1043
+-                    storage_reader=FileSystemReader(optimizer_dir), # 1027
+-                    planner = DefaultLoadPlanner(allow_partial_load=True),
+-                    process_group=process_group,
+-                )
+-            except:
+-                logger.info_rank0(f"Skip loading Optimizer from {checkpoint_dir}")
++            optimizer_reader = FileSystemReader(optimizer_dir)
++            optimizer_metadata_keys = frozenset(
++                optimizer_reader.read_metadata().state_dict_metadata
++            )
++            dcp.load(
++                state_dict={"state": OptimizerState(
++                    model=state["model"],
++                    optimizer=state["optimizer"],
++                    checkpoint_metadata_keys=optimizer_metadata_keys,
++                )},
++                storage_reader=optimizer_reader,
++                planner=DefaultLoadPlanner(allow_partial_load=True),
++                process_group=process_group,
++            )
+         else:
+             model_dir = os.path.join(checkpoint_dir, _MODEL_DIR)
+             dcp.load(
+diff --git a/lingbotvla/distributed/torch_parallelize.py b/lingbotvla/distributed/torch_parallelize.py
+index 5db3bb9..2a9389a 100644
+--- a/lingbotvla/distributed/torch_parallelize.py
++++ b/lingbotvla/distributed/torch_parallelize.py
+@@ -19,7 +19,13 @@ from typing import Any, Dict, List, Optional
+ 
+ import torch
+ import torch.nn as nn
+-from torch.distributed.fsdp import CPUOffload, FullyShardedDataParallel, MixedPrecision, ShardingStrategy
++from torch.distributed.fsdp import (
++    CPUOffload,
++    CPUOffloadPolicy,
++    FullyShardedDataParallel,
++    MixedPrecision,
++    ShardingStrategy,
++)
+ from torch.distributed.fsdp._common_utils import _get_module_fsdp_state_if_fully_sharded_module
+ from torch.distributed.fsdp._runtime_utils import _lazy_init
+ from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+@@ -48,17 +54,26 @@ if is_torch_version_greater_than("2.4"):
+ 
+ logger = logging.get_logger(__name__)
+ 
+-def _resolve(root: Any, paths: List[tuple[str, ...]]) -> tuple[Optional[Any], Optional[tuple[str, ...]]]:
+-    for path in paths:
+-        current = root
+-        for attr in path:
+-            current = getattr(current, attr, None)
+-            if current is None:
+-                break
+-        if current is not None:
+-            return current, path
+-    return None, None
+-
++_VLM_FSDP_LAYER_KINDS = {
++    "Qwen2_5_VLDecoderLayer": "text",
++    "Qwen2_5_VLVisionBlock": "vision",
++    "Qwen3VLTextDecoderLayer": "text",
++    "Qwen3VLVisionBlock": "vision",
++}
++
++def _collect_vlm_fsdp_layers(vlm: "nn.Module") -> dict[str, tuple[tuple[str, "nn.Module"], ...]]:
++    layers: dict[str, list[tuple[str, nn.Module]]] = {"text": [], "vision": []}
++    for path, module in vlm.named_modules():
++        kind = _VLM_FSDP_LAYER_KINDS.get(module.__class__.__name__)
++        if kind is not None:
++            layers[kind].append((path, module))
++    missing = [kind for kind, modules in layers.items() if not modules]
++    if missing:
++        raise RuntimeError(
++            "Could not locate supported Qwen-VL FSDP2 blocks for "
++            f"{missing}; sharding only the root would create a large, non-overlapped AllGather."
++        )
++    return {kind: tuple(modules) for kind, modules in layers.items()}
+ def verbose_fsdp_grouping(model, prefix="", depth=0):
+     indent = "    " * depth
+ 
+@@ -200,10 +215,26 @@ def build_parallelize_model(
+                     )
+                 return fused_expert_modules
+ 
++            user_fsdp_kwargs = dict(kwargs.pop("fsdp_kwargs", {}))
++            enable_fsdp_offload = kwargs.pop("enable_fsdp_offload", False)
++            enable_shared_embedding_offload = kwargs.pop(
++                "enable_shared_embedding_offload",
++                False,
++            )
++            if enable_fsdp_offload and enable_shared_embedding_offload:
++                raise ValueError(
++                    "full-model and shared-embedding FSDP2 CPU offload are mutually exclusive"
++                )
++            if enable_fsdp_offload:
++                if "offload_policy" in user_fsdp_kwargs:
++                    raise ValueError(
++                        "enable_fsdp_offload and fsdp_kwargs.offload_policy are mutually exclusive"
++                    )
++                user_fsdp_kwargs["offload_policy"] = CPUOffloadPolicy(pin_memory=False)
+             fsdp_kwargs = {
+                 "mesh": parallel_state.fsdp_mesh,
+                 "reshard_after_forward": enable_full_shard,
+-                **kwargs.pop("fsdp_kwargs", {}),
++                **user_fsdp_kwargs,
+             }
+             if enable_mixed_precision and not enable_fp32:
+                 logger.info_rank0("Enable mixed precision training.")
+@@ -233,17 +264,18 @@ def build_parallelize_model(
+             mp_fsdp_kwargs = {
+                 "mesh": parallel_state.fsdp_mesh,
+                 "reshard_after_forward": enable_full_shard,
+-                **kwargs.pop("fsdp_kwargs", {}),
++                **user_fsdp_kwargs,
+             }
+ 
+             fused_expert_modules_to_shard = collect_fused_expert_modules(model)
+             fused_expert_modules_to_shard_set = set(fused_expert_modules_to_shard)
+ 
+-            mp_fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
+-                    param_dtype=torch.bfloat16,
+-                    reduce_dtype=torch.float32,
+-                    output_dtype=torch.bfloat16,
+-                )
++            nested_mp_policy = MixedPrecisionPolicy(
++                param_dtype=torch.bfloat16,
++                reduce_dtype=torch.float32,
++                output_dtype=torch.bfloat16,
++            )
++            mp_fsdp_kwargs["mp_policy"] = nested_mp_policy
+             ignore_modules_in_mixed_precision = tuple()
+             if hasattr(model, "get_ignore_modules_in_mixed_precision"):
+                 ignore_modules_in_mixed_precision = model.get_ignore_modules_in_mixed_precision()
+@@ -338,32 +370,66 @@ def build_parallelize_model(
+                     fully_shard(layer, **module_local_fsdp_kwargs(layer, fsdp_kwargs))
+             
+             if vlm_fsdp:
+-                llm_layers, llm_path = _resolve(model.model.qwenvl_with_expert.qwenvl, [
+-                    ("model", "language_model", "layers"),    # Qwen3-VL: language_model on model
+-                    ("model", "layers"),                       # Qwen2.5-VL: layers directly on model
+-                    ("language_model", "model", "layers"),     # legacy fallback
+-                ])
+-
+-                if llm_layers is None or not hasattr(llm_layers, "__iter__"):
+-                    raise RuntimeError(
+-                        "Could not locate Qwen-VL decoder layers under any known path "
+-                        "(model.language_model.layers / model.layers / language_model.model.layers). "
+-                        "sharding would silently fall back and produce a 5+ GB root AllGather."
++                vlm = model.model.qwenvl_with_expert.qwenvl
++                vlm_layers = _collect_vlm_fsdp_layers(vlm)
++                topology = {}
++                for kind in ("text", "vision"):
++                    paths = []
++                    logger.info_rank0(
++                        f"FSDP2 sharding Qwen-VL {kind} blocks, n_layers={len(vlm_layers[kind])}"
+                     )
+-
+-                FSDP_LAYER_CLASS_NAMES = {
+-                    "Qwen2_5_VLDecoderLayer",
+-                    "Qwen2_5_VLVisionBlock",
+-                    "Qwen3VLTextDecoderLayer",
+-                    "Qwen3VLVisionBlock",
+-                }
+-                logger.info_rank0(f"FSDP2 sharding LLM layers via {llm_path}, n_layers={len(llm_layers)}")
+-                for layer in llm_layers:
+-                    if layer.__class__.__name__ in FSDP_LAYER_CLASS_NAMES:
+-                        logger.info_rank0(f"Apply FSDP2 to {layer.__class__.__name__}.")
++                    for path, layer in vlm_layers[kind]:
++                        logger.info_rank0(
++                            f"Apply FSDP2 to {path} ({layer.__class__.__name__})."
++                        )
++                        full_path = f"model.qwenvl_with_expert.qwenvl.{path}"
+                         fully_shard(layer, **mp_fsdp_kwargs)
+-
+-            fully_shard(model, **mp_fsdp_kwargs)
++                        if not hasattr(layer, "reshard") or not hasattr(layer, "unshard"):
++                            raise RuntimeError(
++                                f"FSDP2 did not augment Qwen-VL {kind} block {path}."
++                            )
++                        paths.append(full_path)
++                    topology[kind] = tuple(paths)
++                model._lingbot_vlm_fsdp2_topology = topology
++
++            selective_cpu_modules = ()
++            if enable_shared_embedding_offload:
++                if not vlm_fsdp:
++                    raise ValueError(
++                        "shared-embedding FSDP2 CPU offload requires VLM FSDP2"
++                    )
++                shared_embedding = (
++                    model.model.qwenvl_with_expert.qwenvl.model.language_model.embed_tokens
++                )
++                if not isinstance(shared_embedding, nn.Embedding):
++                    raise TypeError(
++                        "Expected the Qwen3-VL shared language embedding to be nn.Embedding"
++                    )
++                shared_embedding_fsdp_kwargs = dict(mp_fsdp_kwargs)
++                shared_embedding_fsdp_kwargs["offload_policy"] = CPUOffloadPolicy(
++                    pin_memory=False
++                )
++                fully_shard(shared_embedding, **shared_embedding_fsdp_kwargs)
++                if not hasattr(shared_embedding, "reshard") or not hasattr(
++                    shared_embedding, "unshard"
++                ):
++                    raise RuntimeError(
++                        "FSDP2 did not augment the shared language embedding."
++                    )
++                selective_cpu_modules = (
++                    "model.qwenvl_with_expert.qwenvl."
++                    "model.language_model.embed_tokens",
++                )
++            model._lingbot_fsdp2_selective_cpu_modules = selective_cpu_modules
++
++            root_fsdp_kwargs = dict(mp_fsdp_kwargs)
++            root_fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(
++                param_dtype=nested_mp_policy.param_dtype,
++                reduce_dtype=nested_mp_policy.reduce_dtype,
++                output_dtype=nested_mp_policy.output_dtype,
++                cast_forward_inputs=False,
++            )
++            fully_shard(model, **root_fsdp_kwargs)
+ 
+             if kwargs.get("init_device") == "meta":
+                 if weights_path is None:
+diff --git a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+index 44ccf04..5c2ab21 100644
+--- a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
++++ b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+@@ -151,6 +151,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         self.cu_seqlens = None
+         self.visual_split_sizes = None
+         self.visual_max_seqlen = None
++        self.picf_native_graph = None
+ 
+         del self.qwen_expert.model.embed_tokens
+         if self.config.enable_expert_vision:
+@@ -167,6 +168,10 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         self.attention_interface = self.get_attention_interface()
+         self.set_requires_grad()
+ 
++    def set_picf_native_graph(self, graph: Optional[nn.Module]) -> None:
++        """Register strict PICF inside the official per-layer joint graph."""
++        self.picf_native_graph = graph
++
+     def _install_moe_blocks(self):
+         if not getattr(self.config, "use_moe", False):
+             return
+@@ -257,10 +262,29 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+     def embed_language_tokens(self, tokens: torch.Tensor):
+         return self.qwenvl.model.language_model.embed_tokens(tokens)
+ 
+-    def embed_special_token(self, token_id: int, batch: int, count: int, device, dtype):
+-        token = torch.tensor([token_id], device=device, dtype=torch.long)
+-        emb = self.embed_language_tokens(token).to(dtype=dtype)
+-        return emb.view(1, 1, 1, -1).expand(batch, count, 1, -1)
++    def embed_language_and_special_tokens(
++        self,
++        language_tokens: torch.Tensor,
++        special_token_ids: tuple[int, ...],
++    ):
++        """Embed one prefix through one shared-weight autograd node."""
++        if not special_token_ids:
++            raise ValueError("special_token_ids must be non-empty")
++        flat_language_tokens = language_tokens.reshape(-1)
++        special_tokens = torch.tensor(
++            special_token_ids,
++            device=language_tokens.device,
++            dtype=language_tokens.dtype,
++        )
++        embeddings = self.embed_language_tokens(
++            torch.cat((flat_language_tokens, special_tokens))
++        )
++        language_count = flat_language_tokens.numel()
++        language_embeddings = embeddings[:language_count].reshape(
++            *language_tokens.shape,
++            embeddings.shape[-1],
++        )
++        return language_embeddings, embeddings[language_count:]
+ 
+     def build_prefix_position_ids(self, input_ids, attention_mask,
+                                    image_grid_thw=None, video_grid_thw=None):
+@@ -320,7 +344,24 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         ada_cond: List[torch.FloatTensor] = None,
+         visual_pos_masks: Optional[torch.Tensor] = None,
+         deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
++        picf_native_context=None,
++        picf_action_attention_callback=None,
+     ):
++        picf_runtime = None
++        if self.picf_native_graph is not None:
++            (
++                inputs_embeds,
++                attention_mask,
++                position_ids,
++                visual_pos_masks,
++                picf_runtime,
++            ) = self.picf_native_graph.prepare_joint_inputs(
++                inputs_embeds=inputs_embeds,
++                attention_mask=attention_mask,
++                position_ids=position_ids,
++                visual_pos_masks=visual_pos_masks,
++                context=picf_native_context,
++            )
+         models = [self.qwenvl.model.language_model, self.qwen_expert.model]
+         num_layers = self.qwenvl.config.text_config.num_hidden_layers
+         action_num_layers = self.config.qwen_expert_config.num_hidden_layers
+@@ -335,6 +376,15 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+             query_states = []
+             key_states = []
+             value_states = []
++            prefix_qk_bias = None
++            if (
++                self.picf_native_graph is not None
++                and inputs_embeds[0] is not None
++            ):
++                prefix_qk_bias = self.picf_native_graph.layerwise_qk_address_bias(
++                    prefix_hidden=inputs_embeds[0],
++                    runtime=picf_runtime,
++                )
+             for i, hidden_states in enumerate(inputs_embeds):
+                 if hidden_states is None:
+                     continue
+@@ -343,7 +393,11 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+                         hidden_states, compute_kqv=True, ada_cond=ada_cond
+                     )
+                 else:
+-                    q, k, v = models[i].layers[layer_idx](hidden_states, compute_kqv=True)
++                    q, k, v = models[i].layers[layer_idx](
++                        hidden_states,
++                        compute_kqv=True,
++                        qk_input_bias=prefix_qk_bias,
++                    )
+                 query_states.append(q.float())
+                 key_states.append(k.float())
+                 value_states.append(v.float())
+@@ -360,20 +414,76 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+                 use_cache=use_cache,
+                 fill_kv_cache=fill_kv_cache,
+             )
++            layer_attention_mask = attention_mask
++            memory_inputs = None
++            if self.picf_native_graph is not None:
++                memory_inputs = self.picf_native_graph.layerwise_memory_inputs(
++                    layer_index=layer_idx,
++                    runtime=picf_runtime,
++                )
++            if memory_inputs is not None:
++                memory_hidden, memory_qk_bias, history_visibility = memory_inputs
++                memory_q, memory_k, memory_v = models[0].layers[layer_idx](
++                    memory_hidden,
++                    compute_kqv=True,
++                    qk_input_bias=memory_qk_bias,
++                )
++                memory_position_ids = position_ids.new_zeros(
++                    (3, memory_hidden.shape[0], memory_hidden.shape[1])
++                )
++                _, memory_k = self.apply_mrope(
++                    memory_q.float(),
++                    memory_k.float(),
++                    memory_position_ids,
++                )
++                memory_v = memory_v.float()
++                if (
++                    layer_attention_mask.ndim != 3
++                    or layer_attention_mask.shape[0] != query_states.shape[0]
++                    or layer_attention_mask.shape[1] != query_states.shape[1]
++                    or layer_attention_mask.shape[2] != key_states.shape[1]
++                    or history_visibility.shape
++                    != (
++                        query_states.shape[0],
++                        query_states.shape[1],
++                        memory_k.shape[1],
++                    )
++                ):
++                    raise RuntimeError("PICF history mask differs from the host attention surface")
++                key_states = torch.cat((memory_k, key_states), dim=1)
++                value_states = torch.cat((memory_v, value_states), dim=1)
++                layer_attention_mask = torch.cat(
++                    (history_visibility, layer_attention_mask),
++                    dim=-1,
++                )
++            if picf_action_attention_callback is not None:
++                picf_action_attention_callback(
++                    query_states=query_states,
++                    key_states=key_states,
++                    attention_mask=layer_attention_mask,
++                    layer_index=layer_idx,
++                    layer_count=num_layers,
++                )
+             if self.config.attention_implementation == "flex_cached":
+                 if layer_idx == 0:
+-                    _full_len = query_states.shape[1]
++                    _query_len = query_states.shape[1]
++                    _key_value_len = key_states.shape[1]
+                     _full_block_mask = build_block_mask(
+-                        attention_mask,
++                        layer_attention_mask,
+                         self.qwenvl.config.text_config.num_attention_heads,
+-                        _full_len,
+-                        _full_len,
++                        _query_len,
++                        _key_value_len,
+                     )
+                 att_output = flex_attention_with_block_mask(
+                     query_states, key_states, value_states, _full_block_mask, query_states.shape[1]
+                 )
+             else:
+-                att_output = self.attention_interface(query_states, key_states, value_states, attention_mask)
++                att_output = self.attention_interface(
++                    query_states,
++                    key_states,
++                    value_states,
++                    layer_attention_mask,
++                )
+ 
+             outputs_embeds = []
+             start = 0
+@@ -400,6 +510,31 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+                     out_emb = self._apply_deepstack(out_emb, layer_idx, visual_pos_masks, deepstack_visual_embeds)
+                 outputs_embeds.append(out_emb)
+                 start = end
++            if self.picf_native_graph is not None:
++                prefix_hidden = outputs_embeds[0]
++                if prefix_hidden is not None:
++                    self.picf_native_graph.record_layerwise_posterior(
++                        prefix_hidden=prefix_hidden,
++                        runtime=picf_runtime,
++                        layer_index=layer_idx,
++                    )
++            if (
++                self.picf_native_graph is not None
++                and self.picf_native_graph.requires_intermediate_relation(
++                    layer_index=layer_idx,
++                    runtime=picf_runtime,
++                )
++            ):
++                prefix_hidden = outputs_embeds[0]
++                if prefix_hidden is None:
++                    raise RuntimeError(
++                        "PICF intermediate relation requires the native prefix stream"
++                    )
++                self.picf_native_graph.record_intermediate_relation(
++                    normalized_prefix=models[0].norm(prefix_hidden),
++                    runtime=picf_runtime,
++                    layer_index=layer_idx,
++                )
+             inputs_embeds = outputs_embeds
+ 
+         outputs_embeds = []
+@@ -411,6 +546,11 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+                 outputs_embeds.append(out_emb)
+             else:
+                 outputs_embeds.append(models[i].norm(hidden_states))
++        if self.picf_native_graph is not None:
++            outputs_embeds = self.picf_native_graph.finalize_joint_outputs(
++                outputs_embeds=outputs_embeds,
++                runtime=picf_runtime,
++            )
+         return outputs_embeds, past_key_values, router_logits_list
+ 
+     def get_attention_interface(self):
+@@ -541,11 +681,19 @@ class FlowMatchingV2(FlowMatchingV1):
+         visual_token_id = cfg.image_token_id
+ 
+         if getattr(self.config, "qwen3vl_use_vision_boundaries", True):
+-            start_emb = self.qwenvl_with_expert.embed_special_token(
+-                cfg.vision_start_token_id, bsize, num_images, device, embed_dtype
++            lang_emb, boundary_embs = (
++                self.qwenvl_with_expert.embed_language_and_special_tokens(
++                    lang_tokens,
++                    (cfg.vision_start_token_id, cfg.vision_end_token_id),
++                )
+             )
+-            end_emb = self.qwenvl_with_expert.embed_special_token(
+-                cfg.vision_end_token_id, bsize, num_images, device, embed_dtype
++            lang_emb = lang_emb.to(dtype=embed_dtype)
++            boundary_embs = boundary_embs.to(dtype=embed_dtype)
++            start_emb = boundary_embs[0].view(1, 1, 1, -1).expand(
++                bsize, num_images, 1, -1
++            )
++            end_emb = boundary_embs[1].view(1, 1, 1, -1).expand(
++                bsize, num_images, 1, -1
+             )
+             img_chunks = torch.cat([start_emb, img_emb, end_emb], dim=2)
+             image_token_len = num_patch + 2
+@@ -561,6 +709,9 @@ class FlowMatchingV2(FlowMatchingV1):
+             fake_image_ids[:, :, 0] = cfg.vision_start_token_id
+             fake_image_ids[:, :, -1] = cfg.vision_end_token_id
+         else:
++            lang_emb = self.qwenvl_with_expert.embed_language_tokens(lang_tokens).to(
++                dtype=embed_dtype
++            )
+             img_chunks = img_emb
+             image_token_len = num_patch
+             image_pad_masks = einops.repeat(img_masks, "b n -> b n l", l=image_token_len)
+@@ -577,8 +728,6 @@ class FlowMatchingV2(FlowMatchingV1):
+         visual_pos_masks = einops.rearrange(image_visual_masks, "b n l -> b (n l)")
+         fake_image_ids = einops.rearrange(fake_image_ids, "b n l -> b (n l)")
+ 
+-        lang_emb = self.qwenvl_with_expert.embed_language_tokens(lang_tokens).to(dtype=embed_dtype)
+-
+         if self.use_depth_align and self.align_type == "query":
+             def _get_align_tokens(tokens):
+                 tk_weights = tokens.view(self.num_task_tokens, tokens.shape[0] // self.num_task_tokens, tokens.shape[1])
+@@ -738,6 +887,119 @@ class FlowMatchingV2(FlowMatchingV1):
+         )
+         return result
+ 
++    def _bind_picf_native_prefix(
++        self,
++        picf_native_context,
++        *,
++        prefix_pad_masks,
++        visual_pos_masks,
++        lang_masks,
++    ):
++        """Bind the exact official prefix contract for training and inference."""
++        if picf_native_context is None:
++            return
++        query_spans = prefix_query_token_spans(
++            prefix_len=prefix_pad_masks.shape[1],
++            num_task_tokens=getattr(self, "num_task_tokens", 0),
++            use_depth_align=(
++                self.use_depth_align and getattr(self, "align_type", None) == "query"
++            ),
++            use_future_depth=getattr(self, "use_future_depth", False),
++            use_future_video=getattr(self, "use_future_video", False),
++            use_future_video_cls=getattr(self, "use_future_video_cls", False),
++            use_future_video_patch=getattr(self, "use_future_video_patch", True),
++            future_video_share_future_depth_query=getattr(
++                self,
++                "future_video_share_future_depth_query",
++                False,
++            ),
++        )
++        language_end = min(
++            (span[0] for span in query_spans.values()),
++            default=prefix_pad_masks.shape[1],
++        )
++        language_start = language_end - lang_masks.shape[1]
++        current_query_names = {"current_depth"}
++        future_query_names = {"future_video_cls", "future_video", "future_depth"}
++        unexpected_query_names = set(query_spans) - (
++            current_query_names | future_query_names
++        )
++        if unexpected_query_names:
++            raise ValueError(
++                "PICF refuses unclassified official query spans: "
++                f"{sorted(unexpected_query_names)}"
++            )
++        host_current_mask = torch.zeros_like(prefix_pad_masks, dtype=torch.bool)
++        host_future_mask = torch.zeros_like(prefix_pad_masks, dtype=torch.bool)
++        visual_boundary_mask = (
++            prefix_pad_masks.bool() & ~visual_pos_masks.bool()
++        )
++        visual_boundary_mask[:, language_start:] = False
++        for name, (start, stop) in query_spans.items():
++            destination = (
++                host_current_mask if name in current_query_names else host_future_mask
++            )
++            destination[:, start:stop] = True
++        host_current_mask &= prefix_pad_masks.bool()
++        host_future_mask &= prefix_pad_masks.bool()
++        picf_native_context.bind_native_prefix(
++            native_valid=prefix_pad_masks.bool(),
++            visual_sensor_mask=visual_pos_masks.bool(),
++            visual_boundary_mask=visual_boundary_mask,
++            language_start=language_start,
++            language_valid=lang_masks.bool(),
++            host_current_mask=host_current_mask,
++            host_future_mask=host_future_mask,
++        )
++
++    def picf_native_observation_forward(
++        self,
++        *,
++        images,
++        img_masks,
++        lang_tokens,
++        lang_masks,
++        image_grid_thw,
++        picf_native_context,
++    ):
++        """Run the official weight-shared observation prefix without an action suffix."""
++        if picf_native_context is None:
++            raise ValueError("PICF observation forward requires its typed context")
++        (
++            prefix_embs,
++            prefix_pad_masks,
++            prefix_att_masks,
++            prefix_position_ids,
++            visual_pos_masks,
++            deepstack_visual_embeds,
++        ) = self.embed_prefix(
++            images,
++            img_masks,
++            lang_tokens,
++            lang_masks,
++            image_grid_thw=image_grid_thw,
++        )
++        self._bind_picf_native_prefix(
++            picf_native_context,
++            prefix_pad_masks=prefix_pad_masks,
++            visual_pos_masks=visual_pos_masks,
++            lang_masks=lang_masks,
++        )
++        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
++        self.qwenvl_with_expert.forward(
++            attention_mask=prefix_att_2d_masks,
++            position_ids=prefix_position_ids,
++            vlm_position_ids=prefix_position_ids,
++            past_key_values=None,
++            inputs_embeds=[prefix_embs, None],
++            use_cache=False,
++            fill_kv_cache=False,
++            visual_pos_masks=visual_pos_masks,
++            deepstack_visual_embeds=deepstack_visual_embeds,
++            picf_native_context=picf_native_context,
++        )
++        return picf_native_context.root_output_tensors()
++
+     def _build_full_position_ids(self, prefix_position_ids, prefix_pad_masks, suffix_pad_masks):
+         valid_prefix_pos = prefix_position_ids.masked_fill(~prefix_pad_masks.unsqueeze(0), 0)
+         prefix_offsets = valid_prefix_pos.amax(dim=(0, 2)) + 1
+@@ -764,6 +1026,122 @@ class FlowMatchingV2(FlowMatchingV1):
+         start, end = query_spans["current_depth"]
+         return hidden_states[:, start:end, :]
+ 
++    def _picf_cached_training_forward(
++        self,
++        *,
++        prefix_embs,
++        prefix_pad_masks,
++        prefix_att_masks,
++        prefix_position_ids,
++        visual_pos_masks,
++        deepstack_visual_embeds,
++        suffix_embs,
++        suffix_pad_masks,
++        suffix_att_masks,
++        time_embs,
++        picf_native_context,
++        picf_action_attention_callback=None,
++    ):
++        """Train action through the same exact-native cache ABI used at inference."""
++        from picf_next.lingbot_native.host import compact_lingbot_action_cache
++
++        if picf_native_context is None:
++            raise ValueError("PICF cached training requires its typed context")
++        native_prefix_len = prefix_pad_masks.shape[1]
++        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
++        native_outputs, native_past_key_values, _ = self.qwenvl_with_expert.forward(
++            attention_mask=prefix_att_2d_masks,
++            position_ids=prefix_position_ids,
++            vlm_position_ids=prefix_position_ids,
++            past_key_values=None,
++            inputs_embeds=[prefix_embs, None],
++            use_cache=True,
++            fill_kv_cache=True,
++            visual_pos_masks=visual_pos_masks,
++            deepstack_visual_embeds=deepstack_visual_embeds,
++            picf_native_context=None,
++        )
++        native_outputs_embeds = native_outputs[0]
++        if native_outputs_embeds is None:
++            raise RuntimeError("released native prefix produced no hidden states")
++
++        _, expanded_past_key_values, _ = self.qwenvl_with_expert.forward(
++            attention_mask=prefix_att_2d_masks,
++            position_ids=prefix_position_ids,
++            vlm_position_ids=prefix_position_ids,
++            past_key_values=None,
++            inputs_embeds=[prefix_embs, None],
++            use_cache=True,
++            fill_kv_cache=True,
++            visual_pos_masks=visual_pos_masks,
++            deepstack_visual_embeds=deepstack_visual_embeds,
++            picf_native_context=picf_native_context,
++        )
++        suffix_len = suffix_pad_masks.shape[1]
++        compact_cache = compact_lingbot_action_cache(
++            native_past_key_values=native_past_key_values,
++            expanded_past_key_values=expanded_past_key_values,
++            native_valid=prefix_pad_masks,
++            native_position_ids=prefix_position_ids,
++            context=picf_native_context,
++            suffix_count=suffix_len if picf_action_attention_callback is not None else None,
++        )
++        del expanded_past_key_values
++
++        callback = None
++        if picf_action_attention_callback is not None:
++            action_layout = compact_cache.action_attention_layout
++            if action_layout is None:
++                raise RuntimeError("PICF action attention callback lacks a compact posterior layout")
++
++            def callback(**surface):
++                return picf_action_attention_callback(layout=action_layout, **surface)
++
++        compact_prefix_len = compact_cache.valid.shape[1]
++        batch_size = compact_cache.valid.shape[0]
++        prefix_pad_2d_masks = compact_cache.valid[:, None, :].expand(
++            batch_size,
++            suffix_len,
++            compact_prefix_len,
++        )
++        suffix_att_2d_masks = make_att_2d_masks(suffix_pad_masks, suffix_att_masks)
++        full_att_2d_masks = torch.cat(
++            [prefix_pad_2d_masks, suffix_att_2d_masks],
++            dim=2,
++        )
++        if self.block_future_depth_to_action:
++            full_att_2d_masks = block_suffix_to_fv_(
++                full_att_2d_masks,
++                suffix_row_start=0,
++                prefix_len=native_prefix_len,
++                num_task_tokens=self.num_task_tokens,
++            )
++        full_att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
++            full_att_2d_masks,
++            suffix_row_start=0,
++            prefix_len=native_prefix_len,
++        )
++        full_position_ids = self._build_full_position_ids(
++            compact_cache.position_ids,
++            compact_cache.position_valid,
++            suffix_pad_masks,
++        )
++        suffix_position_ids = full_position_ids[:, :, -suffix_len:]
++        action_outputs, _, router_logits_list = self.qwenvl_with_expert.forward(
++            attention_mask=full_att_2d_masks,
++            position_ids=suffix_position_ids,
++            past_key_values=compact_cache.past_key_values,
++            inputs_embeds=[None, suffix_embs],
++            use_cache=True,
++            fill_kv_cache=False,
++            ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
++            picf_action_attention_callback=callback,
++        )
++        suffix_out = action_outputs[1]
++        if suffix_out is None:
++            raise RuntimeError("released action suffix produced no hidden states")
++        return native_outputs_embeds, suffix_out, router_logits_list
++
+     def forward(
+         self,
+         images,
+@@ -781,6 +1159,9 @@ class FlowMatchingV2(FlowMatchingV1):
+         future_video_targets=None,
+         future_video_cls_targets=None,
+         future_video_current_patch=None,
++        picf_native_context=None,
++        compute_alignment_losses=True,
++        picf_action_attention_callback=None,
+     ) -> Tensor:
+         dtype = state.dtype
+         device = state.device
+@@ -807,44 +1188,79 @@ class FlowMatchingV2(FlowMatchingV1):
+             lang_masks,
+             image_grid_thw=image_grid_thw,
+         )
++        self._bind_picf_native_prefix(
++            picf_native_context,
++            prefix_pad_masks=prefix_pad_masks,
++            visual_pos_masks=visual_pos_masks,
++            lang_masks=lang_masks,
++        )
+         time_embs, suffix_embs, suffix_pad_masks, suffix_att_masks = self.embed_suffix(
+             state, x_t, time
+         )
+-
+-        pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
+-        att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
+-        att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
+         prefix_len = prefix_pad_masks.shape[1]
+-        if self.block_future_depth_to_action:
+-            att_2d_masks = block_suffix_to_fv_(
++        if picf_native_context is None:
++            if picf_action_attention_callback is not None:
++                raise ValueError("action-posterior receipt requires a PICF native context")
++            pad_masks = torch.cat([prefix_pad_masks, suffix_pad_masks], dim=1)
++            att_masks = torch.cat([prefix_att_masks, suffix_att_masks], dim=1)
++            att_2d_masks = make_att_2d_masks(pad_masks, att_masks)
++            if self.block_future_depth_to_action:
++                att_2d_masks = block_suffix_to_fv_(
++                    att_2d_masks,
++                    suffix_row_start=prefix_len,
++                    prefix_len=prefix_len,
++                    num_task_tokens=self.num_task_tokens,
++                )
++
++            att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
+                 att_2d_masks,
+                 suffix_row_start=prefix_len,
+                 prefix_len=prefix_len,
+-                num_task_tokens=self.num_task_tokens,
++            )
++            position_ids = self._build_full_position_ids(
++                prefix_position_ids,
++                prefix_pad_masks,
++                suffix_pad_masks,
+             )
+ 
+-        att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
+-            att_2d_masks,
+-            suffix_row_start=prefix_len,
+-            prefix_len=prefix_len,
+-        )
+-        position_ids = self._build_full_position_ids(prefix_position_ids, prefix_pad_masks, suffix_pad_masks)
+-
+-        (outputs_embeds, suffix_out), _, router_logits_list = self.qwenvl_with_expert.forward(
+-            attention_mask=att_2d_masks,
+-            position_ids=position_ids,
+-            vlm_position_ids=prefix_position_ids,
+-            past_key_values=None,
+-            inputs_embeds=[prefix_embs, suffix_embs],
+-            use_cache=self.config.use_cache,
+-            fill_kv_cache=True,
+-            ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
+-            visual_pos_masks=visual_pos_masks,
+-            deepstack_visual_embeds=deepstack_visual_embeds,
+-        )
++            (outputs_embeds, suffix_out), _, router_logits_list = (
++                self.qwenvl_with_expert.forward(
++                    attention_mask=att_2d_masks,
++                    position_ids=position_ids,
++                    vlm_position_ids=prefix_position_ids,
++                    past_key_values=None,
++                    inputs_embeds=[prefix_embs, suffix_embs],
++                    use_cache=self.config.use_cache,
++                    fill_kv_cache=True,
++                    ada_cond=(
++                        time_embs if getattr(self.config, "adanorm_time", False) else None
++                    ),
++                    visual_pos_masks=visual_pos_masks,
++                    deepstack_visual_embeds=deepstack_visual_embeds,
++                    picf_native_context=None,
++                )
++            )
++            native_outputs_embeds = outputs_embeds[:, :prefix_len]
++        else:
++            native_outputs_embeds, suffix_out, router_logits_list = (
++                self._picf_cached_training_forward(
++                    prefix_embs=prefix_embs,
++                    prefix_pad_masks=prefix_pad_masks,
++                    prefix_att_masks=prefix_att_masks,
++                    prefix_position_ids=prefix_position_ids,
++                    visual_pos_masks=visual_pos_masks,
++                    deepstack_visual_embeds=deepstack_visual_embeds,
++                    suffix_embs=suffix_embs,
++                    suffix_pad_masks=suffix_pad_masks,
++                    suffix_att_masks=suffix_att_masks,
++                    time_embs=time_embs,
++                    picf_native_context=picf_native_context,
++                    picf_action_attention_callback=picf_action_attention_callback,
++                )
++            )
+         align_metrics = {}
+-        if self.config.align_params != {}:
+-            loss_depth, loss_future_depth, depth_preds, future_depth_preds = self.depth_emb_forward(outputs_embeds, depth_targets, img_masks,future_depth_targets,)
++        if self.config.align_params != {} and compute_alignment_losses:
++            loss_depth, loss_future_depth, depth_preds, future_depth_preds = self.depth_emb_forward(native_outputs_embeds, depth_targets, img_masks,future_depth_targets,)
+             loss_depth = loss_depth * self.config.align_params["depth_loss_weight"]
+             loss_future_depth = loss_future_depth * self.config.align_params.get("future_depth_loss_weight", 1.0)
+             loss_future_video = 0
+@@ -852,7 +1268,7 @@ class FlowMatchingV2(FlowMatchingV1):
+             current_video_preds = None
+             if getattr(self, "use_future_video", False):
+                 loss_video, future_video_preds, video_metrics = self.video_emb_forward(
+-                    outputs_embeds,
++                    native_outputs_embeds,
+                     future_video_targets,
+                     future_video_cls_targets=future_video_cls_targets,
+                     future_video_current_patch=future_video_current_patch,
+@@ -863,7 +1279,7 @@ class FlowMatchingV2(FlowMatchingV1):
+                     and future_video_current_patch is not None
+                 ):
+                     current_video_loss, current_video_preds, current_video_metrics = self.current_video_emb_forward(
+-                        outputs_embeds,
++                        native_outputs_embeds,
+                         future_video_current_patch,
+                     )
+                     video_total_loss = video_total_loss + current_video_loss
+@@ -926,6 +1342,7 @@ class FlowMatchingV2(FlowMatchingV1):
+         state,
+         noise=None,
+         image_grid_thw=None,
++        picf_native_context=None,
+     ) -> Tensor:
+         """Do a full Qwen3-VL inference forward and compute the action."""
+         bsize = state.shape[0]
+@@ -954,9 +1371,17 @@ class FlowMatchingV2(FlowMatchingV1):
+             lang_masks,
+             image_grid_thw=image_grid_thw,
+         )
++        self._bind_picf_native_prefix(
++            picf_native_context,
++            prefix_pad_masks=prefix_pad_masks,
++            visual_pos_masks=visual_pos_masks,
++            lang_masks=lang_masks,
++        )
++        native_prefix_len = prefix_pad_masks.shape[1]
++        prefix_position_pad_masks = prefix_pad_masks
+         prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
+ 
+-        _, past_key_values, _ = self.qwenvl_with_expert.forward(
++        _, native_past_key_values, _ = self.qwenvl_with_expert.forward(
+             attention_mask=prefix_att_2d_masks,
+             position_ids=prefix_position_ids,
+             vlm_position_ids=prefix_position_ids,
+@@ -966,14 +1391,43 @@ class FlowMatchingV2(FlowMatchingV1):
+             fill_kv_cache=True,
+             visual_pos_masks=visual_pos_masks,
+             deepstack_visual_embeds=deepstack_visual_embeds,
++            picf_native_context=None,
+         )
++        past_key_values = native_past_key_values
++        if picf_native_context is not None:
++            from picf_next.lingbot_native.host import compact_lingbot_action_cache
++
++            _, expanded_past_key_values, _ = self.qwenvl_with_expert.forward(
++                attention_mask=prefix_att_2d_masks,
++                position_ids=prefix_position_ids,
++                vlm_position_ids=prefix_position_ids,
++                past_key_values=None,
++                inputs_embeds=[prefix_embs, None],
++                use_cache=self.config.use_cache,
++                fill_kv_cache=True,
++                visual_pos_masks=visual_pos_masks,
++                deepstack_visual_embeds=deepstack_visual_embeds,
++                picf_native_context=picf_native_context,
++            )
++            compact_cache = compact_lingbot_action_cache(
++                native_past_key_values=native_past_key_values,
++                expanded_past_key_values=expanded_past_key_values,
++                native_valid=prefix_pad_masks,
++                native_position_ids=prefix_position_ids,
++                context=picf_native_context,
++            )
++            past_key_values = compact_cache.past_key_values
++            prefix_pad_masks = compact_cache.valid
++            prefix_position_ids = compact_cache.position_ids
++            prefix_position_pad_masks = compact_cache.position_valid
++            del expanded_past_key_values
+ 
+         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
+         x_t = noise
+         time = torch.tensor(1.0, dtype=dtype, device=device)
+         count = 0
+         predict_velocity_fn = self.predict_velocity
+-        if getattr(self, "_use_compile_predict_velocity", False):
++        if getattr(self, "_use_compile_predict_velocity", False) and picf_native_context is None:
+             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
+             if predict_velocity_fn is None:
+                 predict_velocity_fn = torch.compile(
+@@ -994,6 +1448,8 @@ class FlowMatchingV2(FlowMatchingV1):
+                 x_t,
+                 expanded_time,
+                 prefix_position_ids=prefix_position_ids,
++                prefix_position_pad_masks=prefix_position_pad_masks,
++                native_prefix_len=native_prefix_len,
+             )
+ 
+             x_t += dt * v_t
+@@ -1009,6 +1465,8 @@ class FlowMatchingV2(FlowMatchingV1):
+         x_t,
+         timestep,
+         prefix_position_ids=None,
++        prefix_position_pad_masks=None,
++        native_prefix_len=None,
+     ):
+         """Predict velocity at time t using cached Qwen3-VL prefix states."""
+         if prefix_position_ids is None:
+@@ -1023,6 +1481,14 @@ class FlowMatchingV2(FlowMatchingV1):
+         suffix_len = suffix_pad_masks.shape[1]
+         batch_size = prefix_pad_masks.shape[0]
+         prefix_len = prefix_pad_masks.shape[1]
++        if prefix_position_pad_masks is None:
++            prefix_position_pad_masks = prefix_pad_masks
++        if prefix_position_pad_masks.shape != prefix_pad_masks.shape:
++            raise ValueError("position and visibility prefix masks must have identical shape")
++        if native_prefix_len is None:
++            native_prefix_len = prefix_len
++        if not 0 < native_prefix_len <= prefix_len:
++            raise ValueError("native_prefix_len must address the immutable native prefix")
+         prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
+             batch_size,
+             suffix_len,
+@@ -1035,18 +1501,18 @@ class FlowMatchingV2(FlowMatchingV1):
+             full_att_2d_masks = block_suffix_to_fv_(
+                 full_att_2d_masks,
+                 suffix_row_start=0,
+-                prefix_len=prefix_len,
++                prefix_len=native_prefix_len,
+                 num_task_tokens=self.num_task_tokens,
+             )
+         full_att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
+             full_att_2d_masks,
+             suffix_row_start=0,
+-            prefix_len=prefix_len,
++            prefix_len=native_prefix_len,
+         )
+ 
+         full_position_ids = self._build_full_position_ids(
+             prefix_position_ids,
+-            prefix_pad_masks,
++            prefix_position_pad_masks,
+             suffix_pad_masks,
+         )
+         position_ids = full_position_ids[:, :, -suffix_len:]
+@@ -1233,6 +1699,54 @@ class LingbotVlaV2Policy(PreTrainedModel):
+     def get_optim_params(self) -> dict:
+         return self.parameters()
+ 
++    def picf_native_prior_forward(
++        self,
++        *,
++        attention_mask,
++        position_ids,
++        inputs_embeds,
++        visual_pos_masks,
++        picf_native_context,
++    ):
++        """Run the row-only joint host through a registerable root method."""
++        if picf_native_context is None:
++            raise ValueError("PICF row-only forward requires its typed context")
++        return self.model.qwenvl_with_expert.forward(
++            attention_mask=attention_mask,
++            position_ids=position_ids,
++            inputs_embeds=inputs_embeds,
++            visual_pos_masks=visual_pos_masks,
++            picf_native_context=picf_native_context,
++        )
++
++    def picf_native_observation_forward(
++        self,
++        *,
++        images,
++        img_masks,
++        lang_tokens,
++        lang_masks,
++        image_grid_thw,
++        picf_native_context,
++    ):
++        """Run the observation-only host through a registerable root method."""
++        return self.model.picf_native_observation_forward(
++            images=images,
++            img_masks=img_masks,
++            lang_tokens=lang_tokens,
++            lang_masks=lang_masks,
++            image_grid_thw=image_grid_thw,
++            picf_native_context=picf_native_context,
++        )
++
++    def picf_native_frozen_posterior_action_forward(self, *, request):
++        """Run the label-blind frozen-posterior action path through the FSDP root."""
++        from picf_next.lingbot_native.frozen_posterior_lingbot_adapter import (
++            run_registered_lingbot_frozen_posterior_action,
++        )
++
++        return run_registered_lingbot_frozen_posterior_action(self, request)
++
+     def forward(
+         self,
+         images,
+@@ -1251,6 +1765,9 @@ class LingbotVlaV2Policy(PreTrainedModel):
+         future_video_targets=None,
+         future_video_cls_targets=None,
+         future_video_current_patch=None,
++        picf_native_context=None,
++        compute_alignment_losses=True,
++        picf_action_attention_callback=None,
+         **kwargs
+     ) -> tuple[Tensor, dict[str, Tensor]]:
+         loss_dict = {}
+@@ -1285,6 +1802,9 @@ class LingbotVlaV2Policy(PreTrainedModel):
+             future_video_targets=future_video_targets,
+             future_video_cls_targets=future_video_cls_targets,
+             future_video_current_patch=future_video_current_patch,
++            picf_native_context=picf_native_context,
++            compute_alignment_losses=compute_alignment_losses,
++            picf_action_attention_callback=picf_action_attention_callback,
+         )
+ 
+         if joint_mask is not None:
+@@ -1313,7 +1832,22 @@ class LingbotVlaV2Policy(PreTrainedModel):
+         loss_dict["router_z_loss"] = router_z_loss.detach() if torch.is_tensor(router_z_loss) else router_z_loss
+         if moe_metrics:
+             loss_dict.update(moe_metrics)
+-        return total_loss, loss_vla, loss_depth, loss_future_depth, loss_future_video, seq_wise_loss, loss_dict, depth_preds, future_depth_preds, future_video_preds, current_video_preds
++        official_outputs = (
++            total_loss,
++            loss_vla,
++            loss_depth,
++            loss_future_depth,
++            loss_future_video,
++            seq_wise_loss,
++            loss_dict,
++            depth_preds,
++            future_depth_preds,
++            future_video_preds,
++            current_video_preds,
++        )
++        if picf_native_context is None:
++            return official_outputs
++        return (*official_outputs, picf_native_context.root_output_tensors())
+ 
+     def sample_actions(self, *args, **kwargs) -> Tensor:
+         return self.model.sample_actions(*args, **kwargs)
+diff --git a/lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py b/lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py
+index 045d7f6..da4a473 100644
+--- a/lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py
++++ b/lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py
+@@ -389,8 +389,10 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
+         **kwargs: Unpack[FlashAttentionKwargs],
+     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+         # Ensure input dtypes match weight dtype (needed for gradient checkpointing
+-        # recomputation where autocast context is lost)
+-        param_dtype = self.self_attn.q_proj.weight.dtype
++        # recomputation where autocast context is lost). The parent-owned norm
++        # remains unsharded throughout this call boundary; a nested projection
++        # may be prefetched or resharded when its dtype is inspected.
++        param_dtype = self.input_layernorm.weight.dtype
+         hidden_states = hidden_states.to(param_dtype)
+         if att_output is not None:
+             att_output = att_output.to(param_dtype)
+@@ -411,8 +413,6 @@ class Qwen2DecoderLayer(GradientCheckpointingLayer):
+             return query_state, key_state, value_state
+         
+         elif output_atten:
+-            if att_output.dtype != self.self_attn.o_proj.weight.dtype:
+-                att_output = att_output.to(self.self_attn.o_proj.weight.dtype)
+             out_emb = self.self_attn.o_proj(att_output[:, start:end])
+ 
+             # first residual
+diff --git a/lingbotvla/models/vla/lingbot_vla/qwen3vl_in_vla.py b/lingbotvla/models/vla/lingbot_vla/qwen3vl_in_vla.py
+index 239b6ae..2647da6 100644
+--- a/lingbotvla/models/vla/lingbot_vla/qwen3vl_in_vla.py
++++ b/lingbotvla/models/vla/lingbot_vla/qwen3vl_in_vla.py
+@@ -172,24 +172,36 @@ class Qwen3VLTextDecoderLayer(GradientCheckpointingLayer):
+         end: Optional[int] = 0,
+         compute_kqv: bool = False,
+         output_atten: bool = False,
++        qk_input_bias: Optional[torch.Tensor] = None,
+         **kwargs: Unpack[FlashAttentionKwargs],
+     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+-        param_dtype = self.self_attn.q_proj.weight.dtype
++        # Read execution dtype from this FSDP call boundary, not from a nested
++        # projection whose parameter may be prefetched or resharded between the
++        # original forward and non-reentrant checkpoint recomputation.
++        param_dtype = self.input_layernorm.weight.dtype
+         hidden_states = hidden_states.to(param_dtype)
+         if att_output is not None:
+             att_output = att_output.to(param_dtype)
+ 
+         if compute_kqv:
+             hidden_states = self.input_layernorm(hidden_states)
++            if qk_input_bias is not None:
++                if qk_input_bias.shape != hidden_states.shape:
++                    raise ValueError("Q/K input bias must match normalized hidden states")
++                qk_hidden_states = hidden_states + qk_input_bias.to(hidden_states.dtype)
++            else:
++                qk_hidden_states = hidden_states
+             hidden_shape = (*hidden_states.shape[:-1], -1, self.self_attn.head_dim)
+-            query_state = self.self_attn.q_norm(self.self_attn.q_proj(hidden_states).view(hidden_shape))
+-            key_state = self.self_attn.k_norm(self.self_attn.k_proj(hidden_states).view(hidden_shape))
++            query_state = self.self_attn.q_norm(
++                self.self_attn.q_proj(qk_hidden_states).view(hidden_shape)
++            )
++            key_state = self.self_attn.k_norm(
++                self.self_attn.k_proj(qk_hidden_states).view(hidden_shape)
++            )
+             value_state = self.self_attn.v_proj(hidden_states).view(hidden_shape)
+             return query_state, key_state, value_state
+ 
+         if output_atten:
+-            if att_output.dtype != self.self_attn.o_proj.weight.dtype:
+-                att_output = att_output.to(self.self_attn.o_proj.weight.dtype)
+             out_emb = self.self_attn.o_proj(att_output[:, start:end])
+             out_emb += hidden_states
+             after_first_residual = out_emb.clone()
+diff --git a/lingbotvla/models/vla/lingbot_vla/qwenvl_in_vla.py b/lingbotvla/models/vla/lingbot_vla/qwenvl_in_vla.py
+index 854e6a8..842ccad 100644
+--- a/lingbotvla/models/vla/lingbot_vla/qwenvl_in_vla.py
++++ b/lingbotvla/models/vla/lingbot_vla/qwenvl_in_vla.py
+@@ -220,6 +220,7 @@ class Qwen2_5_VLDecoderLayer(GradientCheckpointingLayer):
+         compute_kqv: bool = False,
+         norm_qkv: bool = False,
+         output_atten: bool = False,
++        qk_input_bias: Optional[torch.Tensor] = None,
+         **kwargs: Unpack[FlashAttentionKwargs],
+     ) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+         """
+@@ -243,13 +244,24 @@ class Qwen2_5_VLDecoderLayer(GradientCheckpointingLayer):
+                 Arbitrary kwargs to be ignored, used for FSDP and other methods that injects code
+                 into the model
+         """
++        # Keep runtime dtype owned by the parent checkpoint/FSDP call boundary.
++        param_dtype = self.input_layernorm.weight.dtype
++        hidden_states = hidden_states.to(param_dtype)
++        if att_output is not None:
++            att_output = att_output.to(param_dtype)
+ 
+         if compute_kqv:
+             hidden_states = self.input_layernorm(hidden_states)
++            if qk_input_bias is not None:
++                if qk_input_bias.shape != hidden_states.shape:
++                    raise ValueError("Q/K input bias must match normalized hidden states")
++                qk_hidden_states = hidden_states + qk_input_bias.to(hidden_states.dtype)
++            else:
++                qk_hidden_states = hidden_states
+             hidden_shape = (*hidden_states.shape[:-1], -1, self.self_attn.head_dim)
+ 
+-            query_state = self.self_attn.q_proj(hidden_states).view(hidden_shape)
+-            key_state = self.self_attn.k_proj(hidden_states).view(hidden_shape)
++            query_state = self.self_attn.q_proj(qk_hidden_states).view(hidden_shape)
++            key_state = self.self_attn.k_proj(qk_hidden_states).view(hidden_shape)
+             value_state = self.self_attn.v_proj(hidden_states).view(hidden_shape)
+ 
+             if norm_qkv:
+@@ -259,8 +271,6 @@ class Qwen2_5_VLDecoderLayer(GradientCheckpointingLayer):
+             return query_state, key_state, value_state
+         
+         elif output_atten:
+-            if att_output.dtype != self.self_attn.o_proj.weight.dtype:
+-                att_output = att_output.to(self.self_attn.o_proj.weight.dtype)
+             out_emb = self.self_attn.o_proj(att_output[:, start:end])
+ 
+             # first residual
+@@ -401,4 +411,4 @@ def apply_lingbot_qwen25_vl_patch():
+     hf_qwen25vl.Qwen2_5_VLVisionAttention = Qwen2_5_VLVisionAttention
+     hf_qwen25vl.Qwen2_5_VLVisionBlock = Qwen2_5_VLVisionBlock
+     hf_qwen25vl.Qwen2_5_VisionTransformerPretrainedModel.forward = forward_without_grid_thw
+-    hf_qwen25vl.Qwen2_5_VisionTransformerPretrainedModel.preprcess_grid_thw = preprcess_grid_thw
+\ No newline at end of file
++    hf_qwen25vl.Qwen2_5_VisionTransformerPretrainedModel.preprcess_grid_thw = preprcess_grid_thw
+diff --git a/lingbotvla/optim/muon.py b/lingbotvla/optim/muon.py
+index 2b307c5..7fbc96e 100644
+--- a/lingbotvla/optim/muon.py
++++ b/lingbotvla/optim/muon.py
+@@ -73,7 +73,7 @@ _DEFAULT_ADAMW_NAME_PATTERNS: Tuple[str, ...] = (
+     "output_layer",
+ )
+ 
+-_MEGABATCH_MAX_GROUP_SIZE = 32
++_MEGABATCH_MAX_GROUP_SIZE = 8
+ 
+ 
+ @torch.no_grad()
+@@ -529,9 +529,16 @@ class DistributedMuon(Optimizer):
+             stacked_full = torch.cat(real_chunks, dim=gather_dim)
+         del gather_list
+ 
+-        # Phase 3: Batched Newton-Schulz
+-        stacked_ortho = batched_newton_schulz(stacked_full, ns_coefficients, ns_steps, eps)
++        # Phase 3: Batched Newton-Schulz. The solver computes in bfloat16, so
++        # retain that result until after the local shard is selected. Converting
++        # the full gathered result back to FP32 here needlessly duplicates every
++        # rank's global update; slice and dtype conversion commute elementwise.
++        stacked_compute = stacked_full.to(torch.bfloat16)
+         del stacked_full
++        stacked_ortho = batched_newton_schulz(
++            stacked_compute, ns_coefficients, ns_steps, eps
++        )
++        del stacked_compute
+ 
+         # Phase 4: Local scatter + apply update
+         chunk_floor = global_dim_size // world_size
+@@ -583,4 +590,4 @@ class DistributedMuon(Optimizer):
+             full = _full_grad(update)
+             return batched_newton_schulz(full, ns_coefficients, ns_steps, eps)
+ 
+-        raise ValueError(f"Unknown DistributedMuon kind: {kind!r}")
+\ No newline at end of file
++        raise ValueError(f"Unknown DistributedMuon kind: {kind!r}")

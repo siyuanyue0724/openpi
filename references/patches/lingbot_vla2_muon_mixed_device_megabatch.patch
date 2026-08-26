@@ -1,0 +1,40 @@
+--- a/lingbotvla/optim/muon.py
++++ b/lingbotvla/optim/muon.py
+@@ -348,7 +348,8 @@
+                 kind = _classify_param(p)
+                 if kind == _KIND_FSDP_GATHER_2D:
+                     global_shape = tuple(p.shape)  # DTensor .shape = global, same on all ranks
+-                    key = (global_shape, str(p.dtype))
++                    local_parameter = p.to_local() if isinstance(p, DTensor) else p
++                    key = (global_shape, str(p.dtype), local_parameter.device.type)
+                     fsdp_2d_groups[key].append(p)
+                 else:
+                     has_grad = p.grad is not None
+@@ -510,6 +511,15 @@
+         # Phase 2: Stack and batched all-gather
+         stacked_local = torch.stack(local_updates, dim=0)  # [N, local_M, K]
+         del local_updates
++        if stacked_local.device.type == "cpu":
++            if not torch.cuda.is_available():
++                raise RuntimeError(
++                    "CPU-offloaded DistributedMuon shards require CUDA Newton-Schulz"
++                )
++            stacked_local = stacked_local.to(
++                device=torch.device("cuda", torch.cuda.current_device()),
++                non_blocking=False,
++            )
+ 
+         gather_dim = shard_dim + 1  # +1 for the batch dim we prepended
+         original_local_size = stacked_local.size(gather_dim)
+@@ -573,7 +583,10 @@
+             if weight_decay != 0.0:
+                 p_local.mul_(1 - lr * weight_decay)
+ 
+-            p_local.add_(ortho_local.to(dtype=p_local.dtype), alpha=-adjusted_lr)
++            p_local.add_(
++                ortho_local.to(device=p_local.device, dtype=p_local.dtype),
++                alpha=-adjusted_lr,
++            )
+ 
+     @staticmethod
+     def _compute_ortho(

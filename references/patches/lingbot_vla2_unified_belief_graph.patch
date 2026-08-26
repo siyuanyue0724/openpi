@@ -1,0 +1,503 @@
+diff --git a/lingbotvla/checkpoint/checkpointer.py b/lingbotvla/checkpoint/checkpointer.py
+index 970181d..6089f4f 100644
+--- a/lingbotvla/checkpoint/checkpointer.py
++++ b/lingbotvla/checkpoint/checkpointer.py
+@@ -50,6 +50,30 @@ _OPTIMIZER_DIR = "optimizer"
+ _EXTRA_STATE_DIR = "extra_state"
+ 
+ 
++def _fsync_directory(path: Path) -> None:
++    descriptor = os.open(path, os.O_RDONLY)
++    try:
++        os.fsync(descriptor)
++    finally:
++        os.close(descriptor)
++
++
++def _atomic_torch_save(value: Any, path: Path) -> None:
++    """Durably publish one rank-local payload without exposing partial bytes."""
++
++    temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
++    try:
++        with temporary.open("wb") as stream:
++            torch.save(value, stream)
++            stream.flush()
++            os.fsync(stream.fileno())
++        os.replace(temporary, path)
++        _fsync_directory(path.parent)
++    except BaseException:
++        temporary.unlink(missing_ok=True)
++        raise
++
++
+ class ModelState(Stateful):
+     """
+     A wrapper around a model to make it stateful.
+@@ -313,7 +337,7 @@ class DistributedCheckpointer(CheckpointerBase):
+                     model_dir,
+                     thread_count=16,
+                     single_file_per_rank=True,
+-                    sync_files=False,
++                    sync_files=True,
+                 ),
+             )
+             if "ema" in state and state["ema"] is not None:
+@@ -324,7 +348,7 @@ class DistributedCheckpointer(CheckpointerBase):
+                         ema_dir,
+                         thread_count=16,
+                         single_file_per_rank=True,
+-                        sync_files=False,
++                        sync_files=True,
+                     ),
+                 )
+             if "optimizer" in state:
+@@ -335,7 +359,7 @@ class DistributedCheckpointer(CheckpointerBase):
+                         optimizer_dir,
+                         thread_count=16,
+                         single_file_per_rank=True,
+-                        sync_files=False,
++                        sync_files=True,
+                     ),
+                 )
+         else:
+@@ -348,7 +372,7 @@ class DistributedCheckpointer(CheckpointerBase):
+                     output_dir,
+                     thread_count=16,
+                     single_file_per_rank=True,
+-                    sync_files=False,
++                    sync_files=True,
+                 )
+             model_dir = os.path.join(checkpoint_dir, _MODEL_DIR)
+             storage_writer = safe_create_writer(model_dir)
+@@ -371,19 +395,16 @@ class DistributedCheckpointer(CheckpointerBase):
+                         optimizer_dir,
+                         thread_count=16,
+                         single_file_per_rank=True,
+-                        sync_files=False,
++                        sync_files=True,
+                     ),
+                 )
+                 # dist.barrier()
+ 
+         if "extra_state" in state:
+-            extra_state_dir = os.path.join(checkpoint_dir, _EXTRA_STATE_DIR)
+-            os.makedirs(extra_state_dir, exist_ok=True)
+-            extra_state_path = os.path.join(extra_state_dir, _EXTRA_STATE_FORMAT.format(dist.get_rank()))
+-            torch.save(
+-                state["extra_state"],
+-                extra_state_path,
+-            )
++            extra_state_dir = Path(checkpoint_dir) / _EXTRA_STATE_DIR
++            extra_state_dir.mkdir(parents=True, exist_ok=True)
++            extra_state_path = extra_state_dir / _EXTRA_STATE_FORMAT.format(dist.get_rank())
++            _atomic_torch_save(state["extra_state"], extra_state_path)
+ 
+         logger.info_rank0(f"Saved checkpoint to {checkpoint_dir}")
+ 
+@@ -438,11 +459,17 @@ class DistributedCheckpointer(CheckpointerBase):
+                 dcp.load(
+                     state_dict={"state": OptimizerState(model=state["model"], optimizer=state["optimizer"])}, # 1043
+                     storage_reader=FileSystemReader(optimizer_dir), # 1027
+-                    planner = DefaultLoadPlanner(allow_partial_load=True),
++                    planner=DefaultLoadPlanner(allow_partial_load=allow_partial_load),
+                     process_group=process_group,
+                 )
+-            except:
+-                logger.info_rank0(f"Skip loading Optimizer from {checkpoint_dir}")
++            except Exception as error:
++                if not allow_partial_load:
++                    raise RuntimeError(
++                        f"Failed to restore optimizer from {checkpoint_dir}"
++                    ) from error
++                logger.warning_rank0(
++                    f"Partial checkpoint load skipped optimizer from {checkpoint_dir}: {error}"
++                )
+         else:
+             model_dir = os.path.join(checkpoint_dir, _MODEL_DIR)
+             dcp.load(
+@@ -453,11 +480,16 @@ class DistributedCheckpointer(CheckpointerBase):
+             )
+ 
+         if "extra_state" in state:
+-            extra_state_dir = os.path.join(checkpoint_dir, _EXTRA_STATE_DIR)
+-            os.makedirs(extra_state_dir, exist_ok=True)
+-            extra_state_path = os.path.join(extra_state_dir, _EXTRA_STATE_FORMAT.format(dist.get_rank()))
++            extra_state_dir = Path(checkpoint_dir) / _EXTRA_STATE_DIR
++            extra_state_path = extra_state_dir / _EXTRA_STATE_FORMAT.format(dist.get_rank())
++            if not extra_state_path.is_file():
++                raise FileNotFoundError(
++                    f"Rank-local checkpoint state is absent: {extra_state_path}"
++                )
+             state["extra_state"] = torch.load(
+                 extra_state_path,
++                map_location="cpu",
++                weights_only=True,
+             )
+ 
+         logger.info_rank0(f"Loaded checkpoint from {checkpoint_dir}")
+diff --git a/lingbotvla/distributed/torch_parallelize.py b/lingbotvla/distributed/torch_parallelize.py
+index 5db3bb9..3f6b061 100644
+--- a/lingbotvla/distributed/torch_parallelize.py
++++ b/lingbotvla/distributed/torch_parallelize.py
+@@ -19,7 +19,13 @@ from typing import Any, Dict, List, Optional
+ 
+ import torch
+ import torch.nn as nn
+-from torch.distributed.fsdp import CPUOffload, FullyShardedDataParallel, MixedPrecision, ShardingStrategy
++from torch.distributed.fsdp import (
++    CPUOffload,
++    CPUOffloadPolicy,
++    FullyShardedDataParallel,
++    MixedPrecision,
++    ShardingStrategy,
++)
+ from torch.distributed.fsdp._common_utils import _get_module_fsdp_state_if_fully_sharded_module
+ from torch.distributed.fsdp._runtime_utils import _lazy_init
+ from torch.distributed.fsdp.wrap import lambda_auto_wrap_policy
+@@ -200,10 +206,17 @@ def build_parallelize_model(
+                     )
+                 return fused_expert_modules
+ 
++            user_fsdp_kwargs = dict(kwargs.pop("fsdp_kwargs", {}))
++            if kwargs.pop("enable_fsdp_offload", False):
++                if "offload_policy" in user_fsdp_kwargs:
++                    raise ValueError(
++                        "enable_fsdp_offload and fsdp_kwargs.offload_policy are mutually exclusive"
++                    )
++                user_fsdp_kwargs["offload_policy"] = CPUOffloadPolicy(pin_memory=False)
+             fsdp_kwargs = {
+                 "mesh": parallel_state.fsdp_mesh,
+                 "reshard_after_forward": enable_full_shard,
+-                **kwargs.pop("fsdp_kwargs", {}),
++                **user_fsdp_kwargs,
+             }
+             if enable_mixed_precision and not enable_fp32:
+                 logger.info_rank0("Enable mixed precision training.")
+@@ -233,7 +246,7 @@ def build_parallelize_model(
+             mp_fsdp_kwargs = {
+                 "mesh": parallel_state.fsdp_mesh,
+                 "reshard_after_forward": enable_full_shard,
+-                **kwargs.pop("fsdp_kwargs", {}),
++                **user_fsdp_kwargs,
+             }
+ 
+             fused_expert_modules_to_shard = collect_fused_expert_modules(model)
+diff --git a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+index 44ccf04..831ec59 100644
+--- a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
++++ b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+@@ -127,14 +127,19 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         vlm_config = AutoConfig.from_pretrained(self.config.tokenizer_path)
+         if self.config.vocab_size not in (0, 257152):
+             vlm_config.text_config.vocab_size = self.config.vocab_size
+-        vlm_config._attn_implementation = "flash_attention_2"
+-        vlm_config.text_config._attn_implementation = "flash_attention_2"
++        hf_attention = (
++            "flash_attention_2"
++            if self.config.attention_implementation == "flex_cached"
++            else self.config.attention_implementation
++        )
++        vlm_config._attn_implementation = hf_attention
++        vlm_config.text_config._attn_implementation = hf_attention
+         vlm_config.vision_config._attn_implementation = self.config.vit_attn_implementation
+         self.qwenvl = Qwen3VLForConditionalGeneration._from_config(vlm_config)
+         if self.config.use_lm_head:
+             self.qwenvl.tie_weights()
+ 
+-        self.config.qwen_expert_config._attn_implementation = "flash_attention_2"
++        self.config.qwen_expert_config._attn_implementation = hf_attention
+         self.qwen_expert = Qwen2ForCausalLM._from_config(self.config.qwen_expert_config, eval=eval)
+ 
+         if getattr(self.config, "adanorm_time", False):
+@@ -151,6 +156,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         self.cu_seqlens = None
+         self.visual_split_sizes = None
+         self.visual_max_seqlen = None
++        self.unified_belief_graph = None
+ 
+         del self.qwen_expert.model.embed_tokens
+         if self.config.enable_expert_vision:
+@@ -167,6 +173,10 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         self.attention_interface = self.get_attention_interface()
+         self.set_requires_grad()
+ 
++    def set_unified_belief_graph(self, graph: Optional[nn.Module]) -> None:
++        """Register a graph that participates in the official joint Q/K/V loop."""
++        self.unified_belief_graph = graph
++
+     def _install_moe_blocks(self):
+         if not getattr(self.config, "use_moe", False):
+             return
+@@ -320,7 +330,23 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         ada_cond: List[torch.FloatTensor] = None,
+         visual_pos_masks: Optional[torch.Tensor] = None,
+         deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
++        unified_belief_context=None,
+     ):
++        unified_runtime = None
++        if self.unified_belief_graph is not None:
++            (
++                inputs_embeds,
++                attention_mask,
++                position_ids,
++                visual_pos_masks,
++                unified_runtime,
++            ) = self.unified_belief_graph.prepare_joint_inputs(
++                inputs_embeds=inputs_embeds,
++                attention_mask=attention_mask,
++                position_ids=position_ids,
++                visual_pos_masks=visual_pos_masks,
++                context=unified_belief_context,
++            )
+         models = [self.qwenvl.model.language_model, self.qwen_expert.model]
+         num_layers = self.qwenvl.config.text_config.num_hidden_layers
+         action_num_layers = self.config.qwen_expert_config.num_hidden_layers
+@@ -352,6 +378,14 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+             key_states = torch.cat(key_states, dim=1)
+             value_states = torch.cat(value_states, dim=1)
+             query_states, key_states = self.apply_mrope(query_states, key_states, position_ids)
++            if unified_runtime is not None:
++                unified_runtime = self.unified_belief_graph.observe_joint_qkv(
++                    layer_index=layer_idx,
++                    query_states=query_states,
++                    key_states=key_states,
++                    value_states=value_states,
++                    runtime=unified_runtime,
++                )
+             key_states, value_states, past_key_values = self.handle_kv_cache(
+                 key_states,
+                 value_states,
+@@ -374,6 +408,12 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+                 )
+             else:
+                 att_output = self.attention_interface(query_states, key_states, value_states, attention_mask)
++            if unified_runtime is not None:
++                att_output = self.unified_belief_graph.apply_relation_message(
++                    layer_index=layer_idx,
++                    attention_output=att_output,
++                    runtime=unified_runtime,
++                )
+ 
+             outputs_embeds = []
+             start = 0
+@@ -400,6 +440,12 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+                     out_emb = self._apply_deepstack(out_emb, layer_idx, visual_pos_masks, deepstack_visual_embeds)
+                 outputs_embeds.append(out_emb)
+                 start = end
++            if unified_runtime is not None:
++                outputs_embeds, unified_runtime = self.unified_belief_graph.after_layer(
++                    layer_index=layer_idx,
++                    outputs_embeds=outputs_embeds,
++                    runtime=unified_runtime,
++                )
+             inputs_embeds = outputs_embeds
+ 
+         outputs_embeds = []
+@@ -781,6 +827,8 @@ class FlowMatchingV2(FlowMatchingV1):
+         future_video_targets=None,
+         future_video_cls_targets=None,
+         future_video_current_patch=None,
++        unified_belief_context=None,
++        compute_alignment_losses=True,
+     ) -> Tensor:
+         dtype = state.dtype
+         device = state.device
+@@ -841,10 +889,16 @@ class FlowMatchingV2(FlowMatchingV1):
+             ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
+             visual_pos_masks=visual_pos_masks,
+             deepstack_visual_embeds=deepstack_visual_embeds,
++            unified_belief_context=unified_belief_context,
+         )
+         align_metrics = {}
+-        if self.config.align_params != {}:
+-            loss_depth, loss_future_depth, depth_preds, future_depth_preds = self.depth_emb_forward(outputs_embeds, depth_targets, img_masks,future_depth_targets,)
++        align_outputs_embeds = (
++            outputs_embeds[:, :prefix_len]
++            if unified_belief_context is not None
++            else outputs_embeds
++        )
++        if self.config.align_params != {} and compute_alignment_losses:
++            loss_depth, loss_future_depth, depth_preds, future_depth_preds = self.depth_emb_forward(align_outputs_embeds, depth_targets, img_masks,future_depth_targets,)
+             loss_depth = loss_depth * self.config.align_params["depth_loss_weight"]
+             loss_future_depth = loss_future_depth * self.config.align_params.get("future_depth_loss_weight", 1.0)
+             loss_future_video = 0
+@@ -852,7 +906,7 @@ class FlowMatchingV2(FlowMatchingV1):
+             current_video_preds = None
+             if getattr(self, "use_future_video", False):
+                 loss_video, future_video_preds, video_metrics = self.video_emb_forward(
+-                    outputs_embeds,
++                    align_outputs_embeds,
+                     future_video_targets,
+                     future_video_cls_targets=future_video_cls_targets,
+                     future_video_current_patch=future_video_current_patch,
+@@ -863,7 +917,7 @@ class FlowMatchingV2(FlowMatchingV1):
+                     and future_video_current_patch is not None
+                 ):
+                     current_video_loss, current_video_preds, current_video_metrics = self.current_video_emb_forward(
+-                        outputs_embeds,
++                        align_outputs_embeds,
+                         future_video_current_patch,
+                     )
+                     video_total_loss = video_total_loss + current_video_loss
+@@ -926,6 +980,7 @@ class FlowMatchingV2(FlowMatchingV1):
+         state,
+         noise=None,
+         image_grid_thw=None,
++        unified_belief_context=None,
+     ) -> Tensor:
+         """Do a full Qwen3-VL inference forward and compute the action."""
+         bsize = state.shape[0]
+@@ -954,26 +1009,77 @@ class FlowMatchingV2(FlowMatchingV1):
+             lang_masks,
+             image_grid_thw=image_grid_thw,
+         )
+-        prefix_att_2d_masks = make_att_2d_masks(prefix_pad_masks, prefix_att_masks)
++        native_prefix_len = prefix_pad_masks.shape[1]
++        cache_inputs = [prefix_embs, None]
++        cache_pad_masks = prefix_pad_masks
++        cache_position_ids = prefix_position_ids
++        if unified_belief_context is not None:
++            _fp32 = getattr(self.config, "action_fp32", False)
++            state_emb = (
++                self._fp32_linear(self.state_proj, state)
++                if _fp32
++                else self.state_proj(state)
++            )[:, None]
++            state_pad_masks = torch.ones(
++                (bsize, 1), device=device, dtype=torch.bool
++            )
++            state_att_masks = torch.ones_like(state_pad_masks)
++            cache_inputs = [prefix_embs, state_emb]
++            cache_pad_masks = torch.cat([prefix_pad_masks, state_pad_masks], dim=1)
++            cache_att_masks = torch.cat([prefix_att_masks, state_att_masks], dim=1)
++            cache_position_ids = self._build_full_position_ids(
++                prefix_position_ids,
++                prefix_pad_masks,
++                state_pad_masks,
++            )
++        else:
++            cache_att_masks = prefix_att_masks
++        cache_att_2d_masks = make_att_2d_masks(cache_pad_masks, cache_att_masks)
++        if unified_belief_context is not None:
++            if self.block_future_depth_to_action:
++                cache_att_2d_masks = block_suffix_to_fv_(
++                    cache_att_2d_masks,
++                    suffix_row_start=native_prefix_len,
++                    prefix_len=native_prefix_len,
++                    num_task_tokens=self.num_task_tokens,
++                )
++            cache_att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
++                cache_att_2d_masks,
++                suffix_row_start=native_prefix_len,
++                prefix_len=native_prefix_len,
++            )
+ 
+         _, past_key_values, _ = self.qwenvl_with_expert.forward(
+-            attention_mask=prefix_att_2d_masks,
+-            position_ids=prefix_position_ids,
++            attention_mask=cache_att_2d_masks,
++            position_ids=cache_position_ids,
+             vlm_position_ids=prefix_position_ids,
+             past_key_values=None,
+-            inputs_embeds=[prefix_embs, None],
++            inputs_embeds=cache_inputs,
+             use_cache=self.config.use_cache,
+             fill_kv_cache=True,
+             visual_pos_masks=visual_pos_masks,
+             deepstack_visual_embeds=deepstack_visual_embeds,
++            unified_belief_context=unified_belief_context,
+         )
++        if unified_belief_context is not None:
++            prefix_pad_masks = unified_belief_context.expanded_cache_valid
++            prefix_position_ids = unified_belief_context.expanded_cache_position_ids
++            action_cache_visible = unified_belief_context.expanded_action_cache_visible
++            if any(
++                value is None for value in (prefix_pad_masks, prefix_position_ids, action_cache_visible)
++            ):
++                raise RuntimeError("unified belief graph did not publish expanded cache metadata")
++            prefix_pad_masks = prefix_pad_masks & action_cache_visible
+ 
+         dt = torch.tensor(-1.0 / self.config.num_steps, dtype=dtype, device=device)
+         x_t = noise
+         time = torch.tensor(1.0, dtype=dtype, device=device)
+         count = 0
+         predict_velocity_fn = self.predict_velocity
+-        if getattr(self, "_use_compile_predict_velocity", False):
++        if (
++            getattr(self, "_use_compile_predict_velocity", False)
++            and unified_belief_context is None
++        ):
+             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
+             if predict_velocity_fn is None:
+                 predict_velocity_fn = torch.compile(
+@@ -994,6 +1100,8 @@ class FlowMatchingV2(FlowMatchingV1):
+                 x_t,
+                 expanded_time,
+                 prefix_position_ids=prefix_position_ids,
++                state_is_cached=unified_belief_context is not None,
++                native_prefix_len=native_prefix_len,
+             )
+ 
+             x_t += dt * v_t
+@@ -1009,6 +1117,8 @@ class FlowMatchingV2(FlowMatchingV1):
+         x_t,
+         timestep,
+         prefix_position_ids=None,
++        state_is_cached=False,
++        native_prefix_len=None,
+     ):
+         """Predict velocity at time t using cached Qwen3-VL prefix states."""
+         if prefix_position_ids is None:
+@@ -1019,10 +1129,18 @@ class FlowMatchingV2(FlowMatchingV1):
+             x_t,
+             timestep,
+         )
++        if state_is_cached:
++            suffix_embs = suffix_embs[:, 1:]
++            suffix_pad_masks = suffix_pad_masks[:, 1:]
++            suffix_att_masks = suffix_att_masks[:, 1:]
+ 
+         suffix_len = suffix_pad_masks.shape[1]
+         batch_size = prefix_pad_masks.shape[0]
+         prefix_len = prefix_pad_masks.shape[1]
++        if native_prefix_len is None:
++            native_prefix_len = prefix_len
++        if not 0 < native_prefix_len <= prefix_len:
++            raise ValueError("native_prefix_len must address the immutable native prefix")
+         prefix_pad_2d_masks = prefix_pad_masks[:, None, :].expand(
+             batch_size,
+             suffix_len,
+@@ -1035,13 +1153,13 @@ class FlowMatchingV2(FlowMatchingV1):
+             full_att_2d_masks = block_suffix_to_fv_(
+                 full_att_2d_masks,
+                 suffix_row_start=0,
+-                prefix_len=prefix_len,
++                prefix_len=native_prefix_len,
+                 num_task_tokens=self.num_task_tokens,
+             )
+         full_att_2d_masks = self._block_suffix_to_future_video_if_enabled_(
+             full_att_2d_masks,
+             suffix_row_start=0,
+-            prefix_len=prefix_len,
++            prefix_len=native_prefix_len,
+         )
+ 
+         full_position_ids = self._build_full_position_ids(
+@@ -1251,6 +1369,8 @@ class LingbotVlaV2Policy(PreTrainedModel):
+         future_video_targets=None,
+         future_video_cls_targets=None,
+         future_video_current_patch=None,
++        unified_belief_context=None,
++        compute_alignment_losses=True,
+         **kwargs
+     ) -> tuple[Tensor, dict[str, Tensor]]:
+         loss_dict = {}
+@@ -1285,6 +1405,8 @@ class LingbotVlaV2Policy(PreTrainedModel):
+             future_video_targets=future_video_targets,
+             future_video_cls_targets=future_video_cls_targets,
+             future_video_current_patch=future_video_current_patch,
++            unified_belief_context=unified_belief_context,
++            compute_alignment_losses=compute_alignment_losses,
+         )
+ 
+         if joint_mask is not None:

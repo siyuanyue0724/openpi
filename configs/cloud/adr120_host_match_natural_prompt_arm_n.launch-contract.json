@@ -1,0 +1,18 @@
+{
+  "baseline_launch_sha256": "b5dd6223d45bbef64cc9c56e7b63a9000ca3c4b89401863f48417497d572eeef",
+  "candidate_launch_sha256": "862bc6c1e4846b4adde8eeeb675957cc72488c0fbd805c42b69a837e58cce9ad",
+  "candidate_log": "/mnt/picf-next/logs/representation-host-native-match-natural-prompt-arm-n-20260731.log",
+  "candidate_run_dir": "/mnt/picf-next/runs/representation-host-native-match-natural-prompt-arm-n-20260731",
+  "gradient_audit_steps": "9,17,20,50,100,200",
+  "other_runner_delta_count": 0,
+  "removed_options": [
+    "--representation-task-intervention-plan",
+    "--representation-task-intervention-plan-sha256"
+  ],
+  "schema": "picf-next.lingbot-representation-natural-prompt-launch.v1",
+  "status": "PASS",
+  "training_state_delta": "donor_intervention_absent_use_natural_source_prompt",
+  "unchanged_runner_option_count": 54,
+  "visual_audit_every": 1,
+  "world_size": 2
+}

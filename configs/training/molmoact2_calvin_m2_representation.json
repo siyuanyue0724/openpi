@@ -1,0 +1,58 @@
+{
+  "acceptance": {
+    "maximum_query_permutation_error": 1e-05,
+    "maximum_task_intervention_feature_error": 0.0,
+    "minimum_count_mae_improvement_fraction_vs_random": 0.1,
+    "minimum_geometry_mae_improvement_fraction_vs_random": 0.1,
+    "minimum_heldout_exact_count_accuracy": 0.25,
+    "minimum_label_shuffle_dice_margin": 0.02,
+    "minimum_label_shuffle_ownership_accuracy_margin": 0.02,
+    "minimum_mean_object_dice": 0.35,
+    "minimum_ownership_accuracy": 0.6,
+    "minimum_ownership_accuracy_improvement_vs_all_context": 0.05,
+    "minimum_random_dice_margin": 0.05,
+    "minimum_uncertainty_error_spearman": 0.0
+  },
+  "cache": {
+    "dtype": "bfloat16",
+    "extraction_batch_size": 8,
+    "modality": "molmo_vision_patch",
+    "shard_rows": 8,
+    "token_count": 1458,
+    "token_dim": 2304
+  },
+  "foundation_recipe_path": "configs/training/molmoact2_calvin_m3_probe.json",
+  "foundation_recipe_sha256": "5d6d543cedf025f510a901fec018075ac99736d795bfdd2d58ff6cd5926427d2",
+  "gate": "M2_representation_smoke",
+  "optimization": {
+    "batch_size": 4,
+    "gradient_clip_norm": 1.0,
+    "learning_rate": 0.0001,
+    "seed": 20260716,
+    "steps": 200,
+    "validation_interval": 20,
+    "warmup_steps": 10,
+    "weight_decay": 0.0
+  },
+  "schema": "picf-next.molmoact2-m2-representation.v1",
+  "splits": {
+    "excluded_overlap_control_segments": [
+      6,
+      8
+    ],
+    "heldout_segments": [
+      1,
+      2,
+      7
+    ],
+    "strategy": "disjoint-language-segments-and-source-ranges.v1",
+    "train_segments": [
+      3,
+      4,
+      5
+    ],
+    "validation_segments": [
+      0
+    ]
+  }
+}

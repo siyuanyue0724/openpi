@@ -1,0 +1,36 @@
+states:
+  - observation.state.arm.position:
+      origin_keys:
+        - observation.state.lingbot:
+            start: 0
+            end: 7
+  - observation.state.end.position:
+      origin_keys:
+        - observation.state.lingbot:
+            start: 14
+            end: 20
+  - observation.state.effector.position:
+      origin_keys:
+        - observation.state.lingbot:
+            start: 28
+            end: 29
+
+actions:
+  - action.end.position:
+      origin_keys:
+        - action.lingbot:
+            start: 14
+            end: 20
+      subtract_state: false
+  - action.effector.position:
+      origin_keys:
+        - action.lingbot:
+            start: 28
+            end: 29
+      subtract_state: false
+
+images:
+  - observation.images.camera_top
+  - observation.images.camera_wrist_left
+
+norm_stats: __REQUIRES_EXPLICIT_AUDITED_NORM_STATS_PATH__

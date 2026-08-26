@@ -1,0 +1,141 @@
+{
+  "schema": "picf-next.full-transplant-sources.v1",
+  "architecture_contract": "docs/199_FULL_TRANSPLANT_UNIFIED_PICF_ARCHITECTURE_20260821.md",
+  "policy": {
+    "exact_upstream_must_precede_adaptation": true,
+    "scientific_adapters_require_named_arms": true,
+    "silent_simplification_forbidden": true,
+    "strict_runtime_requires_all_external_assets": true
+  },
+  "donors": {
+    "lingbot_vla2": {
+      "repository": "https://github.com/Robbyant/lingbot-vla-v2.git",
+      "source_commit": "2838c1862bbec1ea47942fb61512130f635eb595",
+      "audited_public_head": "951475ae1b1d87553e7dc47c97b53a3d695c0d13",
+      "source_files": {
+        "lingbotvla/checkpoint/checkpointer.py": "da48ecca6d78e7982f73018179b50a99b9d211bdebf87c200443b1f51466d8ca",
+        "lingbotvla/distributed/torch_parallelize.py": "00d6e229fc5587f6590cfab07e581f39ffe272715999946ee50ae35c14bb6e5f",
+        "lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla.py": "af6a365f05e4ccd7d2585368412be5d186a3afdabfc6e9eaf0c97e71a51037dc",
+        "lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py": "9b3c9a2ad6823f9d58da51b732477785a1e4db0d29db80e030e094c7b605e40c",
+        "lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py": "2221459c676c27eb70e13edd29d6e25c2c6008a1fc3f0b7c820b8abbbf11aff6",
+        "lingbotvla/models/vla/lingbot_vla/qwen3vl_in_vla.py": "eb2202bd01916c891b366c90f9bf11a2782f9387031cc24ed08851b3d8f01e96",
+        "lingbotvla/models/vla/lingbot_vla/qwenvl_in_vla.py": "6320cbc1c71cfd51b98258e92782d601d00f0b33035bf50979a299fbe29ba7c3",
+        "lingbotvla/models/vla/vision_models/align_heads/depth_head.py": "78d3a617b8b84647ee3811c606f6554d40efadd5ff330d5efc91a64af919fd79",
+        "lingbotvla/models/vla/vision_models/align_heads/resampler.py": "21e8444e7af259746c7786ec0064e8325b446305677fffebcc9569d749549ab8",
+        "lingbotvla/optim/muon.py": "2ca3fcce6c158ed0dbf726313cb623520b13ff249d4ff83a98d6c3a4a6b47881"
+      },
+      "public_head_identical_core_files": [
+        "lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla.py",
+        "lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py",
+        "lingbotvla/models/vla/vision_models/align_heads/depth_head.py",
+        "lingbotvla/models/vla/vision_models/align_heads/resampler.py"
+      ],
+      "ordered_overlays": [
+        {
+          "path": "references/patches/lingbot_vla2_picf_native.patch",
+          "sha256": "3879f68206c1ed2c842a5d2ab7bd96dfb9a488d0ca68c118a531e2464c130c24"
+        },
+        {
+          "path": "references/patches/lingbot_vla2_distributed_muon_collective_alignment.patch",
+          "sha256": "cf1cf8ab41baea50d41e2030977e78fae2ff9742b7c5a7c70c6c40838dcbeab3"
+        },
+        {
+          "path": "references/patches/lingbot_vla2_selective_frozen_vision_offload.patch",
+          "sha256": "783a7cf21cfd439e418f14cc2e6a0770d264268895dd9570800537bc908e9090"
+        },
+        {
+          "path": "references/patches/lingbot_vla2_frozen_visual_root_offload.patch",
+          "sha256": "cb734d999459bfa065f619108e64aa3fa780650442efdaef24b740d622fcbf70"
+        }
+      ],
+      "patched_source_files": {
+        "lingbotvla/checkpoint/checkpointer.py": "ac7bd7e4bcbf6d92d095800a80d44d4340c28caae86a8743f5c77b08f9be316e",
+        "lingbotvla/distributed/torch_parallelize.py": "de3cd1cb59cd25d36b74771fff1b23dd318ac2d54f6639d2ef71518ccace4e47",
+        "lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py": "c4fc62f391404dab155a388d48a9f285fffd65409b0c1c55e88edf1332c35937",
+        "lingbotvla/models/vla/lingbot_vla/qwen2_action_expert.py": "b100e1975ed87e5a23564bb7ad390667b8fc42bce38a8b928ede067d534d875e",
+        "lingbotvla/models/vla/lingbot_vla/qwen3vl_in_vla.py": "e1961fbb369d1c405ac0e67c16652d901bfad5e143abc9d9ae679b014c3fb649",
+        "lingbotvla/models/vla/lingbot_vla/qwenvl_in_vla.py": "bc26161e8698ca858f2ecfc6428c2e9b353ebfdbe33e2319934071eddfd26271",
+        "lingbotvla/optim/muon.py": "cc3cf6de187eacaddb0b5a964f64ab305693b28529a0e5e9f46e149ffc4a81e4"
+      },
+      "checkpoint": {
+        "repository": "robbyant/lingbot-vla-v2-6b",
+        "revision": "11c703bf6a5c1f45b3b69168482da11fdbba53d7",
+        "assets": [
+          {"path": "config.json", "bytes": 31, "sha256": "7c1fddcf59379627bfafda7b5923092f370fa28f15d2132ee305a037335dfb80"},
+          {"path": "depth/model.pt", "bytes": 1316220456, "sha256": "d70c5191eab853d436763b35d40ff99d13534b4bcd43e4d02823656968159e5b"},
+          {"path": "dino_video/config.yaml", "bytes": 1388, "sha256": "333befe36960b094f2604084802639ab4396c1fa51e51f8d1cb160e29522ac08"},
+          {"path": "dino_video/teacher_step_10000.pth", "bytes": 1401509792, "sha256": "086285efd8d65bc66e96b363807c4010ee5c790b7452b765edaa23837a63705b"},
+          {"path": "model-00001-of-00006.safetensors", "bytes": 4987151072, "sha256": "4afb52b06a13df8b738a156ae5c8196d3bfe6b3ca931cecbd701e44cb9674e45"},
+          {"path": "model-00002-of-00006.safetensors", "bytes": 4985113408, "sha256": "ec131afa26a340db94c0dba8ec00e990be5f3d842ce6532070f0c8e26a067501"},
+          {"path": "model-00003-of-00006.safetensors", "bytes": 4928593216, "sha256": "7dccb068ca66c11fa514476d64661eeead56e2e80e1c0572c9ea82aa0d9ecf27"},
+          {"path": "model-00004-of-00006.safetensors", "bytes": 4990740540, "sha256": "1c2cb78066b69ae11255db851df95071e2cd69a3a4bc5020b3fd3b13b17819fb"},
+          {"path": "model-00005-of-00006.safetensors", "bytes": 4990095864, "sha256": "8fe36bf1f4f617869954bdfa1ad12e16abd8b0235a5fa99c88d571d4cddf4a17"},
+          {"path": "model-00006-of-00006.safetensors", "bytes": 622195024, "sha256": "3cf613d592dad64b1e2a1b1bb34a6f556a7fa05eacdb9972d73e0ea4882555a0"},
+          {"path": "model.safetensors.index.json", "bytes": 207389, "sha256": "5a753ec331c51925d064e1e76e921a7eb3dca9770d2a6a91dac5e0e4162d676a"},
+          {"path": "preprocessor_config.json", "bytes": 782, "sha256": "93585062a80db5e8ca038efc7726a3e6411d9db948472d81d63c6303993be8c5"},
+          {"path": "tokenizer.json", "bytes": 11422654, "sha256": "aeb13307a71acd8fe81861d94ad54ab689df773318809eed3cbe794b4492dae4"},
+          {"path": "tokenizer_config.json", "bytes": 5472, "sha256": "cf43a5bf1a49ee69ecced02f419b169e72559034dcf15af47cf775bd253830f0"}
+        ]
+      },
+      "processor": {
+        "repository": "Qwen/Qwen3-VL-4B-Instruct",
+        "revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+        "assets": [
+          {"path": "chat_template.json", "bytes": 5502, "sha256": "6f8a6a55027e3da5160105556cda5dd69f6423f1c32645f6730d32de7773d0c4"},
+          {"path": "config.json", "bytes": 1505, "sha256": "edac7703329133edfc53e46ac0081835144c99d7eebf28b71c732694d435224d"},
+          {"path": "merges.txt", "bytes": 1671839, "sha256": "599bab54075088774b1733fde865d5bd747cbcc7a547c5bc12610e874e26f5e3"},
+          {"path": "preprocessor_config.json", "bytes": 390, "sha256": "27225450ac9c6529872ee1924fcb0962ff5634834f817040f444118116f4e516"},
+          {"path": "tokenizer.json", "bytes": 7032403, "sha256": "a5d85b6dcc535e6b93115a9ef287e6132fdbf30270da6218194ba742261173c7"},
+          {"path": "tokenizer_config.json", "bytes": 10868, "sha256": "c2da771801886ad9ae98181793ffd3dfb7f1af30f6f7c6a4e15d7dbba52e2399"},
+          {"path": "video_preprocessor_config.json", "bytes": 385, "sha256": "7768af27c1fafa9cc9011c1dc20067e03f8915e03b63504550e11d5066986d13"},
+          {"path": "vocab.json", "bytes": 2776833, "sha256": "ca10d7e9fb3ed18575dd1e277a2579c16d108e32f27439684afa0e10b1440910"}
+        ]
+      }
+    },
+    "videomt": {
+      "repository": "https://github.com/tue-mps/videomt.git",
+      "source_commit": "025b9384214bf28cd90d51846464615dd4f443ac",
+      "snapshot_root": "references/source_snapshots/videomt-025b9384214bf28cd90d51846464615dd4f443ac",
+      "vendor_root": "src/picf_next/_vendor/videomt",
+      "source_files": [
+        {"source": "videomt/modeling/backbone/videomt.py", "vendor": "modeling/backbone/videomt.py", "sha256": "e5b4a8140eb638b3618c1472d029b6e326592209f36d06c316320c55de1df5c6", "adapter": "byte-identical"},
+        {"source": "videomt/modeling/backbone/vit.py", "vendor": "modeling/backbone/vit.py", "sha256": "e4456745fcc6a6a3ae721f85c3b5e7025cd387134b1a3e02e612fa8329ad1430", "adapter": "byte-identical"},
+        {"source": "videomt/modeling/backbone/scale_block.py", "vendor": "modeling/backbone/scale_block.py", "sha256": "1aa639121b83ff05fd563682ba8029744ea8780917b1d51fdc3fd766db52eb7c", "adapter": "byte-identical"},
+        {"source": "videomt/modeling/matcher.py", "vendor": "matcher.py", "sha256": "47925acf6af9348df596480c3c9e77cafdf8af25f7a2ac10d831c0cf6e57918d", "adapter": "byte-identical"},
+        {"source": "videomt/criterion_videomt.py", "vendor": "criterion_videomt.py", "sha256": "2db085ec4cce09b54328d74e8618e80fe5fc39bda3a54747e12bd310df7aff27", "adapter": "single-import-rewrite"},
+        {"source": "videomt/data_video/augmentation.py", "vendor": "data_video/augmentation.py", "sha256": "a6c6eb7d92818d56a1bfd71adc6dc81aac49d299894b3e5da08848b6b4055063", "adapter": "byte-identical"},
+        {"source": "videomt/modeling/two_stage_warmup_poly_schedule.py", "vendor": "modeling/two_stage_warmup_poly_schedule.py", "sha256": "d4d035ed67693c0cec54203f76f7c1eaa44905bf5348b25c20b06381b13ca88c", "adapter": "byte-identical"},
+        {"source": "videomt/utils/misc.py", "vendor": "utils/misc.py", "sha256": "53fc8de4b8f5947fbba0f5a802219c0df1ca0b91133400b7da755cf6a328e672", "adapter": "byte-identical"},
+        {"source": "videomt/config.py", "vendor": "config.py", "sha256": "7f401500eb40d53b9586bfbc468fa442eb6568174f5cb4afb0617f7faeda3c86", "adapter": "byte-identical"},
+        {"source": "LICENSE", "vendor": "LICENSE", "sha256": "0299d15a2f1a7f03c2577fecb7bac793ac558a29e89bec9f6bddf29c850a2812", "adapter": "byte-identical"},
+        {"source": "videomt/videomt.py", "vendor": null, "sha256": "c2e021bb57f90ff701fcd4a462306af3c7d04e65be3859f419b35461ea56b9ed", "adapter": "normative-reference"},
+        {"source": "videomt/data_video/dataset_mapper.py", "vendor": null, "sha256": "f61a2648bd9c8a26b5d4f818d1accbcd8d6f5eb0f37a888211c2cd0f64968688", "adapter": "normative-reference"},
+        {"source": "train_net_video.py", "vendor": null, "sha256": "ac599597344f2a21565b1db0d2f59a0807fc02c561e4fd1827afca3b89b7b61d", "adapter": "normative-reference"},
+        {"source": "configs/ytvis19/Base-YouTubeVIS-VideoInstanceSegmentation.yaml", "vendor": null, "sha256": "48a16f25cdde85ea3934f952e75523a67c6c07026835700071ddd1987d7111c9", "adapter": "normative-reference"},
+        {"source": "configs/ytvis19/Base_R50.yaml", "vendor": null, "sha256": "c68124051e88d978dd74f898965e4d7ce26a0803b166a174f107970d9028d4de", "adapter": "normative-reference"},
+        {"source": "configs/ytvis19/videomt/dinov3/vit-large/videomt_online_ViTL.yaml", "vendor": null, "sha256": "f5dc0f1363f439df965e1feb1f252080e3054fb56412d44516d4a1d2fedcb9d7", "adapter": "normative-reference"}
+      ],
+      "checkpoint": {
+        "repository_commit": "8c953a359f03041e5cdb30b385709ddaae91293e",
+        "path": "dinov3_online/yt_2019_dinov3_68.9.pth",
+        "bytes": 1264120741,
+        "sha256": "2cfa7a2df68e6f21f29bea3be571b1f63d0f94c90b7b528a67267eb84317c04f",
+        "model_tensors": 437,
+        "backbone_tensors": 436,
+        "model_numel": 315987030
+      }
+    },
+    "dinov3": {
+      "repository": "https://github.com/facebookresearch/dinov3.git",
+      "source_commit": "6876159a11b4df116f30f667f8c9888617df0751",
+      "constructor_model": "facebook/dinov3-vitl16-pretrain-lvd1689m",
+      "released_pretrain_blob_bytes": 1212347640,
+      "runtime_bundle": {
+        "derivation": "mechanical-key-conversion-from-released-videomt-checkpoint",
+        "config_bytes": 742,
+        "config_sha256": "43304b7ad2d5d2d72d0872ff6092d9aeb722c7e446e755a1ce76a04635760881",
+        "source_checkpoint_sha256": "2cfa7a2df68e6f21f29bea3be571b1f63d0f94c90b7b528a67267eb84317c04f"
+      }
+    }
+  }
+}

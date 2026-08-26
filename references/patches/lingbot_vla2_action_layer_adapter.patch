@@ -1,0 +1,223 @@
+diff --git a/lingbotvla/data/vla_data/base_dataset.py b/lingbotvla/data/vla_data/base_dataset.py
+index cee701c..be5509a 100644
+--- a/lingbotvla/data/vla_data/base_dataset.py
++++ b/lingbotvla/data/vla_data/base_dataset.py
+@@ -24,12 +24,13 @@ from torchvision.transforms.v2 import Resize
+ try:
+     from lerobot.datasets.lerobot_dataset import LeRobotDataset as BaseLeRobotDataset
+     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+-    from lerobot.datasets.utils import hf_transform_to_torch
++    from lerobot.datasets.utils import hf_transform_to_torch, load_nested_dataset
+     LEROBOT_DATASET_API = "v3"
+ except ImportError:
+     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset as BaseLeRobotDataset
+     from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
+     from lerobot.common.datasets.utils import hf_transform_to_torch
++    load_nested_dataset = None
+     LEROBOT_DATASET_API = "v2"
+ 
+ from datasets import load_dataset as _hf_load_dataset
+@@ -100,6 +101,16 @@ class LeRobotDataset(BaseLeRobotDataset):
+         return result
+ 
+     def load_hf_dataset(self, features=None):
++        if LEROBOT_DATASET_API == "v3":
++            hf_dataset = load_nested_dataset(
++                self.root / "data",
++                episodes=self.episodes,
++            )
++            if features is not None:
++                hf_dataset = hf_dataset.select_columns(features)
++            hf_dataset.set_transform(hf_transform_to_torch)
++            return hf_dataset
++
+         episodes = self.episodes if self.episodes is not None else list(range(self.meta.total_episodes))
+         files = [str(self.root / self.meta.get_data_file_path(ep_idx)) for ep_idx in episodes]
+         hf_dataset = _hf_load_dataset("parquet", data_files=files, split="train")
+diff --git a/lingbotvla/data/vla_data/utils.py b/lingbotvla/data/vla_data/utils.py
+index 9cc49ae..cfae4e3 100644
+--- a/lingbotvla/data/vla_data/utils.py
++++ b/lingbotvla/data/vla_data/utils.py
+@@ -19,6 +19,15 @@ import torch.nn.functional as F
+ 
+ logger = logging_utils.get_logger(__name__)
+ 
++def _as_feature_mapping(value):
++    """Accept both CLI strings and mappings produced by yaml.safe_load."""
++    if isinstance(value, dict):
++        return value
++    parsed = ast.literal_eval(value)
++    if not isinstance(parsed, dict):
++        raise ValueError(f"feature declaration must be a mapping, got {type(parsed).__name__}")
++    return parsed
++
+ def compute_image_token_count(images, image_grid_thw=None, merge_size=2, use_vision_boundaries=True):
+     if not isinstance(images, torch.Tensor) or images.numel() == 0:
+         return 0
+@@ -53,7 +62,7 @@ class FeatureInfo(BaseModel):
+         joints= []
+         joints_max_dim = {}
+         for s in joints_info:
+-            joint_info = ast.literal_eval(s)
++            joint_info = _as_feature_mapping(s)
+             joint = next(iter(joint_info.keys()))
+             if joint_info[joint] == 0: continue
+ 
+@@ -136,7 +145,7 @@ class FeatureTransform:
+ 
+         if not do_nomalize: return None
+ 
+-        action_state_norm_type = {k: v for d in data_config.norm_type for k, v in ast.literal_eval(d).items()} 
++        action_state_norm_type = {k: v for d in data_config.norm_type for k, v in _as_feature_mapping(d).items()} 
+ 
+         assert norm_stats_path is not None
+         norm_type = {}
+diff --git a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+index 44ccf04..a593bf2 100644
+--- a/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
++++ b/lingbotvla/models/vla/lingbot_vla/modeling_lingbot_vla_v2.py
+@@ -127,14 +127,19 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         vlm_config = AutoConfig.from_pretrained(self.config.tokenizer_path)
+         if self.config.vocab_size not in (0, 257152):
+             vlm_config.text_config.vocab_size = self.config.vocab_size
+-        vlm_config._attn_implementation = "flash_attention_2"
+-        vlm_config.text_config._attn_implementation = "flash_attention_2"
++        hf_attention = (
++            "flash_attention_2"
++            if self.config.attention_implementation == "flex_cached"
++            else self.config.attention_implementation
++        )
++        vlm_config._attn_implementation = hf_attention
++        vlm_config.text_config._attn_implementation = hf_attention
+         vlm_config.vision_config._attn_implementation = self.config.vit_attn_implementation
+         self.qwenvl = Qwen3VLForConditionalGeneration._from_config(vlm_config)
+         if self.config.use_lm_head:
+             self.qwenvl.tie_weights()
+ 
+-        self.config.qwen_expert_config._attn_implementation = "flash_attention_2"
++        self.config.qwen_expert_config._attn_implementation = hf_attention
+         self.qwen_expert = Qwen2ForCausalLM._from_config(self.config.qwen_expert_config, eval=eval)
+ 
+         if getattr(self.config, "adanorm_time", False):
+@@ -151,6 +156,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         self.cu_seqlens = None
+         self.visual_split_sizes = None
+         self.visual_max_seqlen = None
++        self.action_layer_adapter = None
+ 
+         del self.qwen_expert.model.embed_tokens
+         if self.config.enable_expert_vision:
+@@ -167,6 +173,16 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         self.attention_interface = self.get_attention_interface()
+         self.set_requires_grad()
+ 
++    def set_action_layer_adapter(self, adapter: Optional[nn.Module]) -> None:
++        """Register an optional residual adapter on the action stream.
++
++        The adapter is called after each official action decoder layer and
++        before the next layer. Registering it as a child module keeps its
++        parameters visible to state dicts, optimizers and FSDP.
++        """
++
++        self.action_layer_adapter = adapter
++
+     def _install_moe_blocks(self):
+         if not getattr(self.config, "use_moe", False):
+             return
+@@ -320,6 +336,7 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+         ada_cond: List[torch.FloatTensor] = None,
+         visual_pos_masks: Optional[torch.Tensor] = None,
+         deepstack_visual_embeds: Optional[list[torch.Tensor]] = None,
++        action_layer_context=None,
+     ):
+         models = [self.qwenvl.model.language_model, self.qwen_expert.model]
+         num_layers = self.qwenvl.config.text_config.num_hidden_layers
+@@ -393,6 +410,12 @@ class QwenvlWithExpertV2Model(PreTrainedModel):
+                     )
+                     if router_logits is not None:
+                         router_logits_list.append(router_logits)
++                    if self.action_layer_adapter is not None:
++                        out_emb = self.action_layer_adapter(
++                            out_emb,
++                            layer_index=layer_idx,
++                            context=action_layer_context,
++                        )
+                 else:
+                     out_emb = models[i].layers[layer_idx](
+                         hidden_states, att_output, start, end, output_atten=True
+@@ -781,6 +804,7 @@ class FlowMatchingV2(FlowMatchingV1):
+         future_video_targets=None,
+         future_video_cls_targets=None,
+         future_video_current_patch=None,
++        action_layer_context=None,
+     ) -> Tensor:
+         dtype = state.dtype
+         device = state.device
+@@ -841,6 +865,7 @@ class FlowMatchingV2(FlowMatchingV1):
+             ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
+             visual_pos_masks=visual_pos_masks,
+             deepstack_visual_embeds=deepstack_visual_embeds,
++            action_layer_context=action_layer_context,
+         )
+         align_metrics = {}
+         if self.config.align_params != {}:
+@@ -926,6 +951,7 @@ class FlowMatchingV2(FlowMatchingV1):
+         state,
+         noise=None,
+         image_grid_thw=None,
++        action_layer_context=None,
+     ) -> Tensor:
+         """Do a full Qwen3-VL inference forward and compute the action."""
+         bsize = state.shape[0]
+@@ -973,7 +999,10 @@ class FlowMatchingV2(FlowMatchingV1):
+         time = torch.tensor(1.0, dtype=dtype, device=device)
+         count = 0
+         predict_velocity_fn = self.predict_velocity
+-        if getattr(self, "_use_compile_predict_velocity", False):
++        if (
++            getattr(self, "_use_compile_predict_velocity", False)
++            and action_layer_context is None
++        ):
+             predict_velocity_fn = getattr(self, "_compiled_predict_velocity", None)
+             if predict_velocity_fn is None:
+                 predict_velocity_fn = torch.compile(
+@@ -994,6 +1023,7 @@ class FlowMatchingV2(FlowMatchingV1):
+                 x_t,
+                 expanded_time,
+                 prefix_position_ids=prefix_position_ids,
++                action_layer_context=action_layer_context,
+             )
+ 
+             x_t += dt * v_t
+@@ -1009,6 +1039,7 @@ class FlowMatchingV2(FlowMatchingV1):
+         x_t,
+         timestep,
+         prefix_position_ids=None,
++        action_layer_context=None,
+     ):
+         """Predict velocity at time t using cached Qwen3-VL prefix states."""
+         if prefix_position_ids is None:
+@@ -1059,6 +1090,7 @@ class FlowMatchingV2(FlowMatchingV1):
+             use_cache=self.config.use_cache,
+             fill_kv_cache=False,
+             ada_cond=time_embs if getattr(self.config, "adanorm_time", False) else None,
++            action_layer_context=action_layer_context,
+         )
+         suffix_out = outputs_embeds[1]
+         suffix_out = suffix_out[:, -self.config.n_action_steps :]
+@@ -1251,6 +1283,7 @@ class LingbotVlaV2Policy(PreTrainedModel):
+         future_video_targets=None,
+         future_video_cls_targets=None,
+         future_video_current_patch=None,
++        action_layer_context=None,
+         **kwargs
+     ) -> tuple[Tensor, dict[str, Tensor]]:
+         loss_dict = {}
+@@ -1285,6 +1318,7 @@ class LingbotVlaV2Policy(PreTrainedModel):
+             future_video_targets=future_video_targets,
+             future_video_cls_targets=future_video_cls_targets,
+             future_video_current_patch=future_video_current_patch,
++            action_layer_context=action_layer_context,
+         )
+ 
+         if joint_mask is not None:

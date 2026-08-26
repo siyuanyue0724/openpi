@@ -1,0 +1,21 @@
+{
+  "dataset_id": "allenai/MolmoAct2-LIBERO-Dataset",
+  "dataset_revision": "fe3ead447f44c0ea950396360b304cc2fb6be8f8",
+  "episode_task_stat_mismatches": 1314,
+  "episode_task_stats_used": false,
+  "grouping_unit": "episode_index",
+  "locator_fields_used": false,
+  "min_validation_episodes_per_task": 2,
+  "schema": "picf-next.libero-episode-split.v1",
+  "source_episode_metadata_sha256": "07b6356881ea18981a3ed08ae11286a1ea41895084adc173746b31270fa1b38e",
+  "source_task_metadata_sha256": "f99f80ed66c0861ee121bbb54a8bfe3631792c90d454ea0afa2a9fdc6921e352",
+  "split_seed": "picf-next-libero-v1",
+  "tasks_each_arm": 40,
+  "train_episodes": 1518,
+  "train_frames": 245510,
+  "train_manifest_sha256": "64537f2a64883d0699141063a679babff35fcac258c7fdca65dcd8b100160f41",
+  "validation_episodes": 175,
+  "validation_fraction": 0.1,
+  "validation_frames": 27955,
+  "validation_manifest_sha256": "15231dc417d8b54e574b7e820172ac7b419ef794db79317ece737679b2e83b0e"
+}

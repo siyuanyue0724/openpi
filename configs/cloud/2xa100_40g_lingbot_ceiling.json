@@ -1,0 +1,95 @@
+{
+  "schema": "picf-next.cloud-gates.v2",
+  "profile": "lingbot-vla2-2xa100-40g",
+  "host": {
+    "name": "LingBot-VLA2",
+    "source_commit": "69729b4ef24c63ec25e750915491635f4753be1d",
+    "source_checkout": "references/source_checkouts/lingbot-vla-v2",
+    "adapter_patch": "references/patches/lingbot_vla2_action_layer_adapter.patch",
+    "checkpoint_id": "robbyant/lingbot-vla-v2-6b",
+    "checkpoint_revision": "11c703bf6a5c1f45b3b69168482da11fdbba53d7",
+    "checkpoint_subdir": "lingbot-vla-v2-6b",
+    "processor_id": "Qwen/Qwen3-VL-4B-Instruct",
+    "processor_revision": "ebb281ec70b05090aa6165b016eac8ec08e71b17",
+    "processor_subdir": "qwen3-vl-4b-processor-config"
+  },
+  "hardware": {
+    "gpu_count": 2,
+    "gpu_name_contains": "A100",
+    "minimum_gpu_memory_gib": 39.0,
+    "minimum_system_memory_gib": 64.0,
+    "minimum_free_storage_gib": 250.0
+  },
+  "runtime": {
+    "python_major_minor": [3, 12],
+    "torch": "2.8.0",
+    "torchvision": "0.23.0",
+    "transformers": "4.57.3",
+    "datasets": "4.1.1",
+    "huggingface-hub": "0.34.3",
+    "lerobot": "0.4.3",
+    "lerobot_install_mode": "no-deps",
+    "lingbot_requirements_sha256": "4bea8eca2e5e81107332947fe38d9a2787bc6a8fe4d3f875fa7e3d028f48993d"
+  },
+  "paths": {
+    "checkpoint_root_env": "PICF_CHECKPOINT_DIR",
+    "dataset_root_env": "PICF_DATASET_DIR",
+    "run_root_env": "PICF_RUN_DIR"
+  },
+  "optional_secret_env": ["HF_TOKEN", "WANDB_API_KEY"],
+  "training_contract": {
+    "precision": "bfloat16",
+    "distributed": "fsdp2",
+    "activation_checkpointing": true,
+    "initial_trainable_scope": "picf_and_zero_initialized_adapters",
+    "full_host_adamw_on_2x40g_authorized": false,
+    "temporal_training_mode": "stateful_single_transition",
+    "gradient_transitions": 1,
+    "detached_context_frames": 0,
+    "action_horizon": 10,
+    "object_runtime_targets_forbidden": true,
+    "native_dense_tokens_pruned": false,
+    "picf_runtime_validation": "full_preflight_metadata_hotpath_full_checkpoint",
+    "picf_objective_contract": {
+      "families": ["action", "set", "dynamics", "binding"],
+      "state_factorization": "unit_address_deterministic_content_diagonal_gaussian_geometry_bernoulli_lifecycle",
+      "loss_target_resolution": "post_forward_by_immutable_sample_key",
+      "identity_credit": "checkpointed_loss_track_to_current_address",
+      "geometry_overshooting": {
+        "authorized_gate": "L3_temporal_posterior",
+        "family": "dynamics",
+        "initial_horizons": [1, 2],
+        "start_posterior_detached": true,
+        "production_transition_shared": true,
+        "future_image_encoding": false,
+        "future_content_target": false,
+        "lifecycle_overshooting": false,
+        "per_axis_missingness": true,
+        "episode_boundary_padding": "prefix_zero",
+        "update_schedule": {
+          "algorithm": "every_optimizer_step.v1",
+          "fraction_numerator": 1,
+          "fraction_denominator": 1,
+          "importance_scale": 1.0
+        }
+      }
+    },
+    "experiment_arms": ["vanilla", "full_evidence", "picf"]
+  },
+  "ordered_gates": [
+    "L0_full_weight_parity",
+    "L1_typed_full_manifest",
+    "L2_representation_smoke",
+    "L3_temporal_posterior",
+    "L4_action_adoption",
+    "L5_three_seed_abc",
+    "L6_scale"
+  ],
+  "initial_authorization": ["L0_full_weight_parity"],
+  "required_reports": [
+    "environment.json",
+    "artifact_hashes.json",
+    "full_weight_parity.json",
+    "cuda_memory_latency.json"
+  ]
+}

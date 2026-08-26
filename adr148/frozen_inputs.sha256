@@ -1,0 +1,10 @@
+c1edd080351d6e4ed78e08174f965c4c78a846a256cc78e8f6ff0977e1207a4f  /mnt/picf-next/manifests/calvin-training-files.json
+f9698b03f75d996c27f67a62726cd9b97f71c567730cc6b00027b447a32edd85  /mnt/picf-next/manifests/calvin-lingbot-norm-stats.json
+0198b9d184069f40f1804de411e25ffb3f3a446fcd61d5dd619e944488244ed4  /mnt/picf-next/targets/calvin-physical-all-source-v5-9fc4ca631026-20260724T184616Z/manifest.json
+4000dc3394b3027e7cf2a75d54a88b1025314ca503dc6ec2b77f4a63b2163c86  /mnt/picf-next/runs/calvin-v5-full-tail-audit-43f5c5a-20260725T074858Z/visual_acceptance.json
+337cd18ccf47d10341324780c500b2f7c123ae0d36f06dd992df9d377504f08d  /mnt/picf-next/adr147/four_gpu_handoff_20260808/four-gpu-30k.stream-plan.json
+f23730957ddf8024a766abd673899cfa4c935ab039c7166f5b3cd0724c6ecb80  /mnt/picf-next/adr147/four_gpu_handoff_20260808/four-gpu-30k.split.json
+f4f234e847c95609258ccdce357376693901d3248ac15bc8d52d8af61656a373  /mnt/picf-next/adr148/full-picf-30k/cache/current-correction-dino-v1/manifest.json
+38f96a5db62cbe8bd5a590ab5d4cf6f33dec74fc6e8437affd0b033b4ba2d130  /mnt/picf-next/adr148/full-picf-30k/cache/current-correction-dino-v1.build_report.json
+5a4ebe73cb687a80a90ca3451e194785c325f6d363e11acaba007511a38ce130  /mnt/picf-next/runs/adr147-p0-4gpu-20260808T082443Z/official_p0_steps_200.json
+8fa17b389c15f9289707e3ad7444a1ffa1d5b7d00e2df6f0a67806853358c49c  /mnt/picf-next/source-checkouts/lingbot-vla-v2-adr147/configs/vla/robotwin/robotwin.yaml

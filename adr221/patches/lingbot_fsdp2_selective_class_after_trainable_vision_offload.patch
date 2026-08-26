@@ -1,0 +1,56 @@
+diff --git a/lingbotvla/distributed/torch_parallelize.py b/lingbotvla/distributed/torch_parallelize.py
+--- a/lingbotvla/distributed/torch_parallelize.py
++++ b/lingbotvla/distributed/torch_parallelize.py
+@@ -226,6 +226,18 @@ def build_parallelize_model(
+                 "enable_trainable_vision_offload",
+                 False,
+             )
++            selective_cpu_module_classes = tuple(
++                dict.fromkeys(
++                    kwargs.pop("selective_cpu_module_classes", ())
++                )
++            )
++            if any(
++                not isinstance(class_name, str) or not class_name
++                for class_name in selective_cpu_module_classes
++            ):
++                raise TypeError(
++                    "selective_cpu_module_classes must contain nonempty class names"
++                )
+             if enable_frozen_vision_offload and enable_trainable_vision_offload:
+                 raise ValueError(
+                     "frozen and trainable selective vision offload are mutually exclusive"
+@@ -240,6 +252,11 @@ def build_parallelize_model(
+                 raise ValueError(
+                     "full-model and selective FSDP2 CPU offload are mutually exclusive"
+                 )
++            if enable_fsdp_offload and selective_cpu_module_classes:
++                raise ValueError(
++                    "full-model and selective-class FSDP2 CPU offload are mutually exclusive"
++                )
++            selective_class_offload_policy = CPUOffloadPolicy(pin_memory=False)
+             if enable_fsdp_offload:
+                 if "offload_policy" in user_fsdp_kwargs:
+                     raise ValueError(
+@@ -337,6 +354,11 @@ def build_parallelize_model(
+ 
+                     logger.debug(f"Apply FSDP2 to {module.__class__.__name__}.")
+                     module_fsdp_kwargs = module_local_fsdp_kwargs(module, fsdp_kwargs)
++                    if module.__class__.__name__ in selective_cpu_module_classes:
++                        module_fsdp_kwargs = dict(module_fsdp_kwargs)
++                        module_fsdp_kwargs["offload_policy"] = (
++                            selective_class_offload_policy
++                        )
+                     if module.__class__ in ignore_modules_in_mixed_precision:
+                         fully_shard(module, **{k: v for k, v in module_fsdp_kwargs.items() if k != "mp_policy"})
+                     else:
+@@ -482,6 +504,9 @@ def build_parallelize_model(
+                     "model.language_model.embed_tokens"
+                 )
+             model._lingbot_fsdp2_selective_cpu_modules = tuple(selective_cpu_modules)
++            model._lingbot_fsdp2_selective_cpu_module_classes = (
++                selective_cpu_module_classes
++            )
+ 
+             root_fsdp_kwargs = dict(mp_fsdp_kwargs)
+             root_fsdp_kwargs["mp_policy"] = MixedPrecisionPolicy(

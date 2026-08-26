@@ -1,0 +1,215 @@
+{
+  "artifacts": {
+    "dataset_file_manifest_path": "evidence/calvin_dataset_audit/training_source_manifest.json",
+    "dataset_file_manifest_sha256": "ea5bc4a556c2f1d48fdb31ddd23447514582594cbe31257b79f5b692fae92fb5",
+    "dataset_tree_sha256": "8e5a2b628a10afd76432227c50c16618438066dcdc1f2790d5b946a6d5f72a86",
+    "geometry_sidecar_manifest_path": "data/calvin_geometry_training_v4/manifest.json",
+    "geometry_sidecar_manifest_sha256": "7711ad5f0df44610a48aa343e756b427a4df80615d6ab523e6a8bbd8071c209c",
+    "normalization_file_sha256": "e714e8b5bc90706bce8a804d99f54882b8fffdd17a994f1f0abbcba5d7c0e835",
+    "normalization_path": "data/calvin_normalization_training_v1.json",
+    "normalization_payload_sha256": "bd93d2615f0357f61789b6c3f9b429c89e6b5759a172dbda4c8dad2c0570472e",
+    "physical_sidecar_manifest_path": "data/calvin_physical_supervision_v2/manifest.json",
+    "physical_sidecar_manifest_sha256": "79f58ad383e1d12c68cdb1508aa9de9c9b864ee516d93086e91d344624a973d1"
+  },
+  "authorization": {
+    "hypothesis_status": "preregistered_m3_candidate_not_empirically_validated",
+    "long_training_authorized": false,
+    "max_optimizer_steps": 200,
+    "stage": "M3_structural_probe"
+  },
+  "dataset": {
+    "action_axes": [
+      "delta_tcp.position.x",
+      "delta_tcp.position.y",
+      "delta_tcp.position.z",
+      "delta_tcp.euler.x",
+      "delta_tcp.euler.y",
+      "delta_tcp.euler.z",
+      "gripper.command"
+    ],
+    "action_horizon": 10,
+    "control_hz": 30,
+    "dataset_id": "mees/calvin-debug-dataset",
+    "dataset_revision": "sha256:c66d09147e2c806b244f18ea7d61e388d4dac11f828929779437f728d03e1204",
+    "image_keys": [
+      "observation.images.image",
+      "observation.images.wrist_image"
+    ],
+    "sample_plan_algorithm": "sha256-epoch-sort.v1",
+    "split_name": "training",
+    "state_axes": [
+      "tcp.position.x",
+      "tcp.position.y",
+      "tcp.position.z",
+      "tcp.euler.x",
+      "tcp.euler.y",
+      "tcp.euler.z",
+      "gripper.opening_width",
+      "arm.joint.0",
+      "arm.joint.1",
+      "arm.joint.2",
+      "arm.joint.3",
+      "arm.joint.4",
+      "arm.joint.5",
+      "arm.joint.6",
+      "gripper.previous_command"
+    ]
+  },
+  "core": {
+    "binding_dim": 256,
+    "discovery": {
+      "dropout": 0.0,
+      "ffn_multiplier": 4,
+      "hidden_dim": 512,
+      "initial_variance": 1.0,
+      "minimum_variance": 0.0001,
+      "num_heads": 8,
+      "num_layers": 4,
+      "num_queries": 16,
+      "unmatched_query_weight": 0.1
+    },
+    "modalities": [
+      {
+        "geometry_dim": 0,
+        "name": "molmo_vision_patch",
+        "require_single_active_group": false,
+        "token_dim": 2304
+      }
+    ],
+    "posterior_capacity": 16,
+    "runtime_validation": "full",
+    "state": {
+      "address_dim": 64,
+      "content_dim": 256
+    },
+    "temporal": {
+      "association_address_logit_bias": -2.71,
+      "association_address_temperature": 0.1,
+      "dropout": 0.0,
+      "empty_bank_birth_to_clutter_prior_odds": 1.0,
+      "ffn_multiplier": 4,
+      "hidden_dim": 512,
+      "initial_detection_probability": 0.85,
+      "initial_process_variance": 0.0001,
+      "initial_survival_probability": 0.995,
+      "minimum_variance": 0.000001,
+      "num_heads": 8,
+      "num_layers": 4,
+      "recurrent_birth_to_clutter_prior_odds": 0.1,
+      "reference_delta_t_s": 0.03333333333333333
+    }
+  },
+  "geometry_contract": {
+    "axes": ["x", "y", "z"],
+    "name": "calvin.object-link-aabb-center.robot-base.m2-train-standardized.v2",
+    "normalization_offset": [
+      0.3796050103655587,
+      0.458837615707206,
+      0.21802569315108686
+    ],
+    "normalization_scale": [
+      0.1962029379638472,
+      0.12934434519296104,
+      0.09772606317702993
+    ],
+    "quantity": "object_link_axis_aligned_bounding_box_center",
+    "reference_frame": "robot_base",
+    "schema": "picf.physical-euclidean-geometry.v1",
+    "units": ["m", "m", "m"]
+  },
+  "host": {
+    "action_dim": 7,
+    "checkpoint_id": "allenai/MolmoAct2",
+    "checkpoint_revision": "e432d85f6e039edca44afb93c262f3084ab72a9c",
+    "dense_modality": "molmo_vision_patch",
+    "name": "MolmoAct2",
+    "source_commit": "c2282820f9b188b60e66ea1636b3efd81c45cbb4",
+    "trainer_commit": "80633827176a0203064cb141383664fba024e050"
+  },
+  "policy": {
+    "action_mode": "continuous",
+    "add_control_tokens": true,
+    "add_setup_tokens": true,
+    "control_mode": "normalized relative end-effector pose",
+    "enable_inference_cuda_graph": false,
+    "enable_knowledge_insulation": false,
+    "enable_lora_action_expert": false,
+    "enable_lora_vlm": false,
+    "expected_max_action_dim": 32,
+    "flow_matching_beta_alpha": 1.0,
+    "flow_matching_beta_beta": 1.5,
+    "flow_matching_cutoff": 1.0,
+    "flow_matching_time_offset": 0.001,
+    "flow_matching_time_scale": 0.999,
+    "freeze_embedding": true,
+    "gradient_checkpointing": true,
+    "inference_action_mode": "continuous",
+    "mask_action_dim_padding": true,
+    "model_dtype": "bfloat16",
+    "n_obs_steps": 1,
+    "normalize_gripper": false,
+    "normalize_language": true,
+    "num_flow_timesteps": 8,
+    "num_inference_steps": 8,
+    "num_state_tokens": 256,
+    "optimizer_lr": 0.00001,
+    "optimizer_action_expert_lr": 0.00005,
+    "optimizer_betas": [0.9, 0.95],
+    "optimizer_eps": 0.000001,
+    "optimizer_weight_decay": 0.0,
+    "scheduler_decay_lr": 0.000001,
+    "scheduler_decay_steps": 200,
+    "scheduler_warmup_steps": 10,
+    "setup_type": "single-arm tabletop manipulation",
+    "train_action_expert_only": true
+  },
+  "objective": {
+    "binding": {
+      "logit_bias": null,
+      "minimum_object_mass": 0.0001,
+      "objective": "sigmoid",
+      "temperature": 0.1
+    },
+    "dynamics": {
+      "content_cosine_weight": 1.0,
+      "geometry_nll_weight": 1.0,
+      "probability_epsilon": 0.000001,
+      "survival_weight": 1.0,
+      "visibility_weight": 1.0
+    },
+    "geometry_overshooting": {
+      "fraction_denominator": 1,
+      "fraction_numerator": 1,
+      "horizons": [1, 2],
+      "schedule_algorithm": "every_optimizer_step.v1",
+      "weight": 0.5
+    },
+    "set": {
+      "address_cosine_weight": 0.0,
+      "content_cosine_weight": 0.0,
+      "existence_weight": 2.0,
+      "geometry_weight": 1.0,
+      "localization_confidence_weight": 1.0,
+      "ownership_ce_weight": 5.0,
+      "ownership_dice_weight": 5.0
+    },
+    "weights": {
+      "action": 1.0,
+      "binding": 0.05,
+      "dynamics": 0.1,
+      "require_temporal_positive_pairs": true,
+      "set": 0.1
+    }
+  },
+  "optimizer": {
+    "gradient_clip_norm": 1.0,
+    "host_parameter_groups": "MolmoAct2Policy.get_optim_params",
+    "picf_core_lr": 0.0001,
+    "require_explicit_flow_randomness": true
+  },
+  "schema": "picf-next.training-recipe.v2",
+  "streaming": {
+    "detached_context_frames": 0,
+    "gradient_transitions": 1
+  }
+}

@@ -1,0 +1,137 @@
+{
+  "schema": "picf-next.adr208-vjepa2-ac-exact-source-manifest/v1",
+  "generated_at_cst": "2026-08-23T12:12:53+08:00",
+  "updated_at_cst": "2026-08-23T13:29:05+08:00",
+  "status": "arm_b_source_and_checkpoint_frozen_awaiting_real_weight_gpu_gate",
+  "upstream": {
+    "repository": "https://github.com/facebookresearch/vjepa2",
+    "commit": "204698b45b3712590f06245fbfba32d3be539812",
+    "license": "MIT",
+    "checkpoint_url": "https://dl.fbaipublicfiles.com/vjepa2/vjepa2-ac-vitg.pt",
+    "checkpoint_http_content_length": 11760743310,
+    "checkpoint_http_etag": "12c945a28cc4f447e728fd2ba810607c-1402",
+    "checkpoint_s3_version_id": "e.Pf38N6ZSXp4YzffDSZ9JWYCIJRG2Y4",
+    "checkpoint_last_modified_utc": "2025-05-30T00:00:12Z",
+    "checkpoint_sha256": "0b5e3c4bf77a473cd8c61d32fbd87b28cdbba043fb3b8267f3b8bcfb1d5b9e6b",
+    "checkpoint_state": "downloaded_and_locally_verified",
+    "checkpoint_local_verified_path": "/mnt/c/Users/ALIENWARE/Documents/PICF_assets/vjepa2_ac/vjepa2-ac-vitg.pt",
+    "checkpoint_verified_at_cst": "2026-08-23T13:29:05+08:00",
+    "checkpoint_schema_inspection": {
+      "method": "restricted_metadata_only_unpickler_no_tensor_allocation",
+      "root_keys": [
+        "encoder",
+        "predictor",
+        "opt",
+        "scaler",
+        "target_encoder",
+        "epoch",
+        "loss",
+        "batch_size",
+        "world_size",
+        "lr"
+      ],
+      "encoder_tensor_count": 484,
+      "predictor_tensor_count": 300,
+      "encoder_patch_embed_shape": [1408, 3, 2, 16, 16],
+      "predictor_embed_shape": [1024, 1408],
+      "action_encoder_shape": [1024, 7],
+      "state_encoder_shape": [1024, 7],
+      "predictor_block_23_qkv_shape": [3072, 1024],
+      "predictor_projection_shape": [1408, 1024]
+    },
+    "hub_loader_defect": {
+      "file": "src/hub/backbones.py",
+      "active_base_url": "http://localhost:8300",
+      "expected_published_base_url": "https://dl.fbaipublicfiles.com/vjepa2",
+      "allowed_repair_class": "url_only_no_model_semantics_change"
+    }
+  },
+  "normative_files": [
+    {
+      "path": "src/models/ac_predictor.py",
+      "sha256": "5a520ad92b3f78b231aa153a5bbd9f800f880024974109a04d19aed6a0900643"
+    },
+    {
+      "path": "src/models/utils/modules.py",
+      "sha256": "b93f6c7e0747deb216419c000c2878f11a9189024a9adeacfd437e172396dff0"
+    },
+    {
+      "path": "app/vjepa_droid/train.py",
+      "sha256": "f480c51b80425c88b6cd617e3c5386d3c09c8179810fd5e0e7cb7e5f5ecab61a"
+    },
+    {
+      "path": "app/vjepa_droid/utils.py",
+      "sha256": "84009c0f9565f38288d5fcd91e9861bc322f75f5bc33922ae01ec1755b1415c7"
+    },
+    {
+      "path": "app/vjepa_droid/droid.py",
+      "sha256": "25f3fe88d6d29af0460155f5e0f2b2d05e005f6201a2090bf351fc3daee1d549"
+    },
+    {
+      "path": "configs/train/vitg16/droid-256px-8f.yaml",
+      "sha256": "25f8d23f80dd24c2c9c410f3690edd966f4e9725809912d525dc925e030eb101"
+    },
+    {
+      "path": "src/hub/backbones.py",
+      "sha256": "391cdde1e9a1da47cb8094bbea5fbbe8acac0135b27e82f1a6ab19c0b39cc692",
+      "note": "This is the unmodified upstream hash containing the localhost test URL. A separate URL-only patch must be frozen before use."
+    }
+  ],
+  "source_freeze": {
+    "path": "references/source_archives/vjepa2-204698b45b3712590f06245fbfba32d3be539812.tar.gz",
+    "sha256": "53630196f62950038acf8c9debdc64d7e242b71c68f507b5ad716c795a617d53",
+    "scope": "complete upstream git archive at the pinned commit"
+  },
+  "allowed_patch": {
+    "path": "references/patches/vjepa2_ac_official_download_url.patch",
+    "classification": "download_url_only",
+    "changes_model_semantics": false
+  },
+  "released_recipe": {
+    "encoder": "vit_giant_xformers",
+    "image_size": 256,
+    "patch_size": 16,
+    "tubelet_size": 2,
+    "sampled_clip_frames": 8,
+    "training_model_max_frames": 512,
+    "hub_default_max_frames": 64,
+    "action_width": 7,
+    "predictor_depth": 24,
+    "predictor_width": 1024,
+    "predictor_heads": 16,
+    "causal_attention": true,
+    "rope": true,
+    "activation_checkpointing": true,
+    "normalize_representations": true,
+    "loss_exponent": 1.0,
+    "autoregressive_steps": 2,
+    "teacher_forced_loss": true,
+    "autoregressive_loss": true,
+    "target_encoder_trainable": false
+  },
+  "active_picf_vjepa_cache": {
+    "family": "V-JEPA2.1",
+    "encoder": "ViT-B/384",
+    "checkpoint_sha256": "848a77c33cc9e6649ed2119c9bea1e2c569bcdab9539ff3e7c02ccc2959ddf4d",
+    "causal_history_frames": 64,
+    "dual_view_token_count": 1152,
+    "token_width": 768,
+    "role": "frozen_current_final_grid_evidence"
+  },
+  "hard_incompatibilities": [
+    "The released AC checkpoint is V-JEPA2 ViT-g, not V-JEPA2.1 ViT-B.",
+    "The active cache is an encoder final grid and contains no AC predictor state.",
+    "The released AC objective predicts dense frame latents, not VidEoMT object rows.",
+    "The released AC model is a world-model/planning donor and does not define a LingBot action mediation objective.",
+    "Using the active cache with the AC predictor would be an unapproved architecture adaptation, not an exact transplant."
+  ],
+  "implementation_gate": {
+    "approved": true,
+    "approval_received_at_cst": "2026-08-23",
+    "may_download_checkpoint": true,
+    "may_implement_exact_arm_b": true,
+    "may_implement_labeled_arm_c_after_arm_b_gates": true,
+    "may_start_long_training": false,
+    "required_next_decision": "pass_arm_b_causal_gates_then_pass_arm_c_strict_100_step_gates"
+  }
+}

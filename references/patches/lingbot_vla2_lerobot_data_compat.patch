@@ -1,0 +1,89 @@
+diff --git a/lingbotvla/data/vla_data/base_dataset.py b/lingbotvla/data/vla_data/base_dataset.py
+index cee701c..be5509a 100644
+--- a/lingbotvla/data/vla_data/base_dataset.py
++++ b/lingbotvla/data/vla_data/base_dataset.py
+@@ -24,12 +24,13 @@ from torchvision.transforms.v2 import Resize
+ try:
+     from lerobot.datasets.lerobot_dataset import LeRobotDataset as BaseLeRobotDataset
+     from lerobot.datasets.lerobot_dataset import LeRobotDatasetMetadata
+-    from lerobot.datasets.utils import hf_transform_to_torch
++    from lerobot.datasets.utils import hf_transform_to_torch, load_nested_dataset
+     LEROBOT_DATASET_API = "v3"
+ except ImportError:
+     from lerobot.common.datasets.lerobot_dataset import LeRobotDataset as BaseLeRobotDataset
+     from lerobot.common.datasets.lerobot_dataset import LeRobotDatasetMetadata
+     from lerobot.common.datasets.utils import hf_transform_to_torch
++    load_nested_dataset = None
+     LEROBOT_DATASET_API = "v2"
+ 
+ from datasets import load_dataset as _hf_load_dataset
+@@ -100,6 +101,15 @@ class LeRobotDataset(BaseLeRobotDataset):
+         return result
+ 
+     def load_hf_dataset(self, features=None):
++        if LEROBOT_DATASET_API == "v3":
++            hf_dataset = load_nested_dataset(
++                self.root / "data",
++                features=features,
++                episodes=self.episodes,
++            )
++            hf_dataset.set_transform(hf_transform_to_torch)
++            return hf_dataset
++
+         episodes = self.episodes if self.episodes is not None else list(range(self.meta.total_episodes))
+         files = [str(self.root / self.meta.get_data_file_path(ep_idx)) for ep_idx in episodes]
+         hf_dataset = _hf_load_dataset("parquet", data_files=files, split="train")
+@@ -133,6 +143,8 @@ class LeRobotDataset(BaseLeRobotDataset):
+         return item
+ 
+     def __getitem__(self, idx) -> dict:
++        if LEROBOT_DATASET_API == "v3":
++            return super().__getitem__(idx)
+         # Ensure dataset is loaded when we actually need to read from it
+         item = self.hf_dataset[idx]
+         ep_idx = item["episode_index"].item()
+@@ -296,4 +308,4 @@ class VLADataset(Dataset):
+ 
+     def __getitem__(self, idx):
+         item = self.getitem(idx)
+-        return item
+\ No newline at end of file
++        return item
+diff --git a/lingbotvla/data/vla_data/utils.py b/lingbotvla/data/vla_data/utils.py
+index 9cc49ae..cfae4e3 100644
+--- a/lingbotvla/data/vla_data/utils.py
++++ b/lingbotvla/data/vla_data/utils.py
+@@ -19,6 +19,15 @@ import torch.nn.functional as F
+ 
+ logger = logging_utils.get_logger(__name__)
+ 
++def _as_feature_mapping(value):
++    """Accept both CLI strings and mappings produced by yaml.safe_load."""
++    if isinstance(value, dict):
++        return value
++    parsed = ast.literal_eval(value)
++    if not isinstance(parsed, dict):
++        raise ValueError(f"feature declaration must be a mapping, got {type(parsed).__name__}")
++    return parsed
++
+ def compute_image_token_count(images, image_grid_thw=None, merge_size=2, use_vision_boundaries=True):
+     if not isinstance(images, torch.Tensor) or images.numel() == 0:
+         return 0
+@@ -53,7 +62,7 @@ class FeatureInfo(BaseModel):
+         joints= []
+         joints_max_dim = {}
+         for s in joints_info:
+-            joint_info = ast.literal_eval(s)
++            joint_info = _as_feature_mapping(s)
+             joint = next(iter(joint_info.keys()))
+             if joint_info[joint] == 0: continue
+ 
+@@ -136,7 +145,7 @@ class FeatureTransform:
+ 
+         if not do_nomalize: return None
+ 
+-        action_state_norm_type = {k: v for d in data_config.norm_type for k, v in ast.literal_eval(d).items()} 
++        action_state_norm_type = {k: v for d in data_config.norm_type for k, v in _as_feature_mapping(d).items()} 
+ 
+         assert norm_stats_path is not None
+         norm_type = {}

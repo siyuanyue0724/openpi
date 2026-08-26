@@ -1,0 +1,103 @@
+{
+  "schema": "picf-next.cloud-gates.v2",
+  "profile": "molmoact2-m4-action-2xa100-40g",
+  "host": {
+    "name": "MolmoAct2",
+    "source_commit": "c2282820f9b188b60e66ea1636b3efd81c45cbb4",
+    "source_checkout": "references/source_checkouts/molmoact2-cloud",
+    "training_source_commit": "80633827176a0203064cb141383664fba024e050",
+    "training_source_checkout": "references/source_checkouts/molmoact2-lerobot-cloud",
+    "training_adapter_patch": "references/patches/molmoact2_lerobot_action_layer_adapter.patch",
+    "checkpoint_id": "allenai/MolmoAct2",
+    "checkpoint_revision": "e432d85f6e039edca44afb93c262f3084ab72a9c",
+    "checkpoint_subdir": "molmoact2"
+  },
+  "hardware": {
+    "gpu_count": 2,
+    "gpu_name_contains": "A100",
+    "minimum_gpu_memory_gib": 39.0,
+    "minimum_system_memory_gib": 64.0,
+    "minimum_free_storage_gib": 250.0
+  },
+  "runtime": {
+    "python_major_minor": [3, 12],
+    "torch": "2.10.0",
+    "torchvision": "0.25.0",
+    "transformers": "5.5.4",
+    "datasets": "4.8.5",
+    "huggingface-hub": "1.13.0",
+    "peft": "0.19.1",
+    "accelerate": "1.13.0",
+    "lerobot": "0.5.2",
+    "scipy": "1.17.1",
+    "picf-next": "0.1.0",
+    "uv_lock_sha256": "f79437aeed6ac8f6fd83ff1a250136df040ef5e10657df7e280e0f409c21d8a6"
+  },
+  "paths": {
+    "checkpoint_root_env": "PICF_CHECKPOINT_DIR",
+    "dataset_root_env": "PICF_DATASET_DIR",
+    "run_root_env": "PICF_RUN_DIR"
+  },
+  "optional_secret_env": ["HF_TOKEN", "WANDB_API_KEY"],
+  "training_recipe": {
+    "path": "configs/training/molmoact2_calvin_m4_action_adoption.json",
+    "sha256": "ab3ba2df28acd9186ce98a8337580993c35d482095ac3629c8130978366c13a7"
+  },
+  "training_contract": {
+    "precision": "bfloat16",
+    "distributed": "accelerate_ddp",
+    "activation_checkpointing": true,
+    "initial_trainable_scope": "action_expert_and_zero_initialized_adapters",
+    "full_host_adamw_on_2x40g_authorized": false,
+    "temporal_training_mode": "frozen_accepted_stationary_core_single_transition",
+    "gradient_transitions": 1,
+    "detached_context_frames": 0,
+    "action_horizon": 10,
+    "flow_timesteps": 8,
+    "object_runtime_targets_forbidden": true,
+    "native_dense_tokens_pruned": false,
+    "picf_runtime_validation": "full_preflight_metadata_hotpath_full_checkpoint",
+    "molmo_native_prepool_same_forward_local_contract_ready": true,
+    "picf_dense_bank_contract": "native_same_forward_visual_bank",
+    "sample_plan_algorithm": "sha256-epoch-sort.v1",
+    "checkpoint_backend": "accelerate-1.13-save-state",
+    "atomic_checkpoint_publication": true,
+    "matched_abc_common_plan_required": true,
+    "explicit_flow_randomness_required": true,
+    "stationary_temporal_initialization": "accepted_full_stage_b_checkpoint_and_evidence_package_hash_bound",
+    "action_adoption_arms": [
+      "current_no_posterior",
+      "causal_video_no_posterior",
+      "current_posterior",
+      "causal_video_posterior"
+    ],
+    "picf_objective_contract": {
+      "families": ["action"],
+      "state_factorization": "unit_address_deterministic_content_diagonal_gaussian_geometry_bernoulli_lifecycle",
+      "loss_target_resolution": "host_action_targets_only_no_structural_targets",
+      "identity_credit": "accepted_stationary_posterior_frozen_by_hash",
+      "geometry_overshooting": {
+        "active": false,
+        "weight": 0.0
+      }
+    },
+    "experiment_arms": ["vanilla", "full_evidence", "picf"]
+  },
+  "ordered_gates": [
+    "M0_full_weight_parity",
+    "M1_typed_full_manifest",
+    "M2_representation_smoke",
+    "M3_temporal_posterior",
+    "M4_action_adoption",
+    "M5_three_seed_abc",
+    "M6_lingbot_second_host"
+  ],
+  "initial_authorization": ["M4_action_adoption"],
+  "required_reports": [
+    "environment.json",
+    "artifact_hashes.json",
+    "full_weight_parity.json",
+    "cuda_memory_latency.json",
+    "stationary_temporal_acceptance.json"
+  ]
+}

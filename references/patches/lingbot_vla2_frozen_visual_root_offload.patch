@@ -1,0 +1,35 @@
+diff --git a/lingbotvla/distributed/torch_parallelize.py b/lingbotvla/distributed/torch_parallelize.py
+--- a/lingbotvla/distributed/torch_parallelize.py
++++ b/lingbotvla/distributed/torch_parallelize.py
+@@ -411,8 +411,30 @@ def build_parallelize_model(
+                             )
+                         paths.append(full_path)
+                     topology[kind] = tuple(paths)
+                     if kind == "vision" and enable_frozen_vision_offload:
+-                        selective_cpu_modules.extend(paths)
++                        visual_root = vlm.model.visual
++                        if any(
++                            parameter.requires_grad
++                            for parameter in visual_root.parameters()
++                        ):
++                            raise ValueError(
++                                "selective vision offload requires the complete visual root to be frozen"
++                            )
++                        visual_root_path = (
++                            "model.qwenvl_with_expert.qwenvl.model.visual"
++                        )
++                        logger.info_rank0(
++                            "Apply parent FSDP2 CPU offload to the complete frozen "
++                            f"visual root {visual_root_path}."
++                        )
++                        fully_shard(visual_root, **kind_fsdp_kwargs)
++                        if not hasattr(visual_root, "reshard") or not hasattr(
++                            visual_root, "unshard"
++                        ):
++                            raise RuntimeError(
++                                "FSDP2 did not augment the complete frozen visual root."
++                            )
++                        selective_cpu_modules.append(visual_root_path)
+                 model._lingbot_vlm_fsdp2_topology = topology
+ 
+             if enable_shared_embedding_offload:

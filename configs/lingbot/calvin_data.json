@@ -1,0 +1,25 @@
+{
+  "joints": [
+    {"arm.position": 14},
+    {"end.position": 14},
+    {"effector.position": 2},
+    {"waist.position": 4},
+    {"head.position": 2},
+    {"base.position": 3},
+    {"hand.position": 12}
+  ],
+  "cameras": [
+    "camera_top",
+    "camera_wrist_left",
+    "camera_wrist_right"
+  ],
+  "norm_type": [
+    {"arm.position": "bounds_99_woclip"},
+    {"end.position": "bounds_99_woclip"},
+    {"effector.position": "identity"},
+    {"waist.position": "identity"},
+    {"head.position": "identity"},
+    {"base.position": "identity"},
+    {"hand.position": "identity"}
+  ]
+}
