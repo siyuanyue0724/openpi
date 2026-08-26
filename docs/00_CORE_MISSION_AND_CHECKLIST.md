@@ -23,8 +23,9 @@ No 30k run is authorized.
       target that preserves overlap and low-confidence evidence.
 - [x] Specify final-row complete-episode recurrence with value-preserving TBPTT
       instead of sampled `2+2` burn-in or persistent `36 x 200` layerwise state.
-- [x] Specify one-pass typed PRIOR/POSTERIOR correction, language grounding,
-      authenticated multimodal binding and delayed V-JEPA world supervision.
+- [x] Specify one-pass typed PRIOR/POSTERIOR correction, language grounding and
+      authenticated multimodal binding; quarantine world prediction until a
+      complete code donor receives a separate source-parity ADR.
 - [x] Publish source-diff, local-contract, 250-frame-batch, 2k and 30k
       fail-closed gates with exact LingBot and ADR-227 controls.
 - [ ] Freeze immutable source/file receipts in the implementation worktree.

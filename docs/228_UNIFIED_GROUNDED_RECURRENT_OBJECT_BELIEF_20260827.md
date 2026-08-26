@@ -149,8 +149,8 @@ The following remain complete and independently receipted:
   visual injection, action expert, tokenizer and native action objective;
 - the complete 200-query VidEoMT decoder, all source blocks, auxiliary outputs,
   source criterion and released online query propagation;
-- V-JEPA 2.1's released frozen encoder/target features and multi-level feature
-  convention;
+- V-JEPA 2.1's released frozen encoder features and multi-level feature
+  convention; its predictor is neither claimed nor simplified in ADR-228;
 - AnyTouch and Sonata released encoders and their existing typed projections;
 - ADR-227's deterministic host-aligned online source view alongside the
   released augmented source-training view.
@@ -375,28 +375,28 @@ fully unsupervised: authenticated geometry supplies training evidence. Pure
 implicit co-occurrence is not adopted because it permits modality shortcuts
 and gives no falsifiable object-identity contract.
 
-### 4.8 V-JEPA 2.1 as the world-model teacher
+### 4.8 V-JEPA 2.1 evidence and quarantined world objective
 
-V-JEPA 2.1 is not a task-object selector. Use its released frozen multi-level
-features as a dense temporal target. Follow its official depth groups and
-layer-normalized latent target convention. For row `i`, pool future target
-features under the future aligned mask:
+V-JEPA 2.1 is not a task-object selector. Its complete released frozen encoder
+may supply dense typed current-observation evidence to the shared LingBot host,
+using the official multi-level feature convention. That is the only V-JEPA
+role authorized in the first ADR-228 gate.
 
-```text
-Z_(t+h,i) = stopgrad(LN(Pool(VJEPA_target(X_(t+h)), M_(t+h,i))))
-Zhat_(t+h,i) = linear_transport(P_ti^36, horizon=h)
-L_world = mean_i,h ||Zhat_(t+h,i) - Z_(t+h,i)||_p / p.
-```
+ADR-228 does **not** authorize a linear row predictor and does not claim to
+transplant V-JEPA's predictive algorithm. Replacing V-JEPA's full predictor
+with a linear transport would simplify a successful source and could not
+inherit its evidence. A future object-conditioned world objective requires a
+separate ADR that either:
 
-Only the existing typed linear transport is allowed initially; no private
-JEPA predictor network is introduced. This objective tests whether prior rows
-predict object-conditioned future state. It is enabled only after grounding
-and action adoption pass, because historical predictive losses improved
-structure without proving action value.
+1. transplants a complete released predictor and its optimizer/loss contract;
+   or
+2. names a different complete, code-available world-model donor whose native
+   interface accepts the shared object belief.
 
-If a linear transport demonstrably underfits while grounding and adoption
-already pass, replacement requires a separate source-backed ADR. Model size is
-not increased pre-emptively.
+Until that ADR passes source parity, `L_world` is absent rather than replaced
+by an ad hoc small predictor. Historical predictive losses improved structure
+without proving action value, so this quarantine also prevents an auxiliary
+curve from masking another action-adoption failure.
 
 ### 4.9 Lifecycle and confidence
 
@@ -414,15 +414,14 @@ rule.
 
 ## 5. Objective and optimization contract
 
-The complete target objective is:
+The first complete ADR-228 gate objective is:
 
 ```text
 L_total = L_action
         + L_VidEoMT_source
         + lambda_vis   L_vis
         + lambda_row   L_row
-        + sum_m lambda_m L_bind(m)
-        + lambda_world L_world.
+        + sum_m lambda_m L_bind(m).
 ```
 
 This sum does not authorize simultaneous blind activation. The architecture is
@@ -433,7 +432,8 @@ complete throughout; objective families are enabled by causal gates:
    context retained.
 3. **Multimodal gate:** authenticated V-JEPA/Sonata/AnyTouch binding and
    modality-shuffle interventions.
-4. **World gate:** future latent prediction and long-occlusion action value.
+4. **Separate world ADR:** only after a complete predictor donor passes source
+   parity; it is not part of the first ADR-228 promotion decision.
 
 Loss weights are fixed from one training-only gradient-norm receipt, then
 frozen before the comparison. Test curves cannot tune them. Each objective is
@@ -460,7 +460,7 @@ surface:
 - action episodes with language/RGB/action and whichever optional modalities
   truly exist;
 - grounded image/video transactions with phrase spans and masks;
-- temporal video transactions with V-JEPA latent targets;
+- video transactions whose current frames can produce frozen V-JEPA evidence;
 - touch/3D transactions only when calibrated correspondence is available.
 
 Missing labels skip only their loss. They do not exclude the sample from
@@ -492,7 +492,7 @@ require a separate cross-modal proposal source and is outside ADR-228.
 |---|---|---|---|
 | Multi-depth executed-attention grounding | [SWIM](https://github.com/HumanMLLM/SWIM) | `1b97d22fbb84097a2117feb1f1f10353dfe252c2` | selected depths, head mean, product fusion, min-max spatial map, BCE |
 | Multi-level native visual host | [Qwen3-VL](https://github.com/QwenLM/Qwen3-VL) | `96588727e44c78b25ba03ea03b8e12f7e64fd0da` | DeepStack and interleaved MRoPE remain intact inside LingBot |
-| Dense temporal latent target | [V-JEPA 2.1](https://github.com/facebookresearch/vjepa2) | `204698b45b3712590f06245fbfba32d3be539812` | EMA/frozen target semantics, normalized multi-level target, latent Lp loss |
+| Dense current video evidence | [V-JEPA 2.1](https://github.com/facebookresearch/vjepa2) | `204698b45b3712590f06245fbfba32d3be539812` | complete frozen encoder and official multi-level feature convention; no predictor claim |
 | Episodic recurrent training | [muVLA](https://github.com/CognitiveAISystems/muVLA) | `13e1cf9a34d40726c9f4eeafff464d45c25181bc` | complete episode carry, `is_first/is_last`, value-preserving TBPTT detach, no action-to-memory write |
 
 ### 7.2 Explicit PICF hypotheses
@@ -502,7 +502,7 @@ require a separate cross-modal proposal source and is outside ADR-228.
 - using final posterior rows as muVLA-style recurrent state;
 - using typed prior and posterior row roles inside one LingBot pass;
 - supervising posterior-to-modality attention with authenticated geometry;
-- pooling V-JEPA future targets by propagated object masks;
+- binding frozen current V-JEPA evidence to rows by authenticated geometry;
 - retaining full native context while expecting action to adopt rows.
 
 None of these hypotheses inherits an upstream success claim.
@@ -589,13 +589,15 @@ checkpoints remain loadable.
 - [ ] Demonstrate that every enabled modality changes posterior values and
       action under matched interventions, rather than merely producing a loss.
 
-### Phase E: world objective
+### Phase E: separate world-model authority
 
-- [ ] Receipt V-JEPA 2.1's exact multi-level layer groups and normalization.
-- [ ] Implement future object-latent targets with strict stop-gradient and no
-      current/future leakage.
-- [ ] Start with the existing linear transport only after adoption passes.
-- [ ] Test future shuffle, wrong-time, occlusion and horizon interventions.
+- [ ] Receipt V-JEPA 2.1's exact multi-level layer groups for current-evidence
+      ingestion only.
+- [ ] Do not implement the proposed linear future transport.
+- [ ] Select a complete code-available predictor donor and publish a separate
+      source/adaptation ledger before adding any future objective.
+- [ ] Require source parity, strict stop-gradient/no-future-leakage, future
+      shuffle, wrong-time, occlusion and horizon interventions in that ADR.
 
 ## 9. Scientific experiment ladder
 
