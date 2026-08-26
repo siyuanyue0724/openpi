@@ -2,7 +2,7 @@
 
 Date: 2026-08-27 Asia/Shanghai
 
-Status: **IMPLEMENTED; FOCUSED CONTRACTS PASS; FOUR-GPU CURVE ACTIVE**
+Status: **GATE COMPLETE; RETAIN ALIGNMENT REPAIR; REJECT AS SUFFICIENT ACTION REPAIR**
 
 ## 0. Decision
 
@@ -131,21 +131,65 @@ ADR-225 curve.
       cannot change the host-visible current output or committed online state.
 - [x] Pass focused cloud contracts: `15 passed`, with only pre-existing upstream
       deprecation warnings.
-- [ ] Pass released-weight four-rank forward/backward/update without OOM.
-- [ ] Measure wall time and peak memory relative to ADR-225.
-- [ ] Compare the fixed step-20/100 action and anchor curves against exact
-      LingBot, ADR-207 and the invalid pre-repair ADR-225 arm.
+- [x] Restore the registered PyTorch 2.8 compatibility environment. The first
+      four-rank launch reached fixed evaluation and failed before any model
+      result because its command omitted the existing
+      `videomt-torch280-functorch-v1` overlay. Direct import with the complete
+      overlay path passes; this was an environment-launch failure, not a model
+      observation.
+- [x] Pass released-weight four-rank forward/backward/update without OOM.
+- [x] Measure wall time and peak memory relative to ADR-225.
+- [x] Compare the fixed step-20 action and anchor curves against ADR-207 and
+      the invalid pre-repair ADR-225 arm. Stop at the decisive step-20 gate
+      instead of spending four-A100 time to confirm a non-material margin at
+      step 100.
+
+### 4.1 Four-A100 result
+
+The corrected run is
+`adr226-geometry-aligned-4gpu-step100-v3`. It completed the fixed step-0
+evaluation and 22 finite updates; it was intentionally terminated immediately
+after the step-20 fixed artifacts committed. Step 1 took `81.252 s`; the
+step-2--20 rank-zero median was `59.219 s`, versus `58.963 s` before the
+repair. Thus the additional one-frame shared-source execution costs only about
+`0.43%` measured steady-state wall time in the complete workload, not the
+source-only upper-bound estimate of 20%. Maximum recorded reserved memory over
+all ranks was `35.252 GiB`, below the registered `39 GiB` gate.
+
+Fixed action loss is:
+
+| arm | heldout step 0 | heldout step 20 | validation step 0 | validation step 20 |
+|---|---:|---:|---:|---:|
+| ADR-227 aligned | `0.477826` | `0.396829` | `0.463436` | `0.361903` |
+| invalid ADR-225 | `0.477826` | `0.408419` | `0.463436` | `0.386202` |
+| historical ADR-207 | `0.483097` | `0.385412` | `0.454992` | `0.363023` |
+
+Alignment therefore repairs real damage: relative to invalid ADR-225 it lowers
+heldout loss by `2.84%` and validation loss by `6.29%`. It does not establish
+the required advantage over history: it remains `2.96%` worse than ADR-207 on
+heldout and is only `0.31%` better on validation. Averaging the two fixed
+partitions, ADR-227 remains about `1.38%` worse than ADR-207.
+
+The object bank remains geometrically strong but semantically unranked.
+Heldout full-bank soft/binary IoU at step 20 is `0.791590/0.817855`; validation
+is `0.796315/0.821867`. Heldout Top-10 soft IoU is only `0.106464` and
+Recall@0.5 is `0.122975`; neither improves from step 0. Human review confirms
+both sides of this aggregate: one heldout image has tight small-block oracle
+masks around `0.93` IoU, while another blue block remains around `0.18`, and
+the foreground-ranked Top-10 often omits the useful query.
 
 ## 5. Promotion and rejection rule
 
-Engineering promotion requires finite four-rank backward/update and a committed
-online state receipt. Scientific promotion requires a material fixed-bank curve
-advantage, not merely lower training loss. If geometry alignment does not
-improve fixed action or causal row use, reject mask-conditioned object memory as
-the sufficient repair and proceed to the already documented ADR-226 large-host
-grounding arm. Do not add a small selector or tune thresholds to rescue it.
+Engineering promotion passed: the repair is finite, causal, source-complete and
+cheap enough to retain. Scientific promotion failed: the mixed fixed result is
+not a material whole-curve advantage and Top-10 row semantics remain flat.
+Retain the geometry/state correction as a necessary invariant, but reject it as
+the sufficient action repair and proceed to ADR-226 large-host grounding. Do
+not add a small selector, tune thresholds or extend this arm blindly.
 
-Current theoretical maturity is `8.5/10`: the coordinate and state correction
-is mathematically necessary and preserves the mature source algorithm, but the
-two-view composition is a PICF adaptation. Deployment maturity is `4/10` until
-released-weight backward and fixed-curve evidence complete.
+The alignment repair itself has theoretical maturity `9/10` and deployment
+maturity `9/10`; its remaining point is reserved for longer-state/rollout
+evidence. The current PICF composition has scientific maturity `4/10`: it has
+strong object candidates and now-correct coordinates, but not yet a learned
+large-host language-to-row relation, optional-modality identity or causal
+action adoption.

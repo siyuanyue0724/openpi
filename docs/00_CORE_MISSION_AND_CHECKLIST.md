@@ -3534,18 +3534,21 @@ never received mask-conditioned native visual semantics in the paired row.
       the unattended default is a bounded 250-step run, not 30k.
 
 Current claim: the isolated transplant is source-backed and real four-A100
-execution is closed. Through step 20 it optimizes normally but remains about
-6% worse than the historical ADR-207 fixed-bank action curve, despite a modest
-training-curve advantage. The profile has no active large-host
+execution is closed. ADR-227 removed a measured source/host coordinate defect
+and improved the invalid step-20 fixed action by `2.84%` heldout and `6.29%`
+validation. It still trails historical ADR-207 by `2.96%` heldout and leads by
+only `0.31%` validation, so mask-conditioned native rows alone fail the
+material-advantage gate. The profile has no active large-host
 language-to-object grounding or optional-modality-to-row identity objective;
-cross-modal binding, action value and rollout value remain unproved. A bounded
-step-100 gate is active; no 30k run is authorized.
+cross-modal binding, causal action value and rollout value remain unproved. No
+30k run is authorized.
 
 ## 16. ADR-226 Large-Host Language-to-Object Grounding
 
-The conditional next authority is
+The next architecture authority is
 `docs/226_LARGE_HOST_LANGUAGE_OBJECT_GROUNDING_20260827.md`. It may proceed
-only if ADR-225 fails its step-100 action gate. It preserves LingBot as the
+because the corrected ADR-227 step-20 whole-curve gate failed to produce a
+material historical advantage. It preserves LingBot as the
 single semantic/action owner and adds no selector head: the official SWIM
 six-depth large-host attention supervision is transplanted first, then a
 separately named soft projection from labelled support into the complete
@@ -3588,10 +3591,21 @@ curve is therefore not valid evidence about aligned object memory.
 - [x] Require the aligned view in the pretrained-object-memory profile and keep
       the older ADR-207 ABI unchanged.
 - [x] Pass focused cloud contracts (`15/15`).
-- [ ] Pass real four-A100 forward/backward/update and record peak memory/time.
-- [ ] Compare fixed action and anchor curves at steps 20/100 against LingBot,
-      ADR-207 and pre-repair ADR-225 before implementing ADR-226 grounding.
+- [x] Pass real four-A100 forward/backward/update: maximum reserved memory is
+      `35.252 GiB`; step-2--20 median is `59.219 s`, only about `0.43%` slower
+      than the invalid arm.
+- [x] Complete the decisive fixed step-20 comparison. ADR-227 is
+      `0.396829/0.361903` heldout/validation, invalid ADR-225 is
+      `0.408419/0.386202`, and historical ADR-207 is
+      `0.385412/0.363023`.
+- [x] Inspect original-resolution step-0/20 oracle and Top-10 panels. The bank
+      contains some tight small-object masks near `0.93` IoU but is not
+      uniformly solved; Top-10 soft IoU remains about `0.10--0.11`.
+- [x] Stop after the step-20 artifacts committed. The repair made real progress
+      over the invalid arm but failed the required large historical margin;
+      continuing to step 100 would violate the no-blind-run decision rule.
 
-Current claim: the repair is necessary and mechanically focused, but no new
-action advantage has yet been measured. Four-GPU released-weight execution is
-active; do not describe it as a successful PICF result before the fixed curve.
+Current claim: the coordinate/state repair is necessary, verified and must be
+retained. It is not sufficient to make PICF action superior. The current arm is
+closed as a partial success, and ADR-226 must address the missing large-host
+language-to-object-row relation without a small selector or threshold patch.
